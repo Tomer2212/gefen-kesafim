@@ -1,0 +1,234 @@
+@import "tailwindcss";
+
+* {
+  font-family: 'Heebo', sans-serif;
+  box-sizing: border-box;
+}
+
+/* ── Global scene background ── */
+.bg-scene {
+  background:
+    radial-gradient(ellipse 70% 55% at 5% 5%,   #dbeafe 0%, transparent 65%),
+    radial-gradient(ellipse 60% 50% at 95% 95%,  #bfdbfe 0%, transparent 65%),
+    radial-gradient(ellipse 55% 45% at 92% 8%,   #e0f2fe 0%, transparent 60%),
+    linear-gradient(160deg, #f8fafc 0%, #f1f5f9 100%);
+  min-height: 100vh;
+}
+
+/* ── Glassmorphism card ── */
+.glass-card {
+  background: rgba(255, 255, 255, 0.78);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid rgba(255, 255, 255, 0.65);
+  box-shadow:
+    0 24px 64px rgba(0, 112, 243, 0.09),
+    0 4px 20px rgba(0, 0, 0, 0.05),
+    inset 0 1px 0 rgba(255,255,255,0.9);
+}
+
+.glass-card-dark {
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(0, 112, 243, 0.12);
+  box-shadow:
+    0 8px 32px rgba(0, 112, 243, 0.08),
+    0 2px 8px rgba(0, 0, 0, 0.04);
+}
+
+/* ── Top navigation bar ── */
+.topbar {
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-bottom: 1px solid rgba(0, 112, 243, 0.1);
+  box-shadow: 0 1px 12px rgba(0, 112, 243, 0.06);
+}
+
+/* ── Blue gradient button ── */
+.btn-blue {
+  background: linear-gradient(135deg, #0070F3 0%, #0055cc 100%);
+  color: white;
+  border: none;
+  border-radius: 9999px;
+  font-weight: 700;
+  font-size: 1rem;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: 0 4px 16px rgba(0, 112, 243, 0.35);
+}
+
+.btn-blue:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 24px rgba(0, 112, 243, 0.4);
+  background: linear-gradient(135deg, #1a7fff 0%, #0060df 100%);
+}
+
+.btn-blue:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: 0 2px 8px rgba(0, 112, 243, 0.3);
+}
+
+.btn-blue:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+/* ── Ghost button ── */
+.btn-ghost {
+  background: transparent;
+  color: #64748b;
+  border: 1.5px solid #cbd5e1;
+  border-radius: 9999px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+
+.btn-ghost:hover {
+  border-color: #0070F3;
+  color: #0070F3;
+  background: rgba(0, 112, 243, 0.05);
+}
+
+/* ── Green download button ── */
+.btn-green {
+  background: linear-gradient(135deg, #16a34a 0%, #15803d 100%);
+  color: white;
+  border: none;
+  border-radius: 9999px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: 0 4px 16px rgba(22, 163, 74, 0.3);
+}
+
+.btn-green:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 24px rgba(22, 163, 74, 0.38);
+}
+
+/* ── Input fields ── */
+.input-field {
+  width: 100%;
+  padding: 0.75rem 1rem;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 0.75rem;
+  background: rgba(255, 255, 255, 0.8);
+  font-size: 0.95rem;
+  color: #1e293b;
+  text-align: right;
+  transition: all 0.18s ease;
+  outline: none;
+}
+
+.input-field:focus {
+  border-color: #0070F3;
+  box-shadow: 0 0 0 3px rgba(0, 112, 243, 0.12);
+  background: white;
+}
+
+.input-field::placeholder {
+  color: #94a3b8;
+}
+
+/* ── Upload drop-zone ── */
+.drop-zone {
+  border: 2px dashed #bfdbfe;
+  border-radius: 1.25rem;
+  background: rgba(219, 234, 254, 0.2);
+  transition: all 0.2s ease;
+  cursor: pointer;
+}
+
+.drop-zone:hover,
+.drop-zone.drag-over {
+  border-color: #0070F3;
+  background: rgba(0, 112, 243, 0.05);
+  box-shadow: inset 0 0 0 1px rgba(0, 112, 243, 0.2);
+}
+
+/* ── Spinner ── */
+@keyframes spin-smooth {
+  to { transform: rotate(360deg); }
+}
+
+.spinner {
+  width: 52px;
+  height: 52px;
+  border: 4px solid rgba(0, 112, 243, 0.15);
+  border-top-color: #0070F3;
+  border-radius: 50%;
+  animation: spin-smooth 0.75s linear infinite;
+}
+
+/* ── Fade-in animations ── */
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.anim-fade-up {
+  animation: fadeInUp 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.anim-fade-up-1 { animation: fadeInUp 0.45s cubic-bezier(0.22, 1, 0.36, 1) 0.08s both; }
+.anim-fade-up-2 { animation: fadeInUp 0.45s cubic-bezier(0.22, 1, 0.36, 1) 0.16s both; }
+.anim-fade-up-3 { animation: fadeInUp 0.45s cubic-bezier(0.22, 1, 0.36, 1) 0.24s both; }
+.anim-fade-up-4 { animation: fadeInUp 0.45s cubic-bezier(0.22, 1, 0.36, 1) 0.32s both; }
+
+@keyframes pulse-dot {
+  0%, 80%, 100% { transform: scale(0.7); opacity: 0.4; }
+  40%           { transform: scale(1);   opacity: 1; }
+}
+
+.dot-pulse span {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  background: #0070F3;
+  border-radius: 50%;
+  animation: pulse-dot 1.4s ease-in-out infinite;
+}
+
+.dot-pulse span:nth-child(2) { animation-delay: 0.2s; }
+.dot-pulse span:nth-child(3) { animation-delay: 0.4s; }
+
+/* ── Scrollable table container ── */
+.table-scroll {
+  max-height: 320px;
+  overflow-y: auto;
+  border-radius: 0.875rem;
+  border: 1px solid #e2e8f0;
+}
+
+/* ── Custom scrollbar ── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: #f8fafc; }
+::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+/* ── File item slide-in ── */
+@keyframes slideInRight {
+  from { opacity: 0; transform: translateX(12px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+.file-item {
+  animation: slideInRight 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* ── Loading overlay ── */
+.loading-overlay {
+  background: rgba(248, 250, 252, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
