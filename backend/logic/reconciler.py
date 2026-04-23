@@ -19,19 +19,24 @@ SHARED = [157, 159, 163]
 def reconcile(
     df_gefen: pd.DataFrame,
     df_finance: pd.DataFrame,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    df_finance = _filter_by_division(df_gefen, df_finance)
+) -> tuple[pd.DataFrame, pd.DataFrame, str, int]:
+    """Returns (in_finance_not_gefen, in_gefen_not_finance, division, finance_rows_checked).
+
+    division is one of: "tikkon", "beinayim", "both"
+    finance_rows_checked is the count after division filtering.
+    """
+    df_finance_filtered, division = _filter_by_division(df_gefen, df_finance)
 
     gefen_set = set(df_gefen["ichud"])
-    finance_set = set(df_finance["ichud"])
+    finance_set = set(df_finance_filtered["ichud"])
 
-    in_finance_not_gefen = df_finance[~df_finance["ichud"].isin(gefen_set)].copy()
+    in_finance_not_gefen = df_finance_filtered[~df_finance_filtered["ichud"].isin(gefen_set)].copy()
     in_gefen_not_finance = df_gefen[~df_gefen["ichud"].isin(finance_set)].copy()
 
-    return in_finance_not_gefen, in_gefen_not_finance
+    return in_finance_not_gefen, in_gefen_not_finance, division, len(df_finance_filtered)
 
 
-def _filter_by_division(df_gefen: pd.DataFrame, df_finance: pd.DataFrame) -> pd.DataFrame:
+def _filter_by_division(df_gefen: pd.DataFrame, df_finance: pd.DataFrame) -> tuple[pd.DataFrame, str]:
     gefen_codes = set(df_gefen["report_code"].dropna().astype(int).tolist())
 
     has_tikkon = bool(gefen_codes & set(TIKKON_ONLY))
@@ -39,15 +44,17 @@ def _filter_by_division(df_gefen: pd.DataFrame, df_finance: pd.DataFrame) -> pd.
 
     if has_tikkon and not has_beinayim:
         keep = set(TIKKON_ONLY) | set(SHARED)
+        division = "tikkon"
     elif has_beinayim and not has_tikkon:
         keep = set(BEINAYIM_ONLY) | set(SHARED)
+        division = "beinayim"
     else:
-        return df_finance  # mixed or unknown — keep all
+        return df_finance, "both"
 
     finance_codes = df_finance["report_code"].astype(str).apply(
         lambda x: int(x) if x.isdigit() else None
     )
-    return df_finance[finance_codes.isin(keep) | finance_codes.isna()].copy()
+    return df_finance[finance_codes.isin(keep) | finance_codes.isna()].copy(), division
 
 
 def merge_gefen_files(df1: pd.DataFrame, df2: pd.DataFrame) -> pd.DataFrame:

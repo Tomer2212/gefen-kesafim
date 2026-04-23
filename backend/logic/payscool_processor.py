@@ -5,13 +5,15 @@ import pandas as pd
 from logic.gefen_processor import normalize_amount
 
 
-def load_payscool(filepath: str) -> pd.DataFrame:
+def load_payscool(filepath: str) -> tuple[pd.DataFrame, int]:
     df = pd.read_excel(filepath, sheet_name="Data", header=None)
     df.columns = df.iloc[3]
     df = df.iloc[4:].reset_index(drop=True)
 
     df["report_code"] = df["סעיף"].apply(_extract_report_code)
     df = df[df["report_code"].notna()].copy()
+
+    cancelled_count = int((df["סטטוס חשבונית"] == "מבוטלת").sum())
     df = df[df["סטטוס חשבונית"] != "מבוטלת"].copy()
 
     df["amount"] = df['סה"כ לסעיף'].apply(normalize_amount)
@@ -24,7 +26,7 @@ def load_payscool(filepath: str) -> pd.DataFrame:
         + "-"
         + df["amount"]
     )
-    return df
+    return df, cancelled_count
 
 
 def _extract_report_code(value) -> str | None:

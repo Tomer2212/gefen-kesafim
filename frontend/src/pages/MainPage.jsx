@@ -27,12 +27,57 @@ function Logo() {
   );
 }
 
+function ConfirmModal({ onConfirm, onCancel }) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center px-4"
+      style={{ background: "rgba(15,23,42,0.4)", backdropFilter: "blur(4px)" }}
+    >
+      <div
+        className="glass-card rounded-3xl p-7 max-w-sm w-full anim-fade-up text-right"
+        dir="rtl"
+      >
+        <div
+          className="w-11 h-11 rounded-2xl flex items-center justify-center mb-4"
+          style={{ background: "rgba(0,112,243,0.08)" }}
+        >
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+            <path d="M10 2.5L17.5 15.5H2.5L10 2.5Z" stroke="#0070F3" strokeWidth="1.6" strokeLinejoin="round"/>
+            <path d="M10 8.5v3M10 13.5v.5" stroke="#0070F3" strokeWidth="1.6" strokeLinecap="round"/>
+          </svg>
+        </div>
+        <h2 className="text-base font-800 mb-3" style={{ fontWeight: 800, color: "#0f172a" }}>
+          אישור לפני תחילת הבדיקה
+        </h2>
+        <p className="text-sm text-slate-600 leading-relaxed mb-6">
+          אני מאשר/ת שקראתי את תנאי השימוש ומבין/ה שהתוצאות עשויות להכיל טעויות לפעמים. ברור לי שהאחריות לאימות התוצאות חלה עליי בלבד.
+        </p>
+        <div className="flex gap-3">
+          <button
+            onClick={onConfirm}
+            className="btn-blue flex-1 py-2.5 text-sm"
+          >
+            אישור והתחלת הבדיקה
+          </button>
+          <button
+            onClick={onCancel}
+            className="btn-ghost px-5 py-2.5 text-sm"
+          >
+            ביטול
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function MainPage() {
   const [files, setFiles]     = useState([]);
   const [runId, setRunId]     = useState(null);
   const [status, setStatus]   = useState("idle"); // idle | loading | done | error
   const [result, setResult]   = useState(null);
   const [errorMsg, setErrorMsg] = useState("");
+  const [showConfirm, setShowConfirm] = useState(false);
   const pollRef = useRef(null);
   const navigate = useNavigate();
 
@@ -47,6 +92,11 @@ export default function MainPage() {
 
   async function handleRun() {
     if (files.length < 2) return;
+    setShowConfirm(true);
+  }
+
+  async function handleConfirmedRun() {
+    setShowConfirm(false);
     setStatus("loading");
     setErrorMsg("");
     try {
@@ -97,19 +147,34 @@ export default function MainPage() {
   return (
     <div dir="rtl" className="bg-scene min-h-screen">
 
+      {showConfirm && (
+        <ConfirmModal
+          onConfirm={handleConfirmedRun}
+          onCancel={() => setShowConfirm(false)}
+        />
+      )}
+
       {/* Top navigation */}
       <nav className="topbar sticky top-0 z-50">
         <div className="max-w-4xl mx-auto px-6 h-14 flex items-center justify-between">
-          <button
-            onClick={handleLogout}
-            className="btn-ghost flex items-center gap-1.5 px-4 py-1.5 text-sm"
-          >
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-              <path d="M5 7h7M9.5 5l2 2-2 2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-              <path d="M6 3H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-            </svg>
-            יציאה
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleLogout}
+              className="btn-ghost flex items-center gap-1.5 px-4 py-1.5 text-sm"
+            >
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                <path d="M5 7h7M9.5 5l2 2-2 2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                <path d="M6 3H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+              </svg>
+              יציאה
+            </button>
+            <button
+              onClick={() => navigate("/terms")}
+              className="btn-ghost flex items-center gap-1.5 px-4 py-1.5 text-sm"
+            >
+              תנאי שימוש
+            </button>
+          </div>
           <Logo />
         </div>
       </nav>
@@ -130,19 +195,38 @@ export default function MainPage() {
           </p>
         </div>
 
-        {/* Warning banner */}
-        <div
-          className="flex items-start gap-3 rounded-2xl px-4 py-3 mb-6 anim-fade-up-1"
-          style={{ background: "rgba(254,243,199,0.8)", border: "1px solid rgba(251,191,36,0.4)" }}
-        >
-          <svg width="18" height="18" viewBox="0 0 18 18" fill="none" className="flex-shrink-0 mt-0.5">
-            <path d="M9 1.5L16.5 15H1.5L9 1.5Z" stroke="#d97706" strokeWidth="1.5" strokeLinejoin="round"/>
-            <path d="M9 7v3.5M9 12.5v.5" stroke="#d97706" strokeWidth="1.5" strokeLinecap="round"/>
-          </svg>
-          <p className="text-amber-700 text-sm leading-relaxed">
-            לתוצאות מדויקות, יש להעלות קבצים של תקציב גפן בלבד.
-          </p>
-        </div>
+        {/* Instructions + warning — hidden once results are shown */}
+        {status !== "done" && (
+          <>
+            {/* Step-by-step instructions */}
+            <div className="glass-card rounded-2xl px-5 py-4 mb-4 anim-fade-up-1">
+              <ol className="flex flex-col gap-1.5 text-sm text-slate-600 list-decimal list-inside leading-relaxed" style={{ paddingRight: "0.25rem" }}>
+                <li>העלו קובץ דיווח ביצוע ממערכת הגפן</li>
+                <li>העלו קובץ פירוט אסמכתאות גפן מתוכנת הכספים (פייסקול / כספים2000)</li>
+                <li>לחצו "התחל בדיקה"</li>
+                <li>צפו בקסם קורה.</li>
+              </ol>
+            </div>
+
+            {/* Warning banner */}
+            <div
+              className="flex items-start gap-3 rounded-2xl px-4 py-3 mb-6 anim-fade-up-1"
+              style={{ background: "rgba(254,243,199,0.8)", border: "1px solid rgba(251,191,36,0.4)" }}
+            >
+              <svg width="18" height="18" viewBox="0 0 18 18" fill="none" className="flex-shrink-0 mt-0.5">
+                <path d="M9 1.5L16.5 15H1.5L9 1.5Z" stroke="#d97706" strokeWidth="1.5" strokeLinejoin="round"/>
+                <path d="M9 7v3.5M9 12.5v.5" stroke="#d97706" strokeWidth="1.5" strokeLinecap="round"/>
+              </svg>
+              <div className="text-amber-700 text-sm leading-relaxed flex flex-col gap-1.5">
+                <p className="font-700" style={{ fontWeight: 700 }}>לקבלת תוצאות מדויקות:</p>
+                <ol className="flex flex-col gap-1 list-decimal list-inside">
+                  <li>העלו את הקבצים בצורתם הגולמית כפי שהורדו מהמערכות השונות ללא שינויים.</li>
+                  <li>במידה ויש לביה"ס תקציבים נוספים, ודאו שאתם מורידים את קובץ דיווח ביצוע מהאזור של תקציב הגפן בלבד.</li>
+                </ol>
+              </div>
+            </div>
+          </>
+        )}
 
         {/* State: idle */}
         {status === "idle" && (
@@ -151,14 +235,16 @@ export default function MainPage() {
               <FileUpload files={files} onChange={setFiles} />
             </div>
 
-            <button
-              onClick={handleRun}
-              disabled={files.length < 2}
-              className="btn-blue w-full py-4 text-base anim-fade-up-3"
-              style={{ fontSize: "1.05rem" }}
-            >
-              התחל בדיקה
-            </button>
+            <div className="flex justify-center anim-fade-up-3">
+              <button
+                onClick={handleRun}
+                disabled={files.length < 2}
+                className="btn-blue px-10 py-2.5 text-sm"
+                style={{ background: "linear-gradient(135deg, #0070F3 0%, #0055cc 100%)" }}
+              >
+                התחל בדיקה
+              </button>
+            </div>
           </div>
         )}
 
@@ -171,14 +257,16 @@ export default function MainPage() {
 
         {/* State: done */}
         {status === "done" && result && (
-          <div className="flex flex-col gap-4">
-            <ResultsView result={result} />
-            <DownloadButton
-              runId={runId}
-              authHeader={authHeader()}
-              onNewRun={handleNewRun}
-            />
-          </div>
+          <ResultsView
+            result={result}
+            downloadSlot={
+              <DownloadButton
+                runId={runId}
+                authHeader={authHeader()}
+                onNewRun={handleNewRun}
+              />
+            }
+          />
         )}
 
         {/* State: error */}

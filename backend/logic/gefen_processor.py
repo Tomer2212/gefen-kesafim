@@ -1,25 +1,28 @@
 import pandas as pd
 
 
-def load_gefen(filepath: str) -> pd.DataFrame:
+def load_gefen(filepath: str) -> tuple[pd.DataFrame, bool]:
+    """Returns (df, was_deduplicated) where was_deduplicated is True only when the
+    file contained an exact full duplication of all rows (first half == second half).
+    """
     df = pd.read_excel(filepath, sheet_name="דיווח ביצוע")
-    df = _deduplicate(df)
+    df, was_deduplicated = _deduplicate(df)
     # Drop rows missing essential reconciliation fields
     df = df.dropna(subset=["קוד ושם ספק", "מספר חשבונית", "סכום פריט"]).reset_index(drop=True)
     df["supplier_number"] = df["קוד ושם ספק"].apply(_extract_supplier_number)
     df["report_code"] = df["קוד דווח"].apply(lambda x: int(float(x)) if pd.notna(x) else None)
     df["ichud"] = _build_ichud(df)
-    return df
+    return df, was_deduplicated
 
 
-def _deduplicate(df: pd.DataFrame) -> pd.DataFrame:
+def _deduplicate(df: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
     mid = len(df) // 2
     if (
         len(df) % 2 == 0
         and df.iloc[:mid].reset_index(drop=True).equals(df.iloc[mid:].reset_index(drop=True))
     ):
-        return df.iloc[:mid].reset_index(drop=True)
-    return df
+        return df.iloc[:mid].reset_index(drop=True), True
+    return df, False
 
 
 def _extract_supplier_number(value: str) -> str:

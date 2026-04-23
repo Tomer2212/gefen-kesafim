@@ -8,7 +8,7 @@ from jose import JWTError, jwt
 
 SECRET_KEY = os.getenv("JWT_SECRET", "changeme")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 8
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 30
 
 USERS_FILE = Path(__file__).parent / "users.json"
 

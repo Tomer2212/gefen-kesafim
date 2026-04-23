@@ -11,4 +11,7 @@ frontend/dist/
 runs/
 skills-lock.json
 .agents/
+*.png
+backend/result_debug.json
+.claude/
 
