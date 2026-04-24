@@ -19,7 +19,9 @@ export default function LoginPage() {
       localStorage.setItem("token", data.token);
       navigate("/");
     } catch (err) {
-      if (err.response?.status === 401 || err.response?.status === 400) {
+      if (err.response?.status === 429) {
+        setError(err.response.data?.detail || "יותר מדי ניסיונות כושלים. נסה שוב בעוד 10 דקות.");
+      } else if (err.response?.status === 401 || err.response?.status === 400) {
         setError("כתובת אימייל או סיסמה שגויים");
       } else {
         setError("לא ניתן להתחבר לשרת. אנא נסה שוב בעוד כמה שניות.");
