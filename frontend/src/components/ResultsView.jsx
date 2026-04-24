@@ -18,12 +18,16 @@ const STAGE_LABELS = {
 // Summary section components
 // ---------------------------------------------------------------------------
 
-function InfoRow({ label, value }) {
+function InfoGrid({ rows }) {
   return (
-    <div className="flex items-baseline gap-1.5 text-sm leading-relaxed">
-      <span className="text-slate-400 flex-shrink-0">{label}:</span>
-      <span className="text-slate-600">{value ?? "—"}</span>
-    </div>
+    <dl className="text-sm leading-relaxed" style={{ display: "grid", gridTemplateColumns: "auto 1fr", rowGap: "6px", columnGap: "10px" }}>
+      {rows.filter(r => r.value != null).map(({ label, value, highlight }) => (
+        <>
+          <dt key={label + "_l"} className="text-slate-400 text-right whitespace-nowrap">{label}:</dt>
+          <dd key={label + "_v"} className={highlight ? "font-700 text-slate-700" : "text-slate-600"} style={highlight ? { fontWeight: 700 } : {}}>{value}</dd>
+        </>
+      ))}
+    </dl>
   );
 }
 
@@ -47,14 +51,14 @@ function SummaryBlock({ title, children, index = 0 }) {
 
 function GefenFileCard({ file }) {
   return (
-    <div className="flex flex-col gap-1.5">
-      <InfoRow label="שם קובץ"        value={file.filename} />
-      <InfoRow label="שלב"             value={STAGE_LABELS[file.division] ?? file.division} />
-      <InfoRow label="אסמכתאות שזוהו" value={file.rows} />
+    <div className="flex flex-col gap-2">
+      <InfoGrid rows={[
+        { label: "שם קובץ",        value: file.filename },
+        { label: "שלב",             value: STAGE_LABELS[file.division] ?? file.division },
+        { label: "אסמכתאות שזוהו", value: file.rows },
+      ]} />
       {file.was_deduplicated && (
-        <p className="text-xs text-amber-600 mt-0.5">
-          כפילות שורות זוהתה בקובץ זה ונוטרלה אוטומטית
-        </p>
+        <p className="text-xs text-amber-600">כפילות שורות זוהתה בקובץ זה ונוטרלה אוטומטית</p>
       )}
     </div>
   );
@@ -139,19 +143,15 @@ function SummarySection({ summary }) {
 
       {/* Block 2: Finance file */}
       <SummaryBlock title="קבצים מתוכנת הכספים" index={1}>
-        <div className="px-2">
-          <div className="flex flex-col gap-1.5">
-            <InfoRow label="שם קובץ"        value={finance_file?.filename} />
-            <InfoRow label="סוג תוכנה"       value={finance_file?.software} />
-            <InfoRow label="שלב"             value={stageLabel} />
-            <InfoRow label="אסמכתאות שזוהו" value={
-              summary.finance_rows_total + (finance_file?.cancelled_rows ?? 0)
-            } />
-            {finance_file?.cancelled_rows != null && (
-              <InfoRow label="אסמכתאות מבוטלות" value={finance_file.cancelled_rows} />
-            )}
-          </div>
-          <div className="mt-4 pt-3 border-t border-slate-100 flex flex-col gap-1">
+        <div className="px-2 flex flex-col gap-2">
+          <InfoGrid rows={[
+            { label: "שם קובץ",              value: finance_file?.filename },
+            { label: "סוג תוכנה",             value: finance_file?.software },
+            { label: "שלב",                   value: stageLabel },
+            { label: "אסמכתאות שזוהו",       value: summary.finance_rows_total + (finance_file?.cancelled_rows ?? 0) },
+            { label: "אסמכתאות מבוטלות",     value: finance_file?.cancelled_rows ?? null },
+          ]} />
+          <div className="pt-3 border-t border-slate-100 flex flex-col gap-1">
             {filtered && (
               <p className="text-xs text-slate-500">
                 {`מתוך ${summary.finance_rows_total} שורות כספים, ${summary.finance_rows_checked} שייכות לשלב שנבדק.`}
@@ -166,21 +166,14 @@ function SummarySection({ summary }) {
 
       {/* Block 3: Conclusion */}
       <SummaryBlock title="מסקנה ותהליך הבדיקה" index={2}>
-        <div className="px-2">
-          <div className="flex flex-col gap-1.5">
-            <InfoRow label="גפן" value={
-              (gefen_files ?? []).length === 1
-                ? `הועלה קובץ דיווח ביצוע עבור ${gefenLabel}`
-                : `הועלו קבצי דיווח ביצוע עבור ${gefenLabel}`
-            } />
-            <InfoRow label="תוכנת כספים" value={`הועלה קובץ ${software} עבור ${filtered ? STAGE_LABELS["both"] : stageLabel}`} />
-          </div>
-          <div className="mt-4 pt-3 border-t border-slate-100">
+        <div className="px-2 flex flex-col gap-2">
+          <InfoGrid rows={[
+            { label: "גפן",          value: (gefen_files ?? []).length === 1 ? `הועלה קובץ דיווח ביצוע עבור ${gefenLabel}` : `הועלו קבצי דיווח ביצוע עבור ${gefenLabel}` },
+            { label: "תוכנת כספים", value: `הועלה קובץ ${software} עבור ${filtered ? STAGE_LABELS["both"] : stageLabel}` },
+          ]} />
+          <div className="pt-3 border-t border-slate-100">
             <p className="text-sm font-700 text-slate-700" style={{ fontWeight: 700 }}>
-              {filtered
-                ? `לכן הבדיקה בוצעה עבור ${stageLabel} בלבד.`
-                : `לכן הבדיקה בוצעה עבור ${stageLabel}.`
-              }
+              {filtered ? `לכן הבדיקה בוצעה עבור ${stageLabel} בלבד.` : `לכן הבדיקה בוצעה עבור ${stageLabel}.`}
             </p>
           </div>
         </div>
