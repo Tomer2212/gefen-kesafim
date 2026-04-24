@@ -174,6 +174,11 @@ export default function MainPage() {
             >
               תנאי שימוש
             </button>
+            <button
+              className="btn-ghost flex items-center gap-1.5 px-4 py-1.5 text-sm"
+            >
+              יאללה ביתר
+            </button>
           </div>
           <Logo />
         </div>
