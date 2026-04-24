@@ -22,12 +22,8 @@ def export(
     wb = Workbook()
     wb.remove(wb.active)
 
-    _add_sheet(wb, "גפן 1", df_gefen, orange_fill)
-    _add_sheet(wb, "גפן 2", df_gefen, orange_fill)
-    _add_sheet(wb, f"{finance_label} 1", df_finance, blue_fill)
-    _add_sheet(wb, f"{finance_label} 2", df_finance, blue_fill)
-    _add_result_sheet(wb, "קיים בכספים אך לא בגפן", in_finance_not_gefen, red_fill)
-    _add_result_sheet(wb, "משויך בגפן אך לא בכספים", in_gefen_not_finance, red_fill)
+    _add_result_sheet(wb, f"קיים ב{finance_label} אך לא בגפן", in_finance_not_gefen, red_fill)
+    _add_result_sheet(wb, f"משויך בגפן אך לא ב{finance_label}", in_gefen_not_finance, red_fill)
 
     wb.save(output_path)
     return output_path
