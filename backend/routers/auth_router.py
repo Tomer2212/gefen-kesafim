@@ -33,15 +33,18 @@ def _check_rate_limit(ip: str) -> None:
         )
 
 
-def _record_failure(ip: str) -> None:
+def _record_failure(ip: str) -> str:
+    """Record a failed attempt and return a user-facing error message."""
     entry = _login_attempts.setdefault(ip, {"count": 0, "locked_until": None})
-    # Reset stale lockout
     if entry.get("locked_until") and datetime.utcnow() >= entry["locked_until"]:
         entry["count"] = 0
         entry["locked_until"] = None
     entry["count"] += 1
     if entry["count"] >= MAX_ATTEMPTS:
         entry["locked_until"] = datetime.utcnow() + timedelta(minutes=LOCKOUT_MINUTES)
+        return f"יותר מדי ניסיונות כושלים. החשבון נחסם ל-{LOCKOUT_MINUTES} דקות."
+    remaining = MAX_ATTEMPTS - entry["count"]
+    return f"כתובת אימייל או סיסמה שגויים. נותרו {remaining} ניסיונות לפני חסימה."
 
 
 def _record_success(ip: str) -> None:
@@ -63,8 +66,8 @@ def login(body: LoginRequest, request: Request):
     _check_rate_limit(ip)
 
     if not authenticate_user(body.email, body.password):
-        _record_failure(ip)
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+        msg = _record_failure(ip)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=msg)
 
     _record_success(ip)
     token = create_access_token(body.email)
