@@ -1,6 +1,6 @@
 """PDF export for Gefen-Kesafim reconciliation results using ReportLab."""
-from datetime import date
 from io import BytesIO
+from pathlib import Path
 
 from bidi.algorithm import get_display
 from reportlab.lib import colors
@@ -18,11 +18,12 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
 # ---------------------------------------------------------------------------
-# Font registration — use Windows Arial (full Unicode: Hebrew + Latin + digits)
+# Font registration — bundled Noto Sans Hebrew (works on Linux + Windows)
 # ---------------------------------------------------------------------------
 
-_FONT_NAME = "ArialHeb"
-_FONT_BOLD = "ArialHebBold"
+_FONTS_DIR = Path(__file__).parent / "fonts"
+_FONT_NAME = "NotoHeb"
+_FONT_BOLD = "NotoHebBold"
 _FONT_REGISTERED = False
 
 
@@ -31,8 +32,8 @@ def _ensure_fonts():
     if _FONT_REGISTERED:
         return
     try:
-        pdfmetrics.registerFont(TTFont(_FONT_NAME, "C:/Windows/Fonts/arial.ttf"))
-        pdfmetrics.registerFont(TTFont(_FONT_BOLD, "C:/Windows/Fonts/arialbd.ttf"))
+        pdfmetrics.registerFont(TTFont(_FONT_NAME, str(_FONTS_DIR / "NotoSansHebrew-Regular.ttf")))
+        pdfmetrics.registerFont(TTFont(_FONT_BOLD, str(_FONTS_DIR / "NotoSansHebrew-Bold.ttf")))
     except Exception:
         _FONT_NAME = "Helvetica"
         _FONT_BOLD = "Helvetica-Bold"
