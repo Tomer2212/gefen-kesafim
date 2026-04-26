@@ -1,5 +1,8 @@
 {
-  "test@test.com": {
+  "test10": {
     "hashed_password": "$2b$12$7s4Hs83.zvxRo6hcNl2RVuUGR0SETsGpXW4TFQRAYub6Xe51KwYn."
+  },
+  "gafni10": {
+    "hashed_password": "$2b$12$ohbea3lgPzYTx1ZEdNZX/u7NXqpjs2l/b4NTCZAYvLAEAYCssSbJK"
   }
 }
