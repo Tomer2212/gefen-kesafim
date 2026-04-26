@@ -13,10 +13,11 @@ logging.basicConfig(
 
 app = FastAPI(title="Gefen Reconciliation API")
 
-_allowed = os.getenv("ALLOWED_ORIGIN", "http://localhost:5173")
+_allowed = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173")
+_origins = [o.strip() for o in _allowed.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[_allowed],
+    allow_origins=_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
