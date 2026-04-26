@@ -7,20 +7,23 @@ export default function LoginPage() {
   const [password, setPassword]   = useState("");
   const [error, setError]         = useState("");
   const [loading, setLoading]     = useState(false);
+  const [cooldown, setCooldown]   = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const navigate = useNavigate();
 
   async function handleSubmit(e) {
     e.preventDefault();
-    setError("");
     setLoading(true);
     try {
       const { data } = await axios.post("/auth/login", { username, password });
       localStorage.setItem("token", data.token);
-      navigate("/");
+      window.location.replace("/");
     } catch (err) {
       if (err.response?.status === 429 || err.response?.status === 401 || err.response?.status === 400) {
-        setError(err.response.data?.detail || "שם משתמש או סיסמה שגויים");
+        const msg = err.response.data?.detail || "שם משתמש או סיסמה שגויים";
+        setError(msg);
+        setCooldown(true);
+        setTimeout(() => setCooldown(false), 2000);
       } else {
         setError("לא ניתן להתחבר לשרת. אנא נסה שוב בעוד כמה שניות.");
       }
@@ -123,7 +126,7 @@ export default function LoginPage() {
 
             <button
               type="submit"
-              disabled={loading}
+              disabled={loading || cooldown}
               className="btn-blue mt-2 py-3 text-base"
             >
               {loading ? (
