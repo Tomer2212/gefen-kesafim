@@ -22,17 +22,17 @@ def verify_password(plain: str, hashed: str) -> bool:
     return bcrypt.checkpw(plain.encode(), hashed.encode())
 
 
-def authenticate_user(email: str, password: str) -> bool:
+def authenticate_user(username: str, password: str) -> bool:
     users = load_users()
-    user = users.get(email)
+    user = users.get(username)
     if not user:
         return False
     return verify_password(password, user["hashed_password"])
 
 
-def create_access_token(email: str) -> str:
+def create_access_token(username: str) -> str:
     expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    return jwt.encode({"sub": email, "exp": expire}, SECRET_KEY, algorithm=ALGORITHM)
+    return jwt.encode({"sub": username, "exp": expire}, SECRET_KEY, algorithm=ALGORITHM)
 
 
 def decode_token(token: str) -> str | None:

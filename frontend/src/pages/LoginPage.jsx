@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import axios from "axios";
 
 export default function LoginPage() {
-  const [email, setEmail]         = useState("");
+  const [username, setUsername]    = useState("");
   const [password, setPassword]   = useState("");
   const [error, setError]         = useState("");
   const [loading, setLoading]     = useState(false);
@@ -15,12 +15,12 @@ export default function LoginPage() {
     setError("");
     setLoading(true);
     try {
-      const { data } = await axios.post("/auth/login", { email, password });
+      const { data } = await axios.post("/auth/login", { username, password });
       localStorage.setItem("token", data.token);
       navigate("/");
     } catch (err) {
       if (err.response?.status === 429 || err.response?.status === 401 || err.response?.status === 400) {
-        setError(err.response.data?.detail || "כתובת אימייל או סיסמה שגויים");
+        setError(err.response.data?.detail || "שם משתמש או סיסמה שגויים");
       } else {
         setError("לא ניתן להתחבר לשרת. אנא נסה שוב בעוד כמה שניות.");
       }
@@ -63,18 +63,16 @@ export default function LoginPage() {
           <form onSubmit={handleSubmit} className="flex flex-col gap-4">
             <div className="flex flex-col gap-1.5">
               <label className="text-xs font-600 text-slate-500 text-right" style={{ fontWeight: 600 }}>
-                כתובת אימייל
+                שם משתמש
               </label>
               <input
                 className="input-field"
-                type="email"
-                placeholder="name@school.co.il"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                type="text"
+                placeholder="שם משתמש"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
                 required
                 autoFocus
-                dir="ltr"
-                style={{ textAlign: "right" }}
               />
             </div>
 

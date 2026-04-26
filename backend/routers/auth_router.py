@@ -18,7 +18,9 @@ def _get_client_ip(request: Request) -> str:
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
         return forwarded.split(",")[0].strip()
-    return request.client.host
+    if request.client:
+        return request.client.host
+    return "unknown"
 
 
 def _check_rate_limit(ip: str) -> None:
@@ -44,7 +46,7 @@ def _record_failure(ip: str) -> str:
         entry["locked_until"] = datetime.utcnow() + timedelta(minutes=LOCKOUT_MINUTES)
         return f"יותר מדי ניסיונות כושלים. החשבון נחסם ל-{LOCKOUT_MINUTES} דקות."
     remaining = MAX_ATTEMPTS - entry["count"]
-    return f"כתובת אימייל או סיסמה שגויים. נותרו {remaining} ניסיונות לפני חסימה."
+    return f"שם משתמש או סיסמה שגויים. נותרו {remaining} ניסיונות לפני חסימה."
 
 
 def _record_success(ip: str) -> None:
@@ -52,7 +54,7 @@ def _record_success(ip: str) -> None:
 
 
 class LoginRequest(BaseModel):
-    email: str
+    username: str
     password: str
 
 
@@ -65,10 +67,10 @@ def login(body: LoginRequest, request: Request):
     ip = _get_client_ip(request)
     _check_rate_limit(ip)
 
-    if not authenticate_user(body.email, body.password):
+    if not authenticate_user(body.username, body.password):
         msg = _record_failure(ip)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=msg)
 
     _record_success(ip)
-    token = create_access_token(body.email)
+    token = create_access_token(body.username)
     return {"token": token}
