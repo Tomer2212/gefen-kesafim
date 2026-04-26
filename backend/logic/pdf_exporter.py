@@ -68,29 +68,35 @@ _DIVISION_LABELS = {
 
 # Display columns — logical RTL order (rightmost first)
 _DISPLAY_COLS_LOGICAL = ["קוד דיווח", "שם ספק", "מספר אסמכתה", "תאריך", "סכום", "תיאור"]
+_REJECTED_COLS_LOGICAL = ["קוד דיווח", "שם ספק", "מספר אסמכתה", "תאריך", "סכום", "סיבת הדחייה"]
 
 # For ReportLab (LTR rendering), reverse so the rightmost column appears on the right.
-# Visual left→right in PDF:  תיאור | סכום | תאריך | מספר אסמכתה | שם ספק | קוד דיווח
-_DISPLAY_COLS_VISUAL = list(reversed(_DISPLAY_COLS_LOGICAL))
+_DISPLAY_COLS_VISUAL  = list(reversed(_DISPLAY_COLS_LOGICAL))
+_REJECTED_COLS_VISUAL = list(reversed(_REJECTED_COLS_LOGICAL))
 
 # Column widths matching the reversed visual order
-# Logical widths: קוד(2) שם(4.5) אסמכתה(3) תאריך(2.5) סכום(2) תיאור(3)
+# Logical widths: קוד(2) שם(4.5) אסמכתה(3) תאריך(2.5) סכום(2) תיאור/סיבה(3)
 # Reversed:       תיאור(3) סכום(2) תאריך(2.5) אסמכתה(3) שם(4.5) קוד(2)
 _COL_WIDTHS = [3.0*cm, 2.0*cm, 2.5*cm, 3.0*cm, 4.5*cm, 2.0*cm]
 
 PAGE_WIDTH = A4[0] - 4*cm  # usable width (2cm margins each side)
 
 
-def _make_result_table(rows: list[dict]) -> Table:
-    header = [_rtl(c) for c in _DISPLAY_COLS_VISUAL]
+def _make_result_table(
+    rows: list[dict],
+    cols: list[str] | None = None,
+    header_color: str = "#0c237d",
+) -> Table:
+    display_cols = cols if cols is not None else _DISPLAY_COLS_VISUAL
+    header = [_rtl(c) for c in display_cols]
     data   = [header]
     for row in rows:
-        data.append([_rtl(str(row.get(c, "") or "")) for c in _DISPLAY_COLS_VISUAL])
+        data.append([_rtl(str(row.get(c, "") or "")) for c in display_cols])
 
     tbl = Table(data, colWidths=_COL_WIDTHS, repeatRows=1)
     tbl.setStyle(TableStyle([
         # Header row
-        ("BACKGROUND",    (0, 0), (-1, 0),  colors.HexColor("#dc2626")),
+        ("BACKGROUND",    (0, 0), (-1, 0),  colors.HexColor(header_color)),
         ("TEXTCOLOR",     (0, 0), (-1, 0),  colors.white),
         ("FONTNAME",      (0, 0), (-1, 0),  _FONT_BOLD),
         ("FONTSIZE",      (0, 0), (-1, 0),  8),
@@ -148,16 +154,20 @@ def export_pdf(run_data: dict) -> bytes:
         title="דוח פערי גפן-כספים",
     )
 
-    h1  = ParagraphStyle("h1",  fontName=_FONT_BOLD, fontSize=18, textColor=colors.HexColor("#0f172a"), alignment=2, spaceAfter=10)
-    h2  = ParagraphStyle("h2",  fontName=_FONT_BOLD, fontSize=12, textColor=colors.HexColor("#0f172a"), alignment=2, spaceAfter=8)
+    h1   = ParagraphStyle("h1",   fontName=_FONT_BOLD, fontSize=18, textColor=colors.HexColor("#0f172a"), alignment=2, spaceAfter=10)
+    h2   = ParagraphStyle("h2",   fontName=_FONT_BOLD, fontSize=12, textColor=colors.HexColor("#0c237d"), alignment=2, spaceAfter=8)
+    h2b  = ParagraphStyle("h2b",  fontName=_FONT_BOLD, fontSize=12, textColor=colors.HexColor("#2C3E50"), alignment=2, spaceAfter=8)
+    sec  = ParagraphStyle("sec",  fontName=_FONT_BOLD, fontSize=11, textColor=colors.HexColor("#475569"),  alignment=1, spaceBefore=6, spaceAfter=6)
     h3  = ParagraphStyle("h3",  fontName=_FONT_BOLD, fontSize=9,  textColor=colors.HexColor("#334155"), alignment=2, spaceAfter=4)
     sub = ParagraphStyle("sub", fontName=_FONT_NAME,  fontSize=8,  textColor=colors.HexColor("#64748b"), alignment=2, spaceAfter=8)
     ok  = ParagraphStyle("ok",  fontName=_FONT_BOLD,  fontSize=9,  textColor=colors.HexColor("#15803d"), alignment=1, spaceBefore=4, spaceAfter=4)
 
-    summary      = run_data.get("summary", {})
-    rows_finance = run_data.get("rows_finance_not_gefen", [])
-    rows_gefen   = run_data.get("rows_gefen_not_finance", [])
-    finance_sw   = summary.get("finance_file", {}).get("software", "תוכנת הכספים")
+    summary          = run_data.get("summary", {})
+    rows_finance     = run_data.get("rows_finance_not_gefen", [])
+    rows_gefen       = run_data.get("rows_gefen_not_finance", [])
+    rows_rejected    = run_data.get("rows_gefen_rejected", [])
+    rows_no_pdf      = run_data.get("rows_gefen_no_pdf", [])
+    finance_sw       = summary.get("finance_file", {}).get("software", "תוכנת הכספים")
     division     = summary.get("division", "")
     division_lbl = _DIVISION_LABELS.get(division, division)
 
@@ -168,11 +178,15 @@ def export_pdf(run_data: dict) -> bytes:
     story.append(Spacer(1, 0.4*cm))
     story.append(Paragraph(_rtl(f"הבדיקה בוצעה עבור {division_lbl}"), sub))
 
+    # Group 1 header
+    story.append(Spacer(1, 0.4*cm))
+    story.append(Paragraph(_rtl(f"השוואה גפן - {finance_sw}"), sec))
+
     # Table 1
-    story.append(Spacer(1, 0.3*cm))
+    story.append(Spacer(1, 0.2*cm))
     story.append(Paragraph(_rtl(f"קיים ב{finance_sw}, לא משויך בגפן"), h2))
     if rows_finance:
-        story.append(_make_result_table(rows_finance))
+        story.append(_make_result_table(rows_finance, header_color="#0c237d"))
     else:
         story.append(Paragraph(_rtl("✓ לא נמצאו ליקויים"), ok))
 
@@ -180,7 +194,27 @@ def export_pdf(run_data: dict) -> bytes:
     story.append(Spacer(1, 0.5*cm))
     story.append(Paragraph(_rtl(f"משויך בגפן, לא קיים ב{finance_sw}"), h2))
     if rows_gefen:
-        story.append(_make_result_table(rows_gefen))
+        story.append(_make_result_table(rows_gefen, header_color="#0c237d"))
+    else:
+        story.append(Paragraph(_rtl("✓ לא נמצאו ליקויים"), ok))
+
+    # Group 2 header
+    story.append(Spacer(1, 0.7*cm))
+    story.append(Paragraph(_rtl("לטיפול בגפן"), sec))
+
+    # Table 3
+    story.append(Spacer(1, 0.2*cm))
+    story.append(Paragraph(_rtl("אסמכתאות שנדחו"), h2b))
+    if rows_rejected:
+        story.append(_make_result_table(rows_rejected, cols=_REJECTED_COLS_VISUAL, header_color="#2C3E50"))
+    else:
+        story.append(Paragraph(_rtl("✓ לא נמצאו ליקויים"), ok))
+
+    # Table 4
+    story.append(Spacer(1, 0.5*cm))
+    story.append(Paragraph(_rtl("אסמכתאות ללא PDF"), h2b))
+    if rows_no_pdf:
+        story.append(_make_result_table(rows_no_pdf, header_color="#2C3E50"))
     else:
         story.append(Paragraph(_rtl("✓ לא נמצאו ליקויים"), ok))
 

@@ -8,6 +8,16 @@ const UNIFIED_COLS = [
   { key: "תיאור",        label: "תיאור"         },
 ];
 
+// Column definition for rejected invoices — last column is rejection reason
+const REJECTED_COLS = [
+  { key: "קוד דיווח",    label: "קוד דיווח"      },
+  { key: "שם ספק",       label: "שם ספק"          },
+  { key: "מספר אסמכתה",  label: "מספר אסמכתה"    },
+  { key: "תאריך",        label: "תאריך"           },
+  { key: "סכום",         label: "סכום פריט"       },
+  { key: "סיבת הדחייה", label: "סיבת הדחייה"    },
+];
+
 const STAGE_LABELS = {
   tikkon:   "תיכון",
   beinayim: "יסודי/חטיבה",
@@ -204,7 +214,8 @@ function CountBadge({ count }) {
   );
 }
 
-function ResultTable({ title, rows, columns, index }) {
+function ResultTable({ title, rows, columns, index, headerGradient }) {
+  const thBg = headerGradient ?? "linear-gradient(135deg, #dc2626 0%, #b91c1c 100%)";
   const isEmpty = rows.length === 0;
 
   return (
@@ -239,7 +250,7 @@ function ResultTable({ title, rows, columns, index }) {
                     className="text-right px-4 py-3 text-white text-xs font-700 whitespace-nowrap sticky top-0 z-10"
                     style={{
                       fontWeight: 700,
-                      background: "linear-gradient(135deg, #dc2626 0%, #b91c1c 100%)",
+                      background: thBg,
                       letterSpacing: "0.02em",
                     }}
                   >
@@ -320,25 +331,52 @@ function DivisionBanner({ summary }) {
 // ---------------------------------------------------------------------------
 
 export default function ResultsView({ result, downloadSlot }) {
-  const financeRows = result.rows_finance_not_gefen ?? [];
-  const gefenRows   = result.rows_gefen_not_finance ?? [];
+  const financeRows   = result.rows_finance_not_gefen ?? [];
+  const gefenRows     = result.rows_gefen_not_finance ?? [];
+  const rejectedRows  = result.rows_gefen_rejected ?? [];
+  const noPdfRows     = result.rows_gefen_no_pdf ?? [];
   const { summary } = result;
 
   return (
     <div className="flex flex-col gap-5">
       <DivisionBanner summary={summary} />
 
+      <div className="text-center">
+        <h2 className="text-base font-extrabold text-slate-600" style={{ fontWeight: 800, letterSpacing: "0.04em" }}>{`השוואה גפן - ${summary.finance_file?.software ?? "כספים"}`}</h2>
+      </div>
+
       <ResultTable
         title={`קיים ב${summary.finance_file?.software ?? "תוכנת הכספים"}, לא משויך בגפן`}
         rows={financeRows}
         columns={UNIFIED_COLS}
         index={1}
+        headerGradient="linear-gradient(135deg, #0c237d 0%, #091a60 100%)"
       />
       <ResultTable
         title={`משויך בגפן, לא קיים ב${summary.finance_file?.software ?? "תוכנת הכספים"}`}
         rows={gefenRows}
         columns={UNIFIED_COLS}
         index={2}
+        headerGradient="linear-gradient(135deg, #0c237d 0%, #091a60 100%)"
+      />
+
+      <div className="text-center mt-8">
+        <h2 className="text-base font-extrabold text-slate-600" style={{ fontWeight: 800, letterSpacing: "0.04em" }}>לטיפול בגפן</h2>
+      </div>
+
+      <ResultTable
+        title="אסמכתאות שנדחו"
+        rows={rejectedRows}
+        columns={REJECTED_COLS}
+        index={3}
+        headerGradient="linear-gradient(135deg, #2C3E50 0%, #1e2d3d 100%)"
+      />
+      <ResultTable
+        title="אסמכתאות ללא PDF"
+        rows={noPdfRows}
+        columns={UNIFIED_COLS}
+        index={4}
+        headerGradient="linear-gradient(135deg, #2C3E50 0%, #1e2d3d 100%)"
       />
 
       {/* Download buttons — right after the tables */}
@@ -346,7 +384,7 @@ export default function ResultsView({ result, downloadSlot }) {
 
       {/* Separator + heading before detail blocks */}
       <div className="mt-10 text-center">
-        <h2 className="text-base font-800 text-slate-400" style={{ fontWeight: 800, letterSpacing: "0.04em" }}>
+        <h2 className="text-base font-extrabold text-slate-600" style={{ fontWeight: 800, letterSpacing: "0.04em" }}>
           תהליך הבדיקה וממצאים
         </h2>
       </div>

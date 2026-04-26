@@ -59,6 +59,16 @@ _GEFEN_COL_MAP = [
     ("מהות ההוצאה",    "תיאור",        None),
 ]
 
+# Same as _GEFEN_COL_MAP but last column is "סיבת הדחייה" (extracted from col M)
+_GEFEN_REJECTED_COL_MAP = [
+    ("report_code",    "קוד דיווח",     None),
+    ("קוד ושם ספק",    "שם ספק",         None),
+    ("מספר חשבונית",   "מספר אסמכתה",  normalize_amount),
+    ("תאריך חשבונית",  "תאריך",          None),  # patched below
+    ("סכום פריט",      "סכום",           None),   # patched below
+    ("סיבת הדחייה",   "סיבת הדחייה",   None),
+]
+
 # Columns to strip before writing Excel (internal/computed)
 _STRIP_COLS = {"ichud", "supplier_number", "amount", "report_code"}
 
@@ -125,11 +135,13 @@ def _format_display_amount(val: str) -> str:
 
 
 # Patch date normalizer and amount formatter into all maps
-_PAYSCOOL_COL_MAP[3] = ("תאריך חשבונית", "תאריך", _normalize_date)
-_PAYSCOOL_COL_MAP[4] = ('סה"כ לסעיף',    "סכום",   _format_display_amount)
-_KESAFIM_COL_MAP[3]  = ("תאריך חשבונית", "תאריך", _normalize_date)
-_GEFEN_COL_MAP[3]    = ("תאריך חשבונית", "תאריך", _normalize_date)
-_GEFEN_COL_MAP[4]    = ("סכום פריט",     "סכום",   _format_display_amount)
+_PAYSCOOL_COL_MAP[3]    = ("תאריך חשבונית", "תאריך", _normalize_date)
+_PAYSCOOL_COL_MAP[4]    = ('סה"כ לסעיף',    "סכום",   _format_display_amount)
+_KESAFIM_COL_MAP[3]     = ("תאריך חשבונית", "תאריך", _normalize_date)
+_GEFEN_COL_MAP[3]       = ("תאריך חשבונית", "תאריך", _normalize_date)
+_GEFEN_COL_MAP[4]       = ("סכום פריט",     "סכום",   _format_display_amount)
+_GEFEN_REJECTED_COL_MAP[3] = ("תאריך חשבונית", "תאריך", _normalize_date)
+_GEFEN_REJECTED_COL_MAP[4] = ("סכום פריט",     "סכום",   _format_display_amount)
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +234,31 @@ def _process(run_id: str, paths: list[Path]) -> None:
         df_finance_raw, finance_label, finance_file_stats = _load_finance_raw(finance_path, finance_type)
         in_finance_not_gefen, in_gefen_not_finance, division, finance_rows_checked = reconcile(df_gefen, df_finance_raw)
 
+        # Rejected invoices: Gefen rows where column M (index 12) starts with "נדחה:"
+        col_m = df_gefen.columns[12] if len(df_gefen.columns) > 12 else None
+        if col_m is not None:
+            in_gefen_rejected = df_gefen[df_gefen[col_m].astype(str).str.startswith("נדחה:")].copy()
+            in_gefen_rejected["סיבת הדחייה"] = (
+                in_gefen_rejected[col_m].astype(str).str.replace(r"^נדחה:\s*", "", regex=True)
+            )
+        else:
+            in_gefen_rejected = df_gefen.iloc[0:0].copy()
+            in_gefen_rejected["סיבת הדחייה"] = pd.Series([], dtype=str)
+
+        # No-PDF invoices: rows with real invoice data (cols E-L, indices 4-11 all non-empty)
+        # AND column N (index 13) == "לא"
+        if len(df_gefen.columns) > 13:
+            cols_e_to_l = df_gefen.columns[4:12]
+            col_n = df_gefen.columns[13]
+            has_data = (
+                df_gefen[cols_e_to_l].notna().all(axis=1) &
+                df_gefen[cols_e_to_l].apply(lambda col: col.astype(str).str.strip() != "").all(axis=1)
+            )
+            no_pdf = df_gefen[col_n].astype(str).str.strip() == "לא"
+            in_gefen_no_pdf = df_gefen[has_data & no_pdf]
+        else:
+            in_gefen_no_pdf = df_gefen.iloc[0:0]
+
         # Rename report_code → קוד דיווח for all finance types after reconciliation.
         # Kesafim also renames its other English columns to Hebrew display names.
         if finance_type == "kesafim2000":
@@ -240,6 +277,8 @@ def _process(run_id: str, paths: list[Path]) -> None:
             _for_excel(in_gefen_not_finance),
             excel_path,
             finance_label=finance_label,
+            in_gefen_rejected=_for_excel(in_gefen_rejected),
+            in_gefen_no_pdf=_for_excel(in_gefen_no_pdf),
         )
 
         finance_col_map = (
@@ -255,6 +294,8 @@ def _process(run_id: str, paths: list[Path]) -> None:
                 "finance_rows_checked": finance_rows_checked,
                 "in_finance_not_gefen": len(in_finance_not_gefen),
                 "in_gefen_not_finance": len(in_gefen_not_finance),
+                "in_gefen_rejected": len(in_gefen_rejected),
+                "in_gefen_no_pdf": len(in_gefen_no_pdf),
                 "division": division,
                 "gefen_files": gefen_file_stats,
                 "gefen_merge_note": gefen_merge_note,
@@ -266,6 +307,8 @@ def _process(run_id: str, paths: list[Path]) -> None:
             },
             "rows_finance_not_gefen": _build_display_records(in_finance_not_gefen, finance_col_map),
             "rows_gefen_not_finance": _build_display_records(in_gefen_not_finance, _GEFEN_COL_MAP),
+            "rows_gefen_rejected": _build_display_records(in_gefen_rejected, _GEFEN_REJECTED_COL_MAP),
+            "rows_gefen_no_pdf": _build_display_records(in_gefen_no_pdf, _GEFEN_COL_MAP),
             "file_path": excel_path,
         }
 

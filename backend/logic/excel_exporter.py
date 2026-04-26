@@ -18,12 +18,18 @@ def export(
     in_gefen_not_finance: pd.DataFrame,
     output_path: str,
     finance_label: str = "כספים",
+    in_gefen_rejected: pd.DataFrame | None = None,
+    in_gefen_no_pdf: pd.DataFrame | None = None,
 ) -> str:
     wb = Workbook()
     wb.remove(wb.active)
 
     _add_result_sheet(wb, f"קיים ב{finance_label} אך לא בגפן", in_finance_not_gefen, red_fill)
     _add_result_sheet(wb, f"משויך בגפן אך לא ב{finance_label}", in_gefen_not_finance, red_fill)
+    if in_gefen_rejected is not None:
+        _add_result_sheet(wb, "אסמכתאות שנדחו", in_gefen_rejected, red_fill)
+    if in_gefen_no_pdf is not None:
+        _add_result_sheet(wb, "אסמכתאות ללא סריקה", in_gefen_no_pdf, red_fill)
 
     wb.save(output_path)
     return output_path
