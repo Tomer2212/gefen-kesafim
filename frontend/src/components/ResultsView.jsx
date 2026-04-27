@@ -327,15 +327,109 @@ function DivisionBanner({ summary }) {
 }
 
 // ---------------------------------------------------------------------------
+// Gefen-only notice (shown when no finance file was uploaded)
+// ---------------------------------------------------------------------------
+
+function GefenOnlyNotice({ title, index }) {
+  return (
+    <div
+      className="anim-fade-up glass-card-dark rounded-2xl overflow-hidden"
+      style={{ animationDelay: `${index * 0.1}s` }}
+    >
+      <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-slate-100">
+        <h3 className="text-sm font-700 text-slate-700 text-right" style={{ fontWeight: 700 }}>
+          {title}
+        </h3>
+      </div>
+      <div className="flex items-center justify-center gap-2 py-10">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <circle cx="8" cy="8" r="7" fill="#d97706" fillOpacity="0.15"/>
+          <path d="M8 5v3.5M8 10.5v.5" stroke="#d97706" strokeWidth="1.8" strokeLinecap="round"/>
+        </svg>
+        <span className="text-sm font-700 text-amber-700" style={{ fontWeight: 700 }}>
+          לא בוצעה בדיקה — לא הועלה קובץ מתוכנת הכספים
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main export
 // ---------------------------------------------------------------------------
 
 export default function ResultsView({ result, downloadSlot }) {
-  const financeRows   = result.rows_finance_not_gefen ?? [];
-  const gefenRows     = result.rows_gefen_not_finance ?? [];
   const rejectedRows  = result.rows_gefen_rejected ?? [];
   const noPdfRows     = result.rows_gefen_no_pdf ?? [];
-  const { summary } = result;
+  const { summary, gefen_only } = result;
+
+  if (gefen_only) {
+    return (
+      <div className="flex flex-col gap-5">
+        <div
+          className="anim-fade-up glass-card-dark rounded-2xl px-5 py-3.5 flex items-center justify-center"
+          style={{ animationDelay: "0s" }}
+        >
+          <span className="text-sm text-slate-500">
+            בדיקה בוצעה עבור:{" "}
+            <span className="font-700 text-slate-700" style={{ fontWeight: 700 }}>
+              קובץ גפן בלבד
+            </span>
+          </span>
+        </div>
+
+        <div className="text-center">
+          <h2 className="text-base font-extrabold text-slate-600" style={{ fontWeight: 800, letterSpacing: "0.04em" }}>השוואה גפן - כספים</h2>
+        </div>
+
+        <GefenOnlyNotice title="קיים בתוכנת הכספים, לא משויך בגפן" index={1} />
+        <GefenOnlyNotice title="משויך בגפן, לא קיים בתוכנת הכספים" index={2} />
+
+        <div className="text-center mt-8">
+          <h2 className="text-base font-extrabold text-slate-600" style={{ fontWeight: 800, letterSpacing: "0.04em" }}>לטיפול בגפן</h2>
+        </div>
+
+        <ResultTable
+          title="אסמכתאות שנדחו"
+          rows={rejectedRows}
+          columns={REJECTED_COLS}
+          index={3}
+          headerGradient="linear-gradient(135deg, #2C3E50 0%, #1e2d3d 100%)"
+        />
+        <ResultTable
+          title="אסמכתאות ללא PDF"
+          rows={noPdfRows}
+          columns={UNIFIED_COLS}
+          index={4}
+          headerGradient="linear-gradient(135deg, #2C3E50 0%, #1e2d3d 100%)"
+        />
+
+        {downloadSlot}
+
+        <div className="mt-10 text-center">
+          <h2 className="text-base font-extrabold text-slate-600" style={{ fontWeight: 800, letterSpacing: "0.04em" }}>
+            תהליך הבדיקה וממצאים
+          </h2>
+        </div>
+
+        <div className="anim-fade-up glass-card-dark rounded-2xl overflow-hidden">
+          <div className="px-5 py-3.5 border-b border-slate-100">
+            <h3 className="text-xs font-700 text-slate-500 tracking-wide" style={{ fontWeight: 700 }}>קבצי גפן</h3>
+          </div>
+          <div className="px-7 py-4">
+            <GefenFilesDetail
+              gefen_files={summary.gefen_files ?? []}
+              gefen_rows={summary.gefen_rows}
+              gefen_merge_note={summary.gefen_merge_note}
+            />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const financeRows   = result.rows_finance_not_gefen ?? [];
+  const gefenRows     = result.rows_gefen_not_finance ?? [];
 
   return (
     <div className="flex flex-col gap-5">

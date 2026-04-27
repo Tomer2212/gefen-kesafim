@@ -229,35 +229,44 @@ def _process(run_id: str, paths: list[Path]) -> None:
         gefen_paths, finance_path, finance_type = _classify_files(paths)
         df_gefen, gefen_file_stats, gefen_merge_note = _load_gefen_files(gefen_paths)
 
+        in_gefen_rejected, in_gefen_no_pdf = _extract_gefen_only_results(df_gefen)
+        excel_path = str(RUNS_DIR / run_id / "hashvaa-gefen-ksafim.xlsx")
+
+        # Gefen-only run — skip finance loading and reconciliation
+        if finance_path is None:
+            export(
+                _for_excel(df_gefen),
+                None,
+                None,
+                None,
+                excel_path,
+                finance_label=None,
+                in_gefen_rejected=_for_excel(in_gefen_rejected),
+                in_gefen_no_pdf=_for_excel(in_gefen_no_pdf),
+                gefen_only=True,
+            )
+            runs[run_id] = {
+                "status": "done",
+                "gefen_only": True,
+                "finance_type": None,
+                "summary": {
+                    "gefen_rows": len(df_gefen),
+                    "in_gefen_rejected": len(in_gefen_rejected),
+                    "in_gefen_no_pdf": len(in_gefen_no_pdf),
+                    "division": _detect_gefen_division(df_gefen),
+                    "gefen_files": gefen_file_stats,
+                    "gefen_merge_note": gefen_merge_note,
+                },
+                "rows_gefen_rejected": _build_display_records(in_gefen_rejected, _GEFEN_REJECTED_COL_MAP),
+                "rows_gefen_no_pdf": _build_display_records(in_gefen_no_pdf, _GEFEN_COL_MAP),
+                "file_path": excel_path,
+            }
+            return
+
         # Load raw finance df — kesafim2000 still has English column names here
         # so that reconciler._filter_by_division can access "report_code"
         df_finance_raw, finance_label, finance_file_stats = _load_finance_raw(finance_path, finance_type)
         in_finance_not_gefen, in_gefen_not_finance, division, finance_rows_checked = reconcile(df_gefen, df_finance_raw)
-
-        # Rejected invoices: Gefen rows where column M (index 12) starts with "נדחה:"
-        col_m = df_gefen.columns[12] if len(df_gefen.columns) > 12 else None
-        if col_m is not None:
-            in_gefen_rejected = df_gefen[df_gefen[col_m].astype(str).str.startswith("נדחה:")].copy()
-            in_gefen_rejected["סיבת הדחייה"] = (
-                in_gefen_rejected[col_m].astype(str).str.replace(r"^נדחה:\s*", "", regex=True)
-            )
-        else:
-            in_gefen_rejected = df_gefen.iloc[0:0].copy()
-            in_gefen_rejected["סיבת הדחייה"] = pd.Series([], dtype=str)
-
-        # No-PDF invoices: rows with real invoice data (cols E-L, indices 4-11 all non-empty)
-        # AND column N (index 13) == "לא"
-        if len(df_gefen.columns) > 13:
-            cols_e_to_l = df_gefen.columns[4:12]
-            col_n = df_gefen.columns[13]
-            has_data = (
-                df_gefen[cols_e_to_l].notna().all(axis=1) &
-                df_gefen[cols_e_to_l].apply(lambda col: col.astype(str).str.strip() != "").all(axis=1)
-            )
-            no_pdf = df_gefen[col_n].astype(str).str.strip() == "לא"
-            in_gefen_no_pdf = df_gefen[has_data & no_pdf]
-        else:
-            in_gefen_no_pdf = df_gefen.iloc[0:0]
 
         # Rename report_code → קוד דיווח for all finance types after reconciliation.
         # Kesafim also renames its other English columns to Hebrew display names.
@@ -269,7 +278,6 @@ def _process(run_id: str, paths: list[Path]) -> None:
             df_finance = df_finance_raw.rename(columns=_payscool_rename)
             in_finance_not_gefen = in_finance_not_gefen.rename(columns=_payscool_rename)
 
-        excel_path = str(RUNS_DIR / run_id / "hashvaa-gefen-ksafim.xlsx")
         export(
             _for_excel(df_gefen),
             _for_excel(df_finance),
@@ -287,6 +295,7 @@ def _process(run_id: str, paths: list[Path]) -> None:
 
         runs[run_id] = {
             "status": "done",
+            "gefen_only": False,
             "finance_type": finance_type,
             "summary": {
                 "gefen_rows": len(df_gefen),
@@ -321,7 +330,34 @@ def _process(run_id: str, paths: list[Path]) -> None:
         runs[run_id] = {"status": "error", "error": f"שגיאה פנימית: {exc}", "traceback": tb}
 
 
-def _classify_files(paths: list[Path]) -> tuple[list[Path], Path, str]:
+def _extract_gefen_only_results(df_gefen: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Extract rejected and no-PDF rows from a Gefen dataframe."""
+    col_m = df_gefen.columns[12] if len(df_gefen.columns) > 12 else None
+    if col_m is not None:
+        in_gefen_rejected = df_gefen[df_gefen[col_m].astype(str).str.startswith("נדחה:")].copy()
+        in_gefen_rejected["סיבת הדחייה"] = (
+            in_gefen_rejected[col_m].astype(str).str.replace(r"^נדחה:\s*", "", regex=True)
+        )
+    else:
+        in_gefen_rejected = df_gefen.iloc[0:0].copy()
+        in_gefen_rejected["סיבת הדחייה"] = pd.Series([], dtype=str)
+
+    if len(df_gefen.columns) > 13:
+        cols_e_to_l = df_gefen.columns[4:12]
+        col_n = df_gefen.columns[13]
+        has_data = (
+            df_gefen[cols_e_to_l].notna().all(axis=1) &
+            df_gefen[cols_e_to_l].apply(lambda col: col.astype(str).str.strip() != "").all(axis=1)
+        )
+        no_pdf = df_gefen[col_n].astype(str).str.strip() == "לא"
+        in_gefen_no_pdf = df_gefen[has_data & no_pdf]
+    else:
+        in_gefen_no_pdf = df_gefen.iloc[0:0]
+
+    return in_gefen_rejected, in_gefen_no_pdf
+
+
+def _classify_files(paths: list[Path]) -> tuple[list[Path], Path | None, str | None]:
     gefen: list[Path] = []
     finance_path: Path | None = None
     finance_type: str | None = None
@@ -341,10 +377,10 @@ def _classify_files(paths: list[Path]) -> tuple[list[Path], Path, str]:
                 "אנא העלה את הקבצים בצורתם הגולמית כפי שהורדו מהמערכות השונות, ללא שינויים."
             )
 
+    if not gefen and finance_path is not None:
+        raise ValueError("לא ניתן לבצע את הבדיקה עם קובץ מתוכנת הכספים בלבד.")
     if not gefen:
-        raise ValueError("לא קיבלתי קובץ גפן. אנא העלה לפחות קובץ גפן אחד.")
-    if finance_path is None:
-        raise ValueError("לא קיבלתי קובץ תוכנת כספים. אנא העלה קובץ כספים2000 או פייסקול.")
+        raise ValueError("לא קיבלתי קבצים מזוהים.")
     if len(gefen) > 2:
         raise ValueError("התקבלו יותר משני קבצי גפן. אנא העלה עד שני קבצי גפן.")
 

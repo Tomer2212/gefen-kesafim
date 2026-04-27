@@ -13,23 +13,31 @@ header_font = Font(bold=True, color="FFFFFF", name="Arial")
 
 def export(
     df_gefen: pd.DataFrame,
-    df_finance: pd.DataFrame,
-    in_finance_not_gefen: pd.DataFrame,
-    in_gefen_not_finance: pd.DataFrame,
+    df_finance: pd.DataFrame | None,
+    in_finance_not_gefen: pd.DataFrame | None,
+    in_gefen_not_finance: pd.DataFrame | None,
     output_path: str,
-    finance_label: str = "כספים",
+    finance_label: str | None = "כספים",
     in_gefen_rejected: pd.DataFrame | None = None,
     in_gefen_no_pdf: pd.DataFrame | None = None,
+    gefen_only: bool = False,
 ) -> str:
     wb = Workbook()
     wb.remove(wb.active)
 
-    _add_result_sheet(wb, f"קיים ב{finance_label} אך לא בגפן", in_finance_not_gefen, red_fill)
-    _add_result_sheet(wb, f"משויך בגפן אך לא ב{finance_label}", in_gefen_not_finance, red_fill)
-    if in_gefen_rejected is not None:
-        _add_result_sheet(wb, "אסמכתאות שנדחו", in_gefen_rejected, red_fill)
-    if in_gefen_no_pdf is not None:
-        _add_result_sheet(wb, "אסמכתאות ללא סריקה", in_gefen_no_pdf, red_fill)
+    if gefen_only:
+        if in_gefen_rejected is not None:
+            _add_result_sheet(wb, "אסמכתאות שנדחו", in_gefen_rejected, red_fill)
+        if in_gefen_no_pdf is not None:
+            _add_result_sheet(wb, "אסמכתאות ללא סריקה", in_gefen_no_pdf, red_fill)
+    else:
+        label = finance_label or "כספים"
+        _add_result_sheet(wb, f"קיים ב{label} אך לא בגפן", in_finance_not_gefen, red_fill)
+        _add_result_sheet(wb, f"משויך בגפן אך לא ב{label}", in_gefen_not_finance, red_fill)
+        if in_gefen_rejected is not None:
+            _add_result_sheet(wb, "אסמכתאות שנדחו", in_gefen_rejected, red_fill)
+        if in_gefen_no_pdf is not None:
+            _add_result_sheet(wb, "אסמכתאות ללא סריקה", in_gefen_no_pdf, red_fill)
 
     wb.save(output_path)
     return output_path
