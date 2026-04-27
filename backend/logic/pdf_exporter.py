@@ -163,6 +163,7 @@ def export_pdf(run_data: dict) -> bytes:
     ok  = ParagraphStyle("ok",  fontName=_FONT_BOLD,  fontSize=9,  textColor=colors.HexColor("#15803d"), alignment=1, spaceBefore=4, spaceAfter=4)
 
     summary          = run_data.get("summary", {})
+    gefen_only       = run_data.get("gefen_only", False)
     rows_finance     = run_data.get("rows_finance_not_gefen", [])
     rows_gefen       = run_data.get("rows_gefen_not_finance", [])
     rows_rejected    = run_data.get("rows_gefen_rejected", [])
@@ -171,29 +172,44 @@ def export_pdf(run_data: dict) -> bytes:
     division     = summary.get("division", "")
     division_lbl = _DIVISION_LABELS.get(division, division)
 
+    no_check_msg = "לא בוצעה בדיקה — לא הועלה קובץ מתוכנת הכספים"
+    no_check_style = ParagraphStyle(
+        "no_check",
+        fontName=_FONT_BOLD,
+        fontSize=9,
+        textColor=colors.HexColor("#b45309"),
+        alignment=1,
+        spaceBefore=4,
+        spaceAfter=4,
+    )
+
     story = []
 
-    # Title (no date line)
+    # Title
     story.append(Paragraph(_rtl("דוח פערי גפן–כספים"), h1))
     story.append(Spacer(1, 0.4*cm))
-    story.append(Paragraph(_rtl(f"הבדיקה בוצעה עבור {division_lbl}"), sub))
+    story.append(Paragraph(_rtl("הבדיקה בוצעה עבור קובץ גפן בלבד" if gefen_only else f"הבדיקה בוצעה עבור {division_lbl}"), sub))
 
     # Group 1 header
     story.append(Spacer(1, 0.4*cm))
-    story.append(Paragraph(_rtl(f"השוואה גפן - {finance_sw}"), sec))
+    story.append(Paragraph(_rtl("השוואה גפן - תוכנת הכספים" if gefen_only else f"השוואה גפן - {finance_sw}"), sec))
 
     # Table 1
     story.append(Spacer(1, 0.2*cm))
-    story.append(Paragraph(_rtl(f"קיים ב{finance_sw}, לא משויך בגפן"), h2))
-    if rows_finance:
+    story.append(Paragraph(_rtl(f"קיים ב{finance_sw}, לא משויך בגפן" if not gefen_only else "קיים בתוכנת הכספים, לא משויך בגפן"), h2))
+    if gefen_only:
+        story.append(Paragraph(_rtl(no_check_msg), no_check_style))
+    elif rows_finance:
         story.append(_make_result_table(rows_finance, header_color="#0c237d"))
     else:
         story.append(Paragraph(_rtl("✓ לא נמצאו ליקויים"), ok))
 
     # Table 2
     story.append(Spacer(1, 0.5*cm))
-    story.append(Paragraph(_rtl(f"משויך בגפן, לא קיים ב{finance_sw}"), h2))
-    if rows_gefen:
+    story.append(Paragraph(_rtl(f"משויך בגפן, לא קיים ב{finance_sw}" if not gefen_only else "משויך בגפן, לא קיים בתוכנת הכספים"), h2))
+    if gefen_only:
+        story.append(Paragraph(_rtl(no_check_msg), no_check_style))
+    elif rows_gefen:
         story.append(_make_result_table(rows_gefen, header_color="#0c237d"))
     else:
         story.append(Paragraph(_rtl("✓ לא נמצאו ליקויים"), ok))
@@ -235,43 +251,44 @@ def export_pdf(run_data: dict) -> bytes:
     gefen_pairs.append(('סה"כ ייחודיות:', str(summary.get("gefen_rows", ""))))
     story.append(_make_summary_table(gefen_pairs))
 
-    # Finance file block
-    story.append(Spacer(1, 0.3*cm))
-    story.append(Paragraph(_rtl("קבצים מתוכנת הכספים"), h3))
-    ff = summary.get("finance_file", {})
-    cancelled  = ff.get("cancelled_rows")
-    total_disp = summary.get("finance_rows_total", 0) + (cancelled or 0)
-    rows_total   = summary.get("finance_rows_total", 0)
-    rows_checked = summary.get("finance_rows_checked", 0)
-    finance_pairs: list[tuple[str, str]] = [
-        ("שם קובץ:",           ff.get("filename", "")),
-        ("סוג תוכנה:",         ff.get("software", "")),
-        ("שלב:",               _STAGE_LABELS.get(division, division)),
-        ("אסמכתאות שזוהו:",   str(total_disp)),
-    ]
-    if cancelled is not None:
-        finance_pairs.append(("אסמכתאות מבוטלות:", str(cancelled)))
-    finance_pairs.append(('סה"כ ייחודיות:', str(rows_checked)))
-    if rows_total != rows_checked:
-        finance_pairs.append(("הערה:", f"מתוך {rows_total} שורות, {rows_checked} שייכות לשלב שנבדק"))
-    story.append(_make_summary_table(finance_pairs))
+    if not gefen_only:
+        # Finance file block
+        story.append(Spacer(1, 0.3*cm))
+        story.append(Paragraph(_rtl("קבצים מתוכנת הכספים"), h3))
+        ff = summary.get("finance_file", {})
+        cancelled  = ff.get("cancelled_rows")
+        total_disp = summary.get("finance_rows_total", 0) + (cancelled or 0)
+        rows_total   = summary.get("finance_rows_total", 0)
+        rows_checked = summary.get("finance_rows_checked", 0)
+        finance_pairs: list[tuple[str, str]] = [
+            ("שם קובץ:",           ff.get("filename", "")),
+            ("סוג תוכנה:",         ff.get("software", "")),
+            ("שלב:",               _STAGE_LABELS.get(division, division)),
+            ("אסמכתאות שזוהו:",   str(total_disp)),
+        ]
+        if cancelled is not None:
+            finance_pairs.append(("אסמכתאות מבוטלות:", str(cancelled)))
+        finance_pairs.append(('סה"כ ייחודיות:', str(rows_checked)))
+        if rows_total != rows_checked:
+            finance_pairs.append(("הערה:", f"מתוך {rows_total} שורות, {rows_checked} שייכות לשלב שנבדק"))
+        story.append(_make_summary_table(finance_pairs))
 
-    # Conclusion block
-    story.append(Spacer(1, 0.3*cm))
-    story.append(Paragraph(_rtl("מסקנה ותהליך הבדיקה"), h3))
-    gefen_label  = _STAGE_LABELS.get(division, division)
-    filtered     = rows_total != rows_checked
-    n_files      = len(gefen_files)
-    gefen_word   = "הועלו" if n_files > 1 else "הועלה"
-    gefen_desc   = f"{gefen_word} קובצי דיווח ביצוע עבור {gefen_label}"
-    both_label   = _STAGE_LABELS.get("both", "")
-    finance_desc = f"הועלה קובץ {finance_sw} עבור {both_label if filtered else gefen_label}"
-    conclusion   = f"לכן הבדיקה בוצעה עבור {gefen_label} בלבד." if filtered else f"לכן הבדיקה בוצעה עבור {gefen_label}."
-    story.append(_make_summary_table([
-        ("גפן:",           gefen_desc),
-        ("תוכנת כספים:",   finance_desc),
-        ("מסקנה:",         conclusion),
-    ]))
+        # Conclusion block
+        story.append(Spacer(1, 0.3*cm))
+        story.append(Paragraph(_rtl("מסקנה ותהליך הבדיקה"), h3))
+        gefen_label  = _STAGE_LABELS.get(division, division)
+        filtered     = rows_total != rows_checked
+        n_files      = len(gefen_files)
+        gefen_word   = "הועלו" if n_files > 1 else "הועלה"
+        gefen_desc   = f"{gefen_word} קובצי דיווח ביצוע עבור {gefen_label}"
+        both_label   = _STAGE_LABELS.get("both", "")
+        finance_desc = f"הועלה קובץ {finance_sw} עבור {both_label if filtered else gefen_label}"
+        conclusion   = f"לכן הבדיקה בוצעה עבור {gefen_label} בלבד." if filtered else f"לכן הבדיקה בוצעה עבור {gefen_label}."
+        story.append(_make_summary_table([
+            ("גפן:",           gefen_desc),
+            ("תוכנת כספים:",   finance_desc),
+            ("מסקנה:",         conclusion),
+        ]))
 
     doc.build(story)
     return buf.getvalue()

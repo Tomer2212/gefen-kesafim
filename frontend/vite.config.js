@@ -6,8 +6,8 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
     proxy: {
-      "/auth": "http://localhost:8000",
-      "/analyze": "http://localhost:8000",
+      "/auth": { target: "http://127.0.0.1:8000", changeOrigin: true },
+      "/analyze": { target: "http://127.0.0.1:8000", changeOrigin: true },
     },
   },
 });

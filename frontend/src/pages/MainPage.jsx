@@ -27,6 +27,52 @@ function Logo() {
   );
 }
 
+function SingleFileWarningModal({ onConfirm, onCancel }) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center px-4"
+      style={{ background: "rgba(15,23,42,0.4)", backdropFilter: "blur(4px)" }}
+    >
+      <div
+        className="glass-card rounded-3xl p-7 max-w-sm w-full anim-fade-up text-right"
+        dir="rtl"
+      >
+        <div
+          className="w-11 h-11 rounded-2xl flex items-center justify-center mb-4"
+          style={{ background: "rgba(251,191,36,0.12)" }}
+        >
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+            <path d="M10 2.5L17.5 15.5H2.5L10 2.5Z" stroke="#d97706" strokeWidth="1.6" strokeLinejoin="round"/>
+            <path d="M10 8.5v3M10 13.5v.5" stroke="#d97706" strokeWidth="1.6" strokeLinecap="round"/>
+          </svg>
+        </div>
+        <h2 className="text-base font-800 mb-3" style={{ fontWeight: 800, color: "#0f172a" }}>
+          שים לב! העלית קובץ אחד בלבד
+        </h2>
+        <p className="text-sm text-slate-600 leading-relaxed mb-6">
+          אם מדובר בקובץ דיווח ביצוע (גפן) — המערכת תבדוק אסמכתאות שנדחו וכאלה שהגיעו ללא סריקה בלבד.
+          <br /><br />
+          אם מדובר בקובץ מתוכנת הכספים — הבדיקה תיכשל.
+        </p>
+        <div className="flex gap-3">
+          <button
+            onClick={onConfirm}
+            className="btn-blue flex-1 py-2.5 text-sm"
+          >
+            בדוק בכל זאת
+          </button>
+          <button
+            onClick={onCancel}
+            className="btn-ghost flex-1 py-2.5 text-sm"
+          >
+            אחורה
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ConfirmModal({ onConfirm, onCancel }) {
   return (
     <div
@@ -78,6 +124,7 @@ export default function MainPage() {
   const [result, setResult]   = useState(null);
   const [errorMsg, setErrorMsg] = useState("");
   const [showConfirm, setShowConfirm] = useState(false);
+  const [showSingleFileWarning, setShowSingleFileWarning] = useState(false);
   const pollRef = useRef(null);
   const navigate = useNavigate();
 
@@ -91,8 +138,12 @@ export default function MainPage() {
   }
 
   async function handleRun() {
-    if (files.length < 2) return;
-    setShowConfirm(true);
+    if (files.length === 0) return;
+    if (files.length === 1) {
+      setShowSingleFileWarning(true);
+    } else {
+      setShowConfirm(true);
+    }
   }
 
   async function handleConfirmedRun() {
@@ -146,6 +197,13 @@ export default function MainPage() {
 
   return (
     <div dir="rtl" className="bg-scene min-h-screen">
+
+      {showSingleFileWarning && (
+        <SingleFileWarningModal
+          onConfirm={() => { setShowSingleFileWarning(false); setShowConfirm(true); }}
+          onCancel={() => setShowSingleFileWarning(false)}
+        />
+      )}
 
       {showConfirm && (
         <ConfirmModal
@@ -238,7 +296,7 @@ export default function MainPage() {
             <div className="flex justify-center anim-fade-up-3">
               <button
                 onClick={handleRun}
-                disabled={files.length < 2}
+                disabled={files.length === 0}
                 className="btn-blue px-10 py-2.5 text-sm"
                 style={{ background: "linear-gradient(135deg, #0070F3 0%, #0055cc 100%)" }}
               >
