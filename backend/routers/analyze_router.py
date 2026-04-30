@@ -19,6 +19,7 @@ from logic.file_identifier import identify_file
 from logic.gefen_processor import load_gefen, normalize_amount
 from logic.kesafim_processor import load_kesafim
 from logic.payscool_processor import load_payscool
+from logic.schoolcash_processor import load_schoolcash
 from logic.reconciler import BEINAYIM_ONLY, TIKKON_ONLY, reconcile
 
 RUNS_DIR = Path(__file__).parent.parent / "runs"
@@ -39,6 +40,15 @@ _PAYSCOOL_COL_MAP = [
     ("תאריך חשבונית",  "תאריך",        _norm_date := None),  # assigned below
     ('סה"כ לסעיף',     "סכום",         None),
     ("תיאור",           "תיאור",        None),
+]
+
+_SCHOOLCASH_COL_MAP = [
+    ("קוד דיווח",              "קוד דיווח",   None),
+    ("שם ספק",                 "שם ספק",       None),
+    ("מספר חשבונית",           "מספר אסמכתה", normalize_amount),
+    ("תאריך חשבונית",          "תאריך",        None),  # patched below
+    ("סכום",                   "סכום",         None),  # patched below
+    ("תאור שורה בחשבונית",    "תיאור",        None),
 ]
 
 _KESAFIM_COL_MAP = [
@@ -113,9 +123,9 @@ def _normalize_date(val: str) -> str:
         if len(y) == 2:
             y = "20" + y
         return f"{int(d):02d}/{int(m):02d}/{y}"
-    # YYYY-MM-DD (ISO)
-    if re.match(r"^\d{4}-\d{2}-\d{2}$", s):
-        y, m, d = s.split("-")
+    # YYYY-MM-DD ... (ISO or pandas Timestamp with time component)
+    if re.match(r"^\d{4}-\d{2}-\d{2}", s):
+        y, m, d = s[:10].split("-")
         return f"{int(d):02d}/{int(m):02d}/{y}"
     return s
 
@@ -137,6 +147,8 @@ def _format_display_amount(val: str) -> str:
 # Patch date normalizer and amount formatter into all maps
 _PAYSCOOL_COL_MAP[3]    = ("תאריך חשבונית", "תאריך", _normalize_date)
 _PAYSCOOL_COL_MAP[4]    = ('סה"כ לסעיף',    "סכום",   _format_display_amount)
+_SCHOOLCASH_COL_MAP[3]  = ("תאריך חשבונית", "תאריך", _normalize_date)
+_SCHOOLCASH_COL_MAP[4]  = ("סכום",          "סכום",   _format_display_amount)
 _KESAFIM_COL_MAP[3]     = ("תאריך חשבונית", "תאריך", _normalize_date)
 _GEFEN_COL_MAP[3]       = ("תאריך חשבונית", "תאריך", _normalize_date)
 _GEFEN_COL_MAP[4]       = ("סכום פריט",     "סכום",   _format_display_amount)
@@ -289,9 +301,12 @@ def _process(run_id: str, paths: list[Path]) -> None:
             in_gefen_no_pdf=_for_excel(in_gefen_no_pdf),
         )
 
-        finance_col_map = (
-            _KESAFIM_COL_MAP if finance_type == "kesafim2000" else _PAYSCOOL_COL_MAP
-        )
+        if finance_type == "kesafim2000":
+            finance_col_map = _KESAFIM_COL_MAP
+        elif finance_type == "schoolcash":
+            finance_col_map = _SCHOOLCASH_COL_MAP
+        else:
+            finance_col_map = _PAYSCOOL_COL_MAP
 
         runs[run_id] = {
             "status": "done",
@@ -366,7 +381,7 @@ def _classify_files(paths: list[Path]) -> tuple[list[Path], Path | None, str | N
         ftype = identify_file(str(p))
         if ftype == "gefen":
             gefen.append(p)
-        elif ftype in ("kesafim2000", "payscool"):
+        elif ftype in ("kesafim2000", "payscool", "schoolcash"):
             if finance_path is not None:
                 raise ValueError("התקבלו שני קבצי כספים. אנא העלה קובץ כספים אחד בלבד.")
             finance_path = p
@@ -447,6 +462,10 @@ def _load_finance_raw(path: Path, ftype: str) -> tuple[pd.DataFrame, str, dict]:
         df = load_kesafim(str(path))
         stats = {"filename": path.name, "software": "כספים2000", "cancelled_rows": None}
         return df, "כספים", stats
+    if ftype == "schoolcash":
+        df = load_schoolcash(str(path))
+        stats = {"filename": path.name, "software": "סקולקאש", "cancelled_rows": None}
+        return df, "סקולקאש", stats
     df, cancelled = load_payscool(str(path))
     stats = {"filename": path.name, "software": "פייסקול", "cancelled_rows": cancelled}
     return df, "פייסקול", stats
