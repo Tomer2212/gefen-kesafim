@@ -73,6 +73,18 @@ def _identify_xlsx(filename: str) -> str:
             wb.close()
             return "kesafim2000"
 
+    # --- SchoolCash ---
+    ws = wb[sheets[0]]
+    row1 = _get_row(ws, 1)
+    if (
+        _cell(row1, 5) == "עוסק מורשה"
+        and _cell(row1, 6) == "מספר תעודה"
+        and _cell(row1, 7) == "סוג תעודה"
+        and _cell(row1, 14) == "תאור שורה בחשבונית"
+    ):
+        wb.close()
+        return "schoolcash"
+
     wb.close()
     return "unknown"
 
