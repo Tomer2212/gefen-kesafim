@@ -260,7 +260,7 @@ export default function MainPage() {
             <div className="glass-card rounded-2xl px-5 py-4 mb-4 anim-fade-up-1">
               <ol className="flex flex-col gap-1.5 text-sm text-slate-600 list-decimal list-inside leading-relaxed" style={{ paddingRight: "0.25rem" }}>
                 <li>העלו קובץ דיווח ביצוע ממערכת הגפן</li>
-                <li>העלו קובץ פירוט אסמכתאות גפן מתוכנת הכספים (פייסקול / כספים2000)</li>
+                <li>העלו קובץ פירוט אסמכתאות גפן מתוכנת הכספים (פייסקול / כספים2000 / סקולקאש)</li>
                 <li>לחצו "התחל בדיקה"</li>
                 <li>צפו בקסם קורה.</li>
               </ol>
