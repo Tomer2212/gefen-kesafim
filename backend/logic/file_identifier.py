@@ -54,8 +54,9 @@ def _identify_xlsx(filename: str) -> str:
             return "gefen"
 
     # --- PaySchool ---
-    if "Data" in sheets:
-        ws = wb["Data"]
+    sheets_lower = {s.lower(): s for s in sheets}
+    if "data" in sheets_lower:
+        ws = wb[sheets_lower["data"]]
         row4 = _get_row(ws, 4)
         if (
             _cell(row4, 0) == "סעיף"
