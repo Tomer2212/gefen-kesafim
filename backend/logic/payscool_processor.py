@@ -8,9 +8,15 @@ from logic.gefen_processor import normalize_amount
 def load_payscool(filepath: str) -> tuple[pd.DataFrame, int]:
     import openpyxl
     wb = openpyxl.load_workbook(filepath, read_only=True)
-    sheet_name = next((s for s in wb.sheetnames if s.lower() == "data"), "Data")
+    sheet_name = None
+    for s in wb.sheetnames:
+        ws = wb[s]
+        rows = list(ws.iter_rows(min_row=4, max_row=4, values_only=True))
+        if rows and str(rows[0][0]).strip() == "סעיף":
+            sheet_name = s
+            break
     wb.close()
-    df = pd.read_excel(filepath, sheet_name=sheet_name, header=None)
+    df = pd.read_excel(filepath, sheet_name=sheet_name or 0, header=None)
     df.columns = df.iloc[3]
     df = df.iloc[4:].reset_index(drop=True)
 
