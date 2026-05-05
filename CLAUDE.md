@@ -263,6 +263,33 @@ For gefen-not-finance rows: קוד דווח, קוד ושם ספק, מספר חש
 
 ---
 
+## Deployment
+
+### Default Behavior
+All code changes apply **locally only** (dev server via `start.bat`). Do NOT push to GitHub or deploy to Render unless the user explicitly asks.
+
+### When to Deploy to Render
+Only when the user says something like "עדכן באתר", "deploy", "תפרוס", "תדחוף ל-Render" etc.
+
+### Render Setup
+- Platform: [Render](https://render.com)
+- Render watches the **`main`** branch — pushing to `main` triggers an automatic rebuild.
+- There is no `render.yaml` — configuration is in the Render dashboard.
+- Remote: `https://github.com/Tomer2212/gefen-kesafim.git`
+
+### Deployment Steps (in order)
+```
+1. git add <changed files>
+2. git commit -m "descriptive message"
+3. git push origin dev
+4. git checkout main
+5. git merge dev -m "Merge dev: <same message>"
+6. git push origin main       ← Render auto-deploys from here
+7. git checkout dev
+```
+
+---
+
 ## Development Rules (Token Efficiency)
 
 1. **Always use plan mode** before implementing any new feature

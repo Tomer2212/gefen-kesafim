@@ -4,7 +4,6 @@ import axios from "axios";
 import FileUpload from "../components/FileUpload";
 import LoadingScreen from "../components/LoadingScreen";
 import ResultsView from "../components/ResultsView";
-import DownloadButton from "../components/DownloadButton";
 
 function Logo() {
   return (
@@ -317,13 +316,9 @@ export default function MainPage() {
         {status === "done" && result && (
           <ResultsView
             result={result}
-            downloadSlot={
-              <DownloadButton
-                runId={runId}
-                authHeader={authHeader()}
-                onNewRun={handleNewRun}
-              />
-            }
+            runId={runId}
+            authHeader={authHeader()}
+            onNewRun={handleNewRun}
           />
         )}
 
