@@ -85,6 +85,23 @@ def _identify_xlsx(filename: str) -> str:
         wb.close()
         return "schoolcash"
 
+    # --- Tikhnun (budget planning) ---
+    # Exactly 2 sheets; one has K1="השתתפות רשות/ בעלות" + O1="תאריך אחרון לאישור רשות";
+    # the other has O1="עלות מענה כוללת" + P1="עלות מתקציב"
+    if len(sheets) == 2:
+        hakol_found = False
+        perut_found = False
+        for sheet_name in sheets:
+            ws2 = wb[sheet_name]
+            r1 = _get_row(ws2, 1)
+            if _cell(r1, 10) == "השתתפות רשות/ בעלות" and _cell(r1, 14) == "תאריך אחרון לאישור רשות":
+                hakol_found = True
+            if _cell(r1, 14) == "עלות מענה כוללת" and _cell(r1, 15) == "עלות מתקציב":
+                perut_found = True
+        if hakol_found and perut_found:
+            wb.close()
+            return "tikhnun"
+
     wb.close()
     return "unknown"
 
