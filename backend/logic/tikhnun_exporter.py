@@ -255,81 +255,54 @@ def _write_yozma(ws, tikhnun: dict, yozma_key: str):
 # PDF export
 # ---------------------------------------------------------------------------
 
-def export_tikhnun_pdf(tikhnun: dict, section: str, multiplier: str = "03") -> bytes:
-    """Export a single tikhnun section to PDF bytes using ReportLab."""
-    from io import BytesIO
-    from pathlib import Path
+def build_tikhnun_section_story(tikhnun: dict, section: str, multiplier: str = "03") -> list:
+    """Return ReportLab flowables for a single tikhnun section (used by combined exporter)."""
     from bidi.algorithm import get_display
     from reportlab.lib import colors
-    from reportlab.lib.pagesizes import A4
     from reportlab.lib.units import cm
-    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Spacer, Paragraph
+    from reportlab.platypus import Paragraph, Spacer, Table, TableStyle
     from reportlab.lib.styles import ParagraphStyle
-    from reportlab.pdfbase import pdfmetrics
-    from reportlab.pdfbase.ttfonts import TTFont
+    from logic.pdf_exporter import _ensure_fonts, _FONT_NAME, _FONT_BOLD
 
-    _FONTS_DIR = Path(__file__).parent / "fonts"
-    try:
-        pdfmetrics.registerFont(TTFont("NotoHeb", str(_FONTS_DIR / "NotoSansHebrew-Regular.ttf")))
-        pdfmetrics.registerFont(TTFont("NotoHebBold", str(_FONTS_DIR / "NotoSansHebrew-Bold.ttf")))
-        font_name = "NotoHeb"
-        font_bold = "NotoHebBold"
-    except Exception:
-        font_name = "Helvetica"
-        font_bold = "Helvetica-Bold"
+    _ensure_fonts()
+    font_name = _FONT_NAME
+    font_bold = _FONT_BOLD
 
     def rtl(text):
-        if not text:
-            return ""
+        if not text: return ""
         s = str(text)
-        if any("֐" <= c <= "׿" for c in s):
-            return get_display(s)
-        return s
+        return get_display(s) if any("֐" <= c <= "׿" for c in s) else s
 
     def fmt_money(v):
-        if v is None:
-            return ""
-        try:
-            return f"{int(round(float(v))):,}"
-        except Exception:
-            return str(v)
+        if v is None: return ""
+        try: return f"{int(round(float(v))):,}"
+        except: return str(v)
 
     def fmt_pct(v):
-        if v is None:
-            return ""
-        try:
-            return f"{float(v)*100:.2f}%"
-        except Exception:
-            return str(v)
-
-    buf = BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4, rightMargin=1.5*cm, leftMargin=1.5*cm,
-                             topMargin=2*cm, bottomMargin=2*cm)
-    style_title = ParagraphStyle("title", fontName=font_bold, fontSize=13, alignment=1)
-    style_hdr = ParagraphStyle("hdr", fontName=font_bold, fontSize=9)
+        if v is None: return ""
+        try: return f"{float(v)*100:.2f}%"
+        except: return str(v)
 
     HDR_COLOR = colors.HexColor("#2D5FA0")
-    HDR_FONT_COLOR = colors.white
     GRAY = colors.HexColor("#E8EDF5")
-    RED  = colors.HexColor("#C0392B")
-    BLACK = colors.black
 
     def _tbl_style(num_cols, num_rows, total_row=None):
         style = [
-            ("FONTNAME", (0, 0), (-1, -1), font_name),
-            ("FONTSIZE", (0, 0), (-1, -1), 8),
-            ("BACKGROUND", (0, 0), (-1, 0), HDR_COLOR),
-            ("TEXTCOLOR", (0, 0), (-1, 0), HDR_FONT_COLOR),
-            ("FONTNAME", (0, 0), (-1, 0), font_bold),
-            ("ALIGN", (0, 0), (-1, -1), "RIGHT"),
+            ("FONTNAME", (0, 0), (-1, -1), font_name), ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("BACKGROUND", (0, 0), (-1, 0), HDR_COLOR), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), font_bold), ("ALIGN", (0, 0), (-1, -1), "RIGHT"),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F5F7FA")]),
             ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#CCCCCC")),
         ]
         if total_row is not None:
-            style.append(("BACKGROUND", (0, total_row), (-1, total_row), GRAY))
-            style.append(("FONTNAME", (0, total_row), (-1, total_row), font_bold))
+            style += [("BACKGROUND", (0, total_row), (-1, total_row), GRAY),
+                      ("FONTNAME", (0, total_row), (-1, total_row), font_bold)]
         return TableStyle(style)
+
+    style_title = ParagraphStyle("tkh_title", fontName=font_bold, fontSize=13, alignment=1)
+
+    def _rev(data): return [list(reversed(row)) for row in data]
 
     story = []
 
@@ -353,7 +326,8 @@ def export_tikhnun_pdf(tikhnun: dict, section: str, multiplier: str = "03") -> b
         ]
         if has_doch and ov.get("pct_tanuz") is not None:
             data.append([rtl("אחוז דיווח למודל תמרוץ"), fmt_pct(ov.get("pct_tanuz"))])
-        tbl = Table(data, colWidths=[9*cm, 7*cm])
+        data = _rev(data)
+        tbl = Table(data, colWidths=[7*cm, 9*cm])
         tbl.setStyle(_tbl_style(2, len(data)))
         story.append(tbl)
 
@@ -364,21 +338,24 @@ def export_tikhnun_pdf(tikhnun: dict, section: str, multiplier: str = "03") -> b
         has_multi = tikhnun.get("has_multiple_budget_types", False)
         if has_multi:
             headers = ["סוג תקציב", "שלב", "סל", "תת סל", "תקציב קבוע", "תוכנן", "הפרש"]
+            col_widths = [3*cm, 2.5*cm, 3.5*cm, 3*cm, 2.5*cm, 2.5*cm, 2.5*cm]
         else:
             headers = ["שלב", "סל", "תת סל", "תקציב קבוע", "תוכנן", "הפרש"]
+            col_widths = [2.5*cm, 4*cm, 3.5*cm, 2.8*cm, 2.8*cm, 2.8*cm]
         data = [[rtl(h) for h in headers]]
         for row in kvua_rows:
             r = []
-            if has_multi:
-                r.append(rtl(row.get("budget_type", "")))
+            if has_multi: r.append(rtl(row.get("budget_type", "")))
             r += [rtl(row.get("stage", "")), rtl(row.get("sal", "")), rtl(row.get("tatsub", "")),
                   fmt_money(row.get("kvua")), fmt_money(row.get("tikhnun")), fmt_money(row.get("hefresh"))]
             data.append(r)
         total_h = sum(r.get("hefresh", 0) for r in kvua_rows)
-        totals = [""] * (len(headers) - 3) + [rtl('סה"כ'), "", fmt_money(sum(r.get("kvua", 0) for r in kvua_rows)),
+        totals = [""] * (len(headers) - 3) + [rtl('סה"כ'), "",
+                  fmt_money(sum(r.get("kvua", 0) for r in kvua_rows)),
                   fmt_money(sum(r.get("tikhnun", 0) for r in kvua_rows)), fmt_money(total_h)]
         data.append(totals)
-        tbl = Table(data)
+        data = _rev(data)
+        tbl = Table(data, colWidths=list(reversed(col_widths)))
         tbl.setStyle(_tbl_style(len(headers), len(data), total_row=len(data)-1))
         story.append(tbl)
 
@@ -387,23 +364,21 @@ def export_tikhnun_pdf(tikhnun: dict, section: str, multiplier: str = "03") -> b
         story.append(Spacer(1, 0.4*cm))
         partial_rows = tikhnun.get("partial_rows", [])
         if not partial_rows:
-            story.append(Paragraph(rtl("אין תוכניות עם ביצוע חלקי"), style_hdr))
+            story.append(Paragraph(rtl("אין תוכניות עם ביצוע חלקי"),
+                                   ParagraphStyle("tkh_hdr", fontName=font_bold, fontSize=9)))
         else:
             headers = ["קוד", "שם מענה", "מס' מענה", "תכנון", "דיווח", "הפרש", "אחוז"]
+            col_widths = [1.5*cm, 6*cm, 2*cm, 2.2*cm, 2.2*cm, 2.2*cm, 1.8*cm]
             data = [[rtl(h) for h in headers]]
             for row in partial_rows:
-                data.append([
-                    rtl(row.get("rcode", "")),
-                    rtl(row.get("name", "")),
-                    rtl(row.get("mispnum", "")),
-                    fmt_money(row.get("tikhnun")),
-                    fmt_money(row.get("divuach")),
-                    fmt_money(row.get("hefresh")),
-                    fmt_pct(row.get("pct")),
-                ])
+                data.append([rtl(row.get("rcode", "")), rtl(row.get("name", "")),
+                              rtl(row.get("mispnum", "")), fmt_money(row.get("tikhnun")),
+                              fmt_money(row.get("divuach")), fmt_money(row.get("hefresh")),
+                              fmt_pct(row.get("pct"))])
             total_h = tikhnun.get("sum_hefresh_partial", 0)
             data.append([rtl('סה"כ הפרש'), "", "", "", "", fmt_money(total_h), ""])
-            tbl = Table(data, colWidths=[1.5*cm, 6*cm, 2*cm, 2.2*cm, 2.2*cm, 2.2*cm, 1.8*cm])
+            data = _rev(data)
+            tbl = Table(data, colWidths=list(reversed(col_widths)))
             tbl.setStyle(_tbl_style(len(headers), len(data), total_row=len(data)-1))
             story.append(tbl)
 
@@ -417,18 +392,171 @@ def export_tikhnun_pdf(tikhnun: dict, section: str, multiplier: str = "03") -> b
             [rtl("בתכנון"), fmt_money(yozma.get("betikhnun"))],
             [rtl("הפרש"), fmt_money(yozma.get("hefresh"))],
         ]
-        tbl = Table(summary_data, colWidths=[9*cm, 7*cm])
+        tbl = Table(_rev(summary_data), colWidths=[7*cm, 9*cm])
         tbl.setStyle(_tbl_style(2, 3))
         story.append(tbl)
         story.append(Spacer(1, 0.4*cm))
         headers = ["סעיף", "תקרה", "בתכנון", "הפרש שניתן לתכנון"]
+        col_widths = [5*cm, 4*cm, 4*cm, 5*cm]
+        data = [[rtl(h) for h in headers]]
+        for item in yozma.get("detail", []):
+            data.append([rtl(item.get("label", "")), fmt_money(item.get("cap")),
+                         fmt_money(item.get("betikhnun")), fmt_money(item.get("hefresh"))])
+        tbl2 = Table(_rev(data), colWidths=list(reversed(col_widths)))
+        tbl2.setStyle(_tbl_style(4, len(data)))
+        story.append(tbl2)
+
+    return story
+
+
+def export_tikhnun_pdf(tikhnun: dict, section: str, multiplier: str = "03") -> bytes:
+    """Export a single tikhnun section to PDF bytes using ReportLab."""
+    from io import BytesIO
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import cm
+    from reportlab.platypus import SimpleDocTemplate, PageBreak
+    from logic.pdf_exporter import _ensure_fonts, build_school_info_story
+
+    _ensure_fonts()
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, rightMargin=1.5*cm, leftMargin=1.5*cm,
+                            topMargin=2*cm, bottomMargin=2*cm)
+
+    story = []
+    # Always prepend school info for non-sikar sections (sikar IS the school info)
+    if section != "sikar":
+        story.extend(build_school_info_story(tikhnun))
+        story.append(PageBreak() if section in ("kvua", "partial", "yozma") else __import__("reportlab.platypus", fromlist=["Spacer"]).Spacer(1, 0.3*__import__("reportlab.lib.units", fromlist=["cm"]).cm))
+
+    story.extend(build_tikhnun_section_story(tikhnun, section, multiplier))
+    doc.build(story)
+    return buf.getvalue()
+
+
+# Keep the old PDF helpers block for backward-compat (not used anymore but harmless)
+def _legacy_pdf_setup():
+    """Kept for reference only — logic moved to build_tikhnun_section_story."""
+    pass
+
+
+def _tbl_style_compat(num_cols, num_rows, total_row=None):
+    """Shim for internal callers — unused."""
+    pass
+
+    def _rev(data):
+        """Reverse column order of every row so RTL columns appear correctly in LTR PDF."""
+        return [list(reversed(row)) for row in data]
+
+    story = []
+
+    if section == "sikar":
+        story.append(Paragraph(rtl("סקירה - גפן"), style_title))
+        story.append(Spacer(1, 0.4*cm))
+        ov = tikhnun.get("overview", {})
+        has_doch = tikhnun.get("has_doch", False)
+        data = [
+            [rtl("שדה"), rtl("ערך")],
+            [rtl("שם מוסד"), rtl(tikhnun.get("school_name", ""))],
+            [rtl("סמל מוסד"), str(tikhnun.get("school_code", ""))],
+            [rtl("שלב מוסד"), rtl(tikhnun.get("school_stage", ""))],
+            [rtl("תקציב גפן"), fmt_money(ov.get("budget"))],
+            [rtl("סכום שתוכנן"), fmt_money(ov.get("planned"))],
+            [rtl("תקציב קבוע שנותר"), fmt_money(ov.get("fixed_gap_abs"))],
+            [rtl("תקציב גמיש שנותר"), fmt_money(ov.get("flexible_remaining"))],
+            [rtl("סכום חייב בדיווח"), fmt_money(ov.get("sum_chayav"))],
+            [rtl("סכום שדווח"), fmt_money(ov.get("sum_divuach"))],
+            [rtl("אחוז דיווח (כללי)"), fmt_pct(ov.get("pct_divuach"))],
+        ]
+        if has_doch and ov.get("pct_tanuz") is not None:
+            data.append([rtl("אחוז דיווח למודל תמרוץ"), fmt_pct(ov.get("pct_tanuz"))])
+        data = _rev(data)  # label col rightmost in RTL
+        tbl = Table(data, colWidths=[7*cm, 9*cm])
+        tbl.setStyle(_tbl_style(2, len(data)))
+        story.append(tbl)
+
+    elif section == "kvua":
+        story.append(Paragraph(rtl("מימוש תקציב קבוע - גפן"), style_title))
+        story.append(Spacer(1, 0.4*cm))
+        kvua_rows = tikhnun.get("kvua_rows", [])
+        has_multi = tikhnun.get("has_multiple_budget_types", False)
+        if has_multi:
+            headers = ["סוג תקציב", "שלב", "סל", "תת סל", "תקציב קבוע", "תוכנן", "הפרש"]
+            col_widths = [3*cm, 2.5*cm, 3.5*cm, 3*cm, 2.5*cm, 2.5*cm, 2.5*cm]
+        else:
+            headers = ["שלב", "סל", "תת סל", "תקציב קבוע", "תוכנן", "הפרש"]
+            col_widths = [2.5*cm, 4*cm, 3.5*cm, 2.8*cm, 2.8*cm, 2.8*cm]
+        data = [[rtl(h) for h in headers]]
+        for row in kvua_rows:
+            r = []
+            if has_multi:
+                r.append(rtl(row.get("budget_type", "")))
+            r += [rtl(row.get("stage", "")), rtl(row.get("sal", "")), rtl(row.get("tatsub", "")),
+                  fmt_money(row.get("kvua")), fmt_money(row.get("tikhnun")), fmt_money(row.get("hefresh"))]
+            data.append(r)
+        total_h = sum(r.get("hefresh", 0) for r in kvua_rows)
+        totals = [""] * (len(headers) - 3) + [rtl('סה"כ'), "", fmt_money(sum(r.get("kvua", 0) for r in kvua_rows)),
+                  fmt_money(sum(r.get("tikhnun", 0) for r in kvua_rows)), fmt_money(total_h)]
+        data.append(totals)
+        data = _rev(data)
+        col_widths = list(reversed(col_widths))
+        tbl = Table(data, colWidths=col_widths)
+        tbl.setStyle(_tbl_style(len(headers), len(data), total_row=len(data)-1))
+        story.append(tbl)
+
+    elif section == "partial":
+        story.append(Paragraph(rtl("תוכניות עם ביצוע חלקי"), style_title))
+        story.append(Spacer(1, 0.4*cm))
+        partial_rows = tikhnun.get("partial_rows", [])
+        if not partial_rows:
+            story.append(Paragraph(rtl("אין תוכניות עם ביצוע חלקי"), style_hdr))
+        else:
+            headers = ["קוד", "שם מענה", "מס' מענה", "תכנון", "דיווח", "הפרש", "אחוז"]
+            col_widths = [1.5*cm, 6*cm, 2*cm, 2.2*cm, 2.2*cm, 2.2*cm, 1.8*cm]
+            data = [[rtl(h) for h in headers]]
+            for row in partial_rows:
+                data.append([
+                    rtl(row.get("rcode", "")),
+                    rtl(row.get("name", "")),
+                    rtl(row.get("mispnum", "")),
+                    fmt_money(row.get("tikhnun")),
+                    fmt_money(row.get("divuach")),
+                    fmt_money(row.get("hefresh")),
+                    fmt_pct(row.get("pct")),
+                ])
+            total_h = tikhnun.get("sum_hefresh_partial", 0)
+            data.append([rtl('סה"כ הפרש'), "", "", "", "", fmt_money(total_h), ""])
+            data = _rev(data)
+            col_widths = list(reversed(col_widths))
+            tbl = Table(data, colWidths=col_widths)
+            tbl.setStyle(_tbl_style(len(headers), len(data), total_row=len(data)-1))
+            story.append(tbl)
+
+    elif section == "yozma":
+        story.append(Paragraph(rtl("יוזמות וצרכים - פירוט"), style_title))
+        story.append(Spacer(1, 0.4*cm))
+        yozma_key = "yozma_04" if multiplier == "04" else "yozma_03"
+        yozma = tikhnun.get(yozma_key, tikhnun.get("yozma_03", {}))
+        summary_data = [
+            [rtl("תקציב מקסימלי"), fmt_money(yozma.get("max"))],
+            [rtl("בתכנון"), fmt_money(yozma.get("betikhnun"))],
+            [rtl("הפרש"), fmt_money(yozma.get("hefresh"))],
+        ]
+        summary_data = _rev(summary_data)
+        tbl = Table(summary_data, colWidths=[7*cm, 9*cm])
+        tbl.setStyle(_tbl_style(2, 3))
+        story.append(tbl)
+        story.append(Spacer(1, 0.4*cm))
+        headers = ["סעיף", "תקרה", "בתכנון", "הפרש שניתן לתכנון"]
+        col_widths = [5*cm, 4*cm, 4*cm, 5*cm]
         data = [[rtl(h) for h in headers]]
         for item in yozma.get("detail", []):
             data.append([rtl(item.get("label", "")),
                          fmt_money(item.get("cap")),
                          fmt_money(item.get("betikhnun")),
                          fmt_money(item.get("hefresh"))])
-        tbl2 = Table(data, colWidths=[5*cm, 4*cm, 4*cm, 5*cm])
+        data = _rev(data)
+        col_widths = list(reversed(col_widths))
+        tbl2 = Table(data, colWidths=col_widths)
         tbl2.setStyle(_tbl_style(4, len(data)))
         story.append(tbl2)
 

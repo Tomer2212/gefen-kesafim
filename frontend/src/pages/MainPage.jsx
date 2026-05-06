@@ -122,6 +122,7 @@ export default function MainPage() {
   const [status, setStatus]   = useState("idle"); // idle | loading | done | error
   const [result, setResult]   = useState(null);
   const [errorMsg, setErrorMsg] = useState("");
+  const [userMsg, setUserMsg]   = useState("");
   const [showConfirm, setShowConfirm] = useState(false);
   const [showSingleFileWarning, setShowSingleFileWarning] = useState(false);
   const pollRef = useRef(null);
@@ -149,6 +150,7 @@ export default function MainPage() {
     setShowConfirm(false);
     setStatus("loading");
     setErrorMsg("");
+    setUserMsg("");
     try {
       const form = new FormData();
       files.forEach(f => form.append("files", f));
@@ -174,6 +176,7 @@ export default function MainPage() {
           setStatus("done");
         } else if (data.status === "error") {
           clearInterval(pollRef.current);
+          setUserMsg(data.user_message || "");
           setErrorMsg(data.error || "הבדיקה נכשלה. אנא נסה שוב.");
           setStatus("error");
         }
@@ -340,7 +343,15 @@ export default function MainPage() {
             >
               הבדיקה נכשלה
             </h2>
-            <p className="text-sm text-slate-500 mb-6 leading-relaxed">
+            {userMsg && (
+              <p className="text-sm font-600 text-slate-700 mb-3 leading-relaxed" style={{ fontWeight: 600 }}>
+                {userMsg}
+              </p>
+            )}
+            <p
+              className={`mb-6 leading-relaxed ${userMsg ? "text-xs text-slate-400 font-mono" : "text-sm text-slate-500"}`}
+              dir={userMsg ? "ltr" : "rtl"}
+            >
               {errorMsg || "אירעה שגיאה. אנא נסה שוב."}
             </p>
             <button

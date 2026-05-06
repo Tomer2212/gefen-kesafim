@@ -219,14 +219,14 @@ def download(run_id: str, _user: str = Depends(get_current_user)):
 
 
 @router.get("/pdf/{run_id}")
-def download_pdf(run_id: str, _user: str = Depends(get_current_user)):
+def download_pdf(run_id: str, section: str = "hashva", _user: str = Depends(get_current_user)):
     from fastapi.responses import Response
     run = runs.get(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     if run.get("status") != "done":
         raise HTTPException(status_code=400, detail="Run not complete")
-    pdf_bytes = export_pdf(run)
+    pdf_bytes = export_pdf(run, section=section)
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
@@ -284,23 +284,82 @@ def download_tikhnun_pdf(
     )
 
 
+@router.get("/pdf-combined/{run_id}")
+def download_combined_pdf(
+    run_id: str,
+    sections: str = "hashva",
+    multiplier: str = "03",
+    _user: str = Depends(get_current_user),
+):
+    from fastapi.responses import Response
+    from logic.combined_exporter import export_combined_pdf
+    run = runs.get(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run.get("status") != "done":
+        raise HTTPException(status_code=400, detail="Run not complete")
+    section_list = [s.strip() for s in sections.split(",") if s.strip()]
+    pdf_bytes = export_combined_pdf(run, section_list, multiplier)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'attachment; filename="gefen-combined.pdf"'},
+    )
+
+
+@router.get("/excel-combined/{run_id}")
+def download_combined_excel(
+    run_id: str,
+    sections: str = "hashva",
+    multiplier: str = "03",
+    _user: str = Depends(get_current_user),
+):
+    from fastapi.responses import Response
+    from logic.combined_exporter import export_combined_excel
+    run = runs.get(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run.get("status") != "done":
+        raise HTTPException(status_code=400, detail="Run not complete")
+    section_list = [s.strip() for s in sections.split(",") if s.strip()]
+    xlsx_bytes = export_combined_excel(run, section_list, multiplier)
+    return Response(
+        content=xlsx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="gefen-combined.xlsx"'},
+    )
+
+
 # ---------------------------------------------------------------------------
 # Background processing pipeline
 # ---------------------------------------------------------------------------
 
 def _process(run_id: str, paths: list[Path]) -> None:
     try:
-        gefen_paths, finance_path, finance_type, tikhnun_path = _classify_files(paths)
+        gefen_paths, finance_path, finance_type, tikhnun_paths = _classify_files(paths)
 
         # ── Tikhnun-only run (no gefen doch) ─────────────────────────────────
-        if not gefen_paths and tikhnun_path:
-            tikhnun_data = load_tikhnun(str(tikhnun_path))
-            tikhnun_result = build_tikhnun_result(tikhnun_data)
-            runs[run_id] = {
-                "status": "done",
-                "tikhnun_only": True,
-                "tikhnun": tikhnun_result,
-            }
+        if not gefen_paths and tikhnun_paths:
+            if len(tikhnun_paths) == 2:
+                td0 = load_tikhnun(str(tikhnun_paths[0]))
+                td1 = load_tikhnun(str(tikhnun_paths[1]))
+                tikkon_data, beinayim_data = _assign_tikhnun_pair(td0, td1)
+                tikkon_result   = build_tikhnun_result(tikkon_data)   if tikkon_data   else None
+                beinayim_result = build_tikhnun_result(beinayim_data) if beinayim_data else None
+                runs[run_id] = {
+                    "status": "done",
+                    "tikhnun_only": True,
+                    "tikhnun": tikkon_result or beinayim_result,
+                    "tikhnun_tikkon": tikkon_result,
+                    "tikhnun_beinayim": beinayim_result,
+                }
+            else:
+                tikhnun_data = load_tikhnun(str(tikhnun_paths[0]))
+                runs[run_id] = {
+                    "status": "done",
+                    "tikhnun_only": True,
+                    "tikhnun": build_tikhnun_result(tikhnun_data),
+                }
             return
 
         # ── Normal run: gefen files present ──────────────────────────────────
@@ -308,14 +367,35 @@ def _process(run_id: str, paths: list[Path]) -> None:
         in_gefen_rejected, in_gefen_no_pdf = _extract_gefen_only_results(df_gefen)
         excel_path = str(RUNS_DIR / run_id / "hashvaa-gefen-ksafim.xlsx")
 
-        # Process tikhnun if present (cross-reference with gefen doch)
-        tikhnun_result = None
-        if tikhnun_path:
+        # Process tikhnun if present (cross-reference with matching-division gefen doch)
+        tikhnun_result        = None
+        tikhnun_tikkon_result  = None
+        tikhnun_beinayim_result = None
+
+        if len(tikhnun_paths) == 1:
             try:
-                tikhnun_data = load_tikhnun(str(tikhnun_path))
-                # Use first gefen file as doch for cross-reference
+                tikhnun_data = load_tikhnun(str(tikhnun_paths[0]))
                 tikhnun_data = cross_reference_doch(tikhnun_data, str(gefen_paths[0]))
                 tikhnun_result = build_tikhnun_result(tikhnun_data)
+            except Exception as exc:
+                logger.error("Tikhnun processing error for run %s: %s", run_id, exc)
+                tikhnun_result = {"error": str(exc)}
+        elif len(tikhnun_paths) == 2:
+            try:
+                td0 = load_tikhnun(str(tikhnun_paths[0]))
+                td1 = load_tikhnun(str(tikhnun_paths[1]))
+                tikkon_data, beinayim_data = _assign_tikhnun_pair(td0, td1)
+                if tikkon_data:
+                    gpath = _find_gefen_path_for_division(gefen_paths, gefen_file_stats, "tikkon")
+                    if gpath:
+                        tikkon_data = cross_reference_doch(tikkon_data, str(gpath))
+                    tikhnun_tikkon_result = build_tikhnun_result(tikkon_data)
+                if beinayim_data:
+                    gpath = _find_gefen_path_for_division(gefen_paths, gefen_file_stats, "beinayim")
+                    if gpath:
+                        beinayim_data = cross_reference_doch(beinayim_data, str(gpath))
+                    tikhnun_beinayim_result = build_tikhnun_result(beinayim_data)
+                tikhnun_result = tikhnun_tikkon_result or tikhnun_beinayim_result
             except Exception as exc:
                 logger.error("Tikhnun processing error for run %s: %s", run_id, exc)
                 tikhnun_result = {"error": str(exc)}
@@ -338,6 +418,8 @@ def _process(run_id: str, paths: list[Path]) -> None:
                 "gefen_only": True,
                 "finance_type": None,
                 "tikhnun": tikhnun_result,
+                "tikhnun_tikkon": tikhnun_tikkon_result,
+                "tikhnun_beinayim": tikhnun_beinayim_result,
                 "summary": {
                     "gefen_rows": len(df_gefen),
                     "in_gefen_rejected": len(in_gefen_rejected),
@@ -390,6 +472,8 @@ def _process(run_id: str, paths: list[Path]) -> None:
             "gefen_only": False,
             "finance_type": finance_type,
             "tikhnun": tikhnun_result,
+            "tikhnun_tikkon": tikhnun_tikkon_result,
+            "tikhnun_beinayim": tikhnun_beinayim_result,
             "summary": {
                 "gefen_rows": len(df_gefen),
                 "finance_rows_total": len(df_finance_raw),
@@ -414,6 +498,17 @@ def _process(run_id: str, paths: list[Path]) -> None:
             "file_path": excel_path,
         }
 
+    except UnicodeDecodeError as exc:
+        tb = traceback.format_exc()
+        logger.error("Run %s encoding error:\n%s", run_id, tb)
+        runs[run_id] = {
+            "status": "error",
+            "user_message": (
+                "המערכת לא הצליחה לעבד את קובץ כספים2000. "
+                "במידה והקובץ אינו הקובץ הגולמי כפי שהורד מהמערכת, יש לנסות מחדש עם הקובץ הגולמי."
+            ),
+            "error": str(exc),
+        }
     except ValueError as exc:
         logger.error("Run %s validation error: %s", run_id, exc)
         runs[run_id] = {"status": "error", "error": str(exc)}
@@ -450,11 +545,11 @@ def _extract_gefen_only_results(df_gefen: pd.DataFrame) -> tuple[pd.DataFrame, p
     return in_gefen_rejected, in_gefen_no_pdf
 
 
-def _classify_files(paths: list[Path]) -> tuple[list[Path], Path | None, str | None, Path | None]:
+def _classify_files(paths: list[Path]) -> tuple[list[Path], Path | None, str | None, list[Path]]:
     gefen: list[Path] = []
     finance_path: Path | None = None
     finance_type: str | None = None
-    tikhnun_path: Path | None = None
+    tikhnun_paths: list[Path] = []
 
     for p in paths:
         ftype = identify_file(str(p))
@@ -466,9 +561,9 @@ def _classify_files(paths: list[Path]) -> tuple[list[Path], Path | None, str | N
             finance_path = p
             finance_type = ftype
         elif ftype == "tikhnun":
-            if tikhnun_path is not None:
-                raise ValueError("התקבל יותר מקובץ תכנון אחד. אנא העלה קובץ תכנון אחד בלבד.")
-            tikhnun_path = p
+            tikhnun_paths.append(p)
+            if len(tikhnun_paths) > 2:
+                raise ValueError("התקבלו יותר משני קבצי תכנון. אנא העלה עד שני קבצי תכנון.")
         else:
             raise ValueError(
                 f"הקובץ '{p.name}' אינו בצורתו הגולמית כפי שהורד מהמערכת. "
@@ -476,8 +571,8 @@ def _classify_files(paths: list[Path]) -> tuple[list[Path], Path | None, str | N
             )
 
     # tikhnun only (with or without finance) — treat as tikhnun-only
-    if tikhnun_path and not gefen:
-        return [], None, None, tikhnun_path
+    if tikhnun_paths and not gefen:
+        return [], None, None, tikhnun_paths
 
     if not gefen and finance_path is not None:
         raise ValueError("לא ניתן לבצע את הבדיקה עם קובץ מתוכנת הכספים בלבד.")
@@ -486,7 +581,28 @@ def _classify_files(paths: list[Path]) -> tuple[list[Path], Path | None, str | N
     if len(gefen) > 2:
         raise ValueError("התקבלו יותר משני קבצי גפן. אנא העלה עד שני קבצי גפן.")
 
-    return gefen, finance_path, finance_type, tikhnun_path
+    return gefen, finance_path, finance_type, tikhnun_paths
+
+
+def _assign_tikhnun_pair(td0: dict, td1: dict) -> tuple[dict | None, dict | None]:
+    """Assign two loaded tikhnun dicts to (tikkon, beinayim) based on school_stage."""
+    tikkon, beinayim = None, None
+    for td in (td0, td1):
+        if td.get("school_stage") == "תיכון":
+            tikkon = td
+        else:
+            beinayim = td
+    return tikkon, beinayim
+
+
+def _find_gefen_path_for_division(
+    gefen_paths: list[Path], stats: list[dict], division: str
+) -> Path | None:
+    """Return the gefen path whose division matches the requested division, or None."""
+    for i, stat in enumerate(stats):
+        if stat["division"] == division or stat["division"] == "both":
+            return gefen_paths[i]
+    return None
 
 
 def _detect_gefen_division(df: pd.DataFrame) -> str:

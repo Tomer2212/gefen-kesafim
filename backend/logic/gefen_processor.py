@@ -48,6 +48,8 @@ def normalize_amount(val) -> str:
     if pd.isna(val) or str(val).strip() == "":
         return ""
     s = str(val).replace(",", "").strip()
+    if s.endswith("-"):  # Israeli accounting format: "9600-" → "-9600"
+        s = "-" + s[:-1]
     try:
         f = float(s)
         return str(int(f)) if f == int(f) else f"{f:.2f}".rstrip("0").rstrip(".")
