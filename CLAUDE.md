@@ -268,8 +268,26 @@ For gefen-not-finance rows: קוד דווח, קוד ושם ספק, מספר חש
 ### Default Behavior
 All code changes apply **locally only** (dev server via `start.bat`). Do NOT push to GitHub or deploy to Render unless the user explicitly asks.
 
+### dev-log.md — Change Tracking
+- `dev-log.md` in the project root tracks all pending (undeployed) changes across conversations.
+- **After every set of changes in a conversation**, append an entry to `dev-log.md`:
+  ```
+  ## YYYY-MM-DD — <short title>
+  - bullet describing change 1
+  - bullet describing change 2
+  ```
+- This file is the single source of truth for what will be deployed next.
+
 ### When to Deploy to Render
 Only when the user says something like "עדכן באתר", "deploy", "תפרוס", "תדחוף ל-Render" etc.
+
+### Pre-Deployment Flow (MUST follow every time, no exceptions)
+1. Read `dev-log.md`
+2. Present the pending changes to the user as a concise bullet-point summary in Hebrew
+3. Ask: **"האם להעלות את כל העדכונים הללו לאתר?"**
+4. **Wait for explicit approval — do NOT proceed without it**
+5. Only after approval: run the Deployment Steps below
+6. After successful push to `main`: **clear `dev-log.md`** (leave only the heading `# Dev Log`)
 
 ### Render Setup
 - Platform: [Render](https://render.com)

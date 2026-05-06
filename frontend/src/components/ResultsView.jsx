@@ -5,20 +5,35 @@ import axios from "axios";
 // Column definitions
 // ---------------------------------------------------------------------------
 
+const TIKKON_CODES   = new Set([48,54,55,58,59,61,62,66,76,87,91,92,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,127,136,137,138,139,140,141,142,148,150,152,154,156,158,160,162,164,165,167,169]);
+const BEINAYIM_CODES = new Set([43,44,45,46,47,49,50,51,52,53,56,57,60,63,64,65,67,68,69,70,71,72,73,74,75,77,78,80,81,83,84,85,88,89,90,126,128,129,130,131,132,133,134,135,147,151,153,155,161,166,168]);
+
+function splitByDivision(rows) {
+  const tikkon = [], beinayim = [];
+  for (const r of rows) {
+    const code = Number(r["קוד דיווח"]);
+    if (TIKKON_CODES.has(code)) tikkon.push(r);
+    else beinayim.push(r);  // BEINAYIM, SHARED, and unknown all go to beinayim
+  }
+  return { tikkon, beinayim };
+}
+
+const CODE_COL_STYLE = { width: "48px", minWidth: "48px", maxWidth: "48px", padding: "12px 6px", textAlign: "center", whiteSpace: "normal", wordBreak: "break-word" };
+
 const UNIFIED_COLS = [
-  { key: "קוד דיווח",   label: "קוד דיווח"   },
+  { key: "קוד דיווח",   label: "קוד",          thStyle: CODE_COL_STYLE, tdStyle: { ...CODE_COL_STYLE, padding: "10px 6px" } },
   { key: "שם ספק",      label: "שם ספק"       },
   { key: "מספר אסמכתה", label: "מספר אסמכתא" },
-  { key: "תאריך",       label: "תאריך"        },
+  { key: "תאריך",       label: "תאריך",        noWrap: true },
   { key: "סכום",        label: "סכום פריט"    },
   { key: "תיאור",       label: "תיאור"        },
 ];
 
 const REJECTED_COLS = [
-  { key: "קוד דיווח",   label: "קוד דיווח"   },
+  { key: "קוד דיווח",   label: "קוד",          thStyle: CODE_COL_STYLE, tdStyle: { ...CODE_COL_STYLE, padding: "10px 6px" } },
   { key: "שם ספק",      label: "שם ספק"       },
   { key: "מספר אסמכתה", label: "מספר אסמכתא" },
-  { key: "תאריך",       label: "תאריך"        },
+  { key: "תאריך",       label: "תאריך",        noWrap: true },
   { key: "סכום",        label: "סכום פריט"    },
   { key: "סיבת הדחייה", label: "סיבת הדחייה" },
 ];
@@ -45,14 +60,14 @@ const TAB_LABELS_MAP = {
   sikar:    "סקירה",
   rejected: "אסמכתאות שנדחו",
   nopdf:    "ללא PDF",
-  partial:  "ביצוע חסר",
+  partial:  "דיווח חסר",
   yozma:    "יוזמות וצרכים",
   kvua:     "תקציב קבוע",
 };
 // tabs disabled when no tikhnun data
 const TIKHNUN_ONLY_TABS = ["sikar", "kvua", "partial", "yozma"];
 // tabs disabled when tikhnun-only (no gefen execution data)
-const GEFEN_ONLY_TABS = ["rejected", "nopdf"];
+const GEFEN_ONLY_TABS = ["rejected", "nopdf", "partial"];
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -151,8 +166,9 @@ function ResultTable({ title, rows, columns, index = 0, headerGradient, showSum 
             <thead>
               <tr>
                 {columns.map(col => (
-                  <th key={col.key} className="text-right px-4 py-3 text-white text-xs font-700 whitespace-nowrap sticky top-0 z-10"
-                    style={{ fontWeight: 700, background: thBg, letterSpacing: "0.02em" }}>
+                  <th key={col.key}
+                    className="text-right px-4 py-3 text-white text-xs font-700 whitespace-nowrap sticky top-0 z-10"
+                    style={{ fontWeight: 700, background: thBg, letterSpacing: "0.02em", ...col.thStyle }}>
                     {col.label}
                   </th>
                 ))}
@@ -163,8 +179,9 @@ function ResultTable({ title, rows, columns, index = 0, headerGradient, showSum 
                 <tr key={i} className="border-t border-slate-100 hover:bg-blue-50/40 transition-colors"
                   style={{ background: i % 2 === 0 ? "white" : "rgba(248,250,252,0.7)" }}>
                   {columns.map(col => (
-                    <td key={col.key} className="px-4 py-2.5 text-right text-slate-700 align-middle" style={{ maxWidth: "200px" }}>
-                      <span className="block truncate text-xs" title={row[col.key] || "—"}>
+                    <td key={col.key} className="px-4 py-2.5 text-right text-slate-700 align-middle"
+                      style={col.tdStyle}>
+                      <span className="block text-xs" style={{ wordBreak: col.noWrap ? "normal" : "break-word", whiteSpace: col.noWrap ? "nowrap" : "normal" }}>
                         {row[col.key] || <span className="text-slate-300">—</span>}
                       </span>
                     </td>
@@ -258,6 +275,68 @@ function TabBar({ activeTab, hasTikhnun, tikhnunOnly, getTabIssues, onTabClick }
 }
 
 // ---------------------------------------------------------------------------
+// Download selection modal
+// ---------------------------------------------------------------------------
+
+function DownloadSelectModal({ activeTab, availableTabs, onConfirm, onCancel }) {
+  const otherTabs = availableTabs.filter(t => t !== activeTab);
+  const allTabs = [activeTab, ...otherTabs];
+  const [checked, setChecked] = useState(new Set([activeTab]));
+
+  function toggle(tab) {
+    setChecked(prev => {
+      const next = new Set(prev);
+      if (next.has(tab)) { next.delete(tab); } else { next.add(tab); }
+      return next;
+    });
+  }
+
+  const allSelected = allTabs.every(t => checked.has(t));
+
+  function handleSelectAll() {
+    if (allSelected) {
+      setChecked(new Set([activeTab]));
+    } else {
+      setChecked(new Set(allTabs));
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center px-4"
+      style={{ background: "rgba(15,23,42,0.45)", backdropFilter: "blur(4px)" }}>
+      <div className="glass-card rounded-3xl p-6 max-w-sm w-full anim-fade-up text-right" dir="rtl">
+        <h2 className="text-base mb-4" style={{ fontWeight: 800, color: "#0f172a" }}>בחר לשוניות לייצוא</h2>
+        <div className="flex flex-col gap-2.5 mb-5">
+          <label className="flex items-center gap-3 cursor-default select-none">
+            <input type="checkbox" checked readOnly className="w-4 h-4 accent-blue-600" />
+            <span className="text-sm" style={{ fontWeight: 700 }}>{TAB_LABELS_MAP[activeTab]}</span>
+            <span className="text-xs text-slate-400">(לשונית נוכחית)</span>
+          </label>
+          <label className="flex items-center gap-3 cursor-pointer select-none border-t border-slate-100 pt-2.5">
+            <input type="checkbox" checked={allSelected} onChange={handleSelectAll} className="w-4 h-4 accent-blue-600" />
+            <span className="text-sm" style={{ fontWeight: 600 }}>הכל</span>
+          </label>
+          {otherTabs.map(tab => (
+            <label key={tab} className="flex items-center gap-3 cursor-pointer select-none">
+              <input type="checkbox" checked={checked.has(tab)} onChange={() => toggle(tab)} className="w-4 h-4 accent-blue-600" />
+              <span className="text-sm">{TAB_LABELS_MAP[tab]}</span>
+            </label>
+          ))}
+        </div>
+        <div className="flex gap-2">
+          <button onClick={() => onConfirm([...checked])} className="btn-blue flex-1 py-2.5 text-sm">אישור</button>
+          <button onClick={onCancel}
+            className="flex-1 py-2.5 text-sm rounded-xl transition-all"
+            style={{ fontWeight: 600, border: "1.5px solid #e2e8f0", color: "#64748b" }}>
+            ביטול
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Download bar (per-tab)
 // ---------------------------------------------------------------------------
 
@@ -282,74 +361,114 @@ function Spinner({ dark }) {
   );
 }
 
-function TabDownloadBar({ activeTab, runId, authHeader, hasTikhnun, yozmaMultiplier, onNewRun }) {
+function TabDownloadBar({ activeTab, runId, authHeader, hasTikhnun, tikhnunOnly, yozmaMultiplier, availableTabs, onNewRun }) {
   const [dlExcel, setDlExcel] = useState(false);
   const [dlPdf,   setDlPdf]   = useState(false);
   const [pdfErr,  setPdfErr]  = useState(false);
+  const [modal,   setModal]   = useState(null); // null | "excel" | "pdf"
 
   const isTikhnunTab = TIKHNUN_ONLY_TABS.includes(activeTab);
-  const excelUrl = isTikhnunTab
-    ? `/analyze/download-tikhnun/${runId}?section=${activeTab}&multiplier=${yozmaMultiplier}`
-    : `/analyze/download/${runId}`;
-  const pdfUrl = isTikhnunTab
-    ? `/analyze/pdf-tikhnun/${runId}?section=${activeTab}&multiplier=${yozmaMultiplier}`
-    : `/analyze/pdf/${runId}`;
-  const excelName = isTikhnunTab ? `tikhnun-${activeTab}.xlsx` : "hashvaa-gefen-ksafim.xlsx";
-  const pdfName   = isTikhnunTab ? `tikhnun-${activeTab}.pdf`  : "hashvaa-gefen-kesafim.pdf";
 
-  async function handleExcel() {
-    if (dlExcel || dlPdf) return;
-    setDlExcel(true);
-    try {
-      const res = await axios.get(excelUrl, { headers: authHeader, responseType: "blob" });
-      const url = URL.createObjectURL(res.data);
-      const a = document.createElement("a");
-      a.href = url; a.download = excelName; a.click();
-      URL.revokeObjectURL(url);
-    } catch {}
-    finally { setDlExcel(false); }
+  function resolveUrls(sections) {
+    if (sections.length === 1) {
+      const s = sections[0];
+      const isTk = TIKHNUN_ONLY_TABS.includes(s);
+      return {
+        excelUrl:  isTk ? `/analyze/download-tikhnun/${runId}?section=${s}&multiplier=${yozmaMultiplier}` : `/analyze/download/${runId}`,
+        pdfUrl:    isTk ? `/analyze/pdf-tikhnun/${runId}?section=${s}&multiplier=${yozmaMultiplier}` : `/analyze/pdf/${runId}?section=${s}`,
+        excelName: isTk ? `tikhnun-${s}.xlsx` : "hashvaa-gefen-ksafim.xlsx",
+        pdfName:   isTk ? `tikhnun-${s}.pdf`  : "hashvaa-gefen-kesafim.pdf",
+      };
+    }
+    const sp = sections.join(",");
+    return {
+      excelUrl:  `/analyze/excel-combined/${runId}?sections=${sp}&multiplier=${yozmaMultiplier}`,
+      pdfUrl:    `/analyze/pdf-combined/${runId}?sections=${sp}&multiplier=${yozmaMultiplier}`,
+      excelName: "gefen-combined.xlsx",
+      pdfName:   "gefen-combined.pdf",
+    };
   }
 
-  async function handlePdf() {
+  async function doDownload(type, sections) {
+    const { excelUrl, pdfUrl, excelName, pdfName } = resolveUrls(sections);
+    if (type === "excel") {
+      setDlExcel(true);
+      try {
+        const res = await axios.get(excelUrl, { headers: authHeader, responseType: "blob" });
+        const url = URL.createObjectURL(res.data);
+        const a = document.createElement("a");
+        a.href = url; a.download = excelName; a.click();
+        URL.revokeObjectURL(url);
+      } catch {}
+      finally { setDlExcel(false); }
+    } else {
+      setPdfErr(false);
+      setDlPdf(true);
+      try {
+        const res = await axios.get(pdfUrl, { headers: authHeader, responseType: "blob" });
+        const url = URL.createObjectURL(new Blob([res.data], { type: "application/pdf" }));
+        const a = document.createElement("a");
+        a.href = url; a.download = pdfName;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } catch {
+        setPdfErr(true);
+        setTimeout(() => setPdfErr(false), 3000);
+      } finally { setDlPdf(false); }
+    }
+  }
+
+  function handleExcelClick() {
     if (dlExcel || dlPdf) return;
-    setPdfErr(false);
-    setDlPdf(true);
-    try {
-      const res = await axios.get(pdfUrl, { headers: authHeader, responseType: "blob" });
-      const url = URL.createObjectURL(new Blob([res.data], { type: "application/pdf" }));
-      const a = document.createElement("a");
-      a.href = url; a.download = pdfName;
-      document.body.appendChild(a); a.click(); document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch {
-      setPdfErr(true);
-      setTimeout(() => setPdfErr(false), 3000);
-    } finally { setDlPdf(false); }
+    if (availableTabs.length > 0) { setModal("excel"); }
+    else { doDownload("excel", [activeTab]); }
+  }
+
+  function handlePdfClick() {
+    if (dlExcel || dlPdf) return;
+    if (availableTabs.length > 0) { setModal("pdf"); }
+    else { doDownload("pdf", [activeTab]); }
+  }
+
+  function handleModalConfirm(sections) {
+    const type = modal;
+    setModal(null);
+    doDownload(type, sections);
   }
 
   return (
-    <div className="flex justify-center gap-3 mt-2 anim-fade-up-4 flex-wrap items-center">
-      <button onClick={handleExcel} disabled={dlExcel || dlPdf}
-        className="flex items-center gap-2 px-6 py-3 text-sm rounded-full transition-all"
-        style={{ fontWeight: 700, background: "rgba(34,197,94,0.09)", color: "#16a34a", border: "1.5px solid rgba(34,197,94,0.28)" }}>
-        {dlExcel ? <><Spinner dark /><span>מוריד...</span></> : <><DownloadIcon /><span>הורד קובץ Excel</span></>}
-      </button>
-
-      {(!isTikhnunTab || hasTikhnun) && (
-        <button onClick={handlePdf} disabled={dlExcel || dlPdf}
-          className="flex items-center gap-2 px-6 py-3 text-sm rounded-full transition-all"
-          style={{ fontWeight: 700, background: pdfErr ? "#fee2e2" : "rgba(239,68,68,0.08)", color: "#dc2626", border: "1.5px solid rgba(239,68,68,0.25)" }}>
-          {dlPdf ? <><Spinner dark /><span>מוריד...</span></> : pdfErr ? <span>שגיאה, נסה שוב</span> : <><DownloadIcon /><span>הורד קובץ PDF</span></>}
-        </button>
+    <>
+      {modal && (
+        <DownloadSelectModal
+          activeTab={activeTab}
+          availableTabs={availableTabs}
+          onConfirm={handleModalConfirm}
+          onCancel={() => setModal(null)}
+        />
       )}
+      <div className="flex justify-center gap-3 mt-2 anim-fade-up-4 flex-wrap items-center">
+        <button onClick={handleExcelClick} disabled={dlExcel || dlPdf}
+          className="flex items-center gap-2 px-6 py-3 text-sm rounded-full transition-all"
+          style={{ fontWeight: 700, background: "rgba(34,197,94,0.09)", color: "#16a34a", border: "1.5px solid rgba(34,197,94,0.28)" }}>
+          {dlExcel ? <><Spinner dark /><span>מוריד...</span></> : <><DownloadIcon /><span>הורד קובץ Excel</span></>}
+        </button>
 
-      <button onClick={onNewRun} className="btn-ghost flex items-center gap-2 px-5 py-3 text-sm font-600" style={{ fontWeight: 600 }}>
-        <svg width="15" height="15" viewBox="0 0 15 15" fill="none" className="flex-shrink-0">
-          <path d="M7.5 2v11M2 7.5h11" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
-        </svg>
-        בדיקה חדשה
-      </button>
-    </div>
+        {(!isTikhnunTab || hasTikhnun) && (
+          <button onClick={handlePdfClick} disabled={dlExcel || dlPdf}
+            className="flex items-center gap-2 px-6 py-3 text-sm rounded-full transition-all"
+            style={{ fontWeight: 700, background: pdfErr ? "#fee2e2" : "rgba(239,68,68,0.08)", color: "#dc2626", border: "1.5px solid rgba(239,68,68,0.25)" }}>
+            {dlPdf ? <><Spinner dark /><span>מוריד...</span></> : pdfErr ? <span>שגיאה, נסה שוב</span> : <><DownloadIcon /><span>הורד קובץ PDF</span></>}
+          </button>
+        )}
+
+        <button onClick={onNewRun} className="btn-ghost flex items-center gap-2 px-5 py-3 text-sm font-600" style={{ fontWeight: 600 }}>
+          <svg width="15" height="15" viewBox="0 0 15 15" fill="none" className="flex-shrink-0">
+            <path d="M7.5 2v11M2 7.5h11" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
+          </svg>
+          בדיקה חדשה
+        </button>
+      </div>
+    </>
   );
 }
 
@@ -396,9 +515,85 @@ function YozmaDialog({ onAnswer, onCancel }) {
   );
 }
 
+function YozmaDualDialog({ tikkonLabel, beinayimLabel, onAnswer, onCancel }) {
+  const [tikkonAns,   setTikkonAns]   = useState(null);
+  const [beinayimAns, setBeinayimAns] = useState(null);
+  const canConfirm = tikkonAns !== null && beinayimAns !== null;
+
+  const AnswerRow = ({ label, value, onChange }) => (
+    <div className="mb-4">
+      <p className="text-xs font-700 text-slate-500 mb-2" style={{ fontWeight: 700 }}>{label}</p>
+      <div className="flex gap-2">
+        {["yes", "no"].map(opt => (
+          <button key={opt} onClick={() => onChange(opt)}
+            className="flex-1 py-2 text-sm rounded-xl transition-all"
+            style={{
+              fontWeight: 600,
+              background: value === opt ? "#0070F3" : "transparent",
+              color: value === opt ? "white" : "#64748b",
+              border: value === opt ? "1.5px solid #0070F3" : "1.5px solid #e2e8f0",
+            }}>
+            {opt === "yes" ? "כן" : "לא"}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center px-4"
+      style={{ background: "rgba(15,23,42,0.45)", backdropFilter: "blur(4px)" }}>
+      <div className="glass-card rounded-3xl p-7 max-w-sm w-full anim-fade-up text-right" dir="rtl">
+        <div className="w-11 h-11 rounded-2xl flex items-center justify-center mb-4" style={{ background: "rgba(0,112,243,0.09)" }}>
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+            <circle cx="10" cy="10" r="8" stroke="#0070F3" strokeWidth="1.6"/>
+            <path d="M10 6.5c0-1.1.9-2 2-2a2 2 0 0 1 1.4 3.4L10 11" stroke="#0070F3" strokeWidth="1.5" strokeLinecap="round"/>
+            <circle cx="10" cy="14" r=".8" fill="#0070F3"/>
+          </svg>
+        </div>
+        <h2 className="text-base font-800 mb-2" style={{ fontWeight: 800, color: "#0f172a" }}>
+          האם המוסד עמד במודל התמרוץ תשפ"ה?
+        </h2>
+        <p className="text-sm text-slate-600 leading-relaxed mb-5">
+          בחר עבור כל חטיבה בנפרד — תשובתך תשפיע על חישוב תקציב היוזמות המקסימלי (30% לעומת 40%).
+        </p>
+        <AnswerRow label={tikkonLabel}   value={tikkonAns}   onChange={setTikkonAns}   />
+        <AnswerRow label={beinayimLabel} value={beinayimAns} onChange={setBeinayimAns} />
+        <div className="flex gap-2 mt-1">
+          <button onClick={() => canConfirm && onAnswer(tikkonAns, beinayimAns)}
+            disabled={!canConfirm}
+            className="btn-blue flex-1 py-2.5 text-sm"
+            style={{ opacity: canConfirm ? 1 : 0.45 }}>
+            אישור
+          </button>
+          <button onClick={onCancel}
+            className="flex-1 py-2.5 text-sm rounded-xl transition-all"
+            style={{ fontWeight: 600, border: "1.5px solid #e2e8f0", color: "#64748b" }}>
+            ביטול
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Tikhnun tab content components
 // ---------------------------------------------------------------------------
+
+function DualTikhnunSection({ label, children }) {
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex items-center gap-3 px-1">
+        <div className="h-px flex-1 bg-slate-200" />
+        <span className="text-xs font-700 text-slate-500 tracking-widest px-2"
+          style={{ fontWeight: 700, whiteSpace: "nowrap" }}>{label}</span>
+        <div className="h-px flex-1 bg-slate-200" />
+      </div>
+      {children}
+    </div>
+  );
+}
 
 function NoTikhnunNotice() {
   return (
@@ -567,21 +762,31 @@ function PartialTab({ tikhnun }) {
 
   return (
     <div className="glass-card-dark rounded-2xl overflow-hidden">
-      <div className="px-5 py-3.5 border-b border-slate-100 flex justify-between items-center">
-        <span className="text-xs font-700 text-slate-500" style={{ fontWeight: 700 }}>
-          {rows.length} תוכניות עם ביצוע חלקי
-        </span>
-        <span className="text-xs font-700 text-slate-500" style={{ fontWeight: 700 }}>
-          סה"כ הפרש לטיפול: <span className="text-slate-700">{fmtNum(totalHefresh)}</span>
-        </span>
+      <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-slate-100">
+        <h3 className="text-sm font-700 text-slate-700 text-right" style={{ fontWeight: 700 }}>תוכניות עם דיווח חסר</h3>
+        <div className="flex items-center gap-3">
+          <span className="flex items-center gap-1 text-xs tabular-nums font-700" style={{ fontWeight: 700, color: "#1e293b" }}>
+            <span className="text-slate-400" style={{ fontWeight: 400 }}>סכום שטרם דווח:</span>
+            {Math.abs(Math.round(totalHefresh)).toLocaleString("he-IL")}
+            <span style={{ color: "#64748b", fontWeight: 400 }}>₪</span>
+          </span>
+          <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-700"
+            style={{ fontWeight: 700, background: "#fee2e2", color: "#dc2626" }}>
+            {rows.length} רשומות
+          </span>
+        </div>
       </div>
       <div className="table-scroll">
         <table className="w-full text-sm border-collapse" dir="rtl">
           <thead>
             <tr>
-              {["קוד דיווח", "שם מענה", "מספר מענה", "תכנון", "דיווח", "הפרש", "אחוז דיווח"].map(h => (
-                <th key={h} className="text-right px-4 py-3 text-white text-xs font-700 whitespace-nowrap sticky top-0 z-10"
-                  style={{ fontWeight: 700, background: "linear-gradient(135deg, #2D5FA0 0%, #1e4a8a 100%)" }}>
+              {["קוד", "שם מענה", "מספר מענה", "תכנון", "דיווח", "הפרש", "אחוז דיווח"].map((h, hi) => (
+                <th key={h} className="text-right text-white text-xs font-700 whitespace-nowrap sticky top-0 z-10"
+                  style={{
+                    fontWeight: 700,
+                    background: "linear-gradient(135deg, #2D5FA0 0%, #1e4a8a 100%)",
+                    ...(hi === 0 ? { ...CODE_COL_STYLE, padding: "12px 6px" } : { padding: "12px 16px" }),
+                  }}>
                   {h}
                 </th>
               ))}
@@ -590,9 +795,10 @@ function PartialTab({ tikhnun }) {
           <tbody>
             {rows.map((row, i) => (
               <tr key={i} className="border-t border-slate-100" style={{ background: i % 2 === 0 ? "white" : "rgba(248,250,252,0.7)" }}>
-                <td className="px-4 py-2.5 text-right text-slate-700 text-xs">{row.rcode}</td>
-                <td className="px-4 py-2.5 text-right text-slate-700 text-xs" style={{ maxWidth: "220px" }}>
-                  <span className="block truncate" title={row.name}>{row.name}</span>
+                <td className="text-right text-slate-700 text-xs"
+                  style={{ ...CODE_COL_STYLE, padding: "10px 6px" }}>{row.rcode}</td>
+                <td className="px-4 py-2.5 text-right text-slate-700 text-xs">
+                  <span className="block" style={{ wordBreak: "break-word", whiteSpace: "normal" }}>{row.name}</span>
                 </td>
                 <td className="px-4 py-2.5 text-right text-slate-700 text-xs">{row.mispnum}</td>
                 <td className="px-4 py-2.5 text-right text-slate-700 text-xs tabular-nums">{fmtNum(row.tikhnun)}</td>
@@ -643,6 +849,7 @@ function YozmaTab({ tikhnun, multiplier, autoSwitch }) {
           { label: "בתכנון",                        value: fmtNum(yozma.betikhnun) },
           { label: "הפרש",                          value: fmtNum(hefreshTotal),
             danger: hefreshTotal < 0, highlight: hefreshTotal >= 0 },
+          { label: "תקציב גמיש פנוי",              value: fmtNum(tikhnun.overview?.flexible_remaining) },
         ]} />
       </SummaryBlock>
 
@@ -651,7 +858,7 @@ function YozmaTab({ tikhnun, multiplier, autoSwitch }) {
           <table className="w-full text-sm border-collapse" dir="rtl">
             <thead>
               <tr>
-                {["סעיף", "תקרה", "בתכנון", "הפרש שניתן לתכנון"].map(h => (
+                {["סעיף", "תקרה", "בתכנון", "סכום זמין לתכנון בשקלול תקציב גמיש פנוי"].map(h => (
                   <th key={h} className="text-right px-4 py-3 text-white text-xs font-700 whitespace-nowrap sticky top-0 z-10"
                     style={{ fontWeight: 700, background: "linear-gradient(135deg, #2D5FA0 0%, #1e4a8a 100%)" }}>
                     {h}
@@ -735,12 +942,12 @@ function HashvaTab({ result }) {
         <div className="anim-fade-up glass-card-dark rounded-2xl px-5 py-3.5 flex items-center justify-center">
           <span className="text-sm text-slate-500">
             בדיקה בוצעה עבור:{" "}
-            <span className="font-700 text-slate-700" style={{ fontWeight: 700 }}>קובץ גפן בלבד</span>
+            <span className="font-700 text-slate-700" style={{ fontWeight: 700 }}>קובץ דיווח ביצוע בלבד</span>
           </span>
         </div>
         <GefenOnlyNotice title="קיים בתוכנת הכספים, לא משויך בגפן" index={1} />
         <GefenOnlyNotice title="משויך בגפן, לא קיים בתוכנת הכספים" index={2} />
-        <SummaryBlock title="קבצי גפן" index={3}>
+        <SummaryBlock title="קבצי דיווח ביצוע" index={3}>
           <GefenFilesDetail gefen_files={summary.gefen_files ?? []} gefen_rows={summary.gefen_rows} gefen_merge_note={summary.gefen_merge_note} />
         </SummaryBlock>
       </div>
@@ -774,7 +981,11 @@ function HashvaTab({ result }) {
         rows={gefenRows} columns={UNIFIED_COLS} index={2} showSum
         headerGradient="linear-gradient(135deg, #0c237d 0%, #091a60 100%)" />
 
-      <SummaryBlock title="קבצי גפן" index={3}>
+      <div className="mt-6 mb-1">
+        <h2 className="text-xs font-700 text-slate-400 tracking-widest uppercase text-center" style={{ fontWeight: 700 }}>פרטי הבדיקה</h2>
+      </div>
+
+      <SummaryBlock title="קבצי דיווח ביצוע" index={3}>
         <GefenFilesDetail gefen_files={summary.gefen_files ?? []} gefen_rows={summary.gefen_rows} gefen_merge_note={summary.gefen_merge_note} />
       </SummaryBlock>
       <SummaryBlock title="קבצים מתוכנת הכספים" index={4}>
@@ -820,8 +1031,8 @@ function HashvaTab({ result }) {
   );
 }
 
-function RejectedTab({ result }) {
-  const rows = result.rows_gefen_rejected ?? [];
+function RejectedTab({ result, rows: rowsOverride }) {
+  const rows = rowsOverride ?? result.rows_gefen_rejected ?? [];
   return (
     <div className="flex flex-col gap-4">
       <ResultTable title="אסמכתאות שנדחו" rows={rows} columns={REJECTED_COLS} index={0} showSum
@@ -830,8 +1041,8 @@ function RejectedTab({ result }) {
   );
 }
 
-function NoPdfTab({ result }) {
-  const rows = result.rows_gefen_no_pdf ?? [];
+function NoPdfTab({ result, rows: rowsOverride }) {
+  const rows = rowsOverride ?? result.rows_gefen_no_pdf ?? [];
   return (
     <div className="flex flex-col gap-4">
       <ResultTable title="אסמכתאות ללא PDF" rows={rows} columns={UNIFIED_COLS} index={0} showSum
@@ -862,14 +1073,29 @@ function TikhnunOnlyBanner() {
 
 export default function ResultsView({ result, runId, authHeader, onNewRun }) {
   const [activeTab, setActiveTab]       = useState("hashva");
-  const [yozmaDialogShown, setYozmaDialogShown] = useState(false);
-  const [showYozmaDialog, setShowYozmaDialog]   = useState(false);
-  const [yozmaMultiplier, setYozmaMultiplier]   = useState("03");
-  const [yozmaAutoSwitch, setYozmaAutoSwitch]   = useState(false);
+  const [yozmaDialogShown, setYozmaDialogShown]             = useState(false);
+  const [showYozmaDialog, setShowYozmaDialog]               = useState(false);
+  const [yozmaMultiplier, setYozmaMultiplier]               = useState("03");
+  const [yozmaAutoSwitch, setYozmaAutoSwitch]               = useState(false);
+  const [yozmaMultiplierTikkon,   setYozmaMultiplierTikkon]   = useState("03");
+  const [yozmaAutoSwitchTikkon,   setYozmaAutoSwitchTikkon]   = useState(false);
+  const [yozmaMultiplierBeinayim, setYozmaMultiplierBeinayim] = useState("03");
+  const [yozmaAutoSwitchBeinayim, setYozmaAutoSwitchBeinayim] = useState(false);
 
-  const tikhnun    = result.tikhnun;
-  const hasTikhnun = !!(tikhnun && !tikhnun.error);
-  const tikhnunOnly = !!result.tikhnun_only;
+  const tikhnun         = result.tikhnun;
+  const tikhnunTikkon   = result.tikhnun_tikkon;
+  const tikhnunBeinayim = result.tikhnun_beinayim;
+  const isDualTikhnun   = !!(tikhnunTikkon || tikhnunBeinayim);
+  const hasTikhnun      = isDualTikhnun || !!(tikhnun && !tikhnun.error);
+  const tikhnunOnly     = !!result.tikhnun_only;
+
+  // Enabled tabs other than the currently active one (used by DownloadSelectModal)
+  const availableTabs = TAB_IDS.filter(tab => {
+    if (tab === activeTab) return false;
+    if (TIKHNUN_ONLY_TABS.includes(tab) && !hasTikhnun) return false;
+    if (GEFEN_ONLY_TABS.includes(tab) && tikhnunOnly) return false;
+    return true;
+  });
 
   // Compute issues flag for each tab
   const getTabIssues = (tab) => {
@@ -884,9 +1110,18 @@ export default function ResultsView({ result, runId, authHeader, onNewRun }) {
     if (tab === "rejected") return (result.rows_gefen_rejected ?? []).length > 0;
     if (tab === "nopdf")    return (result.rows_gefen_no_pdf ?? []).length > 0;
     if (!hasTikhnun) return false;
-    if (tab === "kvua")    return !!tikhnun.kvua_has_issues;
-    if (tab === "partial") return !!tikhnun.partial_has_issues;
+    if (tab === "kvua")    return isDualTikhnun
+      ? !!(tikhnunTikkon?.kvua_has_issues || tikhnunBeinayim?.kvua_has_issues)
+      : !!tikhnun.kvua_has_issues;
+    if (tab === "partial") return isDualTikhnun
+      ? !!(tikhnunTikkon?.partial_has_issues || tikhnunBeinayim?.partial_has_issues)
+      : !!tikhnun.partial_has_issues;
     if (tab === "yozma") {
+      if (isDualTikhnun) {
+        const yt = yozmaMultiplierTikkon   === "04" ? tikhnunTikkon?.yozma_04   : tikhnunTikkon?.yozma_03;
+        const yb = yozmaMultiplierBeinayim === "04" ? tikhnunBeinayim?.yozma_04 : tikhnunBeinayim?.yozma_03;
+        return !!(yt?.is_negative || yb?.is_negative);
+      }
       const y = yozmaMultiplier === "04" ? tikhnun.yozma_04 : tikhnun.yozma_03;
       return !!(y?.is_negative);
     }
@@ -919,10 +1154,35 @@ export default function ResultsView({ result, runId, authHeader, onNewRun }) {
     setActiveTab("yozma");
   };
 
+  const handleDualYozmaAnswer = (tikkonAns, beinayimAns) => {
+    setYozmaDialogShown(true);
+    setShowYozmaDialog(false);
+    const resolveMultiplier = (ans, tikhnunData) => {
+      if (ans === "yes") return { mul: "04", auto: false };
+      if (tikhnunData?.yozma_03?.is_negative) return { mul: "04", auto: true };
+      return { mul: "03", auto: false };
+    };
+    const { mul: mulT, auto: autoT } = resolveMultiplier(tikkonAns,   tikhnunTikkon);
+    const { mul: mulB, auto: autoB } = resolveMultiplier(beinayimAns, tikhnunBeinayim);
+    setYozmaMultiplierTikkon(mulT);
+    setYozmaAutoSwitchTikkon(autoT);
+    setYozmaMultiplierBeinayim(mulB);
+    setYozmaAutoSwitchBeinayim(autoB);
+    setActiveTab("yozma");
+  };
+
   return (
     <div className="flex flex-col gap-5" dir="rtl">
-      {showYozmaDialog && (
+      {showYozmaDialog && !isDualTikhnun && (
         <YozmaDialog onAnswer={handleYozmaAnswer} onCancel={() => setShowYozmaDialog(false)} />
+      )}
+      {showYozmaDialog && isDualTikhnun && (
+        <YozmaDualDialog
+          tikkonLabel={tikhnunTikkon?.school_stage ?? "חטיבה עליונה"}
+          beinayimLabel={tikhnunBeinayim?.school_stage ?? "חטיבת ביניים"}
+          onAnswer={handleDualYozmaAnswer}
+          onCancel={() => setShowYozmaDialog(false)}
+        />
       )}
 
       {tikhnunOnly && <TikhnunOnlyBanner />}
@@ -946,17 +1206,55 @@ export default function ResultsView({ result, runId, authHeader, onNewRun }) {
             )
             : <HashvaTab result={result} />
         )}
-        {activeTab === "sikar"    && <SikarTab   tikhnun={hasTikhnun ? tikhnun : null} />}
-        {activeTab === "rejected" && <RejectedTab result={result} />}
-        {activeTab === "nopdf"    && <NoPdfTab   result={result} />}
-        {activeTab === "kvua"     && <KvuaTab    tikhnun={hasTikhnun ? tikhnun : null} />}
-        {activeTab === "partial"  && <PartialTab tikhnun={hasTikhnun ? tikhnun : null} />}
-        {activeTab === "yozma"    && (
-          <YozmaTab
-            tikhnun={hasTikhnun ? tikhnun : null}
-            multiplier={yozmaMultiplier}
-            autoSwitch={yozmaAutoSwitch}
-          />
+        {activeTab === "sikar" && !isDualTikhnun && <SikarTab tikhnun={hasTikhnun ? tikhnun : null} />}
+        {activeTab === "sikar" && isDualTikhnun && (
+          <div className="flex flex-col gap-24">
+            {tikhnunTikkon   && <DualTikhnunSection label={tikhnunTikkon.school_stage}><SikarTab tikhnun={tikhnunTikkon} /></DualTikhnunSection>}
+            {tikhnunBeinayim && <DualTikhnunSection label={tikhnunBeinayim.school_stage}><SikarTab tikhnun={tikhnunBeinayim} /></DualTikhnunSection>}
+          </div>
+        )}
+        {activeTab === "rejected" && !isDualTikhnun && <RejectedTab result={result} />}
+        {activeTab === "rejected" && isDualTikhnun && (() => {
+          const { tikkon, beinayim } = splitByDivision(result.rows_gefen_rejected ?? []);
+          return (
+            <div className="flex flex-col gap-24">
+              {tikhnunTikkon   && <DualTikhnunSection label={tikhnunTikkon.school_stage}><RejectedTab result={result} rows={tikkon} /></DualTikhnunSection>}
+              {tikhnunBeinayim && <DualTikhnunSection label={tikhnunBeinayim.school_stage}><RejectedTab result={result} rows={beinayim} /></DualTikhnunSection>}
+            </div>
+          );
+        })()}
+        {activeTab === "nopdf" && !isDualTikhnun && <NoPdfTab result={result} />}
+        {activeTab === "nopdf" && isDualTikhnun && (() => {
+          const { tikkon, beinayim } = splitByDivision(result.rows_gefen_no_pdf ?? []);
+          return (
+            <div className="flex flex-col gap-24">
+              {tikhnunTikkon   && <DualTikhnunSection label={tikhnunTikkon.school_stage}><NoPdfTab result={result} rows={tikkon} /></DualTikhnunSection>}
+              {tikhnunBeinayim && <DualTikhnunSection label={tikhnunBeinayim.school_stage}><NoPdfTab result={result} rows={beinayim} /></DualTikhnunSection>}
+            </div>
+          );
+        })()}
+        {activeTab === "kvua" && !isDualTikhnun && <KvuaTab tikhnun={hasTikhnun ? tikhnun : null} />}
+        {activeTab === "kvua" && isDualTikhnun && (
+          <div className="flex flex-col gap-24">
+            {tikhnunTikkon   && <DualTikhnunSection label={tikhnunTikkon.school_stage}><KvuaTab tikhnun={tikhnunTikkon} /></DualTikhnunSection>}
+            {tikhnunBeinayim && <DualTikhnunSection label={tikhnunBeinayim.school_stage}><KvuaTab tikhnun={tikhnunBeinayim} /></DualTikhnunSection>}
+          </div>
+        )}
+        {activeTab === "partial" && !isDualTikhnun && <PartialTab tikhnun={hasTikhnun ? tikhnun : null} />}
+        {activeTab === "partial" && isDualTikhnun && (
+          <div className="flex flex-col gap-24">
+            {tikhnunTikkon   && <DualTikhnunSection label={tikhnunTikkon.school_stage}><PartialTab tikhnun={tikhnunTikkon} /></DualTikhnunSection>}
+            {tikhnunBeinayim && <DualTikhnunSection label={tikhnunBeinayim.school_stage}><PartialTab tikhnun={tikhnunBeinayim} /></DualTikhnunSection>}
+          </div>
+        )}
+        {activeTab === "yozma" && !isDualTikhnun && (
+          <YozmaTab tikhnun={hasTikhnun ? tikhnun : null} multiplier={yozmaMultiplier} autoSwitch={yozmaAutoSwitch} />
+        )}
+        {activeTab === "yozma" && isDualTikhnun && (
+          <div className="flex flex-col gap-24">
+            {tikhnunTikkon   && <DualTikhnunSection label={tikhnunTikkon.school_stage}><YozmaTab tikhnun={tikhnunTikkon} multiplier={yozmaMultiplierTikkon} autoSwitch={yozmaAutoSwitchTikkon} /></DualTikhnunSection>}
+            {tikhnunBeinayim && <DualTikhnunSection label={tikhnunBeinayim.school_stage}><YozmaTab tikhnun={tikhnunBeinayim} multiplier={yozmaMultiplierBeinayim} autoSwitch={yozmaAutoSwitchBeinayim} /></DualTikhnunSection>}
+          </div>
         )}
       </div>
 
@@ -965,7 +1263,9 @@ export default function ResultsView({ result, runId, authHeader, onNewRun }) {
         runId={runId}
         authHeader={authHeader}
         hasTikhnun={hasTikhnun}
+        tikhnunOnly={tikhnunOnly}
         yozmaMultiplier={yozmaMultiplier}
+        availableTabs={availableTabs}
         onNewRun={onNewRun}
       />
     </div>
