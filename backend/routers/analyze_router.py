@@ -84,6 +84,16 @@ _GEFEN_REJECTED_COL_MAP = [
 # Columns to strip before writing Excel (internal/computed)
 _STRIP_COLS = {"ichud", "supplier_number", "amount", "report_code"}
 
+# Known data columns in a "דיווח ביצוע" sheet (used for no-PDF completeness check)
+_GEFEN_DATA_COLS = [
+    "מספר חשבונית", "תאריך חשבונית", "קוד ושם ספק",
+    "מהות ההוצאה", "מספר פריט בחשבונית", "כמות",
+    "תיאור פריט", "סכום פריט",
+]
+# Status/PDF column names as they appear in the gefen sheet
+_GEFEN_STATUS_COL = "סטטוס חשבונית"
+_GEFEN_PDF_COL    = "האם קיים קובץ"
+
 # Hebrew display names for kesafim2000 English column names
 _KESAFIM_RENAME = {
     "report_code":    "קוד דיווח",
@@ -519,25 +529,39 @@ def _process(run_id: str, paths: list[Path]) -> None:
 
 
 def _extract_gefen_only_results(df_gefen: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Extract rejected and no-PDF rows from a Gefen dataframe."""
-    col_m = df_gefen.columns[12] if len(df_gefen.columns) > 12 else None
-    if col_m is not None:
-        in_gefen_rejected = df_gefen[df_gefen[col_m].astype(str).str.startswith("נדחה:")].copy()
+    """Extract rejected and no-PDF rows from a Gefen dataframe.
+
+    Looks up columns by name (not by positional index) so the function is
+    robust against files that have extra/blank columns or a different column
+    count than the standard export.
+    """
+    # ── Rejected rows ────────────────────────────────────────────────────────
+    if _GEFEN_STATUS_COL in df_gefen.columns:
+        in_gefen_rejected = df_gefen[
+            df_gefen[_GEFEN_STATUS_COL].astype(str).str.startswith("נדחה:")
+        ].copy()
         in_gefen_rejected["סיבת הדחייה"] = (
-            in_gefen_rejected[col_m].astype(str).str.replace(r"^נדחה:\s*", "", regex=True)
+            in_gefen_rejected[_GEFEN_STATUS_COL]
+            .astype(str)
+            .str.replace(r"^נדחה:\s*", "", regex=True)
         )
     else:
         in_gefen_rejected = df_gefen.iloc[0:0].copy()
         in_gefen_rejected["סיבת הדחייה"] = pd.Series([], dtype=str)
 
-    if len(df_gefen.columns) > 13:
-        cols_e_to_l = df_gefen.columns[4:12]
-        col_n = df_gefen.columns[13]
-        has_data = (
-            df_gefen[cols_e_to_l].notna().all(axis=1) &
-            df_gefen[cols_e_to_l].apply(lambda col: col.astype(str).str.strip() != "").all(axis=1)
-        )
-        no_pdf = df_gefen[col_n].astype(str).str.strip() == "לא"
+    # ── No-PDF rows ──────────────────────────────────────────────────────────
+    if _GEFEN_PDF_COL in df_gefen.columns:
+        data_cols = [c for c in _GEFEN_DATA_COLS if c in df_gefen.columns]
+        if data_cols:
+            has_data = (
+                df_gefen[data_cols].notna().all(axis=1)
+                & df_gefen[data_cols]
+                .apply(lambda col: col.astype(str).str.strip() != "")
+                .all(axis=1)
+            )
+        else:
+            has_data = pd.Series(True, index=df_gefen.index)
+        no_pdf = df_gefen[_GEFEN_PDF_COL].astype(str).str.strip() == "לא"
         in_gefen_no_pdf = df_gefen[has_data & no_pdf]
     else:
         in_gefen_no_pdf = df_gefen.iloc[0:0]
