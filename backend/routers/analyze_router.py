@@ -353,6 +353,8 @@ def _process(run_id: str, paths: list[Path]) -> None:
             if len(tikhnun_paths) == 2:
                 td0 = load_tikhnun(str(tikhnun_paths[0]))
                 td1 = load_tikhnun(str(tikhnun_paths[1]))
+                td0["filename"] = tikhnun_paths[0].name
+                td1["filename"] = tikhnun_paths[1].name
                 tikkon_data, beinayim_data = _assign_tikhnun_pair(td0, td1)
                 tikkon_result   = build_tikhnun_result(tikkon_data)   if tikkon_data   else None
                 beinayim_result = build_tikhnun_result(beinayim_data) if beinayim_data else None
@@ -365,6 +367,7 @@ def _process(run_id: str, paths: list[Path]) -> None:
                 }
             else:
                 tikhnun_data = load_tikhnun(str(tikhnun_paths[0]))
+                tikhnun_data["filename"] = tikhnun_paths[0].name
                 runs[run_id] = {
                     "status": "done",
                     "tikhnun_only": True,
@@ -385,6 +388,7 @@ def _process(run_id: str, paths: list[Path]) -> None:
         if len(tikhnun_paths) == 1:
             try:
                 tikhnun_data = load_tikhnun(str(tikhnun_paths[0]))
+                tikhnun_data["filename"] = tikhnun_paths[0].name
                 tikhnun_data = cross_reference_doch(tikhnun_data, str(gefen_paths[0]))
                 tikhnun_result = build_tikhnun_result(tikhnun_data)
             except Exception as exc:
@@ -394,6 +398,8 @@ def _process(run_id: str, paths: list[Path]) -> None:
             try:
                 td0 = load_tikhnun(str(tikhnun_paths[0]))
                 td1 = load_tikhnun(str(tikhnun_paths[1]))
+                td0["filename"] = tikhnun_paths[0].name
+                td1["filename"] = tikhnun_paths[1].name
                 tikkon_data, beinayim_data = _assign_tikhnun_pair(td0, td1)
                 if tikkon_data:
                     gpath = _find_gefen_path_for_division(gefen_paths, gefen_file_stats, "tikkon")

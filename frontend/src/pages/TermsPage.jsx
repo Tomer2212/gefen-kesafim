@@ -95,12 +95,36 @@ export default function TermsPage() {
               </svg>
               ראשי
             </button>
-            <button
+            <span
+              aria-current="page"
               className="flex items-center gap-1.5 px-4 py-1.5 text-sm rounded-full"
               style={{ background: "rgba(0,112,243,0.08)", color: "#0070F3", fontWeight: 600, cursor: "default" }}
-              disabled
             >
               תנאי שימוש
+            </span>
+            <button
+              onClick={() => navigate("/privacy")}
+              className="btn-ghost flex items-center gap-1.5 px-4 py-1.5 text-sm"
+            >
+              מדיניות פרטיות
+            </button>
+            <button
+              onClick={() => navigate("/guide")}
+              className="btn-ghost flex items-center gap-1.5 px-4 py-1.5 text-sm"
+            >
+              הדרכה
+            </button>
+            <button
+              onClick={() => navigate("/contact")}
+              className="btn-ghost flex items-center gap-1.5 px-4 py-1.5 text-sm"
+            >
+              צור קשר
+            </button>
+            <button
+              onClick={() => navigate("/accessibility")}
+              className="btn-ghost flex items-center gap-1.5 px-4 py-1.5 text-sm"
+            >
+              נגישות
             </button>
           </div>
           <Logo />

@@ -4,6 +4,7 @@ import axios from "axios";
 import FileUpload from "../components/FileUpload";
 import LoadingScreen from "../components/LoadingScreen";
 import ResultsView from "../components/ResultsView";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 
 function Logo() {
   return (
@@ -27,12 +28,18 @@ function Logo() {
 }
 
 function SingleFileWarningModal({ onConfirm, onCancel }) {
+  const { ref, handleKeyDown } = useFocusTrap(onCancel);
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center px-4"
       style={{ background: "rgba(15,23,42,0.4)", backdropFilter: "blur(4px)" }}
     >
       <div
+        ref={ref}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="single-file-modal-title"
+        onKeyDown={handleKeyDown}
         className="glass-card rounded-3xl p-7 max-w-sm w-full anim-fade-up text-right"
         dir="rtl"
       >
@@ -40,12 +47,12 @@ function SingleFileWarningModal({ onConfirm, onCancel }) {
           className="w-11 h-11 rounded-2xl flex items-center justify-center mb-4"
           style={{ background: "rgba(251,191,36,0.12)" }}
         >
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+          <svg aria-hidden="true" width="20" height="20" viewBox="0 0 20 20" fill="none">
             <path d="M10 2.5L17.5 15.5H2.5L10 2.5Z" stroke="#d97706" strokeWidth="1.6" strokeLinejoin="round"/>
             <path d="M10 8.5v3M10 13.5v.5" stroke="#d97706" strokeWidth="1.6" strokeLinecap="round"/>
           </svg>
         </div>
-        <h2 className="text-base font-800 mb-3" style={{ fontWeight: 800, color: "#0f172a" }}>
+        <h2 id="single-file-modal-title" className="text-base font-800 mb-3" style={{ fontWeight: 800, color: "#0f172a" }}>
           שים לב! העלית קובץ אחד בלבד
         </h2>
         <p className="text-sm text-slate-600 leading-relaxed mb-6">
@@ -73,12 +80,18 @@ function SingleFileWarningModal({ onConfirm, onCancel }) {
 }
 
 function ConfirmModal({ onConfirm, onCancel }) {
+  const { ref, handleKeyDown } = useFocusTrap(onCancel);
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center px-4"
       style={{ background: "rgba(15,23,42,0.4)", backdropFilter: "blur(4px)" }}
     >
       <div
+        ref={ref}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="confirm-modal-title"
+        onKeyDown={handleKeyDown}
         className="glass-card rounded-3xl p-7 max-w-sm w-full anim-fade-up text-right"
         dir="rtl"
       >
@@ -86,12 +99,12 @@ function ConfirmModal({ onConfirm, onCancel }) {
           className="w-11 h-11 rounded-2xl flex items-center justify-center mb-4"
           style={{ background: "rgba(0,112,243,0.08)" }}
         >
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+          <svg aria-hidden="true" width="20" height="20" viewBox="0 0 20 20" fill="none">
             <path d="M10 2.5L17.5 15.5H2.5L10 2.5Z" stroke="#0070F3" strokeWidth="1.6" strokeLinejoin="round"/>
             <path d="M10 8.5v3M10 13.5v.5" stroke="#0070F3" strokeWidth="1.6" strokeLinecap="round"/>
           </svg>
         </div>
-        <h2 className="text-base font-800 mb-3" style={{ fontWeight: 800, color: "#0f172a" }}>
+        <h2 id="confirm-modal-title" className="text-base font-800 mb-3" style={{ fontWeight: 800, color: "#0f172a" }}>
           אישור לפני תחילת הבדיקה
         </h2>
         <p className="text-sm text-slate-600 leading-relaxed mb-6">
@@ -234,6 +247,30 @@ export default function MainPage() {
             >
               תנאי שימוש
             </button>
+            <button
+              onClick={() => navigate("/privacy")}
+              className="btn-ghost flex items-center gap-1.5 px-4 py-1.5 text-sm"
+            >
+              מדיניות פרטיות
+            </button>
+            <button
+              onClick={() => navigate("/guide")}
+              className="btn-ghost flex items-center gap-1.5 px-4 py-1.5 text-sm"
+            >
+              הדרכה
+            </button>
+            <button
+              onClick={() => navigate("/contact")}
+              className="btn-ghost flex items-center gap-1.5 px-4 py-1.5 text-sm"
+            >
+              צור קשר
+            </button>
+            <button
+              onClick={() => navigate("/accessibility")}
+              className="btn-ghost flex items-center gap-1.5 px-4 py-1.5 text-sm"
+            >
+              נגישות
+            </button>
           </div>
           <Logo />
         </div>
@@ -317,17 +354,37 @@ export default function MainPage() {
 
         {/* State: done */}
         {status === "done" && result && (
-          <ResultsView
-            result={result}
-            runId={runId}
-            authHeader={authHeader()}
-            onNewRun={handleNewRun}
-          />
+          <>
+            <ResultsView
+              result={result}
+              runId={runId}
+              authHeader={authHeader()}
+              onNewRun={handleNewRun}
+            />
+            <div className="flex justify-center mt-4 mb-2 anim-fade-up">
+              <button
+                onClick={() => window.open("/contact", "_blank")}
+                className="flex items-center gap-2 px-5 py-2.5 text-sm rounded-full transition-all"
+                style={{
+                  fontWeight: 600,
+                  background: "rgba(100,116,139,0.07)",
+                  color: "#64748b",
+                  border: "1.5px solid rgba(100,116,139,0.2)",
+                }}
+              >
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                  <circle cx="7" cy="7" r="6" stroke="currentColor" strokeWidth="1.4"/>
+                  <path d="M7 5v2.5M7 9v.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
+                </svg>
+                זיהיתם שגיאה? דווחו לנו כדי שנוכל להשתפר!
+              </button>
+            </div>
+          </>
         )}
 
         {/* State: error */}
         {status === "error" && (
-          <div className="glass-card rounded-3xl p-8 text-center anim-fade-up">
+          <div role="alert" className="glass-card rounded-3xl p-8 text-center anim-fade-up">
             <div
               className="w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-4"
               style={{ background: "#fee2e2" }}

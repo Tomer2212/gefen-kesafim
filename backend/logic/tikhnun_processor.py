@@ -375,6 +375,7 @@ def build_tikhnun_result(tikhnun_data):
         "school_name": tikhnun_data["school_name"],
         "school_code": tikhnun_data["school_code"],
         "school_stage": tikhnun_data["school_stage"],
+        "filename": tikhnun_data.get("filename"),
         "has_doch": tikhnun_data.get("has_doch", False),
         "overview": overview,
         "kvua_rows": tikhnun_data["kvua_rows"],
