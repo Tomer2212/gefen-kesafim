@@ -1,5 +1,6 @@
 import { useState } from "react";
 import axios from "axios";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 
 // ---------------------------------------------------------------------------
 // Column definitions
@@ -154,7 +155,7 @@ function ResultTable({ title, rows, columns, index = 0, headerGradient, showSum 
       </div>
       {isEmpty ? (
         <div className="flex items-center justify-center gap-2 py-10">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none">
             <circle cx="8" cy="8" r="7" fill="#16a34a" fillOpacity="0.15"/>
             <path d="M5 8l2 2 4-4" stroke="#16a34a" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
@@ -167,6 +168,7 @@ function ResultTable({ title, rows, columns, index = 0, headerGradient, showSum 
               <tr>
                 {columns.map(col => (
                   <th key={col.key}
+                    scope="col"
                     className="text-right px-4 py-3 text-white text-xs font-700 whitespace-nowrap sticky top-0 z-10"
                     style={{ fontWeight: 700, background: thBg, letterSpacing: "0.02em", ...col.thStyle }}>
                     {col.label}
@@ -203,7 +205,7 @@ function GefenOnlyNotice({ title, index }) {
         <h3 className="text-sm font-700 text-slate-700 text-right" style={{ fontWeight: 700 }}>{title}</h3>
       </div>
       <div className="flex items-center justify-center gap-2 py-10">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+        <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none">
           <circle cx="8" cy="8" r="7" fill="#d97706" fillOpacity="0.15"/>
           <path d="M8 5v3.5M8 10.5v.5" stroke="#d97706" strokeWidth="1.8" strokeLinecap="round"/>
         </svg>
@@ -282,6 +284,7 @@ function DownloadSelectModal({ activeTab, availableTabs, onConfirm, onCancel }) 
   const otherTabs = availableTabs.filter(t => t !== activeTab);
   const allTabs = [activeTab, ...otherTabs];
   const [checked, setChecked] = useState(new Set([activeTab]));
+  const { ref, handleKeyDown } = useFocusTrap(onCancel);
 
   function toggle(tab) {
     setChecked(prev => {
@@ -304,8 +307,14 @@ function DownloadSelectModal({ activeTab, availableTabs, onConfirm, onCancel }) 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center px-4"
       style={{ background: "rgba(15,23,42,0.45)", backdropFilter: "blur(4px)" }}>
-      <div className="glass-card rounded-3xl p-6 max-w-sm w-full anim-fade-up text-right" dir="rtl">
-        <h2 className="text-base mb-4" style={{ fontWeight: 800, color: "#0f172a" }}>בחר לשוניות לייצוא</h2>
+      <div
+        ref={ref}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="download-modal-title"
+        onKeyDown={handleKeyDown}
+        className="glass-card rounded-3xl p-6 max-w-sm w-full anim-fade-up text-right" dir="rtl">
+        <h2 id="download-modal-title" className="text-base mb-4" style={{ fontWeight: 800, color: "#0f172a" }}>בחר לשוניות לייצוא</h2>
         <div className="flex flex-col gap-2.5 mb-5">
           <label className="flex items-center gap-3 cursor-default select-none">
             <input type="checkbox" checked readOnly className="w-4 h-4 accent-blue-600" />
@@ -342,7 +351,7 @@ function DownloadSelectModal({ activeTab, availableTabs, onConfirm, onCancel }) 
 
 function DownloadIcon() {
   return (
-    <svg width="15" height="15" viewBox="0 0 17 17" fill="none" className="flex-shrink-0">
+    <svg aria-hidden="true" width="15" height="15" viewBox="0 0 17 17" fill="none" className="flex-shrink-0">
       <path d="M8.5 2v9M5 8l3.5 3.5L12 8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
       <path d="M2 13.5h13" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
     </svg>
@@ -462,7 +471,7 @@ function TabDownloadBar({ activeTab, runId, authHeader, hasTikhnun, tikhnunOnly,
         )}
 
         <button onClick={onNewRun} className="btn-ghost flex items-center gap-2 px-5 py-3 text-sm font-600" style={{ fontWeight: 600 }}>
-          <svg width="15" height="15" viewBox="0 0 15 15" fill="none" className="flex-shrink-0">
+          <svg aria-hidden="true" width="15" height="15" viewBox="0 0 15 15" fill="none" className="flex-shrink-0">
             <path d="M7.5 2v11M2 7.5h11" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
           </svg>
           בדיקה חדשה
@@ -477,18 +486,25 @@ function TabDownloadBar({ activeTab, runId, authHeader, hasTikhnun, tikhnunOnly,
 // ---------------------------------------------------------------------------
 
 function YozmaDialog({ onAnswer, onCancel }) {
+  const { ref, handleKeyDown } = useFocusTrap(onCancel);
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center px-4"
       style={{ background: "rgba(15,23,42,0.45)", backdropFilter: "blur(4px)" }}>
-      <div className="glass-card rounded-3xl p-7 max-w-sm w-full anim-fade-up text-right" dir="rtl">
+      <div
+        ref={ref}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="yozma-modal-title"
+        onKeyDown={handleKeyDown}
+        className="glass-card rounded-3xl p-7 max-w-sm w-full anim-fade-up text-right" dir="rtl">
         <div className="w-11 h-11 rounded-2xl flex items-center justify-center mb-4" style={{ background: "rgba(0,112,243,0.09)" }}>
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+          <svg aria-hidden="true" width="20" height="20" viewBox="0 0 20 20" fill="none">
             <circle cx="10" cy="10" r="8" stroke="#0070F3" strokeWidth="1.6"/>
             <path d="M10 6.5c0-1.1.9-2 2-2a2 2 0 0 1 1.4 3.4L10 11" stroke="#0070F3" strokeWidth="1.5" strokeLinecap="round"/>
             <circle cx="10" cy="14" r=".8" fill="#0070F3"/>
           </svg>
         </div>
-        <h2 className="text-base font-800 mb-3" style={{ fontWeight: 800, color: "#0f172a" }}>
+        <h2 id="yozma-modal-title" className="text-base font-800 mb-3" style={{ fontWeight: 800, color: "#0f172a" }}>
           האם המוסד עמד במודל התמרוץ תשפ"ה?
         </h2>
         <p className="text-sm text-slate-600 leading-relaxed mb-6">
@@ -519,6 +535,7 @@ function YozmaDualDialog({ tikkonLabel, beinayimLabel, onAnswer, onCancel }) {
   const [tikkonAns,   setTikkonAns]   = useState(null);
   const [beinayimAns, setBeinayimAns] = useState(null);
   const canConfirm = tikkonAns !== null && beinayimAns !== null;
+  const { ref, handleKeyDown } = useFocusTrap(onCancel);
 
   const AnswerRow = ({ label, value, onChange }) => (
     <div className="mb-4">
@@ -543,15 +560,21 @@ function YozmaDualDialog({ tikkonLabel, beinayimLabel, onAnswer, onCancel }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center px-4"
       style={{ background: "rgba(15,23,42,0.45)", backdropFilter: "blur(4px)" }}>
-      <div className="glass-card rounded-3xl p-7 max-w-sm w-full anim-fade-up text-right" dir="rtl">
+      <div
+        ref={ref}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="yozma-dual-modal-title"
+        onKeyDown={handleKeyDown}
+        className="glass-card rounded-3xl p-7 max-w-sm w-full anim-fade-up text-right" dir="rtl">
         <div className="w-11 h-11 rounded-2xl flex items-center justify-center mb-4" style={{ background: "rgba(0,112,243,0.09)" }}>
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+          <svg aria-hidden="true" width="20" height="20" viewBox="0 0 20 20" fill="none">
             <circle cx="10" cy="10" r="8" stroke="#0070F3" strokeWidth="1.6"/>
             <path d="M10 6.5c0-1.1.9-2 2-2a2 2 0 0 1 1.4 3.4L10 11" stroke="#0070F3" strokeWidth="1.5" strokeLinecap="round"/>
             <circle cx="10" cy="14" r=".8" fill="#0070F3"/>
           </svg>
         </div>
-        <h2 className="text-base font-800 mb-2" style={{ fontWeight: 800, color: "#0f172a" }}>
+        <h2 id="yozma-dual-modal-title" className="text-base font-800 mb-2" style={{ fontWeight: 800, color: "#0f172a" }}>
           האם המוסד עמד במודל התמרוץ תשפ"ה?
         </h2>
         <p className="text-sm text-slate-600 leading-relaxed mb-5">
@@ -599,7 +622,7 @@ function NoTikhnunNotice() {
   return (
     <div className="glass-card-dark rounded-2xl overflow-hidden">
       <div className="flex items-center justify-center gap-2 py-14">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+        <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none">
           <circle cx="8" cy="8" r="7" fill="#d97706" fillOpacity="0.15"/>
           <path d="M8 5v3.5M8 10.5v.5" stroke="#d97706" strokeWidth="1.8" strokeLinecap="round"/>
         </svg>
@@ -686,11 +709,11 @@ function KvuaTab({ tikhnun }) {
         <table className="w-full text-sm border-collapse" dir="rtl">
           <thead>
             <tr>
-              {hasMulti && <th className="text-right px-4 py-3 text-white text-xs font-700 whitespace-nowrap sticky top-0 z-10"
-                style={{ fontWeight: 700, background: "linear-gradient(135deg, #2D5FA0 0%, #1e4a8a 100%)" }}>סוג תקציב</th>}
+              {hasMulti && <th scope="col" className="text-right px-4 py-3 text-white text-xs font-700 whitespace-nowrap sticky top-0 z-10"
+                style={{ fontWeight: 700, background: "linear-gradient(135deg, #0c237d 0%, #091a60 100%)" }}>סוג תקציב</th>}
               {["שלב חינוך", "סל", "תת סל", "תקציב קבוע", "תקציב שתוכנן", "הפרש שלא תוכנן"].map(h => (
-                <th key={h} className="text-right px-4 py-3 text-white text-xs font-700 whitespace-nowrap sticky top-0 z-10"
-                  style={{ fontWeight: 700, background: "linear-gradient(135deg, #2D5FA0 0%, #1e4a8a 100%)" }}>
+                <th key={h} scope="col" className="text-right px-4 py-3 text-white text-xs font-700 whitespace-nowrap sticky top-0 z-10"
+                  style={{ fontWeight: 700, background: "linear-gradient(135deg, #0c237d 0%, #091a60 100%)" }}>
                   {h}
                 </th>
               ))}
@@ -738,7 +761,7 @@ function PartialTab({ tikhnun }) {
     return (
       <div className="glass-card-dark rounded-2xl overflow-hidden">
         <div className="flex items-center justify-center gap-2 py-12">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none">
             <circle cx="8" cy="8" r="7" fill="#16a34a" fillOpacity="0.15"/>
             <path d="M5 8l2 2 4-4" stroke="#16a34a" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
@@ -781,10 +804,10 @@ function PartialTab({ tikhnun }) {
           <thead>
             <tr>
               {["קוד", "שם מענה", "מספר מענה", "תכנון", "דיווח", "הפרש", "אחוז דיווח"].map((h, hi) => (
-                <th key={h} className="text-right text-white text-xs font-700 whitespace-nowrap sticky top-0 z-10"
+                <th key={h} scope="col" className="text-right text-white text-xs font-700 whitespace-nowrap sticky top-0 z-10"
                   style={{
                     fontWeight: 700,
-                    background: "linear-gradient(135deg, #2D5FA0 0%, #1e4a8a 100%)",
+                    background: "linear-gradient(135deg, #0c237d 0%, #091a60 100%)",
                     ...(hi === 0 ? { ...CODE_COL_STYLE, padding: "12px 6px" } : { padding: "12px 16px" }),
                   }}>
                   {h}
@@ -859,8 +882,8 @@ function YozmaTab({ tikhnun, multiplier, autoSwitch }) {
             <thead>
               <tr>
                 {["סעיף", "תקרה", "בתכנון", "סכום זמין לתכנון בשקלול תקציב גמיש פנוי"].map(h => (
-                  <th key={h} className="text-right px-4 py-3 text-white text-xs font-700 whitespace-nowrap sticky top-0 z-10"
-                    style={{ fontWeight: 700, background: "linear-gradient(135deg, #2D5FA0 0%, #1e4a8a 100%)" }}>
+                  <th key={h} scope="col" className="text-right px-4 py-3 text-white text-xs font-700 whitespace-nowrap sticky top-0 z-10"
+                    style={{ fontWeight: 700, background: "linear-gradient(135deg, #0c237d 0%, #091a60 100%)" }}>
                     {h}
                   </th>
                 ))}
@@ -981,52 +1004,6 @@ function HashvaTab({ result }) {
         rows={gefenRows} columns={UNIFIED_COLS} index={2} showSum
         headerGradient="linear-gradient(135deg, #0c237d 0%, #091a60 100%)" />
 
-      <div className="mt-6 mb-1">
-        <h2 className="text-xs font-700 text-slate-400 tracking-widest uppercase text-center" style={{ fontWeight: 700 }}>פרטי הבדיקה</h2>
-      </div>
-
-      <SummaryBlock title="קבצי דיווח ביצוע" index={3}>
-        <GefenFilesDetail gefen_files={summary.gefen_files ?? []} gefen_rows={summary.gefen_rows} gefen_merge_note={summary.gefen_merge_note} />
-      </SummaryBlock>
-      <SummaryBlock title="קבצים מתוכנת הכספים" index={4}>
-        <div className="px-2 flex flex-col gap-2">
-          <InfoGrid rows={[
-            { label: "שם קובץ",          value: finance_file?.filename },
-            { label: "סוג תוכנה",         value: finance_file?.software },
-            { label: "שלב",               value: STAGE_LABELS[division] ?? division },
-            { label: "אסמכתאות שזוהו",   value: summary.finance_rows_total + (finance_file?.cancelled_rows ?? 0) },
-            { label: "אסמכתאות מבוטלות", value: finance_file?.cancelled_rows ?? null },
-          ]} />
-          <div className="pt-3 border-t border-slate-100 flex flex-col gap-1">
-            {filtered && (
-              <p className="text-xs text-slate-500">
-                {`מתוך ${summary.finance_rows_total} שורות כספים, ${summary.finance_rows_checked} שייכות לשלב שנבדק.`}
-              </p>
-            )}
-            <p className="text-sm font-700 text-slate-700" style={{ fontWeight: 700 }}>
-              {`סה"כ ${summary.finance_rows_checked} אסמכתאות ייחודיות`}
-            </p>
-          </div>
-        </div>
-      </SummaryBlock>
-
-      <SummaryBlock title="מסקנה ותהליך הבדיקה" index={5}>
-        <div className="px-2 flex flex-col gap-2">
-          <InfoGrid rows={[
-            { label: "גפן",          value: (summary.gefen_files ?? []).length === 1
-              ? `הועלה קובץ דיווח ביצוע עבור ${STAGE_LABELS[division] ?? division}`
-              : `הועלו קבצי דיווח ביצוע עבור ${STAGE_LABELS[division] ?? division}` },
-            { label: "תוכנת כספים", value: `הועלה קובץ ${finance_file?.software ?? "כספים"} עבור ${filtered ? STAGE_LABELS["both"] : (STAGE_LABELS[division] ?? division)}` },
-          ]} />
-          <div className="pt-3 border-t border-slate-100">
-            <p className="text-sm font-700 text-slate-700" style={{ fontWeight: 700 }}>
-              {filtered
-                ? `לכן הבדיקה בוצעה עבור ${STAGE_LABELS[division] ?? division} בלבד.`
-                : `לכן הבדיקה בוצעה עבור ${STAGE_LABELS[division] ?? division}.`}
-            </p>
-          </div>
-        </div>
-      </SummaryBlock>
     </div>
   );
 }
@@ -1036,7 +1013,7 @@ function RejectedTab({ result, rows: rowsOverride }) {
   return (
     <div className="flex flex-col gap-4">
       <ResultTable title="אסמכתאות שנדחו" rows={rows} columns={REJECTED_COLS} index={0} showSum
-        headerGradient="linear-gradient(135deg, #2C3E50 0%, #1e2d3d 100%)" />
+        headerGradient="linear-gradient(135deg, #0c237d 0%, #091a60 100%)" />
     </div>
   );
 }
@@ -1046,7 +1023,7 @@ function NoPdfTab({ result, rows: rowsOverride }) {
   return (
     <div className="flex flex-col gap-4">
       <ResultTable title="אסמכתאות ללא PDF" rows={rows} columns={UNIFIED_COLS} index={0} showSum
-        headerGradient="linear-gradient(135deg, #2C3E50 0%, #1e2d3d 100%)" />
+        headerGradient="linear-gradient(135deg, #0c237d 0%, #091a60 100%)" />
     </div>
   );
 }
@@ -1206,13 +1183,172 @@ export default function ResultsView({ result, runId, authHeader, onNewRun }) {
             )
             : <HashvaTab result={result} />
         )}
-        {activeTab === "sikar" && !isDualTikhnun && <SikarTab tikhnun={hasTikhnun ? tikhnun : null} />}
-        {activeTab === "sikar" && isDualTikhnun && (
-          <div className="flex flex-col gap-24">
-            {tikhnunTikkon   && <DualTikhnunSection label={tikhnunTikkon.school_stage}><SikarTab tikhnun={tikhnunTikkon} /></DualTikhnunSection>}
-            {tikhnunBeinayim && <DualTikhnunSection label={tikhnunBeinayim.school_stage}><SikarTab tikhnun={tikhnunBeinayim} /></DualTikhnunSection>}
-          </div>
-        )}
+        {activeTab === "sikar" && !isDualTikhnun && (() => {
+          const summary = result.summary;
+          const showBedika = !tikhnunOnly && summary;
+          const { division, finance_rows_total, finance_rows_checked, finance_file } = summary ?? {};
+          const filtered = finance_rows_total !== finance_rows_checked;
+          return (
+            <div className="flex flex-col gap-4">
+              <SikarTab tikhnun={hasTikhnun ? tikhnun : null} />
+              {showBedika && (
+                <>
+                  <div className="mt-6 mb-1">
+                    <h2 className="text-xs font-700 text-slate-400 tracking-widest uppercase text-center" style={{ fontWeight: 700 }}>פרטי הבדיקה</h2>
+                  </div>
+                  {hasTikhnun && tikhnun?.filename && (
+                    <SummaryBlock title="קבצי תכנון" index={2}>
+                      <div className="px-2">
+                        <InfoGrid rows={[
+                          { label: "שם קובץ", value: tikhnun.filename },
+                          { label: "שלב",     value: tikhnun.school_stage },
+                        ]} />
+                      </div>
+                    </SummaryBlock>
+                  )}
+                  <SummaryBlock title="קבצי דיווח ביצוע" index={3}>
+                    <GefenFilesDetail gefen_files={summary.gefen_files ?? []} gefen_rows={summary.gefen_rows} gefen_merge_note={summary.gefen_merge_note} />
+                  </SummaryBlock>
+                  <SummaryBlock title="קבצים מתוכנת הכספים" index={4}>
+                    <div className="px-2 flex flex-col gap-2">
+                      <InfoGrid rows={[
+                        { label: "שם קובץ",          value: finance_file?.filename },
+                        { label: "סוג תוכנה",         value: finance_file?.software },
+                        { label: "שלב",               value: STAGE_LABELS[division] ?? division },
+                        { label: "אסמכתאות שזוהו",   value: (finance_rows_total ?? 0) + (finance_file?.cancelled_rows ?? 0) },
+                        { label: "אסמכתאות מבוטלות", value: finance_file?.cancelled_rows ?? null },
+                      ]} />
+                      <div className="pt-3 border-t border-slate-100 flex flex-col gap-1">
+                        {filtered && (
+                          <p className="text-xs text-slate-500">
+                            {`מתוך ${finance_rows_total} שורות כספים, ${finance_rows_checked} שייכות לשלב שנבדק.`}
+                          </p>
+                        )}
+                        <p className="text-sm font-700 text-slate-700" style={{ fontWeight: 700 }}>
+                          {`סה"כ ${finance_rows_checked} אסמכתאות ייחודיות`}
+                        </p>
+                      </div>
+                    </div>
+                  </SummaryBlock>
+                  <SummaryBlock title="מסקנה ותהליך הבדיקה" index={5}>
+                    <div className="px-2 flex flex-col gap-2">
+                      <InfoGrid rows={[
+                        { label: "גפן",          value: (summary.gefen_files ?? []).length === 1
+                          ? `הועלה קובץ דיווח ביצוע עבור ${STAGE_LABELS[division] ?? division}`
+                          : `הועלו קבצי דיווח ביצוע עבור ${STAGE_LABELS[division] ?? division}` },
+                        { label: "תוכנת כספים", value: `הועלה קובץ ${finance_file?.software ?? "כספים"} עבור ${filtered ? STAGE_LABELS["both"] : (STAGE_LABELS[division] ?? division)}` },
+                      ]} />
+                      <div className="pt-3 border-t border-slate-100">
+                        <p className="text-sm font-700 text-slate-700" style={{ fontWeight: 700 }}>
+                          {filtered
+                            ? `לכן הבדיקה בוצעה עבור ${STAGE_LABELS[division] ?? division} בלבד.`
+                            : `לכן הבדיקה בוצעה עבור ${STAGE_LABELS[division] ?? division}.`}
+                        </p>
+                      </div>
+                    </div>
+                  </SummaryBlock>
+                </>
+              )}
+            </div>
+          );
+        })()}
+        {activeTab === "sikar" && isDualTikhnun && (() => {
+          const summary = result.summary;
+          const showBedika = !tikhnunOnly && summary;
+          const { division, finance_rows_total, finance_rows_checked, finance_file } = summary ?? {};
+          const filtered = finance_rows_total !== finance_rows_checked;
+          const hasBothTikhnun = !!(tikhnunTikkon && tikhnunBeinayim);
+          return (
+            <div className="flex flex-col gap-24">
+              {tikhnunTikkon && (
+                <DualTikhnunSection label={tikhnunTikkon.school_stage}>
+                  <SikarTab tikhnun={tikhnunTikkon} />
+                </DualTikhnunSection>
+              )}
+              {tikhnunBeinayim && (
+                <DualTikhnunSection label={tikhnunBeinayim.school_stage}>
+                  <SikarTab tikhnun={tikhnunBeinayim} />
+                </DualTikhnunSection>
+              )}
+              {showBedika && (
+                <div className="flex flex-col gap-4">
+                  <div className="mt-2 mb-1">
+                    <h2 className="text-xs font-700 text-slate-400 tracking-widest uppercase text-center" style={{ fontWeight: 700 }}>פרטי הבדיקה</h2>
+                  </div>
+                  {(tikhnunTikkon || tikhnunBeinayim) && (
+                    <SummaryBlock title="קבצי תכנון" index={2}>
+                      {hasBothTikhnun ? (
+                        <div className="flex items-start gap-0">
+                          <div className="flex-1 px-2">
+                            <InfoGrid rows={[
+                              { label: "שם קובץ", value: tikhnunTikkon.filename },
+                              { label: "שלב",     value: tikhnunTikkon.school_stage },
+                            ]} />
+                          </div>
+                          <div className="w-px self-stretch bg-slate-100 mx-3" />
+                          <div className="flex-1 px-2">
+                            <InfoGrid rows={[
+                              { label: "שם קובץ", value: tikhnunBeinayim.filename },
+                              { label: "שלב",     value: tikhnunBeinayim.school_stage },
+                            ]} />
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="px-2">
+                          <InfoGrid rows={[
+                            { label: "שם קובץ", value: (tikhnunTikkon ?? tikhnunBeinayim).filename },
+                            { label: "שלב",     value: (tikhnunTikkon ?? tikhnunBeinayim).school_stage },
+                          ]} />
+                        </div>
+                      )}
+                    </SummaryBlock>
+                  )}
+                  <SummaryBlock title="קבצי דיווח ביצוע" index={3}>
+                    <GefenFilesDetail gefen_files={summary.gefen_files ?? []} gefen_rows={summary.gefen_rows} gefen_merge_note={summary.gefen_merge_note} />
+                  </SummaryBlock>
+                  <SummaryBlock title="קבצים מתוכנת הכספים" index={4}>
+                    <div className="px-2 flex flex-col gap-2">
+                      <InfoGrid rows={[
+                        { label: "שם קובץ",          value: finance_file?.filename },
+                        { label: "סוג תוכנה",         value: finance_file?.software },
+                        { label: "שלב",               value: STAGE_LABELS[division] ?? division },
+                        { label: "אסמכתאות שזוהו",   value: (finance_rows_total ?? 0) + (finance_file?.cancelled_rows ?? 0) },
+                        { label: "אסמכתאות מבוטלות", value: finance_file?.cancelled_rows ?? null },
+                      ]} />
+                      <div className="pt-3 border-t border-slate-100 flex flex-col gap-1">
+                        {filtered && (
+                          <p className="text-xs text-slate-500">
+                            {`מתוך ${finance_rows_total} שורות כספים, ${finance_rows_checked} שייכות לשלב שנבדק.`}
+                          </p>
+                        )}
+                        <p className="text-sm font-700 text-slate-700" style={{ fontWeight: 700 }}>
+                          {`סה"כ ${finance_rows_checked} אסמכתאות ייחודיות`}
+                        </p>
+                      </div>
+                    </div>
+                  </SummaryBlock>
+                  <SummaryBlock title="מסקנה ותהליך הבדיקה" index={5}>
+                    <div className="px-2 flex flex-col gap-2">
+                      <InfoGrid rows={[
+                        { label: "גפן",          value: (summary.gefen_files ?? []).length === 1
+                          ? `הועלה קובץ דיווח ביצוע עבור ${STAGE_LABELS[division] ?? division}`
+                          : `הועלו קבצי דיווח ביצוע עבור ${STAGE_LABELS[division] ?? division}` },
+                        { label: "תוכנת כספים", value: `הועלה קובץ ${finance_file?.software ?? "כספים"} עבור ${filtered ? STAGE_LABELS["both"] : (STAGE_LABELS[division] ?? division)}` },
+                      ]} />
+                      <div className="pt-3 border-t border-slate-100">
+                        <p className="text-sm font-700 text-slate-700" style={{ fontWeight: 700 }}>
+                          {filtered
+                            ? `לכן הבדיקה בוצעה עבור ${STAGE_LABELS[division] ?? division} בלבד.`
+                            : `לכן הבדיקה בוצעה עבור ${STAGE_LABELS[division] ?? division}.`}
+                        </p>
+                      </div>
+                    </div>
+                  </SummaryBlock>
+                </div>
+              )}
+            </div>
+          );
+        })()}
         {activeTab === "rejected" && !isDualTikhnun && <RejectedTab result={result} />}
         {activeTab === "rejected" && isDualTikhnun && (() => {
           const { tikkon, beinayim } = splitByDivision(result.rows_gefen_rejected ?? []);

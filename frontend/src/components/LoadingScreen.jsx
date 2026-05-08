@@ -1,9 +1,9 @@
 export default function LoadingScreen() {
   return (
-    <div className="loading-overlay rounded-3xl flex flex-col items-center justify-center gap-6 py-20 px-8 anim-fade-up">
+    <div role="status" aria-label="הבדיקה מתבצעת, אנא המתן" className="loading-overlay rounded-3xl flex flex-col items-center justify-center gap-6 py-20 px-8 anim-fade-up">
 
       {/* Spinner */}
-      <div className="relative">
+      <div className="relative" aria-hidden="true">
         <div className="spinner" />
         <div
           className="absolute inset-0 flex items-center justify-center"
@@ -30,7 +30,7 @@ export default function LoadingScreen() {
       </div>
 
       {/* Animated dots */}
-      <div className="dot-pulse flex gap-2">
+      <div aria-hidden="true" className="dot-pulse flex gap-2">
         <span />
         <span />
         <span />
