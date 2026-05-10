@@ -12,7 +12,7 @@ def load_payscool(filepath: str) -> tuple[pd.DataFrame, int]:
     for s in wb.sheetnames:
         ws = wb[s]
         rows = list(ws.iter_rows(min_row=4, max_row=4, values_only=True))
-        if rows and str(rows[0][0]).strip() == "סעיף":
+        if rows and "סעיף" in {str(v).strip() for v in rows[0] if v is not None}:
             sheet_name = s
             break
     wb.close()

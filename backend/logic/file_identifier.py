@@ -54,13 +54,15 @@ def _identify_xlsx(filename: str) -> str:
             return "gefen"
 
     # --- PaySchool --- (scan all sheets, sheet name may vary)
+    # Supports both old format (סעיף at col 0) and new format (extra cols before סעיף)
     for sheet_name in sheets:
         ws = wb[sheet_name]
         row4 = _get_row(ws, 4)
+        row4_vals = {str(v).strip() for v in row4 if v is not None}
         if (
-            _cell(row4, 0) == "סעיף"
-            and _cell(row4, 4) == "תאריך חשבונית"
-            and _cell(row4, 9) == "סוג חשבונית"
+            "סעיף" in row4_vals
+            and "ח.פ" in row4_vals
+            and "סוג חשבונית" in row4_vals
         ):
             wb.close()
             return "payscool"
