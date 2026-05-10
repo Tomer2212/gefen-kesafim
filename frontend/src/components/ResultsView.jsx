@@ -670,6 +670,7 @@ function SikarTab({ tikhnun }) {
             <InfoGrid rows={[
               { label: "תקציב גפן",                value: fmtNum(ov.budget) },
               { label: "סכום שתוכנן",              value: fmtNum(ov.planned) },
+              { label: "אחוז תכנון",               value: fmtPct(ov.budget > 0 ? ov.planned / ov.budget : null, 2) },
               { label: "תקציב קבוע שנותר לתכנון", value: fmtNum(ov.fixed_gap_abs) },
               { label: "תקציב גמיש שנותר לתכנון", value: fmtNum(ov.flexible_remaining),
                 highlight: ov.flexible_remaining < 0 },
