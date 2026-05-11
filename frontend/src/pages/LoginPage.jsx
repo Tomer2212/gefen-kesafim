@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
 import axios from "axios";
 
 export default function LoginPage() {
@@ -9,7 +8,6 @@ export default function LoginPage() {
   const [loading, setLoading]     = useState(false);
   const [cooldown, setCooldown]   = useState(false);
   const [showPassword, setShowPassword] = useState(false);
-  const navigate = useNavigate();
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -17,7 +15,11 @@ export default function LoginPage() {
     try {
       const { data } = await axios.post("/auth/login", { username, password });
       localStorage.setItem("token", data.token);
-      navigate("/");
+      // Use full page reload instead of SPA navigate() to ensure clean rendering state.
+      // SPA navigation can leave backdrop-filter/animation compositing layers stuck at
+      // opacity:0 which blocks pointer events and makes the page appear gray.
+      window.location.replace("/");
+      return;
     } catch (err) {
       if (err.response?.status === 429 || err.response?.status === 401 || err.response?.status === 400) {
         const msg = err.response.data?.detail || "שם משתמש או סיסמה שגויים";
@@ -56,7 +58,7 @@ export default function LoginPage() {
 
           {/* Title */}
           <h1 className="text-center text-2xl font-800 mb-1" style={{ color: "#0070F3", fontWeight: 800 }}>
-            מערכת גפן–כספים
+            גפן AI
           </h1>
           <p className="text-center text-sm text-slate-400 mb-8 font-medium">
             כניסה למערכת בדיקת תקציב
@@ -143,7 +145,7 @@ export default function LoginPage() {
 
         {/* Footer */}
         <p className="text-center text-xs text-slate-400 mt-6">
-          מערכת לבדיקת פערי חשבוניות בין גפן לתוכנות כספים
+          מערכת חכמה לניהול תקציב הגפן
         </p>
       </div>
     </div>

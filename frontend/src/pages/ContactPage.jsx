@@ -3,8 +3,14 @@ import { useNavigate } from "react-router-dom";
 import axios from "axios";
 
 function Logo() {
+  const navigate = useNavigate();
   return (
-    <div className="flex items-center gap-2.5">
+    <button
+      onClick={() => navigate("/")}
+      aria-label="חזור לעמוד הראשי"
+      className="flex items-center gap-2.5"
+      style={{ background: "none", border: "none", padding: 0, cursor: "pointer" }}
+    >
       <div
         className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
         style={{ background: "linear-gradient(135deg, #0070F3 0%, #0055cc 100%)" }}
@@ -17,9 +23,9 @@ function Logo() {
         </svg>
       </div>
       <span className="font-800 text-base" style={{ fontWeight: 800, color: "#0070F3" }}>
-        מערכת גפן–כספים
+        גפן AI
       </span>
-    </div>
+    </button>
   );
 }
 

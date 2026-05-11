@@ -273,7 +273,7 @@ def export_pdf(run_data: dict, section: str = "hashva") -> bytes:
     _ensure_fonts()
     buf = BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, rightMargin=2*cm, leftMargin=2*cm,
-                            topMargin=2*cm, bottomMargin=2*cm, title="דוח פערי גפן-כספים")
+                            topMargin=2*cm, bottomMargin=2*cm, title="דוח פערי גפן AI")
     story = build_hashva_section_story(run_data, section)
     doc.build(story)
     return buf.getvalue()
