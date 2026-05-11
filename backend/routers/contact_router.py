@@ -92,7 +92,7 @@ def build_email_html(
     <!-- Header -->
     <div style="background: #0070F3; padding: 20px 24px;">
       <p style="margin: 0; color: white; font-size: 13px; font-weight: 600;">
-        מערכת גפן–כספים &middot; {header_sub}
+        גפן AI &middot; {header_sub}
       </p>
       <p style="margin: 4px 0 0 0; color: rgba(255,255,255,0.75); font-size: 12px;">
         מספר פנייה {ticket_id}
@@ -152,7 +152,7 @@ def build_email_html(
     <!-- Footer -->
     <div style="background: #f1f5f9; padding: 12px 24px; text-align: center;">
       <p style="margin: 0; font-size: 11px; color: #94a3b8;">
-        נשלח ממערכת גפן–כספים
+        נשלח מגפן AI
       </p>
     </div>
 

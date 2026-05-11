@@ -7,13 +7,19 @@ import ResultsView from "../components/ResultsView";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 
 function Logo() {
+  const navigate = useNavigate();
   return (
-    <div className="flex items-center gap-2.5">
+    <button
+      onClick={() => navigate("/")}
+      aria-label="חזור לעמוד הראשי"
+      className="flex items-center gap-2.5"
+      style={{ background: "none", border: "none", padding: 0, cursor: "pointer" }}
+    >
       <div
         className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
         style={{ background: "linear-gradient(135deg, #0070F3 0%, #0055cc 100%)" }}
       >
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
           <rect x="1.5" y="1.5" width="5" height="5" rx="1" fill="white" fillOpacity="0.9"/>
           <rect x="9.5" y="1.5" width="5" height="5" rx="1" fill="white" fillOpacity="0.5"/>
           <rect x="1.5" y="9.5" width="5" height="5" rx="1" fill="white" fillOpacity="0.5"/>
@@ -21,9 +27,9 @@ function Logo() {
         </svg>
       </div>
       <span className="font-800 text-base" style={{ fontWeight: 800, color: "#0070F3" }}>
-        מערכת גפן–כספים
+        גפן AI
       </span>
-    </div>
+    </button>
   );
 }
 
@@ -147,7 +153,9 @@ export default function MainPage() {
 
   function handleLogout() {
     localStorage.removeItem("token");
-    navigate("/login");
+    // Full page reload instead of SPA navigate — same reason as login:
+    // prevents backdrop-filter/animation compositing from getting stuck.
+    window.location.replace("/login");
   }
 
   async function handleRun() {
