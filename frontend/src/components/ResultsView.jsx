@@ -66,7 +66,7 @@ const TAB_LABELS_MAP = {
   kvua:     "תקציב קבוע",
 };
 // tabs disabled when no tikhnun data
-const TIKHNUN_ONLY_TABS = ["sikar", "kvua", "partial", "yozma"];
+const TIKHNUN_ONLY_TABS = ["kvua", "partial", "yozma"];
 // tabs disabled when tikhnun-only (no gefen execution data)
 const GEFEN_ONLY_TABS = ["rejected", "nopdf", "partial"];
 
@@ -1186,12 +1186,12 @@ export default function ResultsView({ result, runId, authHeader, onNewRun }) {
         )}
         {activeTab === "sikar" && !isDualTikhnun && (() => {
           const summary = result.summary;
-          const showBedika = !tikhnunOnly && summary;
+          const showBedika = !tikhnunOnly && !result.gefen_only && summary;
           const { division, finance_rows_total, finance_rows_checked, finance_file } = summary ?? {};
           const filtered = finance_rows_total !== finance_rows_checked;
           return (
             <div className="flex flex-col gap-4">
-              <SikarTab tikhnun={hasTikhnun ? tikhnun : null} />
+              {hasTikhnun && <SikarTab tikhnun={tikhnun} />}
               {showBedika && (
                 <>
                   <div className="mt-6 mb-1">
@@ -1255,7 +1255,7 @@ export default function ResultsView({ result, runId, authHeader, onNewRun }) {
         })()}
         {activeTab === "sikar" && isDualTikhnun && (() => {
           const summary = result.summary;
-          const showBedika = !tikhnunOnly && summary;
+          const showBedika = !tikhnunOnly && !result.gefen_only && summary;
           const { division, finance_rows_total, finance_rows_checked, finance_file } = summary ?? {};
           const filtered = finance_rows_total !== finance_rows_checked;
           const hasBothTikhnun = !!(tikhnunTikkon && tikhnunBeinayim);
