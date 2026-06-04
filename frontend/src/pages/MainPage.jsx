@@ -1,37 +1,12 @@
 import { useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import axios from "axios";
 import FileUpload from "../components/FileUpload";
 import LoadingScreen from "../components/LoadingScreen";
 import ResultsView from "../components/ResultsView";
+import Sidebar from "../components/Sidebar";
+import ClassifyModal from "../components/ClassifyModal";
 import { useFocusTrap } from "../hooks/useFocusTrap";
-
-function Logo() {
-  const navigate = useNavigate();
-  return (
-    <button
-      onClick={() => navigate("/")}
-      aria-label="חזור לעמוד הראשי"
-      className="flex items-center gap-2.5"
-      style={{ background: "none", border: "none", padding: 0, cursor: "pointer" }}
-    >
-      <div
-        className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
-        style={{ background: "linear-gradient(135deg, #0070F3 0%, #0055cc 100%)" }}
-      >
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-          <rect x="1.5" y="1.5" width="5" height="5" rx="1" fill="white" fillOpacity="0.9"/>
-          <rect x="9.5" y="1.5" width="5" height="5" rx="1" fill="white" fillOpacity="0.5"/>
-          <rect x="1.5" y="9.5" width="5" height="5" rx="1" fill="white" fillOpacity="0.5"/>
-          <rect x="9.5" y="9.5" width="5" height="5" rx="1" fill="white" fillOpacity="0.9"/>
-        </svg>
-      </div>
-      <span className="font-800 text-base" style={{ fontWeight: 800, color: "#0070F3" }}>
-        גפן AI
-      </span>
-    </button>
-  );
-}
 
 function SingleFileWarningModal({ onConfirm, onCancel }) {
   const { ref, handleKeyDown } = useFocusTrap(onCancel);
@@ -135,6 +110,13 @@ function ConfirmModal({ onConfirm, onCancel }) {
   );
 }
 
+const DIVISION_LABEL = {
+  tikkon: "חטיבה עליונה",
+  beinayim: "חטיבת ביניים",
+  yesodi: "יסודי",
+  other: "אחר",
+};
+
 export default function MainPage() {
   const [files, setFiles]     = useState([]);
   const [runId, setRunId]     = useState(null);
@@ -144,19 +126,14 @@ export default function MainPage() {
   const [userMsg, setUserMsg]   = useState("");
   const [showConfirm, setShowConfirm] = useState(false);
   const [showSingleFileWarning, setShowSingleFileWarning] = useState(false);
+  const [classifyQueue, setClassifyQueue] = useState([]);
   const pollRef = useRef(null);
   const navigate = useNavigate();
+  const location = useLocation();
 
-  function authHeader() {
-    return { Authorization: `Bearer ${localStorage.getItem("token")}` };
-  }
-
-  function handleLogout() {
-    localStorage.removeItem("token");
-    // Full page reload instead of SPA navigate — same reason as login:
-    // prevents backdrop-filter/animation compositing from getting stuck.
-    window.location.replace("/login");
-  }
+  // School context passed from Dashboard/SchoolPage
+  const schoolContext = location.state || {};
+  const { school_id, gefen_account_id, school_name, division_type } = schoolContext;
 
   async function handleRun() {
     if (files.length === 0) return;
@@ -175,9 +152,9 @@ export default function MainPage() {
     try {
       const form = new FormData();
       files.forEach(f => form.append("files", f));
-      const { data } = await axios.post("/analyze/upload", form, {
-        headers: { ...authHeader(), "Content-Type": "multipart/form-data" },
-      });
+      if (school_id) form.append("school_id", school_id);
+      if (gefen_account_id) form.append("gefen_account_id", gefen_account_id);
+      const { data } = await axios.post("/analyze/upload", form);
       setRunId(data.run_id);
       startPolling(data.run_id);
     } catch (err) {
@@ -190,11 +167,16 @@ export default function MainPage() {
   function startPolling(id) {
     pollRef.current = setInterval(async () => {
       try {
-        const { data } = await axios.get(`/analyze/result/${id}`, { headers: authHeader() });
+        const { data } = await axios.get(`/analyze/result/${id}`);
         if (data.status === "done") {
           clearInterval(pollRef.current);
           setResult(data);
           setStatus("done");
+          const queue = [];
+          if (data.tikhnun?.pending_identification) queue.push({ tikhnun: data.tikhnun, division: "main", runId: id });
+          if (data.tikhnun_tikkon?.pending_identification) queue.push({ tikhnun: data.tikhnun_tikkon, division: "tikkon", runId: id });
+          if (data.tikhnun_beinayim?.pending_identification) queue.push({ tikhnun: data.tikhnun_beinayim, division: "beinayim", runId: id });
+          if (queue.length > 0) setClassifyQueue(queue);
         } else if (data.status === "error") {
           clearInterval(pollRef.current);
           setUserMsg(data.user_message || "");
@@ -216,10 +198,22 @@ export default function MainPage() {
     setResult(null);
     setErrorMsg("");
     setStatus("idle");
+    setClassifyQueue([]);
+  }
+
+  function handleTikhnunUpdate(division, updatedTikhnun, perComboResults) {
+    setResult(prev => {
+      if (!prev) return prev;
+      const perComboUpdate = perComboResults != null ? { per_combo_results: perComboResults } : {};
+      if (division === "tikkon") return { ...prev, tikhnun_tikkon: updatedTikhnun, tikhnun: updatedTikhnun, ...perComboUpdate };
+      if (division === "beinayim") return { ...prev, tikhnun_beinayim: updatedTikhnun, tikhnun: updatedTikhnun, ...perComboUpdate };
+      return { ...prev, tikhnun: updatedTikhnun, ...perComboUpdate };
+    });
   }
 
   return (
     <div dir="rtl" className="bg-scene min-h-screen">
+      <Sidebar dark />
 
       {showSingleFileWarning && (
         <SingleFileWarningModal
@@ -235,57 +229,30 @@ export default function MainPage() {
         />
       )}
 
-      {/* Top navigation */}
-      <nav className="topbar sticky top-0 z-50">
-        <div className="max-w-4xl mx-auto px-6 h-14 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <button
-              onClick={handleLogout}
-              className="btn-ghost flex items-center gap-1.5 px-4 py-1.5 text-sm"
-            >
-              <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                <path d="M5 7h7M9.5 5l2 2-2 2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-                <path d="M6 3H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-              </svg>
-              יציאה
-            </button>
-            <button
-              onClick={() => navigate("/terms")}
-              className="btn-ghost flex items-center gap-1.5 px-4 py-1.5 text-sm"
-            >
-              תנאי שימוש
-            </button>
-            <button
-              onClick={() => navigate("/privacy")}
-              className="btn-ghost flex items-center gap-1.5 px-4 py-1.5 text-sm"
-            >
-              מדיניות פרטיות
-            </button>
-            <button
-              onClick={() => navigate("/guide")}
-              className="btn-ghost flex items-center gap-1.5 px-4 py-1.5 text-sm"
-            >
-              הדרכה
-            </button>
-            <button
-              onClick={() => navigate("/contact")}
-              className="btn-ghost flex items-center gap-1.5 px-4 py-1.5 text-sm"
-            >
-              צור קשר
-            </button>
-            <button
-              onClick={() => navigate("/accessibility")}
-              className="btn-ghost flex items-center gap-1.5 px-4 py-1.5 text-sm"
-            >
-              נגישות
-            </button>
-          </div>
-          <Logo />
-        </div>
-      </nav>
+      {classifyQueue.length > 0 && (
+        <ClassifyModal
+          item={classifyQueue[0]}
+          runId={classifyQueue[0]?.runId}
+          onComplete={(division, updatedTikhnun, perComboResults) => {
+            handleTikhnunUpdate(division, updatedTikhnun, perComboResults);
+            setClassifyQueue(prev => prev.slice(1));
+          }}
+          onCancel={handleNewRun}
+        />
+      )}
 
+      <div style={{ marginRight: 240 }}>
       {/* Main content */}
       <main className="max-w-3xl mx-auto px-4 py-8 pb-16">
+
+        {/* Back to school / dashboard */}
+        {school_id && (
+          <div className="mb-4">
+            <button onClick={() => navigate(-1)} className="btn-ghost text-sm flex items-center gap-1">
+              ← חזור
+            </button>
+          </div>
+        )}
 
         {/* Page heading */}
         <div className="text-center mb-8 anim-fade-up">
@@ -295,9 +262,15 @@ export default function MainPage() {
           >
             בדיקת פערי חשבוניות
           </h1>
-          <p className="text-slate-500 text-sm">
-            השוואה אוטומטית בין קבצי גפן לתוכנת הכספים
-          </p>
+          {school_name ? (
+            <p className="text-slate-500 text-sm">
+              {school_name}{division_type ? ` — ${DIVISION_LABEL[division_type] || division_type}` : ""}
+            </p>
+          ) : (
+            <p className="text-slate-500 text-sm">
+              השוואה אוטומטית בין קבצי גפן לתוכנת הכספים
+            </p>
+          )}
         </div>
 
         {/* Instructions + warning — hidden once results are shown */}
@@ -366,8 +339,8 @@ export default function MainPage() {
             <ResultsView
               result={result}
               runId={runId}
-              authHeader={authHeader()}
               onNewRun={handleNewRun}
+              onTikhnunUpdate={handleTikhnunUpdate}
             />
             <div className="flex justify-center mt-4 mb-2 anim-fade-up">
               <button
@@ -428,6 +401,7 @@ export default function MainPage() {
           </div>
         )}
       </main>
+      </div>
     </div>
   );
 }

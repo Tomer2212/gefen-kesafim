@@ -1,4 +1,5 @@
 .env
+.env.local
 __pycache__/
 *.pyc
 *.pyo
@@ -14,4 +15,6 @@ skills-lock.json
 *.png
 backend/result_debug.json
 .claude/
+temp_*.json
+_skill_tmp/
 

@@ -1,43 +1,129 @@
 import json
 import os
-from datetime import datetime, timedelta
-from pathlib import Path
+import threading
+import time
+import urllib.request
+from typing import Annotated
 
-import bcrypt
-from jose import JWTError, jwt
+import jwt
+from fastapi import Depends, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-SECRET_KEY = os.getenv("JWT_SECRET", "changeme")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 30
+from supabase_client import get_admin_client
 
-USERS_FILE = Path(__file__).parent / "users.json"
+_security = HTTPBearer()
 
-
-def load_users() -> dict:
-    with open(USERS_FILE, "r") as f:
-        return json.load(f)
-
-
-def verify_password(plain: str, hashed: str) -> bool:
-    return bcrypt.checkpw(plain.encode(), hashed.encode())
-
-
-def authenticate_user(username: str, password: str) -> bool:
-    users = load_users()
-    user = users.get(username)
-    if not user:
-        return False
-    return verify_password(password, user["hashed_password"])
+# ---------------------------------------------------------------------------
+# JWKS cache — public key fetched once from Supabase, refreshed every hour
+# ---------------------------------------------------------------------------
+_jwks_key = None
+_jwks_fetched_at = 0.0
+_JWKS_TTL = 3600
+_jwks_lock = threading.Lock()  # prevents concurrent fetches on cold start
 
 
-def create_access_token(username: str) -> str:
-    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    return jwt.encode({"sub": username, "exp": expire}, SECRET_KEY, algorithm=ALGORITHM)
+def _get_public_key():
+    """Fetch (and cache) the active signing public key from Supabase's JWKS endpoint."""
+    global _jwks_key, _jwks_fetched_at
+    now = time.monotonic()
+    if _jwks_key and (now - _jwks_fetched_at) < _JWKS_TTL:
+        return _jwks_key
+
+    with _jwks_lock:
+        # Re-check after acquiring lock — another thread may have fetched it already
+        now = time.monotonic()
+        if _jwks_key and (now - _jwks_fetched_at) < _JWKS_TTL:
+            return _jwks_key
+
+        supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
+        jwks_url = f"{supabase_url}/auth/v1/.well-known/jwks.json"
+
+        try:
+            with urllib.request.urlopen(jwks_url, timeout=10) as resp:
+                jwks = json.loads(resp.read())
+            key_data = jwks["keys"][0]
+            from jwt.algorithms import ECAlgorithm
+            _jwks_key = ECAlgorithm.from_jwk(json.dumps(key_data))
+            _jwks_fetched_at = now
+        except Exception as exc:
+            if _jwks_key:
+                # Return stale key rather than crashing on a transient network hiccup
+                return _jwks_key
+            raise RuntimeError(f"Could not fetch Supabase JWKS: {exc}")
+
+    return _jwks_key
 
 
-def decode_token(token: str) -> str | None:
+# ---------------------------------------------------------------------------
+# Profile cache — avoid a DB round-trip on every request
+# ---------------------------------------------------------------------------
+_profile_cache: dict = {}
+_PROFILE_TTL = 300  # 5 minutes
+
+
+def _get_profile(user_id: str) -> tuple[str, str]:
+    now = time.monotonic()
+    cached = _profile_cache.get(user_id)
+    if cached and (now - cached[2]) < _PROFILE_TTL:
+        return cached[0], cached[1]
+
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return payload.get("sub")
-    except JWTError:
-        return None
+        db = get_admin_client()
+        profile = (
+            db.table("profiles")
+            .select("role, full_name")
+            .eq("id", user_id)
+            .single()
+            .execute()
+        )
+        role = profile.data.get("role", "advisor") if profile.data else "advisor"
+        full_name = profile.data.get("full_name", "") if profile.data else ""
+    except Exception:
+        role = "advisor"
+        full_name = ""
+
+    _profile_cache[user_id] = (role, full_name, now)
+    return role, full_name
+
+
+def invalidate_profile_cache(user_id: str) -> None:
+    """Call after changing a user's role so the new role takes effect immediately."""
+    _profile_cache.pop(user_id, None)
+
+
+# ---------------------------------------------------------------------------
+# FastAPI dependency
+# ---------------------------------------------------------------------------
+
+def get_current_user(
+    credentials: Annotated[HTTPAuthorizationCredentials, Depends(_security)],
+) -> dict:
+    token = credentials.credentials
+
+    try:
+        public_key = _get_public_key()
+        payload = jwt.decode(
+            token,
+            public_key,
+            algorithms=["ES256"],
+            audience="authenticated",
+        )
+        user_id = payload.get("sub")
+        email = payload.get("email", "")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    role, full_name = _get_profile(user_id)
+
+    return {
+        "id": user_id,
+        "email": email,
+        "role": role,
+        "full_name": full_name,
+    }

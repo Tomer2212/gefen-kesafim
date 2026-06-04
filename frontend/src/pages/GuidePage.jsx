@@ -1,4 +1,5 @@
 import { useNavigate } from "react-router-dom";
+import Sidebar from "../components/Sidebar";
 
 function Logo() {
   const navigate = useNavigate();
@@ -124,30 +125,8 @@ export default function GuidePage() {
 
   return (
     <div dir="rtl" className="bg-scene min-h-screen">
-      <nav className="topbar sticky top-0 z-50">
-        <div className="max-w-4xl mx-auto px-6 h-14 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <button onClick={() => navigate("/")} className="btn-ghost flex items-center gap-1.5 px-4 py-1.5 text-sm">
-              <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                <path d="M9 2L4 7l5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-              </svg>
-              ראשי
-            </button>
-            <button onClick={() => navigate("/terms")}   className="btn-ghost px-4 py-1.5 text-sm">תנאי שימוש</button>
-            <button onClick={() => navigate("/privacy")} className="btn-ghost px-4 py-1.5 text-sm">מדיניות פרטיות</button>
-            <span
-              aria-current="page"
-              className="flex items-center gap-1.5 px-4 py-1.5 text-sm rounded-full"
-              style={{ background: "rgba(0,112,243,0.08)", color: "#0070F3", fontWeight: 600, cursor: "default" }}
-            >
-              הדרכה
-            </span>
-            <button onClick={() => navigate("/contact")} className="btn-ghost px-4 py-1.5 text-sm">צור קשר</button>
-            <button onClick={() => navigate("/accessibility")} className="btn-ghost px-4 py-1.5 text-sm">נגישות</button>
-          </div>
-          <Logo />
-        </div>
-      </nav>
+      <Sidebar dark />
+      <div style={{ marginRight: 240 }}>
 
       <main className="max-w-3xl mx-auto px-4 py-8 pb-16 text-center">
         {/* Page heading */}
@@ -216,6 +195,7 @@ export default function GuidePage() {
           </button>
         </div>
       </main>
+      </div>
     </div>
   );
 }

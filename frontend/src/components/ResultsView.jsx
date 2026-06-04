@@ -370,7 +370,7 @@ function Spinner({ dark }) {
   );
 }
 
-function TabDownloadBar({ activeTab, runId, authHeader, hasTikhnun, tikhnunOnly, yozmaMultiplier, availableTabs, onNewRun }) {
+function TabDownloadBar({ activeTab, runId, hasTikhnun, tikhnunOnly, yozmaMultiplier, availableTabs, onNewRun }) {
   const [dlExcel, setDlExcel] = useState(false);
   const [dlPdf,   setDlPdf]   = useState(false);
   const [pdfErr,  setPdfErr]  = useState(false);
@@ -403,7 +403,7 @@ function TabDownloadBar({ activeTab, runId, authHeader, hasTikhnun, tikhnunOnly,
     if (type === "excel") {
       setDlExcel(true);
       try {
-        const res = await axios.get(excelUrl, { headers: authHeader, responseType: "blob" });
+        const res = await axios.get(excelUrl, { responseType: "blob" });
         const url = URL.createObjectURL(res.data);
         const a = document.createElement("a");
         a.href = url; a.download = excelName; a.click();
@@ -414,7 +414,7 @@ function TabDownloadBar({ activeTab, runId, authHeader, hasTikhnun, tikhnunOnly,
       setPdfErr(false);
       setDlPdf(true);
       try {
-        const res = await axios.get(pdfUrl, { headers: authHeader, responseType: "blob" });
+        const res = await axios.get(pdfUrl, { responseType: "blob" });
         const url = URL.createObjectURL(new Blob([res.data], { type: "application/pdf" }));
         const a = document.createElement("a");
         a.href = url; a.download = pdfName;
@@ -646,8 +646,83 @@ function OverviewRow({ label, value, red, bold }) {
   );
 }
 
-function SikarTab({ tikhnun }) {
+function SikarTab({ tikhnun, activeBudgetIdx: propIdx, setActiveBudgetIdx: propSetter }) {
+  const [localIdx, setLocalIdx] = useState(0);
+  const activeBudgetIdx = propIdx !== undefined ? propIdx : localIdx;
+  const setActiveBudgetIdx = propSetter ?? setLocalIdx;
   if (!tikhnun) return <NoTikhnunNotice />;
+
+  const budgets = tikhnun.budgets;
+  const isMultiBudget = budgets && budgets.length > 1;
+
+  if (isMultiBudget) {
+    const safeIdx = Math.min(activeBudgetIdx, budgets.length - 1);
+    const bud = budgets[safeIdx];
+    const ov = bud.overview ?? {};
+    return (
+      <div className="flex flex-col gap-4">
+        {/* Budget selector pills */}
+        <div className="flex gap-2 flex-wrap" dir="rtl">
+          {budgets.map((b, i) => (
+            <button
+              key={i}
+              onClick={() => setActiveBudgetIdx(i)}
+              style={{
+                fontWeight: safeIdx === i ? 700 : 500,
+                fontSize: "12px",
+                padding: "4px 14px",
+                borderRadius: "20px",
+                border: `1.5px solid ${safeIdx === i ? "#0070F3" : "#e2e8f0"}`,
+                background: safeIdx === i ? "#0070F3" : "transparent",
+                color: safeIdx === i ? "white" : "#64748b",
+                cursor: "pointer",
+                transition: "all 0.15s",
+              }}
+            >
+              {b.name}
+            </button>
+          ))}
+        </div>
+
+        <div className="glass-card-dark rounded-2xl overflow-hidden">
+          <div className="flex" dir="rtl">
+            <div className="flex-1 px-5 py-4">
+              <h3 className="text-xs font-700 text-slate-500 tracking-wide mb-3" style={{ fontWeight: 700 }}>פרטי מוסד</h3>
+              <InfoGrid rows={[
+                { label: "שם מוסד",  value: tikhnun.school_name },
+                { label: "סמל מוסד", value: tikhnun.school_code },
+                { label: "שלב מוסד", value: tikhnun.school_stage },
+              ]} />
+            </div>
+            <div className="w-px bg-slate-100 self-stretch" />
+            <div className="flex-1 px-5 py-4">
+              <h3 className="text-xs font-700 text-slate-500 tracking-wide mb-3" style={{ fontWeight: 700 }}>תקציב {bud.name}</h3>
+              <InfoGrid rows={[
+                { label: "גובה תקציב",  value: fmtNum(ov.budget) },
+                { label: "סכום שתוכנן", value: fmtNum(ov.planned) },
+                { label: "אחוז תכנון",  value: fmtPct(ov.pct_plan, 2) },
+              ]} />
+            </div>
+          </div>
+        </div>
+
+        {tikhnun.has_doch && (
+          <SummaryBlock title="דיווח" index={1}>
+            <InfoGrid rows={[
+              { label: "סכום חייב בדיווח",          value: fmtNum(ov.sum_chayav) },
+              { label: "סכום שדווח",                 value: fmtNum(ov.sum_divuach) },
+              { label: "אחוז דיווח (כללי)",          value: fmtPct(ov.pct_divuach, 0) },
+              ...(ov.pct_tanuz != null
+                ? [{ label: "אחוז דיווח למודל תמרוץ", value: fmtPct(ov.pct_tanuz, 2), highlight: true }]
+                : []),
+            ]} />
+          </SummaryBlock>
+        )}
+      </div>
+    );
+  }
+
+  // Single budget — existing display
   const ov = tikhnun.overview ?? {};
   const hasDoch = tikhnun.has_doch;
 
@@ -753,38 +828,75 @@ function KvuaTab({ tikhnun }) {
   );
 }
 
-function PartialTab({ tikhnun }) {
+function PartialTab({ tikhnun, activeBudgetIdx = 0, setActiveBudgetIdx }) {
   if (!tikhnun) return <NoTikhnunNotice />;
-  const rows = tikhnun.partial_rows ?? [];
-  const totalHefresh = tikhnun.sum_hefresh_partial ?? 0;
+  const allRows = tikhnun.partial_rows ?? [];
+  const budgets = tikhnun.budgets;
+  const isMultiBudget = budgets && budgets.length > 1;
+  const safeIdx = isMultiBudget ? Math.min(activeBudgetIdx, budgets.length - 1) : 0;
+  const selectedBudget = isMultiBudget ? budgets[safeIdx]?.name : null;
+  const rows = selectedBudget ? allRows.filter(r => r.budget === selectedBudget) : allRows;
+  const totalHefresh = rows.reduce((s, r) => s + (r.hefresh ?? 0), 0);
 
-  if (rows.length === 0) {
+  const pillsEl = isMultiBudget && setActiveBudgetIdx ? (
+    <div className="flex gap-2 flex-wrap" dir="rtl">
+      {budgets.map((b, i) => (
+        <button
+          key={i}
+          onClick={() => setActiveBudgetIdx(i)}
+          style={{
+            fontWeight: safeIdx === i ? 700 : 500,
+            fontSize: "12px",
+            padding: "4px 14px",
+            borderRadius: "20px",
+            border: `1.5px solid ${safeIdx === i ? "#0070F3" : "#e2e8f0"}`,
+            background: safeIdx === i ? "#0070F3" : "transparent",
+            color: safeIdx === i ? "white" : "#64748b",
+            cursor: "pointer",
+            transition: "all 0.15s",
+          }}
+        >
+          {b.name}
+        </button>
+      ))}
+    </div>
+  ) : null;
+
+  if (!tikhnun.has_doch) {
     return (
-      <div className="glass-card-dark rounded-2xl overflow-hidden">
-        <div className="flex items-center justify-center gap-2 py-12">
-          <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none">
-            <circle cx="8" cy="8" r="7" fill="#16a34a" fillOpacity="0.15"/>
-            <path d="M5 8l2 2 4-4" stroke="#16a34a" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
-          </svg>
-          <span className="text-sm font-700" style={{ fontWeight: 700, color: "#15803d" }}>כל התוכניות דווחו במלואן</span>
+      <div className="flex flex-col gap-3">
+        {pillsEl}
+        <div className="glass-card-dark rounded-2xl overflow-hidden">
+          <div className="flex items-center justify-center gap-2 py-12">
+            <span className="text-sm font-700 text-amber-700" style={{ fontWeight: 700 }}>
+              לא הועלה קובץ דיווח ביצוע — לא ניתן לחשב ביצוע חלקי
+            </span>
+          </div>
         </div>
       </div>
     );
   }
 
-  if (!tikhnun.has_doch) {
+  if (rows.length === 0) {
     return (
-      <div className="glass-card-dark rounded-2xl overflow-hidden">
-        <div className="flex items-center justify-center gap-2 py-12">
-          <span className="text-sm font-700 text-amber-700" style={{ fontWeight: 700 }}>
-            לא הועלה קובץ דיווח ביצוע — לא ניתן לחשב ביצוע חלקי
-          </span>
+      <div className="flex flex-col gap-3">
+        {pillsEl}
+        <div className="glass-card-dark rounded-2xl overflow-hidden">
+          <div className="flex items-center justify-center gap-2 py-12">
+            <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <circle cx="8" cy="8" r="7" fill="#16a34a" fillOpacity="0.15"/>
+              <path d="M5 8l2 2 4-4" stroke="#16a34a" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+            <span className="text-sm font-700" style={{ fontWeight: 700, color: "#15803d" }}>כל התוכניות דווחו במלואן</span>
+          </div>
         </div>
       </div>
     );
   }
 
   return (
+    <div className="flex flex-col gap-3">
+      {pillsEl}
     <div className="glass-card-dark rounded-2xl overflow-hidden">
       <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-slate-100">
         <h3 className="text-sm font-700 text-slate-700 text-right" style={{ fontWeight: 700 }}>תוכניות עם דיווח חסר</h3>
@@ -847,18 +959,159 @@ function PartialTab({ tikhnun }) {
         </table>
       </div>
     </div>
+    </div>
+  );
+}
+
+function YozmaSupplierBreakdown({ breakdown }) {
+  const [openSuppliers, setOpenSuppliers] = useState(new Set());
+  function toggleSup(key) {
+    setOpenSuppliers(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }
+  if (!breakdown || breakdown.length === 0) return null;
+  return (
+    <div className="flex flex-col gap-4">
+      <h3 className="text-sm px-1 text-center mt-12" style={{ fontWeight: 700, color: "#475569" }}>פירוט ספקים שדווחו — לפי יוזמה</h3>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0" }}>
+      {breakdown.map((item, idx) => (
+        <div key={`${item.plan_number}-${item.code}`} className="glass-card-dark overflow-hidden"
+          style={{
+            borderRadius: 0,
+            borderRight: idx % 2 === 0 ? "1px solid #e2e8f0" : "none",
+            borderBottom: "1px solid #e2e8f0",
+          }}>
+          <div className="px-5 py-3 flex justify-between items-center" dir="rtl"
+            style={{ background: "linear-gradient(135deg, #0c237d 0%, #091a60 100%)" }}>
+            <div className="flex flex-col gap-0.5">
+              <span className="text-sm text-white" style={{ fontWeight: 700 }}>
+                קוד {item.code} — {item.initiative_name}
+              </span>
+              <span className="text-xs" style={{ color: "rgba(255,255,255,0.6)" }}>מענה {item.plan_number}</span>
+            </div>
+            <span className="text-sm tabular-nums text-white">{fmtNum(item.total_amount)} ₪</span>
+          </div>
+          {item.suppliers.map(sup => {
+            const supKey = `${item.plan_number}-${item.code}-${sup.supplier_number}`;
+            const isOpen = openSuppliers.has(supKey);
+            return (
+              <div key={supKey} className="border-t border-slate-100">
+                <button
+                  className="w-full flex items-center justify-between px-5 py-3 hover:bg-slate-50 transition-colors"
+                  dir="rtl" onClick={() => toggleSup(supKey)}
+                  aria-expanded={isOpen} aria-controls={`supd-${supKey}`}
+                  aria-label={`${sup.supplier_name} — ${fmtNum(sup.total_amount)} ₪`}
+                >
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs text-slate-400 tabular-nums">{sup.supplier_number}</span>
+                    <span className="text-sm text-slate-700">{sup.supplier_name}</span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <span className="text-sm tabular-nums" style={{ color: "#1e293b" }}>{fmtNum(sup.total_amount)} ₪</span>
+                    <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none"
+                      style={{ transform: isOpen ? "rotate(180deg)" : "rotate(0deg)", transition: "transform 0.2s", flexShrink: 0 }}>
+                      <path d="M4 6l4 4 4-4" stroke="#94a3b8" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                  </div>
+                </button>
+                {isOpen && (
+                  <div id={`supd-${supKey}`} className="bg-slate-50 border-t border-slate-100">
+                    <div className="table-scroll">
+                      <table className="w-full text-xs border-collapse" dir="rtl">
+                        <thead>
+                          <tr>
+                            {["תאריך", "מספר אסמכתא", "תיאור", "סכום"].map(h => (
+                              <th key={h} scope="col" className="text-right px-4 py-2 text-slate-500 border-b border-slate-200 whitespace-nowrap"
+                                style={{ fontWeight: 700, background: "#f8fafc" }}>{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {sup.transactions.map((txn, ti) => (
+                            <tr key={ti} style={{ background: ti % 2 === 0 ? "white" : "rgba(248,250,252,0.7)" }}>
+                              <td className="px-4 py-2 text-right tabular-nums text-slate-600 whitespace-nowrap">{txn.date}</td>
+                              <td className="px-4 py-2 text-right tabular-nums text-slate-600">{txn.invoice}</td>
+                              <td className="px-4 py-2 text-right text-slate-600">{txn.description}</td>
+                              <td className="px-4 py-2 text-right tabular-nums text-slate-700" style={{ fontWeight: 700 }}>{fmtNum(txn.amount)} ₪</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ))}
+      </div>
+    </div>
   );
 }
 
 function YozmaTab({ tikhnun, multiplier, autoSwitch }) {
+  const budgetsWithYozma = (tikhnun?.budgets || []).filter(b => b.yozma_03);
+  const hasBudgetPills = budgetsWithYozma.length > 1;
+
+  const [localActiveBudget, setLocalActiveBudget] = useState(null);
+  const [budgetMultipliers, setBudgetMultipliers] = useState({});
+  const [pendingDialogBudget, setPendingDialogBudget] = useState(
+    () => hasBudgetPills && budgetsWithYozma.length > 0 ? budgetsWithYozma[0].name : null
+  );
+
   if (!tikhnun) return <NoTikhnunNotice />;
-  const yozmaKey = multiplier === "04" ? "yozma_04" : "yozma_03";
-  const yozma = tikhnun[yozmaKey] ?? tikhnun.yozma_03 ?? {};
-  const hefreshTotal = yozma.hefresh ?? 0;
+
+  const PILL_STYLE = (active) => ({
+    fontWeight: active ? 700 : 500,
+    fontSize: "12px",
+    padding: "4px 14px",
+    borderRadius: "20px",
+    border: `1.5px solid ${active ? "#0070F3" : "#e2e8f0"}`,
+    background: active ? "#0070F3" : "transparent",
+    color: active ? "white" : "#64748b",
+    cursor: "pointer",
+    transition: "all 0.15s",
+  });
+
+  const handlePillClick = (name) => {
+    if (!budgetMultipliers[name]) setPendingDialogBudget(name);
+    else setLocalActiveBudget(name);
+  };
+
+  const handlePerBudgetAnswer = (answer, budgetName) => {
+    const bObj = budgetsWithYozma.find(b => b.name === budgetName);
+    const mult = answer === "yes" ? "04" : (bObj?.yozma_03?.is_negative ? "04" : "03");
+    setBudgetMultipliers(prev => ({ ...prev, [budgetName]: mult }));
+    setLocalActiveBudget(budgetName);
+    setPendingDialogBudget(null);
+  };
+
+  const effectiveBudget = hasBudgetPills ? (localActiveBudget ?? budgetsWithYozma[0]?.name ?? null) : null;
+  let yozmaData;
+  let flexibleRemaining;
+  let breakdownData = null;
+  if (hasBudgetPills && effectiveBudget) {
+    const effMult = budgetMultipliers[effectiveBudget] ?? "03";
+    const bObj = budgetsWithYozma.find(b => b.name === effectiveBudget);
+    yozmaData = bObj?.[`yozma_${effMult}`] ?? bObj?.yozma_03 ?? {};
+    flexibleRemaining = bObj?.overview?.flexible_remaining ?? tikhnun.overview?.flexible_remaining;
+    breakdownData = bObj?.yozma_breakdown ?? null;
+  } else {
+    const yozmaKey = multiplier === "04" ? "yozma_04" : "yozma_03";
+    yozmaData = tikhnun[yozmaKey] ?? tikhnun.yozma_03 ?? {};
+    flexibleRemaining = tikhnun.overview?.flexible_remaining;
+    breakdownData = tikhnun.budgets?.[0]?.yozma_breakdown ?? null;
+  }
+
+  const hefreshTotal = yozmaData?.hefresh ?? 0;
 
   return (
     <div className="flex flex-col gap-4">
-      {autoSwitch && (
+      {autoSwitch && !hasBudgetPills && (
         <div
           className="rounded-xl px-4 py-3 text-sm text-right"
           style={{ background: "rgba(251,191,36,0.12)", border: "1px solid rgba(251,191,36,0.4)", color: "#92400e" }}
@@ -867,45 +1120,98 @@ function YozmaTab({ tikhnun, multiplier, autoSwitch }) {
         </div>
       )}
 
-      <SummaryBlock title="סיכום יוזמות" index={0}>
-        <InfoGrid rows={[
-          { label: "תקציב מקסימלי לתכנון יוזמות", value: fmtNum(yozma.max) },
-          { label: "בתכנון",                        value: fmtNum(yozma.betikhnun) },
-          { label: "הפרש",                          value: fmtNum(hefreshTotal),
-            danger: hefreshTotal < 0, highlight: hefreshTotal >= 0 },
-          { label: "תקציב גמיש פנוי",              value: fmtNum(tikhnun.overview?.flexible_remaining) },
-        ]} />
-      </SummaryBlock>
-
-      <div className="glass-card-dark rounded-2xl overflow-hidden">
-        <div className="table-scroll">
-          <table className="w-full text-sm border-collapse" dir="rtl">
-            <thead>
-              <tr>
-                {["סעיף", "תקרה", "בתכנון", "סכום זמין לתכנון בשקלול תקציב גמיש פנוי"].map(h => (
-                  <th key={h} scope="col" className="text-right px-4 py-3 text-white text-xs font-700 whitespace-nowrap sticky top-0 z-10"
-                    style={{ fontWeight: 700, background: "linear-gradient(135deg, #0c237d 0%, #091a60 100%)" }}>
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {(yozma.detail ?? []).map((item, i) => (
-                <tr key={i} className="border-t border-slate-100" style={{ background: i % 2 === 0 ? "white" : "rgba(248,250,252,0.7)" }}>
-                  <td className="px-4 py-2.5 text-right text-slate-700 text-xs">{item.label}</td>
-                  <td className="px-4 py-2.5 text-right text-slate-700 text-xs tabular-nums">{fmtNum(item.cap)}</td>
-                  <td className="px-4 py-2.5 text-right text-slate-700 text-xs tabular-nums">{fmtNum(item.betikhnun)}</td>
-                  <td className="px-4 py-2.5 text-right text-xs font-700 tabular-nums"
-                    style={{ fontWeight: 700, color: item.hefresh < 0 ? "#dc2626" : "#1e293b" }}>
-                    {fmtNum(item.hefresh)}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      {hasBudgetPills && (
+        <div className="flex gap-2 flex-wrap" dir="rtl">
+          {budgetsWithYozma.map(b => (
+            <button
+              key={b.name}
+              onClick={() => handlePillClick(b.name)}
+              aria-pressed={effectiveBudget === b.name}
+              style={PILL_STYLE(effectiveBudget === b.name)}
+            >
+              {b.name}
+              {budgetMultipliers[b.name] && (
+                <span style={{ marginRight: "4px", fontSize: "11px", opacity: 0.6 }}>
+                  {budgetMultipliers[b.name] === "04" ? "40%" : "30%"}
+                </span>
+              )}
+            </button>
+          ))}
         </div>
-      </div>
+      )}
+
+      {pendingDialogBudget ? (
+        <div className="bg-yellow-50 border border-yellow-200 rounded-2xl p-4 text-right" dir="rtl">
+          <p className="text-sm font-medium mb-3">
+            האם המוסד עמד במודל התמרוץ תשפ"ה עבור תקציב <strong>{pendingDialogBudget}</strong>?
+          </p>
+          <div className="flex gap-2">
+            <button
+              onClick={() => handlePerBudgetAnswer("yes", pendingDialogBudget)}
+              className="px-4 py-2 rounded-lg bg-green-600 text-white text-sm font-semibold hover:bg-green-700 transition-colors"
+            >
+              כן — עמד
+            </button>
+            <button
+              onClick={() => handlePerBudgetAnswer("no", pendingDialogBudget)}
+              className="px-4 py-2 rounded-lg bg-slate-200 text-slate-700 text-sm font-semibold hover:bg-slate-300 transition-colors"
+            >
+              לא
+            </button>
+          </div>
+        </div>
+      ) : (
+        <>
+          <SummaryBlock title="סיכום יוזמות" index={0}>
+            <InfoGrid rows={[
+              { label: "תקציב מקסימלי לתכנון יוזמות", value: fmtNum(yozmaData.max) },
+              { label: "בתכנון",                        value: fmtNum(yozmaData.betikhnun) },
+              { label: "הפרש",                          value: fmtNum(hefreshTotal),
+                danger: hefreshTotal < 0, highlight: hefreshTotal >= 0 },
+              { label: "תקציב גמיש פנוי",              value: fmtNum(flexibleRemaining) },
+            ]} />
+          </SummaryBlock>
+
+          <div className="glass-card-dark rounded-2xl overflow-hidden">
+            <div className="table-scroll">
+              <table className="w-full text-sm border-collapse" dir="rtl">
+                <thead>
+                  <tr>
+                    {["סעיף", "תקרה", "בתכנון", "משויך", "טרם שויך", "סכום זמין לתכנון בשקלול תקציב גמיש פנוי"].map(h => (
+                      <th key={h} scope="col" className="text-right px-4 py-3 text-white text-xs font-700 whitespace-nowrap sticky top-0 z-10"
+                        style={{ fontWeight: 700, background: "linear-gradient(135deg, #0c237d 0%, #091a60 100%)" }}>
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {(yozmaData.detail ?? []).map((item, i) => {
+                    const teremShuyakh = (item.betikhnun ?? 0) - (item.meshuyakh ?? 0);
+                    return (
+                    <tr key={i} className="border-t border-slate-100" style={{ background: i % 2 === 0 ? "white" : "rgba(248,250,252,0.7)" }}>
+                      <td className="px-4 py-2.5 text-right text-slate-700 text-xs">{item.label}</td>
+                      <td className="px-4 py-2.5 text-right text-slate-700 text-xs tabular-nums">{fmtNum(item.cap)}</td>
+                      <td className="px-4 py-2.5 text-right text-slate-700 text-xs tabular-nums">{fmtNum(item.betikhnun)}</td>
+                      <td className="px-4 py-2.5 text-right text-slate-600 text-xs tabular-nums">{item.meshuyakh != null ? fmtNum(item.meshuyakh) : "—"}</td>
+                      <td className="px-4 py-2.5 text-right text-xs tabular-nums"
+                        style={{ color: teremShuyakh < 0 ? "#dc2626" : teremShuyakh > 0 ? "#0f172a" : "#64748b" }}>
+                        {item.meshuyakh != null ? fmtNum(teremShuyakh) : "—"}
+                      </td>
+                      <td className="px-4 py-2.5 text-right text-xs font-700 tabular-nums"
+                        style={{ fontWeight: 700, color: item.hefresh < 0 ? "#dc2626" : "#1e293b" }}>
+                        {fmtNum(item.hefresh)}
+                      </td>
+                    </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <YozmaSupplierBreakdown breakdown={breakdownData} />
+        </>
+      )}
     </div>
   );
 }
@@ -958,7 +1264,10 @@ function GefenFilesDetail({ gefen_files, gefen_rows, gefen_merge_note }) {
 }
 
 function HashvaTab({ result }) {
+  const [activeBudgetName, setActiveBudgetName] = useState(null);
   const { summary, gefen_only } = result;
+  const perComboResults = result.per_combo_results;
+  const perCombos = perComboResults ? Object.values(perComboResults) : null;
 
   if (gefen_only) {
     return (
@@ -978,11 +1287,91 @@ function HashvaTab({ result }) {
     );
   }
 
-  const financeRows = result.rows_finance_not_gefen ?? [];
-  const gefenRows   = result.rows_gefen_not_finance ?? [];
   const { division, finance_rows_total, finance_rows_checked, finance_file } = summary;
+  const softwareLabel = finance_file?.software ?? "תוכנת הכספים";
   const label    = DIVISION_LABELS[division] ?? division;
   const filtered = finance_rows_total !== finance_rows_checked;
+
+  // Build pill list: prefer tikhnun plan budgets, fall back to per_combo keys
+  const tikhnunBudgets = (
+    result.tikhnun?.budgets ||
+    result.tikhnun_tikkon?.budgets ||
+    result.tikhnun_beinayim?.budgets ||
+    []
+  ).map(b => b.name);
+  const pillBudgets = tikhnunBudgets.length > 0
+    ? tikhnunBudgets
+    : perCombos ? [...new Set(perCombos.map(c => c.budget))] : [];
+
+  const hasPills = pillBudgets.length > 1 || (pillBudgets.length === 1 && perCombos);
+  const effectiveBudget = hasPills ? (activeBudgetName ?? pillBudgets[0] ?? null) : null;
+  const selectedCombos = (perCombos && effectiveBudget)
+    ? perCombos.filter(c => c.budget === effectiveBudget)
+    : perCombos ?? null;
+  const selectedCombo = selectedCombos?.[0] ?? null;
+  const isNotChecked = selectedCombo?.not_checked === true;
+
+  const PILL_STYLE = (active) => ({
+    fontWeight: active ? 700 : 500,
+    fontSize: "12px",
+    padding: "4px 14px",
+    borderRadius: "20px",
+    border: `1.5px solid ${active ? "#0070F3" : "#e2e8f0"}`,
+    background: active ? "#0070F3" : "transparent",
+    color: active ? "white" : "#64748b",
+    cursor: "pointer",
+    transition: "all 0.15s",
+  });
+
+  if (hasPills) {
+    return (
+      <div className="flex flex-col gap-4">
+        <div className="anim-fade-up glass-card-dark rounded-2xl px-5 py-3.5 flex items-center justify-center flex-wrap gap-2">
+          <span className="text-sm text-slate-500">בדיקה מפורטת לפי תקציב</span>
+        </div>
+        <div className="flex gap-2 flex-wrap" dir="rtl">
+          {pillBudgets.map((bname) => (
+            <button
+              key={bname}
+              onClick={() => setActiveBudgetName(bname)}
+              aria-pressed={effectiveBudget === bname}
+              style={PILL_STYLE(effectiveBudget === bname)}
+            >
+              {bname}
+            </button>
+          ))}
+        </div>
+        {isNotChecked ? (
+          <div className="anim-fade-up bg-yellow-50 border border-yellow-200 rounded-2xl p-4 text-sm text-yellow-800 text-right" dir="rtl">
+            {selectedCombo.not_checked_text || `לא ניתן היה לבצע השוואה עבור תקציב ${effectiveBudget} — לא נמצאו נתוני כספים תואמים`}
+          </div>
+        ) : selectedCombo ? (
+          <>
+            <ResultTable
+              title={`קיים ב${softwareLabel}, לא משויך בגפן — ${effectiveBudget}`}
+              rows={selectedCombo.in_finance_not_gefen}
+              columns={UNIFIED_COLS} index={1} showSum
+              headerGradient="linear-gradient(135deg, #0c237d 0%, #091a60 100%)"
+            />
+            <ResultTable
+              title={`משויך בגפן, לא קיים ב${softwareLabel} — ${effectiveBudget}`}
+              rows={selectedCombo.in_gefen_not_finance}
+              columns={UNIFIED_COLS} index={2} showSum
+              headerGradient="linear-gradient(135deg, #0c237d 0%, #091a60 100%)"
+            />
+          </>
+        ) : (
+          <div className="anim-fade-up bg-yellow-50 border border-yellow-200 rounded-2xl p-4 text-sm text-yellow-800 text-right" dir="rtl">
+            {`לא ניתן היה לבצע השוואה עבור תקציב ${effectiveBudget} — לא נמצאו נתוני כספים תואמים`}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // No pills — single combo or no per_combo (legacy path)
+  const financeRows = selectedCombo ? selectedCombo.in_finance_not_gefen : (result.rows_finance_not_gefen ?? []);
+  const gefenRows   = selectedCombo ? selectedCombo.in_gefen_not_finance  : (result.rows_gefen_not_finance  ?? []);
 
   return (
     <div className="flex flex-col gap-4">
@@ -997,19 +1386,97 @@ function HashvaTab({ result }) {
           </span>
         )}
       </div>
-
-      <ResultTable title={`קיים ב${finance_file?.software ?? "תוכנת הכספים"}, לא משויך בגפן`}
+      <ResultTable title={`קיים ב${softwareLabel}, לא משויך בגפן`}
         rows={financeRows} columns={UNIFIED_COLS} index={1} showSum
         headerGradient="linear-gradient(135deg, #0c237d 0%, #091a60 100%)" />
-      <ResultTable title={`משויך בגפן, לא קיים ב${finance_file?.software ?? "תוכנת הכספים"}`}
+      <ResultTable title={`משויך בגפן, לא קיים ב${softwareLabel}`}
         rows={gefenRows} columns={UNIFIED_COLS} index={2} showSum
         headerGradient="linear-gradient(135deg, #0c237d 0%, #091a60 100%)" />
-
     </div>
   );
 }
 
-function RejectedTab({ result, rows: rowsOverride }) {
+function RejectedTab({ result, rows: rowsOverride, tikhnun: tikhnunProp }) {
+  const [activeBudgetIdx, setActiveBudgetIdx] = useState(0);
+  const tikhnun = tikhnunProp ?? result.tikhnun;
+  const perBudget = tikhnun?.per_budget_rejected;
+  const budgets = tikhnun?.budgets;
+  const isMultiBudget = budgets && budgets.length > 1;
+
+  if (perBudget != null) {
+    if (isMultiBudget) {
+      const safeIdx = Math.min(activeBudgetIdx, budgets.length - 1);
+      const selectedName = budgets[safeIdx]?.name;
+      const rows = perBudget[selectedName] ?? [];
+      return (
+        <div className="flex flex-col gap-4">
+          <div className="flex gap-2 flex-wrap" dir="rtl">
+            {budgets.map((b, i) => (
+              <button
+                key={i}
+                onClick={() => setActiveBudgetIdx(i)}
+                style={{
+                  fontWeight: safeIdx === i ? 700 : 500,
+                  fontSize: "12px",
+                  padding: "4px 14px",
+                  borderRadius: "20px",
+                  border: `1.5px solid ${safeIdx === i ? "#0070F3" : "#e2e8f0"}`,
+                  background: safeIdx === i ? "#0070F3" : "transparent",
+                  color: safeIdx === i ? "white" : "#64748b",
+                  cursor: "pointer",
+                  transition: "all 0.15s",
+                }}
+              >
+                {b.name}
+              </button>
+            ))}
+          </div>
+          {rows.length === 0 ? (
+            <div className="glass-card-dark rounded-2xl overflow-hidden">
+              <div className="flex items-center justify-center gap-2 py-12">
+                <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  <circle cx="8" cy="8" r="7" fill="#16a34a" fillOpacity="0.15"/>
+                  <path d="M5 8l2 2 4-4" stroke="#16a34a" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+                <span className="text-sm font-700" style={{ fontWeight: 700, color: "#15803d" }}>אין אסמכתאות שנדחו</span>
+              </div>
+            </div>
+          ) : (
+            <ResultTable
+              title={`אסמכתאות שנדחו — ${selectedName}`}
+              rows={rows}
+              columns={REJECTED_COLS}
+              index={0}
+              showSum
+              headerGradient="linear-gradient(135deg, #0c237d 0%, #091a60 100%)"
+            />
+          )}
+        </div>
+      );
+    }
+    // Single budget with per_budget_rejected
+    const singleRows = Object.values(perBudget)[0] ?? [];
+    return (
+      <div className="flex flex-col gap-4">
+        {singleRows.length === 0 ? (
+          <div className="glass-card-dark rounded-2xl overflow-hidden">
+            <div className="flex items-center justify-center gap-2 py-12">
+              <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <circle cx="8" cy="8" r="7" fill="#16a34a" fillOpacity="0.15"/>
+                <path d="M5 8l2 2 4-4" stroke="#16a34a" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+              <span className="text-sm font-700" style={{ fontWeight: 700, color: "#15803d" }}>אין אסמכתאות שנדחו</span>
+            </div>
+          </div>
+        ) : (
+          <ResultTable title="אסמכתאות שנדחו" rows={singleRows} columns={REJECTED_COLS} index={0} showSum
+            headerGradient="linear-gradient(135deg, #0c237d 0%, #091a60 100%)" />
+        )}
+      </div>
+    );
+  }
+
+  // Fallback: no tikhnun identification — use provided rows or flat list
   const rows = rowsOverride ?? result.rows_gefen_rejected ?? [];
   return (
     <div className="flex flex-col gap-4">
@@ -1019,7 +1486,87 @@ function RejectedTab({ result, rows: rowsOverride }) {
   );
 }
 
-function NoPdfTab({ result, rows: rowsOverride }) {
+function NoPdfTab({ result, rows: rowsOverride, tikhnun: tikhnunProp }) {
+  const [activeBudgetIdx, setActiveBudgetIdx] = useState(0);
+  const tikhnun = tikhnunProp ?? result.tikhnun;
+  const perBudget = tikhnun?.per_budget_no_pdf;
+  const budgets = tikhnun?.budgets;
+  const isMultiBudget = budgets && budgets.length > 1;
+
+  if (perBudget != null) {
+    if (isMultiBudget) {
+      const safeIdx = Math.min(activeBudgetIdx, budgets.length - 1);
+      const selectedName = budgets[safeIdx]?.name;
+      const rows = perBudget[selectedName] ?? [];
+      return (
+        <div className="flex flex-col gap-4">
+          <div className="flex gap-2 flex-wrap" dir="rtl">
+            {budgets.map((b, i) => (
+              <button
+                key={i}
+                onClick={() => setActiveBudgetIdx(i)}
+                style={{
+                  fontWeight: safeIdx === i ? 700 : 500,
+                  fontSize: "12px",
+                  padding: "4px 14px",
+                  borderRadius: "20px",
+                  border: `1.5px solid ${safeIdx === i ? "#0070F3" : "#e2e8f0"}`,
+                  background: safeIdx === i ? "#0070F3" : "transparent",
+                  color: safeIdx === i ? "white" : "#64748b",
+                  cursor: "pointer",
+                  transition: "all 0.15s",
+                }}
+              >
+                {b.name}
+              </button>
+            ))}
+          </div>
+          {rows.length === 0 ? (
+            <div className="glass-card-dark rounded-2xl overflow-hidden">
+              <div className="flex items-center justify-center gap-2 py-12">
+                <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  <circle cx="8" cy="8" r="7" fill="#16a34a" fillOpacity="0.15"/>
+                  <path d="M5 8l2 2 4-4" stroke="#16a34a" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+                <span className="text-sm font-700" style={{ fontWeight: 700, color: "#15803d" }}>אין אסמכתאות ללא PDF</span>
+              </div>
+            </div>
+          ) : (
+            <ResultTable
+              title={`אסמכתאות ללא PDF — ${selectedName}`}
+              rows={rows}
+              columns={UNIFIED_COLS}
+              index={0}
+              showSum
+              headerGradient="linear-gradient(135deg, #0c237d 0%, #091a60 100%)"
+            />
+          )}
+        </div>
+      );
+    }
+    // Single budget with per_budget_no_pdf
+    const singleRows = Object.values(perBudget)[0] ?? [];
+    return (
+      <div className="flex flex-col gap-4">
+        {singleRows.length === 0 ? (
+          <div className="glass-card-dark rounded-2xl overflow-hidden">
+            <div className="flex items-center justify-center gap-2 py-12">
+              <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <circle cx="8" cy="8" r="7" fill="#16a34a" fillOpacity="0.15"/>
+                <path d="M5 8l2 2 4-4" stroke="#16a34a" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+              <span className="text-sm font-700" style={{ fontWeight: 700, color: "#15803d" }}>אין אסמכתאות ללא PDF</span>
+            </div>
+          </div>
+        ) : (
+          <ResultTable title="אסמכתאות ללא PDF" rows={singleRows} columns={UNIFIED_COLS} index={0} showSum
+            headerGradient="linear-gradient(135deg, #0c237d 0%, #091a60 100%)" />
+        )}
+      </div>
+    );
+  }
+
+  // Fallback: no tikhnun identification — use provided rows or flat list
   const rows = rowsOverride ?? result.rows_gefen_no_pdf ?? [];
   return (
     <div className="flex flex-col gap-4">
@@ -1049,8 +1596,9 @@ function TikhnunOnlyBanner() {
 // Main export
 // ---------------------------------------------------------------------------
 
-export default function ResultsView({ result, runId, authHeader, onNewRun }) {
+export default function ResultsView({ result, runId, onNewRun, onTikhnunUpdate = () => {} }) {
   const [activeTab, setActiveTab]       = useState("hashva");
+  const [activeBudgetIdx, setActiveBudgetIdx] = useState(0);
   const [yozmaDialogShown, setYozmaDialogShown]             = useState(false);
   const [showYozmaDialog, setShowYozmaDialog]               = useState(false);
   const [yozmaMultiplier, setYozmaMultiplier]               = useState("03");
@@ -1064,6 +1612,7 @@ export default function ResultsView({ result, runId, authHeader, onNewRun }) {
   const tikhnunTikkon   = result.tikhnun_tikkon;
   const tikhnunBeinayim = result.tikhnun_beinayim;
   const isDualTikhnun   = !!(tikhnunTikkon || tikhnunBeinayim);
+
   const hasTikhnun      = isDualTikhnun || !!(tikhnun && !tikhnun.error);
   const tikhnunOnly     = !!result.tikhnun_only;
 
@@ -1081,6 +1630,12 @@ export default function ResultsView({ result, runId, authHeader, onNewRun }) {
       if (GEFEN_ONLY_TABS.includes(tab)) return false;
     }
     if (tab === "hashva") {
+      const perCombo = result.per_combo_results;
+      if (perCombo != null) {
+        return Object.values(perCombo).some(
+          c => !c.not_checked && (c.in_finance_not_gefen.length + c.in_gefen_not_finance.length > 0)
+        );
+      }
       const a = (result.rows_finance_not_gefen ?? []).length;
       const b = (result.rows_gefen_not_finance ?? []).length;
       return a + b > 0;
@@ -1110,8 +1665,11 @@ export default function ResultsView({ result, runId, authHeader, onNewRun }) {
     if (TIKHNUN_ONLY_TABS.includes(tab) && !hasTikhnun) return;
     if (GEFEN_ONLY_TABS.includes(tab) && tikhnunOnly) return;
     if (tab === "yozma" && hasTikhnun && !yozmaDialogShown) {
-      setShowYozmaDialog(true);
-      return;
+      const _budgetsWithYozma = (tikhnun?.budgets || []).filter(b => b.yozma_03);
+      if (_budgetsWithYozma.length <= 1) {
+        setShowYozmaDialog(true);
+        return;
+      }
     }
     setActiveTab(tab);
   };
@@ -1191,7 +1749,7 @@ export default function ResultsView({ result, runId, authHeader, onNewRun }) {
           const filtered = finance_rows_total !== finance_rows_checked;
           return (
             <div className="flex flex-col gap-4">
-              {hasTikhnun && <SikarTab tikhnun={tikhnun} />}
+              {hasTikhnun && <SikarTab tikhnun={tikhnun} activeBudgetIdx={activeBudgetIdx} setActiveBudgetIdx={setActiveBudgetIdx} />}
               {showBedika && (
                 <>
                   <div className="mt-6 mb-1">
@@ -1355,8 +1913,8 @@ export default function ResultsView({ result, runId, authHeader, onNewRun }) {
           const { tikkon, beinayim } = splitByDivision(result.rows_gefen_rejected ?? []);
           return (
             <div className="flex flex-col gap-24">
-              {tikhnunTikkon   && <DualTikhnunSection label={tikhnunTikkon.school_stage}><RejectedTab result={result} rows={tikkon} /></DualTikhnunSection>}
-              {tikhnunBeinayim && <DualTikhnunSection label={tikhnunBeinayim.school_stage}><RejectedTab result={result} rows={beinayim} /></DualTikhnunSection>}
+              {tikhnunTikkon   && <DualTikhnunSection label={tikhnunTikkon.school_stage}><RejectedTab result={result} rows={tikkon} tikhnun={tikhnunTikkon} /></DualTikhnunSection>}
+              {tikhnunBeinayim && <DualTikhnunSection label={tikhnunBeinayim.school_stage}><RejectedTab result={result} rows={beinayim} tikhnun={tikhnunBeinayim} /></DualTikhnunSection>}
             </div>
           );
         })()}
@@ -1365,8 +1923,8 @@ export default function ResultsView({ result, runId, authHeader, onNewRun }) {
           const { tikkon, beinayim } = splitByDivision(result.rows_gefen_no_pdf ?? []);
           return (
             <div className="flex flex-col gap-24">
-              {tikhnunTikkon   && <DualTikhnunSection label={tikhnunTikkon.school_stage}><NoPdfTab result={result} rows={tikkon} /></DualTikhnunSection>}
-              {tikhnunBeinayim && <DualTikhnunSection label={tikhnunBeinayim.school_stage}><NoPdfTab result={result} rows={beinayim} /></DualTikhnunSection>}
+              {tikhnunTikkon   && <DualTikhnunSection label={tikhnunTikkon.school_stage}><NoPdfTab result={result} rows={tikkon}   tikhnun={tikhnunTikkon} /></DualTikhnunSection>}
+              {tikhnunBeinayim && <DualTikhnunSection label={tikhnunBeinayim.school_stage}><NoPdfTab result={result} rows={beinayim} tikhnun={tikhnunBeinayim} /></DualTikhnunSection>}
             </div>
           );
         })()}
@@ -1377,28 +1935,25 @@ export default function ResultsView({ result, runId, authHeader, onNewRun }) {
             {tikhnunBeinayim && <DualTikhnunSection label={tikhnunBeinayim.school_stage}><KvuaTab tikhnun={tikhnunBeinayim} /></DualTikhnunSection>}
           </div>
         )}
-        {activeTab === "partial" && !isDualTikhnun && <PartialTab tikhnun={hasTikhnun ? tikhnun : null} />}
+        {activeTab === "partial" && !isDualTikhnun && <PartialTab tikhnun={hasTikhnun ? tikhnun : null} activeBudgetIdx={activeBudgetIdx} setActiveBudgetIdx={setActiveBudgetIdx} />}
         {activeTab === "partial" && isDualTikhnun && (
           <div className="flex flex-col gap-24">
             {tikhnunTikkon   && <DualTikhnunSection label={tikhnunTikkon.school_stage}><PartialTab tikhnun={tikhnunTikkon} /></DualTikhnunSection>}
             {tikhnunBeinayim && <DualTikhnunSection label={tikhnunBeinayim.school_stage}><PartialTab tikhnun={tikhnunBeinayim} /></DualTikhnunSection>}
           </div>
         )}
-        {activeTab === "yozma" && !isDualTikhnun && (
+        <div style={{ display: activeTab === "yozma" && !isDualTikhnun ? undefined : "none" }}>
           <YozmaTab tikhnun={hasTikhnun ? tikhnun : null} multiplier={yozmaMultiplier} autoSwitch={yozmaAutoSwitch} />
-        )}
-        {activeTab === "yozma" && isDualTikhnun && (
-          <div className="flex flex-col gap-24">
-            {tikhnunTikkon   && <DualTikhnunSection label={tikhnunTikkon.school_stage}><YozmaTab tikhnun={tikhnunTikkon} multiplier={yozmaMultiplierTikkon} autoSwitch={yozmaAutoSwitchTikkon} /></DualTikhnunSection>}
-            {tikhnunBeinayim && <DualTikhnunSection label={tikhnunBeinayim.school_stage}><YozmaTab tikhnun={tikhnunBeinayim} multiplier={yozmaMultiplierBeinayim} autoSwitch={yozmaAutoSwitchBeinayim} /></DualTikhnunSection>}
-          </div>
-        )}
+        </div>
+        <div className="flex flex-col gap-24" style={{ display: activeTab === "yozma" && isDualTikhnun ? undefined : "none" }}>
+          {tikhnunTikkon   && <DualTikhnunSection label={tikhnunTikkon.school_stage}><YozmaTab tikhnun={tikhnunTikkon} multiplier={yozmaMultiplierTikkon} autoSwitch={yozmaAutoSwitchTikkon} /></DualTikhnunSection>}
+          {tikhnunBeinayim && <DualTikhnunSection label={tikhnunBeinayim.school_stage}><YozmaTab tikhnun={tikhnunBeinayim} multiplier={yozmaMultiplierBeinayim} autoSwitch={yozmaAutoSwitchBeinayim} /></DualTikhnunSection>}
+        </div>
       </div>
 
       <TabDownloadBar
         activeTab={activeTab}
         runId={runId}
-        authHeader={authHeader}
         hasTikhnun={hasTikhnun}
         tikhnunOnly={tikhnunOnly}
         yozmaMultiplier={yozmaMultiplier}
