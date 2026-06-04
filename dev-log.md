@@ -1,6 +1,5 @@
 # Dev Log
 
-## 2026-06-04 — תיקון: עדכון שם ב"אזור אישי" לא נשמר לסשן
 - **`frontend/src/components/Sidebar.jsx`**: אחרי שמירת שם ב-`profiles`, מוסיפים קריאה ל-`supabase.auth.updateUser({ data: { full_name } })` כדי לסנכרן את ה-`user_metadata` בסשן המקומי. בלי זה הסיידבר המשיך לקרוא את השם הישן מה-JWT.
 
 ## 2026-06-04 — פיצ'ר: אזור אישי בסיידבר
