@@ -5,6 +5,13 @@ from logic.gefen_processor import normalize_amount
 
 def load_kesafim(filepath: str) -> pd.DataFrame:
     rows = _parse_tsv(filepath)
+    if not rows:
+        return pd.DataFrame(columns=[
+            "report_code", "supplier", "supplier_name",
+            "invoice_date", "invoice_number", "voucher",
+            "item_number", "item_name", "description",
+            "amount_raw", "total", "status", "amount", "ichud",
+        ])
     df = pd.DataFrame(rows)
     df["amount"] = df["amount_raw"].apply(normalize_amount)
     df["ichud"] = (
