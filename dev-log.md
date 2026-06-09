@@ -1,6 +1,14 @@
 # Dev Log
 
-## 2026-06-04 — תיקון: עדכון שם ב"אזור אישי" לא נשמר לסשן
+## 2026-06-09 — ביצועים: ייעול טעינה, קריאות מקביליות, gunicorn
+- **`frontend/src/main.jsx`**: הוספת `axios.defaults.timeout = 20000` — בקשות תקועות נכשלות אחרי 20 שניות
+- **`frontend/src/pages/DashboardPage.jsx`**: ה-`init()` שוכתב — `loadSchools()` מתחיל מיידית, תוך כדי שהקריאות `/users/me`, `/users/all`, `profiles` רצות במקביל (`Promise.allSettled`); העדפות localStorage נטענות סינכרונית עוד לפני
+- **`frontend/src/pages/SchoolPage.jsx`**: קריאות `/accounts` ו-`/logs` מתבצעות ב-`Promise.allSettled` במקביל (במקום ברצף)
+- **`frontend/src/App.jsx`**: הוספת keep-alive — כל 9 דקות נשלחת `GET /health` לשמירת ה-Render dyno חם
+- **`backend/routers/schools_router.py` — `list_schools()`**: קריאת schools + advisor filter מקבילית עם `ThreadPoolExecutor` — במקום 2-3 קריאות Supabase ברצף
+- **`backend/routers/schools_router.py` — `get_meetings_stats()`**: עבור owner/manager — קריאה אחת בלבד לmeetings (ללא שאילתת schools); עבור advisor — קריאות schools + advisor_schools מקבילית
+- **`render.yaml` + `requirements.txt`**: החלפת `uvicorn --workers 4` ב-`gunicorn -w 4 -k uvicorn.workers.UvicornWorker` — gunicorn מאחזר workers שקרסו אוטומטית (uvicorn לא עושה זאת), מונע את שגיאות "cannot connect" שנגרמות כשworker מת לאחר עיבוד קובץ גדול
+
 - **`frontend/src/components/Sidebar.jsx`**: אחרי שמירת שם ב-`profiles`, מוסיפים קריאה ל-`supabase.auth.updateUser({ data: { full_name } })` כדי לסנכרן את ה-`user_metadata` בסשן המקומי. בלי זה הסיידבר המשיך לקרוא את השם הישן מה-JWT.
 
 ## 2026-06-04 — פיצ'ר: אזור אישי בסיידבר

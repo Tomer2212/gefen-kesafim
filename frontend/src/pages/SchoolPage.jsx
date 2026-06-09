@@ -2718,23 +2718,24 @@ export default function SchoolPage() {
 
       loadUsers();
 
-      const accountsRes = await axios.get(`/schools/${schoolId}/accounts`).catch(() => null);
-      if (accountsRes) setAccounts(accountsRes.data || []);
+      const [accountsResult, logsResult] = await Promise.allSettled([
+        axios.get(`/schools/${schoolId}/accounts`),
+        axios.get(`/schools/${schoolId}/logs`),
+      ]);
 
-      let logsData = null;
-      try {
-        const res = await axios.get(`/schools/${schoolId}/logs`);
-        logsData = res.data || [];
-      } catch {
+      if (accountsResult.status === "fulfilled") setAccounts(accountsResult.value.data || []);
+
+      if (logsResult.status === "fulfilled") {
+        setLogs(logsResult.value.data || []);
+      } else {
         try {
           await new Promise(r => setTimeout(r, 1500));
           const res = await axios.get(`/schools/${schoolId}/logs`);
-          logsData = res.data || [];
+          setLogs(res.data || []);
         } catch {
           setLogsError("שגיאה בטעינת ההיסטוריה");
         }
       }
-      if (logsData !== null) setLogs(logsData);
       setLoading(false);
     }
     load();

@@ -545,38 +545,46 @@ export default function DashboardPage() {
       const uid = session.user.id;
       setUserId(uid);
       setRole(session.user.user_metadata?.role || "advisor");
-      try {
-        const meRes = await axios.get("/schools/users/me");
-        setCanDelete(!!meRes.data?.managers_can_delete);
-      } catch {}
-      try {
-        const usersRes = await axios.get("/schools/users/all");
-        setAllOrgUsers(Array.isArray(usersRes.data) ? usersRes.data : []);
-      } catch {}
-      try {
-        // Load from Supabase (cross-device), fall back to localStorage
-        const { data: prefs } = await supabase.from("profiles").select("col_order, col_visible").eq("id", uid).single();
+
+      // Load localStorage prefs immediately (synchronous, no wait)
+      const savedOrder = JSON.parse(localStorage.getItem(`dashboard-col-order-${uid}`) || "null");
+      if (Array.isArray(savedOrder) && savedOrder.length === DEFAULT_COL_ORDER.length && savedOrder.every(k => DEFAULT_COL_ORDER.includes(k)))
+        setColOrder(savedOrder);
+      const savedVisible = JSON.parse(localStorage.getItem(`dashboard-col-visible-${uid}`) || "null");
+      if (savedVisible && typeof savedVisible === "object" && DEFAULT_COL_ORDER.every(k => k in savedVisible))
+        setColVisible(savedVisible);
+
+      // Start schools loading immediately, run metadata calls in parallel
+      const schoolsPromise = loadSchools();
+
+      const [meResult, usersResult, prefsResult] = await Promise.allSettled([
+        axios.get("/schools/users/me"),
+        axios.get("/schools/users/all"),
+        supabase.from("profiles").select("col_order, col_visible").eq("id", uid).single(),
+      ]);
+
+      if (meResult.status === "fulfilled") {
+        setCanDelete(!!meResult.value.data?.managers_can_delete);
+      }
+      if (usersResult.status === "fulfilled") {
+        setAllOrgUsers(Array.isArray(usersResult.value.data) ? usersResult.value.data : []);
+      }
+      if (prefsResult.status === "fulfilled") {
+        const prefs = prefsResult.value.data;
         if (prefs?.col_order && Array.isArray(prefs.col_order) &&
             prefs.col_order.length === DEFAULT_COL_ORDER.length &&
             prefs.col_order.every(k => DEFAULT_COL_ORDER.includes(k))) {
           setColOrder(prefs.col_order);
           localStorage.setItem(`dashboard-col-order-${uid}`, JSON.stringify(prefs.col_order));
-        } else {
-          const savedOrder = JSON.parse(localStorage.getItem(`dashboard-col-order-${uid}`) || "null");
-          if (Array.isArray(savedOrder) && savedOrder.length === DEFAULT_COL_ORDER.length && savedOrder.every(k => DEFAULT_COL_ORDER.includes(k)))
-            setColOrder(savedOrder);
         }
         if (prefs?.col_visible && typeof prefs.col_visible === "object" &&
             DEFAULT_COL_ORDER.every(k => k in prefs.col_visible)) {
           setColVisible(prefs.col_visible);
           localStorage.setItem(`dashboard-col-visible-${uid}`, JSON.stringify(prefs.col_visible));
-        } else {
-          const savedVisible = JSON.parse(localStorage.getItem(`dashboard-col-visible-${uid}`) || "null");
-          if (savedVisible && typeof savedVisible === "object" && DEFAULT_COL_ORDER.every(k => k in savedVisible))
-            setColVisible(savedVisible);
         }
-      } catch {}
-      await loadSchools();
+      }
+
+      await schoolsPromise;
     }
     init();
   }, [navigate]);

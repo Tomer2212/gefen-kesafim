@@ -1,6 +1,7 @@
 import io
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor, wait as futures_wait, FIRST_COMPLETED
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
@@ -105,30 +106,34 @@ def _require_owner(user: dict):
 @router.get("/")
 def list_schools(user: Annotated[dict, Depends(get_current_user)]):
     db = get_admin_client()
+    is_advisor = user["role"] not in ("owner", "manager")
 
-    def _filter_for_advisor(schools: list) -> list:
-        """Filter schools based on restrict_access_to for non-manager roles."""
-        assigned = db.table("advisor_schools").select("school_id").eq("advisor_id", user["id"]).execute()
-        advisor_school_ids = {r["school_id"] for r in (assigned.data or [])}
-        result = []
-        for s in schools:
-            rat = s.get("restrict_access_to")
-            if rat is None:  # כולם — open to all
-                result.append(s)
-            elif user["id"] in (rat or []):  # advisor is in explicit access list
-                result.append(s)
-            elif s["id"] in advisor_school_ids:  # assigned via advisor_schools
-                result.append(s)
-        return result
+    # Fetch schools + (for advisors) advisor assignment in parallel
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        schools_future = pool.submit(
+            lambda: db.table("schools").select("*, gefen_accounts(*), advisor_schools(advisor_id)").order("name").execute()
+        )
+        if is_advisor:
+            assigned_future = pool.submit(
+                lambda: db.table("advisor_schools").select("school_id").eq("advisor_id", user["id"]).execute()
+            )
+        else:
+            assigned_future = None
 
-    # Step 1: get schools with accounts + advisor_ids (no nested profiles join)
-    all_res = db.table("schools").select("*, gefen_accounts(*), advisor_schools(advisor_id)").order("name").execute()
-    schools = all_res.data or []
+        all_res = schools_future.result()
+        schools = all_res.data or []
 
-    if user["role"] not in ("owner", "manager"):
-        schools = _filter_for_advisor(schools)
+        if is_advisor and assigned_future:
+            assigned = assigned_future.result()
+            advisor_school_ids = {r["school_id"] for r in (assigned.data or [])}
+            filtered = []
+            for s in schools:
+                rat = s.get("restrict_access_to")
+                if rat is None or user["id"] in (rat or []) or s["id"] in advisor_school_ids:
+                    filtered.append(s)
+            schools = filtered
 
-    # Step 2: enrich advisor_schools entries with profile data via separate query
+    # Enrich advisor_schools entries with profile data via separate query
     all_advisor_ids = list({
         row["advisor_id"]
         for s in schools
@@ -463,26 +468,30 @@ def get_notifications(user: Annotated[dict, Depends(get_current_user)]):
 def get_meetings_stats(user: Annotated[dict, Depends(get_current_user)]):
     db = get_admin_client()
 
-    # Determine accessible school IDs
-    all_res = db.table("schools").select("id, restrict_access_to").execute()
-    all_schools = all_res.data or []
+    if user["role"] in ("owner", "manager"):
+        # Owners/managers see all schools — skip the schools filter query entirely
+        meetings_res = db.table("meetings").select("school_id, status, start_time, end_time").execute()
+    else:
+        # Advisors: fetch schools + assignments in parallel, then meetings
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            schools_future = pool.submit(
+                lambda: db.table("schools").select("id, restrict_access_to").execute()
+            )
+            assigned_future = pool.submit(
+                lambda: db.table("advisor_schools").select("school_id").eq("advisor_id", user["id"]).execute()
+            )
+            all_schools = schools_future.result().data or []
+            advisor_ids = {r["school_id"] for r in (assigned_future.result().data or [])}
 
-    if user["role"] not in ("owner", "manager"):
-        assigned = db.table("advisor_schools").select("school_id").eq("advisor_id", user["id"]).execute()
-        advisor_ids = {r["school_id"] for r in (assigned.data or [])}
         accessible = [
             s["id"] for s in all_schools
             if s.get("restrict_access_to") is None
             or user["id"] in (s.get("restrict_access_to") or [])
             or s["id"] in advisor_ids
         ]
-    else:
-        accessible = [s["id"] for s in all_schools]
-
-    if not accessible:
-        return {}
-
-    meetings_res = db.table("meetings").select("school_id, status, start_time, end_time").in_("school_id", accessible).execute()
+        if not accessible:
+            return {}
+        meetings_res = db.table("meetings").select("school_id, status, start_time, end_time").in_("school_id", accessible).execute()
     stats: dict = {}
     for m in (meetings_res.data or []):
         sid = m["school_id"]
