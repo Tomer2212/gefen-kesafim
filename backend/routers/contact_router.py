@@ -23,6 +23,11 @@ TICKETS_FILE  = Path(__file__).parent.parent / "tickets.json"
 CONSENTS_FILE = Path(__file__).parent.parent / "consents.json"
 _lock = threading.Lock()
 
+if not TICKETS_FILE.exists():
+    TICKETS_FILE.write_text(json.dumps({"last": 0}), encoding="utf-8")
+if not CONSENTS_FILE.exists():
+    CONSENTS_FILE.write_text(json.dumps([]), encoding="utf-8")
+
 CONSENT_TEXT = "אני מאשר/ת קבלת עדכונים במייל ו/או בטלפון בנוגע לפנייה זו."
 
 
