@@ -129,9 +129,7 @@ export default function ContactPage() {
       fd.append("consent",     consent ? "true" : "false");
       files.forEach(f => fd.append("files", f));
 
-      const res = await axios.post("/contact/send", fd, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
+      const res = await axios.post("/contact/send", fd);
       setTicketId(res.data.ticket ?? "");
       setSent(true);
     } catch {
