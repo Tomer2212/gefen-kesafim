@@ -1,5 +1,6 @@
-import { createContext, useContext, useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useRef, useState } from "react";
 import { createBrowserRouter, Navigate, RouterProvider } from "react-router-dom";
+import axios from "axios";
 import { supabase } from "./lib/supabase";
 import LoginPage from "./pages/LoginPage";
 import DashboardPage from "./pages/DashboardPage";
@@ -47,15 +48,29 @@ const router = createBrowserRouter([
 
 export default function App() {
   const [session, setSession] = useState(undefined);
+  const keepAliveRef = useRef(null);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session ?? null);
     });
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session ?? null);
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession ?? null);
+      if (newSession) {
+        if (!keepAliveRef.current) {
+          keepAliveRef.current = setInterval(() => {
+            axios.get("/health", { timeout: 5000 }).catch(() => {});
+          }, 9 * 60 * 1000); // every 9 minutes — keeps Render dyno warm
+        }
+      } else {
+        clearInterval(keepAliveRef.current);
+        keepAliveRef.current = null;
+      }
     });
-    return () => subscription.unsubscribe();
+    return () => {
+      subscription.unsubscribe();
+      clearInterval(keepAliveRef.current);
+    };
   }, []);
 
   return (

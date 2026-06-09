@@ -138,10 +138,10 @@ export default function AccessibilityStatementPage() {
                   תומר אלון
                 </p>
                 <a
-                  href="mailto:geffen360@gmail.com"
+                  href="mailto:support@gefenai.co.il"
                   className="text-sm text-blue-600 hover:underline block mb-2"
                 >
-                  geffen360@gmail.com
+                  support@gefenai.co.il
                 </a>
                 <p className="text-sm text-slate-600">
                   או דרך{" "}
