@@ -8,7 +8,7 @@ import { supabase } from "./lib/supabase";
 if (import.meta.env.VITE_API_URL) {
   axios.defaults.baseURL = import.meta.env.VITE_API_URL;
 }
-axios.defaults.timeout = 20000;
+axios.defaults.timeout = 45000;
 
 // Attach Supabase JWT to every request
 axios.interceptors.request.use(async (config) => {

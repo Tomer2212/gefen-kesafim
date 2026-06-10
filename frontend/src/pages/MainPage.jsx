@@ -241,7 +241,7 @@ export default function MainPage() {
         />
       )}
 
-      <div style={{ marginRight: 240 }}>
+      <div style={{ marginRight: "var(--sidebar-w, 240px)", transition: "margin-right 0.25s cubic-bezier(0.4,0,0.2,1)" }}>
       {/* Main content */}
       <main className="max-w-3xl mx-auto px-4 py-8 pb-16">
 

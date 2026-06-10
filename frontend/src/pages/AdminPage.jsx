@@ -802,7 +802,7 @@ export default function AdminPage() {
     <div dir="rtl" className="bg-scene min-h-screen">
       <Sidebar dark />
 
-      <div style={{ marginRight: 240 }}>
+      <div style={{ marginRight: "var(--sidebar-w, 240px)", transition: "margin-right 0.25s cubic-bezier(0.4,0,0.2,1)" }}>
         <div className="max-w-4xl mx-auto px-6 py-10">
           <div className="mb-8">
             <h1 className="text-2xl font-bold text-slate-900">פאנל ניהול</h1>

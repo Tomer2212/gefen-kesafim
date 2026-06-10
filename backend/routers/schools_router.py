@@ -1,6 +1,7 @@
 import io
 import logging
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, wait as futures_wait, FIRST_COMPLETED
 from typing import Annotated
 
@@ -107,31 +108,42 @@ def _require_owner(user: dict):
 def list_schools(user: Annotated[dict, Depends(get_current_user)]):
     db = get_admin_client()
     is_advisor = user["role"] not in ("owner", "manager")
+    schools = []
 
-    # Fetch schools + (for advisors) advisor assignment in parallel
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        schools_future = pool.submit(
-            lambda: db.table("schools").select("*, gefen_accounts(*), advisor_schools(advisor_id)").order("name").execute()
-        )
-        if is_advisor:
-            assigned_future = pool.submit(
-                lambda: db.table("advisor_schools").select("school_id").eq("advisor_id", user["id"]).execute()
-            )
-        else:
-            assigned_future = None
+    for attempt in range(2):
+        try:
+            # Fetch schools + (for advisors) advisor assignment in parallel
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                schools_future = pool.submit(
+                    lambda: db.table("schools").select("*, gefen_accounts(*), advisor_schools(advisor_id)").order("name").execute()
+                )
+                if is_advisor:
+                    assigned_future = pool.submit(
+                        lambda: db.table("advisor_schools").select("school_id").eq("advisor_id", user["id"]).execute()
+                    )
+                else:
+                    assigned_future = None
 
-        all_res = schools_future.result()
-        schools = all_res.data or []
+                all_res = schools_future.result()
+                schools = all_res.data or []
 
-        if is_advisor and assigned_future:
-            assigned = assigned_future.result()
-            advisor_school_ids = {r["school_id"] for r in (assigned.data or [])}
-            filtered = []
-            for s in schools:
-                rat = s.get("restrict_access_to")
-                if rat is None or user["id"] in (rat or []) or s["id"] in advisor_school_ids:
-                    filtered.append(s)
-            schools = filtered
+                if is_advisor and assigned_future:
+                    assigned = assigned_future.result()
+                    advisor_school_ids = {r["school_id"] for r in (assigned.data or [])}
+                    filtered = []
+                    for s in schools:
+                        rat = s.get("restrict_access_to")
+                        if rat is None or user["id"] in (rat or []) or s["id"] in advisor_school_ids:
+                            filtered.append(s)
+                    schools = filtered
+            break  # success
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("list_schools attempt 1 failed: %s — retrying", exc)
+                time.sleep(0.3)
+            else:
+                logger.error("list_schools failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
     # Enrich advisor_schools entries with profile data via separate query
     all_advisor_ids = list({
@@ -141,11 +153,28 @@ def list_schools(user: Annotated[dict, Depends(get_current_user)]):
         if row.get("advisor_id")
     })
     if all_advisor_ids:
-        p_rows = db.table("profiles").select("id, full_name, email").in_("id", all_advisor_ids).execute()
-        profiles_map = {p["id"]: p for p in (p_rows.data or [])}
-        for school in schools:
-            for row in (school.get("advisor_schools") or []):
-                row["profiles"] = profiles_map.get(row["advisor_id"])
+        try:
+            p_rows = db.table("profiles").select("id, full_name, email").in_("id", all_advisor_ids).execute()
+            profiles_map = {p["id"]: p for p in (p_rows.data or [])}
+            for school in schools:
+                for row in (school.get("advisor_schools") or []):
+                    row["profiles"] = profiles_map.get(row["advisor_id"])
+        except Exception as exc:
+            logger.warning("profiles enrichment failed (non-fatal): %s", exc)
+
+    # Embed meetings stats directly so the frontend needs no separate request
+    school_ids = [s["id"] for s in schools]
+    if school_ids:
+        try:
+            stats_res = db.rpc("get_meetings_stats", {"school_ids": school_ids}).execute()
+            m_stats = {
+                r["school_id"]: {"completed": r["completed"], "total_minutes": r["total_minutes"]}
+                for r in (stats_res.data or [])
+            }
+            for school in schools:
+                school["meetings_stats"] = m_stats.get(school["id"])
+        except Exception as exc:
+            logger.warning("meetings stats enrichment failed (non-fatal): %s", exc)
 
     return schools
 
@@ -205,14 +234,23 @@ def list_accounts(
     user: Annotated[dict, Depends(get_current_user)],
 ):
     db = get_admin_client()
-    rows = (
-        db.table("gefen_accounts")
-        .select("*")
-        .eq("school_id", school_id)
-        .order("division_type")
-        .execute()
-    )
-    return rows.data
+    for attempt in range(2):
+        try:
+            rows = (
+                db.table("gefen_accounts")
+                .select("*")
+                .eq("school_id", school_id)
+                .order("division_type")
+                .execute()
+            )
+            return rows.data
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("list_accounts attempt 1 failed: %s — retrying", exc)
+                time.sleep(0.3)
+            else:
+                logger.error("list_accounts failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
 
 @router.post("/{school_id}/accounts")
@@ -326,15 +364,38 @@ class ReviewRequestIn(BaseModel):
     reviewer_note: str | None = None
 
 
+_approver_ids_cache: tuple[list[str], float] | None = None
+_APPROVER_TTL = 300  # 5 minutes
+
+
+def invalidate_approver_ids_cache() -> None:
+    global _approver_ids_cache
+    _approver_ids_cache = None
+
+
 def _get_approver_ids(db) -> list[str]:
     """Return IDs of who should receive approval notifications.
     If any owner has delegate_approvals_to_managers=True, include managers too.
+    Result cached for 5 minutes; single query instead of two.
     """
-    owners = db.table("profiles").select("id, delegate_approvals_to_managers").eq("role", "owner").execute()
-    ids = [r["id"] for r in (owners.data or [])]
-    if any(r.get("delegate_approvals_to_managers") for r in (owners.data or [])):
-        managers = db.table("profiles").select("id").eq("role", "manager").execute()
-        ids += [r["id"] for r in (managers.data or [])]
+    global _approver_ids_cache
+    now = time.monotonic()
+    if _approver_ids_cache and (now - _approver_ids_cache[1]) < _APPROVER_TTL:
+        return _approver_ids_cache[0]
+
+    all_candidates = (
+        db.table("profiles")
+        .select("id, role, delegate_approvals_to_managers")
+        .in_("role", ["owner", "manager"])
+        .execute()
+    )
+    candidates = all_candidates.data or []
+    owners = [r for r in candidates if r["role"] == "owner"]
+    managers = [r for r in candidates if r["role"] == "manager"]
+    ids = [r["id"] for r in owners]
+    if any(r.get("delegate_approvals_to_managers") for r in owners):
+        ids += [r["id"] for r in managers]
+    _approver_ids_cache = (ids, now)
     return ids
 
 
@@ -468,30 +529,34 @@ def get_notifications(user: Annotated[dict, Depends(get_current_user)]):
 def get_meetings_stats(user: Annotated[dict, Depends(get_current_user)]):
     db = get_admin_client()
 
-    if user["role"] in ("owner", "manager"):
-        # Owners/managers see all schools — skip the schools filter query entirely
-        meetings_res = db.table("meetings").select("school_id, status, start_time, end_time").execute()
-    else:
-        # Advisors: fetch schools + assignments in parallel, then meetings
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            schools_future = pool.submit(
-                lambda: db.table("schools").select("id, restrict_access_to").execute()
-            )
-            assigned_future = pool.submit(
-                lambda: db.table("advisor_schools").select("school_id").eq("advisor_id", user["id"]).execute()
-            )
-            all_schools = schools_future.result().data or []
-            advisor_ids = {r["school_id"] for r in (assigned_future.result().data or [])}
+    try:
+        if user["role"] in ("owner", "manager"):
+            # Owners/managers see all schools — skip the schools filter query entirely
+            meetings_res = db.table("meetings").select("school_id, status, start_time, end_time").execute()
+        else:
+            # Advisors: fetch schools + assignments in parallel, then meetings
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                schools_future = pool.submit(
+                    lambda: db.table("schools").select("id, restrict_access_to").execute()
+                )
+                assigned_future = pool.submit(
+                    lambda: db.table("advisor_schools").select("school_id").eq("advisor_id", user["id"]).execute()
+                )
+                all_schools = schools_future.result().data or []
+                advisor_ids = {r["school_id"] for r in (assigned_future.result().data or [])}
 
-        accessible = [
-            s["id"] for s in all_schools
-            if s.get("restrict_access_to") is None
-            or user["id"] in (s.get("restrict_access_to") or [])
-            or s["id"] in advisor_ids
-        ]
-        if not accessible:
-            return {}
-        meetings_res = db.table("meetings").select("school_id, status, start_time, end_time").in_("school_id", accessible).execute()
+            accessible = [
+                s["id"] for s in all_schools
+                if s.get("restrict_access_to") is None
+                or user["id"] in (s.get("restrict_access_to") or [])
+                or s["id"] in advisor_ids
+            ]
+            if not accessible:
+                return {}
+            meetings_res = db.table("meetings").select("school_id, status, start_time, end_time").in_("school_id", accessible).execute()
+    except Exception as exc:
+        logger.warning("get_meetings_stats failed: %s", exc)
+        return {}
     stats: dict = {}
     for m in (meetings_res.data or []):
         sid = m["school_id"]
@@ -543,6 +608,7 @@ def update_my_settings(
         raise HTTPException(status_code=403, detail="רק בעלים יכולים לשנות הגדרה זו")
     db = get_admin_client()
     db.table("profiles").update({"delegate_approvals_to_managers": body.delegate_approvals_to_managers}).eq("id", user["id"]).execute()
+    invalidate_approver_ids_cache()
     return {"ok": True}
 
 
@@ -611,6 +677,7 @@ def update_role(
     db = get_admin_client()
     db.table("profiles").update({"role": body.role}).eq("id", user_id).execute()
     invalidate_profile_cache(user_id)
+    invalidate_approver_ids_cache()
     return {"ok": True}
 
 
@@ -656,14 +723,26 @@ def list_logs(
     user: Annotated[dict, Depends(get_current_user)],
 ):
     db = get_admin_client()
-    rows = (
-        db.table("check_logs")
-        .select("*")
-        .eq("school_id", school_id)
-        .order("run_at", desc=True)
-        .execute()
-    )
-    logs = rows.data or []
+    logs = []
+    for attempt in range(2):
+        try:
+            rows = (
+                db.table("check_logs")
+                .select("*")
+                .eq("school_id", school_id)
+                .order("run_at", desc=True)
+                .execute()
+            )
+            logs = rows.data or []
+            break  # success
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("list_logs attempt 1 failed: %s — retrying", exc)
+                time.sleep(0.3)
+            else:
+                logger.error("list_logs failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
     if not logs:
         return []
     # Enrich with profile data via a separate simple query (avoids PostgREST join issues)
