@@ -70,30 +70,35 @@ def _get_profile(user_id: str) -> tuple[str, str]:
     if cached and (now - cached[2]) < _PROFILE_TTL:
         return cached[0], cached[1]
 
-    try:
-        db = get_admin_client()
-        profile = (
-            db.table("profiles")
-            .select("role, full_name")
-            .eq("id", user_id)
-            .single()
-            .execute()
-        )
-        role = profile.data.get("role", "advisor") if profile.data else "advisor"
-        full_name = profile.data.get("full_name", "") if profile.data else ""
-        _profile_cache[user_id] = (role, full_name, now)
-        return role, full_name
-    except Exception as exc:
-        logger.warning("_get_profile DB query failed for %s: %s", user_id, exc)
-        # Force a fresh httpx connection pool on the next request — the current
-        # pool may have a stale/reset connection that would cause repeated failures.
-        reset_admin_client()
-        # A concurrent call may have already written the correct role to the cache
-        # (common when 4+ requests arrive simultaneously on a cold server start).
-        fresh = _profile_cache.get(user_id)
-        if fresh:
-            return fresh[0], fresh[1]
-        return "advisor", ""
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            profile = (
+                db.table("profiles")
+                .select("role, full_name")
+                .eq("id", user_id)
+                .single()
+                .execute()
+            )
+            role = profile.data.get("role", "advisor") if profile.data else "advisor"
+            full_name = profile.data.get("full_name", "") if profile.data else ""
+            _profile_cache[user_id] = (role, full_name, time.monotonic())
+            return role, full_name
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("_get_profile attempt 1 failed for %s: %s — resetting and retrying", user_id, exc)
+                reset_admin_client()
+                time.sleep(0.05)
+                # A concurrent thread may have already succeeded and populated the cache
+                fresh = _profile_cache.get(user_id)
+                if fresh:
+                    return fresh[0], fresh[1]
+            else:
+                logger.warning("_get_profile failed after 2 attempts for %s: %s", user_id, exc)
+                fresh = _profile_cache.get(user_id)
+                if fresh:
+                    return fresh[0], fresh[1]
+                return "advisor", ""
 
 
 def invalidate_profile_cache(user_id: str) -> None:

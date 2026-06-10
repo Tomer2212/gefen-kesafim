@@ -4,9 +4,10 @@ from supabase.lib.client_options import ClientOptions
 
 _client: Client | None = None
 
-# Fail fast: 10 s per query instead of 30 s.
-# Frees the gunicorn worker 3× faster when Supabase is slow.
-_POSTGREST_TIMEOUT = 10
+# Fail fast: 3 s per query.
+# Supabase REST responds in <500ms normally; 3s is enough for any legitimate query.
+# Reduces cold-start penalty from 10s → 3s when a stale connection is encountered.
+_POSTGREST_TIMEOUT = 3
 
 
 def get_admin_client() -> Client:

@@ -2719,8 +2719,6 @@ export default function SchoolPage() {
       const userRole = session?.user.user_metadata?.role || "advisor";
       if (session) setRole(userRole);
 
-      loadUsers();
-
       const [accountsResult, logsResult] = await Promise.allSettled([
         axios.get(`/schools/${schoolId}/accounts`),
         axios.get(`/schools/${schoolId}/logs`),
@@ -2740,6 +2738,11 @@ export default function SchoolPage() {
         }
       }
       setLoading(false);
+
+      // Defer user list after critical data renders — avoids competing with accounts/logs on mount
+      if (userRole === "owner" || userRole === "manager") {
+        loadUsers();
+      }
     }
     load();
   }, [schoolId]);
@@ -2760,9 +2763,9 @@ export default function SchoolPage() {
   useEffect(() => {
     if (activeTab === "meetings") {
       loadMeetings();
-      if (users.length === 0) loadUsers();
+      if (users.length === 0 && (role === "owner" || role === "manager")) loadUsers();
     }
-  }, [activeTab, schoolId]);
+  }, [activeTab, schoolId, role]);
 
   async function startNewMeeting() {
     const defaultAdvisor = schoolAdvisors[0] || null;

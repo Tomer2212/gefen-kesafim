@@ -106,25 +106,43 @@ def _require_owner(user: dict):
 
 @router.get("/")
 def list_schools(user: Annotated[dict, Depends(get_current_user)]):
-    db = get_admin_client()
     is_advisor = user["role"] not in ("owner", "manager")
     schools = []
 
     for attempt in range(2):
         try:
             db = get_admin_client()
-            all_res = db.table("schools").select("*, gefen_accounts(*), advisor_schools(advisor_id)").order("name").execute()
-            schools = all_res.data or []
 
             if is_advisor:
+                # Q_pre: fetch only this advisor's assigned school IDs (fast, indexed)
                 assigned = db.table("advisor_schools").select("school_id").eq("advisor_id", user["id"]).execute()
-                advisor_school_ids = {r["school_id"] for r in (assigned.data or [])}
-                schools = [
-                    s for s in schools
-                    if s.get("restrict_access_to") is None
-                    or user["id"] in (s.get("restrict_access_to") or [])
-                    or s["id"] in advisor_school_ids
+                assigned_ids = [r["school_id"] for r in (assigned.data or [])]
+
+                # Q1 (advisor): DB-side filter — only return schools this advisor can see
+                filters = [
+                    "restrict_access_to.is.null",                    # open to everyone
+                    f'restrict_access_to.cs.["{user["id"]}"]',       # advisor explicitly in restrict list
                 ]
+                if assigned_ids:
+                    filters.append(f"id.in.({','.join(assigned_ids)})")  # directly assigned
+
+                all_res = (
+                    db.table("schools")
+                    .select("*, gefen_accounts(*), advisor_schools(advisor_id)")
+                    .or_(",".join(filters))
+                    .order("name")
+                    .execute()
+                )
+            else:
+                # Q1 (manager/owner): fetch all schools
+                all_res = (
+                    db.table("schools")
+                    .select("*, gefen_accounts(*), advisor_schools(advisor_id)")
+                    .order("name")
+                    .execute()
+                )
+
+            schools = all_res.data or []
             break  # success
         except Exception as exc:
             if attempt == 0:
@@ -135,25 +153,26 @@ def list_schools(user: Annotated[dict, Depends(get_current_user)]):
                 logger.error("list_schools failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
-    # Enrich advisor_schools entries with profile data via separate query
+    # Enrich Q3 (profiles) and Q4 (meetings stats) sequentially — safer with 3s timeout
+    db = get_admin_client()
     all_advisor_ids = list({
         row["advisor_id"]
         for s in schools
         for row in (s.get("advisor_schools") or [])
         if row.get("advisor_id")
     })
+    school_ids = [s["id"] for s in schools]
+
+    profiles_map: dict = {}
+    m_stats: dict = {}
+
     if all_advisor_ids:
         try:
             p_rows = db.table("profiles").select("id, full_name, email").in_("id", all_advisor_ids).execute()
             profiles_map = {p["id"]: p for p in (p_rows.data or [])}
-            for school in schools:
-                for row in (school.get("advisor_schools") or []):
-                    row["profiles"] = profiles_map.get(row["advisor_id"])
         except Exception as exc:
             logger.warning("profiles enrichment failed (non-fatal): %s", exc)
 
-    # Embed meetings stats directly so the frontend needs no separate request
-    school_ids = [s["id"] for s in schools]
     if school_ids:
         try:
             stats_res = db.rpc("get_meetings_stats", {"school_ids": school_ids}).execute()
@@ -161,10 +180,13 @@ def list_schools(user: Annotated[dict, Depends(get_current_user)]):
                 r["school_id"]: {"completed": r["completed"], "total_minutes": r["total_minutes"]}
                 for r in (stats_res.data or [])
             }
-            for school in schools:
-                school["meetings_stats"] = m_stats.get(school["id"])
         except Exception as exc:
             logger.warning("meetings stats enrichment failed (non-fatal): %s", exc)
+
+    for school in schools:
+        for row in (school.get("advisor_schools") or []):
+            row["profiles"] = profiles_map.get(row["advisor_id"])
+        school["meetings_stats"] = m_stats.get(school["id"])
 
     return schools
 
@@ -223,9 +245,9 @@ def list_accounts(
     school_id: str,
     user: Annotated[dict, Depends(get_current_user)],
 ):
-    db = get_admin_client()
     for attempt in range(2):
         try:
+            db = get_admin_client()
             rows = (
                 db.table("gefen_accounts")
                 .select("*")
@@ -462,51 +484,64 @@ def review_update_request(
 @router.get("/notifications")
 def get_notifications(user: Annotated[dict, Depends(get_current_user)]):
     """Return pending items relevant to the current user."""
-    db = get_admin_client()
     items = []
 
-    # Approval requests (for approvers)
-    if user["role"] in ("owner", "manager"):
-        approver_ids = _get_approver_ids(db)
-        if user["id"] in approver_ids:
-            rows = (
-                db.table("school_update_requests")
-                .select("*, schools(name), requester:profiles!requester_id(full_name, email)")
-                .eq("status", "pending")
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            items = []
+
+            # Approval requests (for approvers)
+            if user["role"] in ("owner", "manager"):
+                approver_ids = _get_approver_ids(db)
+                if user["id"] in approver_ids:
+                    rows = (
+                        db.table("school_update_requests")
+                        .select("*, schools(name), requester:profiles!requester_id(full_name, email)")
+                        .eq("status", "pending")
+                        .order("created_at", desc=True)
+                        .execute()
+                    )
+                    for r in (rows.data or []):
+                        r["_type"] = "update_request"
+                    items.extend(rows.data or [])
+            else:
+                # Status updates on advisor's own requests
+                rows = (
+                    db.table("school_update_requests")
+                    .select("*, schools(name)")
+                    .eq("requester_id", user["id"])
+                    .neq("status", "pending")
+                    .order("resolved_at", desc=True)
+                    .limit(20)
+                    .execute()
+                )
+                for r in (rows.data or []):
+                    r["_type"] = "update_request"
+                items.extend(rows.data or [])
+
+            # Mention notifications (for everyone)
+            mentions = (
+                db.table("mention_notifications")
+                .select("*, schools(name), sender:profiles!sender_id(full_name, email)")
+                .eq("recipient_id", user["id"])
+                .is_("read_at", "null")
                 .order("created_at", desc=True)
+                .limit(20)
                 .execute()
             )
-            for r in (rows.data or []):
-                r["_type"] = "update_request"
-            items.extend(rows.data or [])
-    else:
-        # Status updates on advisor's own requests
-        rows = (
-            db.table("school_update_requests")
-            .select("*, schools(name)")
-            .eq("requester_id", user["id"])
-            .neq("status", "pending")
-            .order("resolved_at", desc=True)
-            .limit(20)
-            .execute()
-        )
-        for r in (rows.data or []):
-            r["_type"] = "update_request"
-        items.extend(rows.data or [])
-
-    # Mention notifications (for everyone)
-    mentions = (
-        db.table("mention_notifications")
-        .select("*, schools(name), sender:profiles!sender_id(full_name, email)")
-        .eq("recipient_id", user["id"])
-        .is_("read_at", "null")
-        .order("created_at", desc=True)
-        .limit(20)
-        .execute()
-    )
-    for m in (mentions.data or []):
-        m["_type"] = "mention"
-    items.extend(mentions.data or [])
+            for m in (mentions.data or []):
+                m["_type"] = "mention"
+            items.extend(mentions.data or [])
+            break  # success
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("get_notifications attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.warning("get_notifications failed after 2 attempts: %s", exc)
+                return {"count": 0, "items": []}  # silent fallback — not critical
 
     items.sort(key=lambda x: x.get("created_at", ""), reverse=True)
     return {"count": len(items), "items": items}
@@ -624,9 +659,19 @@ def update_my_profile(
 @router.get("/users/all")
 def list_users(user: Annotated[dict, Depends(get_current_user)]):
     _require_manager(user)
-    db = get_admin_client()
-    rows = db.table("profiles").select("*").order("full_name").execute()
-    return rows.data
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            rows = db.table("profiles").select("*").order("full_name").execute()
+            return rows.data
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("list_users attempt 1 failed: %s — resetting client and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("list_users failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
 
 @router.post("/users/invite")
@@ -713,10 +758,10 @@ def list_logs(
     school_id: str,
     user: Annotated[dict, Depends(get_current_user)],
 ):
-    db = get_admin_client()
     logs = []
     for attempt in range(2):
         try:
+            db = get_admin_client()
             rows = (
                 db.table("check_logs")
                 .select("*")
@@ -737,18 +782,22 @@ def list_logs(
 
     if not logs:
         return []
-    # Enrich with profile data via a separate simple query (avoids PostgREST join issues)
+    # Enrich with profile data (non-fatal — logs returned even if enrichment fails)
     user_ids = list({r["run_by"] for r in logs if r.get("run_by")})
     if user_ids:
-        p_rows = (
-            db.table("profiles")
-            .select("id, full_name, email")
-            .in_("id", user_ids)
-            .execute()
-        )
-        profiles_map = {p["id"]: p for p in (p_rows.data or [])}
-        for row in logs:
-            row["profiles"] = profiles_map.get(row.get("run_by"))
+        try:
+            db = get_admin_client()
+            p_rows = (
+                db.table("profiles")
+                .select("id, full_name, email")
+                .in_("id", user_ids)
+                .execute()
+            )
+            profiles_map = {p["id"]: p for p in (p_rows.data or [])}
+            for row in logs:
+                row["profiles"] = profiles_map.get(row.get("run_by"))
+        except Exception as exc:
+            logger.warning("list_logs profile enrichment failed (non-fatal): %s", exc)
     return logs
 
 
@@ -882,9 +931,21 @@ async def import_schools(
 
 @router.get("/{school_id}/meetings")
 def list_meetings(school_id: str, user: Annotated[dict, Depends(get_current_user)]):
-    db = get_admin_client()
-    res = db.table("meetings").select("*").eq("school_id", school_id).order("created_at", desc=True).execute()
-    meetings = res.data or []
+    meetings = []
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            res = db.table("meetings").select("*").eq("school_id", school_id).order("created_at", desc=True).execute()
+            meetings = res.data or []
+            break
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("list_meetings attempt 1 failed: %s — resetting client and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("list_meetings failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
     # Collect all referenced advisor IDs (new array field + legacy single field)
     all_ids: set[str] = set()
@@ -895,13 +956,19 @@ def list_meetings(school_id: str, user: Annotated[dict, Depends(get_current_user
             all_ids.add(m["advisor_id"])
 
     if all_ids:
-        profiles = db.table("profiles").select("id, full_name, email").in_("id", list(all_ids)).execute().data or []
-        profiles_map = {p["id"]: p for p in profiles}
-        for m in meetings:
-            ids = m.get("advisor_ids") or []
-            if not ids and m.get("advisor_id"):  # backward compat: single advisor
-                ids = [m["advisor_id"]]
-            m["advisor_profiles"] = [profiles_map[uid] for uid in ids if uid in profiles_map]
+        try:
+            db = get_admin_client()
+            profiles = db.table("profiles").select("id, full_name, email").in_("id", list(all_ids)).execute().data or []
+            profiles_map = {p["id"]: p for p in profiles}
+            for m in meetings:
+                ids = m.get("advisor_ids") or []
+                if not ids and m.get("advisor_id"):  # backward compat: single advisor
+                    ids = [m["advisor_id"]]
+                m["advisor_profiles"] = [profiles_map[uid] for uid in ids if uid in profiles_map]
+        except Exception as exc:
+            logger.warning("list_meetings profile enrichment failed (non-fatal): %s", exc)
+            for m in meetings:
+                m["advisor_profiles"] = []
     else:
         for m in meetings:
             m["advisor_profiles"] = []

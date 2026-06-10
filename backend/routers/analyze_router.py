@@ -2448,8 +2448,8 @@ def _classify_files(paths: list[Path]) -> tuple[list[Path], list[Path], str | No
             gefen.append(p)
         elif ftype in ("kesafim2000", "payscool", "schoolcash"):
             if finance_list:
-                # Multiple kesafim2000 files are allowed and will be merged; other types must be single
-                if ftype != "kesafim2000" or finance_type != "kesafim2000":
+                # Multiple kesafim2000 and schoolcash files are allowed and will be merged; payscool must be single
+                if ftype != finance_type or ftype not in ("kesafim2000", "schoolcash"):
                     raise ValueError("התקבלו קבצי כספים מסוגים שונים. אנא העלה קבצי כספים מאותו סוג בלבד.")
             finance_list.append(p)
             finance_type = ftype
@@ -2573,8 +2573,10 @@ def _load_finance_raw(paths: list[Path], ftype: str) -> tuple[pd.DataFrame, str,
         stats = {"filename": filename, "software": "כספים2000", "cancelled_rows": None}
         return df, "כספים", stats
     if ftype == "schoolcash":
-        df = load_schoolcash(str(paths[0]))
-        stats = {"filename": paths[0].name, "software": "סקולקאש", "cancelled_rows": None}
+        dfs = [load_schoolcash(str(p)) for p in paths]
+        df = pd.concat(dfs, ignore_index=True).drop_duplicates()
+        filename = ", ".join(p.name for p in paths)
+        stats = {"filename": filename, "software": "סקולקאש", "cancelled_rows": None}
         return df, "סקולקאש", stats
     df, cancelled = load_payscool(str(paths[0]))
     stats = {"filename": paths[0].name, "software": "פייסקול", "cancelled_rows": cancelled}
