@@ -1,13 +1,58 @@
 # Dev Log
 
-## 2026-06-09 — ביצועים: ייעול טעינה, קריאות מקביליות, gunicorn
-- **`frontend/src/main.jsx`**: הוספת `axios.defaults.timeout = 20000` — בקשות תקועות נכשלות אחרי 20 שניות
-- **`frontend/src/pages/DashboardPage.jsx`**: ה-`init()` שוכתב — `loadSchools()` מתחיל מיידית, תוך כדי שהקריאות `/users/me`, `/users/all`, `profiles` רצות במקביל (`Promise.allSettled`); העדפות localStorage נטענות סינכרונית עוד לפני
-- **`frontend/src/pages/SchoolPage.jsx`**: קריאות `/accounts` ו-`/logs` מתבצעות ב-`Promise.allSettled` במקביל (במקום ברצף)
-- **`frontend/src/App.jsx`**: הוספת keep-alive — כל 9 דקות נשלחת `GET /health` לשמירת ה-Render dyno חם
-- **`backend/routers/schools_router.py` — `list_schools()`**: קריאת schools + advisor filter מקבילית עם `ThreadPoolExecutor` — במקום 2-3 קריאות Supabase ברצף
-- **`backend/routers/schools_router.py` — `get_meetings_stats()`**: עבור owner/manager — קריאה אחת בלבד לmeetings (ללא שאילתת schools); עבור advisor — קריאות schools + advisor_schools מקבילית
-- **`render.yaml` + `requirements.txt`**: החלפת `uvicorn --workers 4` ב-`gunicorn -w 4 -k uvicorn.workers.UvicornWorker` — gunicorn מאחזר workers שקרסו אוטומטית (uvicorn לא עושה זאת), מונע את שגיאות "cannot connect" שנגרמות כשworker מת לאחר עיבוד קובץ גדול
+## 2026-06-10 — Fix: 403 אחרון על /schools/users/all — race condition ב-cold start
+- **`frontend/src/pages/DashboardPage.jsx`**: הפרדת `/schools/users/me` מה-`Promise.allSettled` לקריאה עצמאית ראשונה. `/me` מחמם את `_profile_cache` בבאקאנד ומאמת את ה-role מהשרת לפני שמשגרים את `/users/all`. כך `/users/all` תמיד מגיע לבאקאנד עם cache מאוכלס — אין יותר 403 על cold start. ה-role המשמש לשמירת `/users/all` הוא מהבאקאנד (`confirmedIsManager`) ולא מה-JWT בלבד, עם fallback ל-JWT אם `/me` נכשל.
+
+## 2026-06-10 — Perf (שלב ב׳): RPC meetings stats + cache notifications
+
+- **Supabase migration** (להרצה ידנית): יצירת פונקציה `get_meetings_stats(school_ids UUID[])` — מחשבת `COUNT(*)` + `SUM(EXTRACT(EPOCH FROM (end_time::TIME - start_time::TIME)) / 60)` server-side, מחזירה N שורות (אחת לכל בית ספר) במקום כל שורות הפגישות.
+- **`backend/routers/schools_router.py`** — `list_schools`: החלפת Python loop (50,000+ שורות בסקייל) ב-`db.rpc("get_meetings_stats", {"school_ids": school_ids})` — PostgreSQL מחשב הכל, Python מקבל רק תוצאה מסוכמת.
+- **`backend/routers/schools_router.py`** — `_get_approver_ids`: מיזוג שתי שאילתות ל-1 (`profiles WHERE role IN ('owner','manager')`) + cache ב-`_approver_ids_cache` עם TTL 5 דקות — מפחית `/schools/notifications` מ-3-4 שאילתות ל-1-2.
+- **`backend/routers/schools_router.py`** — `invalidate_approver_ids_cache()`: נקרא מ-`update_my_settings` (שינוי delegation) ומ-`update_role` (שינוי תפקיד) כדי לוודא עדכניות ה-cache.
+
+## 2026-06-10 — Fix: 403 על /schools/users/all עבור Owner
+- **`frontend/src/pages/DashboardPage.jsx`**: הוספת בדיקת role לפני קריאה ל-`/schools/users/all` — המשתנה `roleValue` נקרא מ-`session.user.user_metadata?.role` ומשמש לבדוק `isManager` לפני השליחה. יועצים לא ישלחו את הבקשה כלל (קיבלו 403 בשקט).
+- **`backend/auth.py`**: `_get_profile` לא שומר יותר "advisor" fallback ב-cache כשהשאילתה לסופהבייס נכשלת. שמירה בcache רק על הצלחה — כשל חולף לא ינעל את המשתמש מחוץ לendpoints של manager לחמש דקות. בנוסף: כשhthread נכשל, בודק מחדש את הcache לפני שמחזיר "advisor" — יתכן שthread מקביל הצליח וכתב את התפקיד הנכון בינתיים (race condition ב-cold start עם 4+ בקשות מקבילות).
+
+## 2026-06-10 — Fix: ביטול ThreadPoolExecutor מ-list_schools enrichments
+- **`backend/routers/schools_router.py`**: חזרה להרצה סדרתית לenrichments של profiles ו-meetings stats. ה-ThreadPoolExecutor שהוסף גרם ל-502 Bad Gateway (sub-threads מ-thread של FastAPI סיבך את error handling וה-timeout של gunicorn). הרווח העיקרי (meetings stats מוטמע ישירות ב-`/schools/` — ללא בקשה נפרדת מהפרונטאנד) נשמר.
+
+## 2026-06-10 — Fix: 4 שדות בפגישה לא נשמרים לאחר ניווט
+כל 4 השדות הבאים ב-`MeetingRow` השתמשו ב-`onMouseDown` + `e.preventDefault()` פנימית, מה שמנע מ-`handleRowBlur` לירות. התיקון בכולם: קריאה מיידית ל-`saveDraft(nd)` בעת שינוי, במקום להסתמך על blur.
+- **`ParticipantsSelector`** — `onChange` קרא רק ל-`set()`
+- **`NotesModal`** — callback ל-`onOpenNotes` קרא רק ל-`setDraft`
+- **`AdvisorCell`** — `onChange` קרא רק ל-`setDraft`
+- **`MeetingTypeSelect`** — `onChange` קרא רק ל-`set()`
+
+## 2026-06-10 — פיצ'ר: כפתור קיפול/הרחבה של ה-Sidebar + מצב שמור
+- **`frontend/src/components/Sidebar.jsx`**: הוספת state `collapsed` + כפתור עגול קטן שצף על השוליים השמאליים של ה-Sidebar באמצע אנכי. לחיצה מקפלת את ה-Sidebar לרוחב 64px (אייקונים בלבד) או מרחיבה בחזרה ל-240px. אנימציית transition חלקה. במצב מקופל: טקסט נסתר, אייקונים ממורכזים עם `title` tooltip, כפתור יציאה ממורכז.
+- **שמירת מצב**: `collapsed` נשמר ב-`localStorage` ומוחזר בטעינה — ניווט בין עמודים שומר את מצב הקיפול האחרון.
+- **הזזת תוכן סימטרית**: CSS custom property `--sidebar-w` מוגדר על `document.documentElement` בכל שינוי מצב. כל 10 עמודי האתר עברו מ-`marginRight: 240` ל-`marginRight: "var(--sidebar-w, 240px)"` עם אנימציית transition מסונכרנת עם הSidebar.
+
+## 2026-06-10 — Fix: טעינת דשבורד איטית + timeout ב-Render cold start
+- **`frontend/src/main.jsx`**: הגדלת axios timeout מ-20 שניות ל-45 שניות — Render free tier לוקח ~30 שניות להתעורר אחרי חוסר פעילות, ה-20 שניות הישנות גרמו לבקשה להיכשל לפני שהשרת הספיק להגיב.
+- **`frontend/src/pages/DashboardPage.jsx`**: הוספת `slowLoading` state — אחרי 8 שניות מוצג מסר "השרת מתעורר — עשוי לקחת עד 30 שניות בפעם הראשונה ביום".
+
+## 2026-06-09 — Fix: עמודות סה"כ פגישות/שעות הציגו — בדשבורד
+- **Supabase migration**: `GRANT SELECT ON meetings TO authenticated` + מחיקת policy כללית `meetings_service_all` + יצירת policy `meetings_select` שמסנן לפי תפקיד (`get_my_role()` IN owner/manager — הכל; יועץ — רק בתי ספר ב-`advisor_schools`).
+- **`backend/routers/schools_router.py`**: חישוב `meetings_stats` (ספירת פגישות שהושלמו + דקות) מוטמע ישירות ב-`list_schools` — מוחזר כשדה `meetings_stats` בכל בית ספר, ללא בקשה נפרדת מהפרונטאנד.
+- **`frontend/src/pages/DashboardPage.jsx`**: `loadSchools` בונה `meetingsStats` מהשדה המוטמע בתגובת `/schools/` — אין race condition אפשרית.
+
+## 2026-06-09 — Fix: תיקון 503 שמופיע בד-בבד עם הטבלה ב-DashboardPage
+- **`frontend/src/pages/DashboardPage.jsx` שורה 877**: הוספת `!error` לתנאי הצגת טבלת בתי הספר. קודם תנאי `!loading && schools.length > 0` אפשר לשגיאה ולטבלה להופיע בו-זמנית — קרה ב-React StrictMode (שתי קריאות `loadSchools()` מקבילות) ובכל תרחיש שבו שגיאה מאוחרת הגיעה אחרי שה-schools כבר נטענו.
+- **`backend/routers/schools_router.py` שורות 155-162**: עיטוף שאילתת profiles enrichment ב-`list_schools` ב-try/except — קריאה זו נמצאת מחוץ ללולאת הretry ועלולה לזרוק exception שנתפס ע"י global handler ומחזיר 503 גם כשהנתונים הראשיים נטענו בהצלחה.
+- **`backend/routers/schools_router.py` שורות 491-540**: הוספת try/except ל-`get_meetings_stats` — endpoint זה לא היה מוגן כלל; כישלון מחזיר `{}` במקום 503 (ה-frontend כבר מוגן עם `.catch()` אך כעת גם ה-backend מוגן).
+- **`backend/supabase_client.py`**: העלאת `postgrest_client_timeout` מ-10 ל-30 שניות — 10 שניות היה קצר מדי לחיבורים ראשוניים אחרי חוסר פעילות (reconnect overhead).
+
+## 2026-06-09 — Fix: תיקון שגיאות 500 וזמני המתנה ארוכים בטעינת נתונים
+- **`backend/supabase_client.py`**: הגדרת `postgrest_client_timeout=10` שניות (ברירת המחדל הייתה 120 שניות — גרמה ל-workers לתלות 2 דקות בכל כשל Supabase)
+- **`backend/main.py`**: הוספת global exception handler — כל exception לא מטופל מוחזר כ-503 + מולוג עם traceback מלא בלוגים של Render
+- **`backend/routers/schools_router.py`**: try/except עם retry אחד (300ms) ב-`list_schools`, `list_accounts`, `list_logs` — exception חולף יטופל בretry; שני כשלים → 503 ברור
+- **`frontend/src/pages/DashboardPage.jsx`**: retry delay מ-2000ms ל-400ms; הוספת "מנסה להתחבר מחדש..." מתחת לספינר בזמן retry
+- **`frontend/src/pages/SchoolPage.jsx`**: retry delay logs מ-1500ms ל-400ms; תיקון שתיקת כשל פגישות → הודעת שגיאה + כפתור רענן; תיקון useEffect: `[activeTab]` → `[activeTab, schoolId]`
+
+## 2026-06-09 — Fix: שמירת זמנים ותאריך בפגישה כשהסטטוס שונה קודם
+- **`frontend/src/pages/SchoolPage.jsx`**: בחירת תאריך מ-DatePickerPopover כעת קוראת ל-`saveDraft(nd)` מיידית (בדיוק כמו שינוי סטטוס). קודם, הסגירה של ה-popover לאחר בחירת תאריך לא הבטיחה שה-blur יגיע ל-`handleRowBlur`, ולכן זמני התחלה/סיום שהוזנו לאחר שינוי סטטוס לא נשמרו לצורך חישוב "סה"כ שעות שבוצעו".
 
 - **`frontend/src/components/Sidebar.jsx`**: אחרי שמירת שם ב-`profiles`, מוסיפים קריאה ל-`supabase.auth.updateUser({ data: { full_name } })` כדי לסנכרן את ה-`user_metadata` בסשן המקומי. בלי זה הסיידבר המשיך לקרוא את השם הישן מה-JWT.
 

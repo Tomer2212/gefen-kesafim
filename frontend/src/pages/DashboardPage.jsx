@@ -429,6 +429,8 @@ export default function DashboardPage() {
   const [allOrgUsers, setAllOrgUsers] = useState([]);
   const [meetingsStats, setMeetingsStats] = useState({});
   const [loading, setLoading] = useState(true);
+  const [retrying, setRetrying] = useState(false);
+  const [slowLoading, setSlowLoading] = useState(false);
   const [error, setError] = useState("");
   const [role, setRole] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
@@ -509,23 +511,32 @@ export default function DashboardPage() {
 
   async function loadSchools() {
     setLoading(true);
+    setSlowLoading(false);
     setError("");
+    const slowTimer = setTimeout(() => setSlowLoading(true), 8000);
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const [res, statsRes] = await Promise.all([
-          axios.get("/schools/"),
-          axios.get("/schools/meetings-stats").catch(() => ({ data: {} })),
-        ]);
-        setSchools(Array.isArray(res.data) ? res.data : []);
-        setMeetingsStats(statsRes.data || {});
+        const res = await axios.get("/schools/");
+        clearTimeout(slowTimer);
+        const schoolsData = Array.isArray(res.data) ? res.data : [];
+        setSchools(schoolsData);
+        const stats = {};
+        for (const s of schoolsData) {
+          if (s.meetings_stats) stats[s.id] = s.meetings_stats;
+        }
+        setMeetingsStats(stats);
+        setSlowLoading(false);
         setLoading(false);
         return;
       } catch (err) {
         const is5xx = err.response?.status >= 500;
         if (attempt === 0 && is5xx) {
-          await new Promise(r => setTimeout(r, 2000));
+          setRetrying(true);
+          await new Promise(r => setTimeout(r, 400));
+          setRetrying(false);
           continue;
         }
+        clearTimeout(slowTimer);
         if (!err.response) {
           setError("לא ניתן להתחבר לשרת — ודא שהשרת פועל ולחץ על רענן");
         } else if (is5xx) {
@@ -535,6 +546,7 @@ export default function DashboardPage() {
         }
       }
     }
+    setSlowLoading(false);
     setLoading(false);
   }
 
@@ -544,7 +556,8 @@ export default function DashboardPage() {
       if (!session) { navigate("/login"); return; }
       const uid = session.user.id;
       setUserId(uid);
-      setRole(session.user.user_metadata?.role || "advisor");
+      const roleValue = session.user.user_metadata?.role || "advisor";
+      setRole(roleValue);
 
       // Load localStorage prefs immediately (synchronous, no wait)
       const savedOrder = JSON.parse(localStorage.getItem(`dashboard-col-order-${uid}`) || "null");
@@ -554,18 +567,26 @@ export default function DashboardPage() {
       if (savedVisible && typeof savedVisible === "object" && DEFAULT_COL_ORDER.every(k => k in savedVisible))
         setColVisible(savedVisible);
 
-      // Start schools loading immediately, run metadata calls in parallel
+      // Start schools loading immediately
       const schoolsPromise = loadSchools();
 
-      const [meResult, usersResult, prefsResult] = await Promise.allSettled([
-        axios.get("/schools/users/me"),
-        axios.get("/schools/users/all"),
+      // Call /me first: confirms the role from the backend and warms the
+      // _profile_cache so the subsequent /users/all call never hits a cold cache.
+      const isManagerFrontend = roleValue === "owner" || roleValue === "manager";
+      let confirmedIsManager = false;
+      try {
+        const meRes = await axios.get("/schools/users/me");
+        setCanDelete(!!meRes.data?.managers_can_delete);
+        confirmedIsManager = meRes.data?.role === "owner" || meRes.data?.role === "manager";
+      } catch {
+        confirmedIsManager = isManagerFrontend;
+      }
+
+      const [usersResult, prefsResult] = await Promise.allSettled([
+        confirmedIsManager ? axios.get("/schools/users/all") : Promise.resolve({ data: [] }),
         supabase.from("profiles").select("col_order, col_visible").eq("id", uid).single(),
       ]);
 
-      if (meResult.status === "fulfilled") {
-        setCanDelete(!!meResult.value.data?.managers_can_delete);
-      }
       if (usersResult.status === "fulfilled") {
         setAllOrgUsers(Array.isArray(usersResult.value.data) ? usersResult.value.data : []);
       }
@@ -657,7 +678,7 @@ export default function DashboardPage() {
     <div dir="rtl" className="bg-scene min-h-screen">
       <Sidebar dark />
 
-      <div style={{ marginRight: 240 }}>
+      <div style={{ marginRight: "var(--sidebar-w, 240px)", transition: "margin-right 0.25s cubic-bezier(0.4,0,0.2,1)" }}>
         <div className="max-w-5xl mx-auto px-6 py-10">
           <div className="flex items-center justify-between mb-8">
             <div>
@@ -847,8 +868,14 @@ export default function DashboardPage() {
           )}
 
           {loading && (
-            <div role="status" aria-label="טוען בתי ספר" className="flex justify-center py-20">
+            <div role="status" aria-label="טוען בתי ספר" className="flex flex-col items-center justify-center py-20 gap-3">
               <div aria-hidden="true" className="spinner w-10 h-10" />
+              {retrying && <p className="text-slate-500 text-sm">מנסה להתחבר מחדש...</p>}
+              {slowLoading && !retrying && (
+                <p className="text-slate-400 text-sm text-center">
+                  השרת מתעורר — עשוי לקחת עד 30 שניות בפעם הראשונה ביום
+                </p>
+              )}
             </div>
           )}
 
@@ -870,7 +897,7 @@ export default function DashboardPage() {
             </div>
           )}
 
-          {!loading && schools.length > 0 && (
+          {!loading && !error && schools.length > 0 && (
             <>
               <p className="text-sm text-slate-500 mb-2">
                 {hasAnyFilter

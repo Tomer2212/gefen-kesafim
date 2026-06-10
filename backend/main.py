@@ -8,8 +8,9 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from routers.analyze_router import router as analyze_router
 from routers.contact_router import router as contact_router
 from routers.schools_router import router as schools_router
@@ -104,6 +105,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    _log.error(
+        "Unhandled exception on %s %s: %s",
+        request.method, request.url.path, exc,
+        exc_info=True,
+    )
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות"},
+    )
+
 
 app.include_router(analyze_router, prefix="/analyze")
 app.include_router(contact_router, prefix="/contact")

@@ -1,8 +1,11 @@
 import json
+import logging
 import os
 import threading
 import time
 import urllib.request
+
+logger = logging.getLogger(__name__)
 from typing import Annotated
 
 import jwt
@@ -78,12 +81,16 @@ def _get_profile(user_id: str) -> tuple[str, str]:
         )
         role = profile.data.get("role", "advisor") if profile.data else "advisor"
         full_name = profile.data.get("full_name", "") if profile.data else ""
-    except Exception:
-        role = "advisor"
-        full_name = ""
-
-    _profile_cache[user_id] = (role, full_name, now)
-    return role, full_name
+        _profile_cache[user_id] = (role, full_name, now)
+        return role, full_name
+    except Exception as exc:
+        logger.warning("_get_profile DB query failed for %s: %s", user_id, exc)
+        # A concurrent call may have already written the correct role to the cache
+        # (common when 4+ requests arrive simultaneously on a cold server start).
+        fresh = _profile_cache.get(user_id)
+        if fresh:
+            return fresh[0], fresh[1]
+        return "advisor", ""
 
 
 def invalidate_profile_cache(user_id: str) -> None:

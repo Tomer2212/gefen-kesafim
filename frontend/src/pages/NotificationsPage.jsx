@@ -70,7 +70,7 @@ export default function NotificationsPage() {
   return (
     <div dir="rtl" className="bg-scene min-h-screen">
       <Sidebar dark />
-      <div style={{ marginRight: 240 }}>
+      <div style={{ marginRight: "var(--sidebar-w, 240px)", transition: "margin-right 0.25s cubic-bezier(0.4,0,0.2,1)" }}>
         <div className="max-w-3xl mx-auto px-6 py-10">
           <h1 className="text-2xl font-bold text-slate-900 mb-2">התראות</h1>
           <p className="text-slate-500 text-sm mb-8">

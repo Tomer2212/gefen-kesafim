@@ -90,7 +90,7 @@ export default function TermsPage() {
   return (
     <div dir="rtl" className="bg-scene min-h-screen">
       <Sidebar dark />
-      <div style={{ marginRight: 240 }}>
+      <div style={{ marginRight: "var(--sidebar-w, 240px)", transition: "margin-right 0.25s cubic-bezier(0.4,0,0.2,1)" }}>
       {/* Content */}
       <main className="max-w-3xl mx-auto px-4 py-8 pb-16">
         {/* Heading */}

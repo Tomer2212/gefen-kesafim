@@ -1777,7 +1777,7 @@ function MeetingRow({ meeting, onSave, onRequestDelete, onOpenNotes, usersWithAc
               {draft.meeting_date ? formatMeetingDate(draft.meeting_date) : <span className="text-slate-300 font-normal">—</span>}
             </button>
             {showDate && <DatePickerPopover value={draft.meeting_date}
-              onChange={v => { set("meeting_date", v); setShowDate(false); }}
+              onChange={v => { const nd = { ...draft, meeting_date: v }; setDraft(nd); setShowDate(false); saveDraft(nd); }}
               onClose={() => setShowDate(false)} />}
           </div>
         </td>
@@ -1821,7 +1821,7 @@ function MeetingRow({ meeting, onSave, onRequestDelete, onOpenNotes, usersWithAc
             value={draft.advisor_profiles || []}
             usersWithAccess={usersWithAccess}
             usersWithoutAccess={usersWithoutAccess}
-            onChange={profiles => setDraft(p => ({ ...p, advisor_ids: profiles.map(x => x.id), advisor_profiles: profiles }))}
+            onChange={profiles => { const nd = { ...draft, advisor_ids: profiles.map(x => x.id), advisor_profiles: profiles }; setDraft(nd); saveDraft(nd); }}
             onRequestAccess={onRequestAccess}
           />
         </td>
@@ -1829,18 +1829,20 @@ function MeetingRow({ meeting, onSave, onRequestDelete, onOpenNotes, usersWithAc
         <td className="py-2.5 px-2">
           <ParticipantsSelector contacts={contacts} selected={draft.participants || []}
             onChange={v => {
-              set("participants", v);
-              if (v.length === 0 && draft.reminder_enabled) set("reminder_enabled", false);
+              const reminderOff = v.length === 0 && draft.reminder_enabled;
+              const nd = { ...draft, participants: v, ...(reminderOff ? { reminder_enabled: false } : {}) };
+              setDraft(nd);
+              saveDraft(nd);
             }} />
         </td>
         {/* סוג */}
         <td className="py-2.5 px-2">
-          <MeetingTypeSelect value={draft.meeting_type || ""} onChange={v => set("meeting_type", v)} />
+          <MeetingTypeSelect value={draft.meeting_type || ""} onChange={v => { const nd = { ...draft, meeting_type: v }; setDraft(nd); saveDraft(nd); }} />
         </td>
         {/* הערות */}
         <td className="py-2.5 px-2 text-center">
           <button type="button"
-            onMouseDown={e => { e.preventDefault(); onOpenNotes(meeting.id, draft.notes || "", val => setDraft(p => ({ ...p, notes: val }))); }}
+            onMouseDown={e => { e.preventDefault(); onOpenNotes(meeting.id, draft.notes || "", val => { const nd = { ...draft, notes: val }; setDraft(nd); saveDraft(nd); }); }}
             className="text-slate-400 hover:text-blue-600 transition-colors text-base leading-none" aria-label="פתח הערות">
             {draft.notes ? "📝" : <span className="text-slate-400 text-lg font-light">+</span>}
           </button>
@@ -2656,6 +2658,7 @@ export default function SchoolPage() {
   const [accounts, setAccounts] = useState(location.state?.school?.gefen_accounts || []);
   const [logs, setLogs] = useState([]);
   const [logsError, setLogsError] = useState("");
+  const [meetingsError, setMeetingsError] = useState("");
   const [loading, setLoading] = useState(!location.state?.school);
   const [activeTab, setActiveTab] = useState("info");
   const [activeSubTab, setActiveSubTab] = useState("tikkon");
@@ -2729,7 +2732,7 @@ export default function SchoolPage() {
         setLogs(logsResult.value.data || []);
       } else {
         try {
-          await new Promise(r => setTimeout(r, 1500));
+          await new Promise(r => setTimeout(r, 400));
           const res = await axios.get(`/schools/${schoolId}/logs`);
           setLogs(res.data || []);
         } catch {
@@ -2743,11 +2746,12 @@ export default function SchoolPage() {
 
   async function loadMeetings() {
     setMeetingsLoading(true);
+    setMeetingsError("");
     try {
       const res = await axios.get(`/schools/${schoolId}/meetings`);
       setMeetings(res.data || []);
     } catch {
-      // silently fail — show empty state
+      setMeetingsError("שגיאה בטעינת הפגישות — נסה לרענן");
     } finally {
       setMeetingsLoading(false);
     }
@@ -2758,7 +2762,7 @@ export default function SchoolPage() {
       loadMeetings();
       if (users.length === 0) loadUsers();
     }
-  }, [activeTab]);
+  }, [activeTab, schoolId]);
 
   async function startNewMeeting() {
     const defaultAdvisor = schoolAdvisors[0] || null;
@@ -3026,7 +3030,7 @@ export default function SchoolPage() {
     return (
       <div dir="rtl" className="bg-scene min-h-screen">
         <Sidebar dark />
-        <div style={{ marginRight: 240 }} className="flex items-center justify-center min-h-screen">
+        <div style={{ marginRight: "var(--sidebar-w, 240px)", transition: "margin-right 0.25s cubic-bezier(0.4,0,0.2,1)" }} className="flex items-center justify-center min-h-screen">
           <div role="status" aria-label="טוען">
             <div aria-hidden="true" className="spinner w-10 h-10" />
           </div>
@@ -3055,7 +3059,7 @@ export default function SchoolPage() {
         />
       )}
 
-      <div style={{ marginRight: 240 }}>
+      <div style={{ marginRight: "var(--sidebar-w, 240px)", transition: "margin-right 0.25s cubic-bezier(0.4,0,0.2,1)" }}>
         <div className={`mx-auto px-6 py-10 ${activeTab === "checks" ? "max-w-6xl" : "max-w-4xl"}`}>
 
           {/* Page header */}
@@ -3605,6 +3609,11 @@ export default function SchoolPage() {
               {meetingsLoading ? (
                 <div className="glass-card rounded-2xl p-10 flex justify-center">
                   <div role="status" aria-label="טוען פגישות"><div aria-hidden="true" className="spinner w-8 h-8" /></div>
+                </div>
+              ) : meetingsError ? (
+                <div role="alert" className="glass-card rounded-2xl p-6 text-center">
+                  <p className="text-red-600 mb-3">{meetingsError}</p>
+                  <button onClick={loadMeetings} className="btn-blue text-sm px-4 py-2">רענן</button>
                 </div>
               ) : meetings.length === 0 ? (
                 <div className="glass-card rounded-2xl p-12 text-center">

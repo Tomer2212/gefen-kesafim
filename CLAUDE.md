@@ -550,6 +550,23 @@ def normalize_amount(val):
 - All explanations to the user in **Hebrew**
 - Sidebar: dark mode (`<Sidebar dark />`) on DashboardPage only; white on all other pages
 
+### MeetingRow Auto-Save Pattern (IMPORTANT)
+`MeetingRow` saves via `handleRowBlur` — fires when focus leaves the `<tr>`.
+
+**Critical exception:** any field using `onMouseDown` + `e.preventDefault()` (dropdowns, modals, popovers) prevents focus movement, which means `handleRowBlur` **never fires** for that interaction. The draft is updated locally but never sent to Supabase.
+
+**Rule:** these fields MUST call `saveDraft(nd)` immediately on change — do NOT rely on blur.
+
+Fields currently requiring this pattern (all fixed):
+- `ParticipantsSelector` → `onChange` ✓
+- Notes button → callback passed to `onOpenNotes` ✓
+- `AdvisorCell` → `onChange` ✓
+- `MeetingTypeSelect` → `onChange` ✓
+- `DatePickerPopover` → `onChange` ✓ (was already correct)
+- `StatusPicker` → `onMouseDown` ✓ (was already correct)
+
+If you add a new interactive element to `MeetingRow` that uses `onMouseDown` + `e.preventDefault()`, always call `saveDraft(nd)` directly — never assume blur will handle it.
+
 ---
 
 ## Deployment

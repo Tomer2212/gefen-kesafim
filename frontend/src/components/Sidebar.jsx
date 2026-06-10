@@ -17,8 +17,10 @@ function Icon({ d, d2, circle, rect, viewBox = "0 0 24 24" }) {
   );
 }
 
-function NavItem({ icon, label, active, onClick, badge, dark }) {
-  const baseClass = "flex items-center gap-3 w-full px-3 py-2.5 rounded-xl text-sm font-medium transition-all text-right";
+function NavItem({ icon, label, active, onClick, badge, dark, collapsed }) {
+  const baseClass = collapsed
+    ? "flex items-center justify-center w-full py-2.5 rounded-xl text-sm font-medium transition-all relative"
+    : "flex items-center gap-3 w-full px-3 py-2.5 rounded-xl text-sm font-medium transition-all text-right";
   const stateClass = dark
     ? (active ? "bg-white/12 text-white" : "text-white/70 hover:bg-white/8 hover:text-white")
     : (active ? "bg-blue-50 text-blue-700" : "text-slate-600 hover:bg-slate-50 hover:text-slate-900");
@@ -27,8 +29,13 @@ function NavItem({ icon, label, active, onClick, badge, dark }) {
     : (active ? "text-blue-600" : "text-slate-400");
 
   return (
-    <button onClick={onClick} className={`${baseClass} ${stateClass}`}>
-      <span className="flex-1 text-right">{label}</span>
+    <button
+      onClick={onClick}
+      className={`${baseClass} ${stateClass}`}
+      title={collapsed ? label : undefined}
+      aria-label={collapsed ? label : undefined}
+    >
+      {!collapsed && <span className="flex-1 text-right">{label}</span>}
       <span className={`flex-shrink-0 relative ${iconClass}`}>
         {icon}
         {badge > 0 && (
@@ -265,6 +272,14 @@ export default function Sidebar({ dark = false }) {
   const [role, setRole] = useState("advisor");
   const [notifCount, setNotifCount] = useState(0);
   const [showProfile, setShowProfile] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => {
+    try { return localStorage.getItem("sidebar-collapsed") === "true"; } catch { return false; }
+  });
+
+  useEffect(() => {
+    try { localStorage.setItem("sidebar-collapsed", String(collapsed)); } catch {}
+    document.documentElement.style.setProperty("--sidebar-w", collapsed ? "64px" : "240px");
+  }, [collapsed]);
 
   useEffect(() => {
     async function load() {
@@ -310,9 +325,12 @@ export default function Sidebar({ dark = false }) {
 
   const is = (path) => location.pathname === path;
 
+  const sidebarWidth = collapsed ? 64 : 240;
+  const TRANSITION = "0.25s cubic-bezier(0.4,0,0.2,1)";
+
   const asideStyle = dark
-    ? { width: 240, background: "#18181b", borderLeft: "1px solid rgba(255,255,255,0.07)" }
-    : { width: 240, background: "rgba(255,255,255,0.97)", backdropFilter: "blur(20px)", borderLeft: "1px solid rgba(0,112,243,0.1)", boxShadow: "-4px 0 24px rgba(0,112,243,0.06)" };
+    ? { width: sidebarWidth, background: "#18181b", borderLeft: "1px solid rgba(255,255,255,0.07)", transition: `width ${TRANSITION}`, overflow: "hidden" }
+    : { width: sidebarWidth, background: "rgba(255,255,255,0.97)", backdropFilter: "blur(20px)", borderLeft: "1px solid rgba(0,112,243,0.1)", boxShadow: "-4px 0 24px rgba(0,112,243,0.06)", transition: `width ${TRANSITION}`, overflow: "hidden" };
 
   const dividerClass = dark ? "h-px mx-4 mb-2 bg-white/10" : "h-px bg-slate-100 mx-4 mb-2";
   const innerDividerClass = dark ? "h-px my-1 bg-white/10" : "h-px bg-slate-100 my-1";
@@ -328,11 +346,11 @@ export default function Sidebar({ dark = false }) {
         <button
           onClick={() => navigate("/")}
           aria-label="עמוד הבית"
-          className="flex flex-col items-center px-4 pt-6 pb-4 hover:opacity-90 transition-opacity"
+          className="flex flex-col items-center px-4 pt-6 pb-4 hover:opacity-90 transition-opacity w-full"
           style={{ background: "none", border: "none", cursor: "pointer" }}
         >
           <div
-            className="w-14 h-14 rounded-2xl flex items-center justify-center"
+            className="w-14 h-14 rounded-2xl flex items-center justify-center flex-shrink-0"
             style={{ background: "linear-gradient(135deg, #0070F3 0%, #0055cc 100%)", boxShadow: "0 6px 20px rgba(0,112,243,0.35)" }}
           >
             <svg aria-hidden="true" width="28" height="28" viewBox="0 0 28 28" fill="none">
@@ -342,66 +360,72 @@ export default function Sidebar({ dark = false }) {
               <rect x="16" y="16" width="9" height="9" rx="2" fill="white" fillOpacity="0.9"/>
             </svg>
           </div>
-          <span className="font-bold text-base mt-2" style={{ color: dark ? "white" : "#0070F3" }}>גפן AI</span>
-          <p className={`text-xs text-center mt-1 leading-relaxed px-2 ${dark ? "text-white/40" : "text-slate-400"}`}>
-            כל מה שצריך בגפן במקום אחד
-          </p>
+          {!collapsed && (
+            <>
+              <span className="font-bold text-base mt-2 whitespace-nowrap" style={{ color: dark ? "white" : "#0070F3" }}>גפן AI</span>
+              <p className={`text-xs text-center mt-1 leading-relaxed px-2 whitespace-nowrap ${dark ? "text-white/40" : "text-slate-400"}`}>
+                כל מה שצריך בגפן במקום אחד
+              </p>
+            </>
+          )}
         </button>
 
         {/* User info */}
-        <div
-          className="mx-3 mb-3 px-3 py-2.5 rounded-xl"
-          style={dark
-            ? { background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.1)" }
-            : { background: "#f8fafc", border: "1px solid #f1f5f9" }}
-        >
-          <p className={`text-sm font-semibold truncate ${dark ? "text-white" : "text-slate-800"}`}>{userName || "..."}</p>
-          <p className={`text-xs mt-0.5 ${dark ? "text-white/40" : "text-slate-400"}`}>{ROLE_LABEL[role] || role}</p>
-        </div>
+        {!collapsed && (
+          <div
+            className="mx-3 mb-3 px-3 py-2.5 rounded-xl"
+            style={dark
+              ? { background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.1)" }
+              : { background: "#f8fafc", border: "1px solid #f1f5f9" }}
+          >
+            <p className={`text-sm font-semibold truncate ${dark ? "text-white" : "text-slate-800"}`}>{userName || "..."}</p>
+            <p className={`text-xs mt-0.5 ${dark ? "text-white/40" : "text-slate-400"}`}>{ROLE_LABEL[role] || role}</p>
+          </div>
+        )}
 
-        <div className={dividerClass} />
+        {!collapsed && <div className={dividerClass} />}
 
         {/* Navigation */}
-        <nav className="flex-1 flex flex-col px-3 gap-0.5 overflow-y-auto" aria-label="ניווט ראשי">
-          <NavItem dark={dark}
+        <nav className={`flex-1 flex flex-col gap-0.5 overflow-y-auto ${collapsed ? "px-2" : "px-3"}`} aria-label="ניווט ראשי">
+          <NavItem dark={dark} collapsed={collapsed}
             icon={<Icon d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" d2="M9 22V12h6v10" />}
             label="בית" active={is("/")} onClick={() => navigate("/")}
           />
-          <NavItem dark={dark}
+          <NavItem dark={dark} collapsed={collapsed}
             icon={<Icon d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" circle={[12, 7, 4]} />}
             label="אזור אישי" active={false} onClick={() => setShowProfile(true)}
           />
-          <NavItem dark={dark}
+          <NavItem dark={dark} collapsed={collapsed}
             icon={<Icon d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" d2="M13.73 21a2 2 0 0 1-3.46 0" />}
             label="התראות" active={is("/notifications")} onClick={() => navigate("/notifications")} badge={notifCount}
           />
           {(role === "owner" || role === "manager") && (
-            <NavItem dark={dark}
+            <NavItem dark={dark} collapsed={collapsed}
               icon={<Icon d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" circle={[12, 12, 3]} />}
               label="ניהול" active={is("/admin")} onClick={() => navigate("/admin")}
             />
           )}
 
           <div className="flex-1 min-h-3" />
-          <div className={innerDividerClass} />
+          {!collapsed && <div className={innerDividerClass} />}
 
-          <NavItem dark={dark}
+          <NavItem dark={dark} collapsed={collapsed}
             icon={<Icon d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" d2="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />}
             label="הדרכה" active={is("/guide")} onClick={() => navigate("/guide")}
           />
-          <NavItem dark={dark}
+          <NavItem dark={dark} collapsed={collapsed}
             icon={<Icon d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z" d2="m22 6-10 7L2 6" />}
             label="צור קשר" active={is("/contact")} onClick={() => navigate("/contact")}
           />
-          <NavItem dark={dark}
+          <NavItem dark={dark} collapsed={collapsed}
             icon={<Icon d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" circle={[9, 7, 4]} />}
             label="נגישות" active={is("/accessibility")} onClick={() => navigate("/accessibility")}
           />
-          <NavItem dark={dark}
+          <NavItem dark={dark} collapsed={collapsed}
             icon={<Icon d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" d2="M14 2v6h6M16 13H8M16 17H8M10 9H8" />}
             label="תנאי שימוש" active={is("/terms")} onClick={() => navigate("/terms")}
           />
-          <NavItem dark={dark}
+          <NavItem dark={dark} collapsed={collapsed}
             icon={<Icon rect={[3, 11, 18, 11, 2]} d="M7 11V7a5 5 0 0 1 10 0v4" />}
             label="מדיניות פרטיות" active={is("/privacy")} onClick={() => navigate("/privacy")}
           />
@@ -411,11 +435,15 @@ export default function Sidebar({ dark = false }) {
         <div className="p-3" style={{ borderTop: dark ? "1px solid rgba(255,255,255,0.08)" : "1px solid #f1f5f9" }}>
           <button
             onClick={handleLogout}
-            className={`flex items-center gap-3 w-full px-3 py-2.5 rounded-xl text-sm font-medium transition-all ${
+            title={collapsed ? "יציאה" : undefined}
+            aria-label={collapsed ? "יציאה" : undefined}
+            className={`flex items-center w-full px-3 py-2.5 rounded-xl text-sm font-medium transition-all ${
+              collapsed ? "justify-center" : "gap-3"
+            } ${
               dark ? "text-white/50 hover:bg-red-500/15 hover:text-red-400" : "text-slate-500 hover:bg-red-50 hover:text-red-600"
             }`}
           >
-            <span className="flex-1 text-right">יציאה</span>
+            {!collapsed && <span className="flex-1 text-right">יציאה</span>}
             <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
               <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
               <polyline points="16 17 21 12 16 7"/>
@@ -424,6 +452,31 @@ export default function Sidebar({ dark = false }) {
           </button>
         </div>
       </aside>
+
+      {/* Collapse/expand toggle — floats on the sidebar's left border, vertically centered */}
+      <button
+        onClick={() => setCollapsed(c => !c)}
+        aria-label={collapsed ? "הרחב תפריט" : "צמצם תפריט"}
+        title={collapsed ? "הרחב תפריט" : "צמצם תפריט"}
+        className="fixed z-50 w-6 h-6 rounded-full flex items-center justify-center shadow-md"
+        style={{
+          top: "50%",
+          right: sidebarWidth - 12,
+          transform: "translateY(-50%)",
+          background: dark ? "#3f3f46" : "white",
+          border: dark ? "1px solid rgba(255,255,255,0.18)" : "1px solid #e2e8f0",
+          color: dark ? "rgba(255,255,255,0.55)" : "#94a3b8",
+          transition: `right ${TRANSITION}`,
+          cursor: "pointer",
+        }}
+      >
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          {collapsed
+            ? <path d="M15 18l-6-6 6-6" />
+            : <path d="M9 18l6-6-6-6" />
+          }
+        </svg>
+      </button>
 
       {showProfile && (
         <ProfileModal
