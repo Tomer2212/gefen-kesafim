@@ -12,7 +12,7 @@ import jwt
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from supabase_client import get_admin_client
+from supabase_client import get_admin_client, reset_admin_client
 
 _security = HTTPBearer()
 
@@ -85,6 +85,9 @@ def _get_profile(user_id: str) -> tuple[str, str]:
         return role, full_name
     except Exception as exc:
         logger.warning("_get_profile DB query failed for %s: %s", user_id, exc)
+        # Force a fresh httpx connection pool on the next request — the current
+        # pool may have a stale/reset connection that would cause repeated failures.
+        reset_admin_client()
         # A concurrent call may have already written the correct role to the cache
         # (common when 4+ requests arrive simultaneously on a cold server start).
         fresh = _profile_cache.get(user_id)

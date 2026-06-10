@@ -10,7 +10,7 @@ from openpyxl import load_workbook
 from pydantic import BaseModel
 
 from auth import get_current_user, invalidate_profile_cache
-from supabase_client import get_admin_client
+from supabase_client import get_admin_client, reset_admin_client
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -112,35 +112,25 @@ def list_schools(user: Annotated[dict, Depends(get_current_user)]):
 
     for attempt in range(2):
         try:
-            # Fetch schools + (for advisors) advisor assignment in parallel
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                schools_future = pool.submit(
-                    lambda: db.table("schools").select("*, gefen_accounts(*), advisor_schools(advisor_id)").order("name").execute()
-                )
-                if is_advisor:
-                    assigned_future = pool.submit(
-                        lambda: db.table("advisor_schools").select("school_id").eq("advisor_id", user["id"]).execute()
-                    )
-                else:
-                    assigned_future = None
+            db = get_admin_client()
+            all_res = db.table("schools").select("*, gefen_accounts(*), advisor_schools(advisor_id)").order("name").execute()
+            schools = all_res.data or []
 
-                all_res = schools_future.result()
-                schools = all_res.data or []
-
-                if is_advisor and assigned_future:
-                    assigned = assigned_future.result()
-                    advisor_school_ids = {r["school_id"] for r in (assigned.data or [])}
-                    filtered = []
-                    for s in schools:
-                        rat = s.get("restrict_access_to")
-                        if rat is None or user["id"] in (rat or []) or s["id"] in advisor_school_ids:
-                            filtered.append(s)
-                    schools = filtered
+            if is_advisor:
+                assigned = db.table("advisor_schools").select("school_id").eq("advisor_id", user["id"]).execute()
+                advisor_school_ids = {r["school_id"] for r in (assigned.data or [])}
+                schools = [
+                    s for s in schools
+                    if s.get("restrict_access_to") is None
+                    or user["id"] in (s.get("restrict_access_to") or [])
+                    or s["id"] in advisor_school_ids
+                ]
             break  # success
         except Exception as exc:
             if attempt == 0:
-                logger.warning("list_schools attempt 1 failed: %s — retrying", exc)
-                time.sleep(0.3)
+                logger.warning("list_schools attempt 1 failed: %s — resetting client and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.1)
             else:
                 logger.error("list_schools failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
@@ -246,8 +236,9 @@ def list_accounts(
             return rows.data
         except Exception as exc:
             if attempt == 0:
-                logger.warning("list_accounts attempt 1 failed: %s — retrying", exc)
-                time.sleep(0.3)
+                logger.warning("list_accounts attempt 1 failed: %s — resetting client and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.1)
             else:
                 logger.error("list_accounts failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
@@ -737,8 +728,9 @@ def list_logs(
             break  # success
         except Exception as exc:
             if attempt == 0:
-                logger.warning("list_logs attempt 1 failed: %s — retrying", exc)
-                time.sleep(0.3)
+                logger.warning("list_logs attempt 1 failed: %s — resetting client and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.1)
             else:
                 logger.error("list_logs failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
