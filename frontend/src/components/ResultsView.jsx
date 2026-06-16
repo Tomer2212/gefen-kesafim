@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, Fragment } from "react";
 import axios from "axios";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 
@@ -55,7 +55,7 @@ const DIVISION_LABELS = {
 // Tabs configuration
 // ---------------------------------------------------------------------------
 
-const TAB_IDS = ["hashva", "sikar", "rejected", "nopdf", "partial", "yozma", "kvua"];
+const TAB_IDS = ["hashva", "sikar", "rejected", "nopdf", "partial", "yozma", "nihul", "kvua"];
 const TAB_LABELS_MAP = {
   hashva:   "השוואה גפן-כספים",
   sikar:    "סקירה",
@@ -63,16 +63,29 @@ const TAB_LABELS_MAP = {
   nopdf:    "ללא PDF",
   partial:  "דיווח חסר",
   yozma:    "יוזמות וצרכים",
+  nihul:    "ניהול ותפעול",
   kvua:     "תקציב קבוע",
 };
 // tabs disabled when no tikhnun data
-const TIKHNUN_ONLY_TABS = ["kvua", "partial", "yozma"];
+const TIKHNUN_ONLY_TABS = ["kvua", "partial", "yozma", "nihul"];
 // tabs disabled when tikhnun-only (no gefen execution data)
 const GEFEN_ONLY_TABS = ["rejected", "nopdf", "partial"];
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+const PILL_STYLE = (active) => ({
+  fontWeight: active ? 700 : 500,
+  fontSize: "12px",
+  padding: "4px 14px",
+  borderRadius: "20px",
+  border: `1.5px solid ${active ? "#0070F3" : "#e2e8f0"}`,
+  background: active ? "#0070F3" : "transparent",
+  color: active ? "white" : "#64748b",
+  cursor: "pointer",
+  transition: "all 0.15s",
+});
 
 function fmtNum(v) {
   if (v == null) return "";
@@ -100,10 +113,10 @@ function InfoGrid({ rows }) {
   return (
     <dl className="text-sm leading-relaxed" style={{ display: "grid", gridTemplateColumns: "auto 1fr", rowGap: "6px", columnGap: "10px" }}>
       {rows.filter(r => r.value != null).map(({ label, value, highlight, danger }) => (
-        <>
-          <dt key={label + "_l"} className="text-slate-400 text-right whitespace-nowrap">{label}:</dt>
-          <dd key={label + "_v"} style={danger ? { fontWeight: 700, color: "#dc2626" } : highlight ? { fontWeight: 700, color: "#334155" } : { color: "#475569" }}>{value}</dd>
-        </>
+        <Fragment key={label}>
+          <dt className="text-slate-400 text-right whitespace-nowrap">{label}:</dt>
+          <dd style={danger ? { fontWeight: 700, color: "#dc2626" } : highlight ? { fontWeight: 700, color: "#334155" } : { color: "#475569" }}>{value}</dd>
+        </Fragment>
       ))}
     </dl>
   );
@@ -963,7 +976,7 @@ function PartialTab({ tikhnun, activeBudgetIdx = 0, setActiveBudgetIdx }) {
   );
 }
 
-function YozmaSupplierBreakdown({ breakdown }) {
+function YozmaSupplierBreakdown({ breakdown, title = "פירוט ספקים שדווחו — לפי יוזמה" }) {
   const [openSuppliers, setOpenSuppliers] = useState(new Set());
   function toggleSup(key) {
     setOpenSuppliers(prev => {
@@ -973,15 +986,16 @@ function YozmaSupplierBreakdown({ breakdown }) {
     });
   }
   if (!breakdown || breakdown.length === 0) return null;
+  const isSingle = breakdown.length === 1;
   return (
     <div className="flex flex-col gap-4">
-      <h3 className="text-sm px-1 text-center mt-12" style={{ fontWeight: 700, color: "#475569" }}>פירוט ספקים שדווחו — לפי יוזמה</h3>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0" }}>
+      <h3 className="text-sm px-1 text-center mt-12" style={{ fontWeight: 700, color: "#475569" }}>{title}</h3>
+      <div style={{ display: "grid", gridTemplateColumns: isSingle ? "1fr" : "1fr 1fr", gap: "0" }}>
       {breakdown.map((item, idx) => (
         <div key={`${item.plan_number}-${item.code}`} className="glass-card-dark overflow-hidden"
           style={{
             borderRadius: 0,
-            borderRight: idx % 2 === 0 ? "1px solid #e2e8f0" : "none",
+            borderRight: !isSingle && idx % 2 === 0 ? "1px solid #e2e8f0" : "none",
             borderBottom: "1px solid #e2e8f0",
           }}>
           <div className="px-5 py-3 flex justify-between items-center" dir="rtl"
@@ -990,7 +1004,9 @@ function YozmaSupplierBreakdown({ breakdown }) {
               <span className="text-sm text-white" style={{ fontWeight: 700 }}>
                 קוד {item.code} — {item.initiative_name}
               </span>
-              <span className="text-xs" style={{ color: "rgba(255,255,255,0.6)" }}>מענה {item.plan_number}</span>
+              {item.plan_number && (
+                <span className="text-xs" style={{ color: "rgba(255,255,255,0.6)" }}>מענה {item.plan_number}</span>
+              )}
             </div>
             <span className="text-sm tabular-nums text-white">{fmtNum(item.total_amount)} ₪</span>
           </div>
@@ -1212,6 +1228,56 @@ function YozmaTab({ tikhnun, multiplier, autoSwitch }) {
           <YozmaSupplierBreakdown breakdown={breakdownData} />
         </>
       )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Nihul (ניהול ותפעול) tab
+// ---------------------------------------------------------------------------
+
+function NihulTab({ tikhnun }) {
+  const budgetsWithNihul = (tikhnun?.budgets || []).filter(b => b.nihul_breakdown?.length > 0);
+  const hasBudgetPills   = budgetsWithNihul.length > 1;
+  const [activeBudget, setActiveBudget] = useState(null);
+  const effectiveBudget  = hasBudgetPills ? (activeBudget ?? budgetsWithNihul[0]?.name ?? null) : null;
+
+  let breakdownData;
+  if (hasBudgetPills && effectiveBudget) {
+    const bObj = budgetsWithNihul.find(b => b.name === effectiveBudget);
+    breakdownData = bObj?.nihul_breakdown ?? null;
+  } else {
+    breakdownData = tikhnun?.budgets?.[0]?.nihul_breakdown ?? null;
+  }
+
+  if (!tikhnun || !breakdownData?.length) {
+    return (
+      <p className="text-center text-slate-500 py-10 text-sm" dir="rtl">
+        אין נתוני ניהול ותפעול לבדיקה זו
+      </p>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      {hasBudgetPills && (
+        <div className="flex gap-2 flex-wrap" dir="rtl">
+          {budgetsWithNihul.map(b => (
+            <button
+              key={b.name}
+              onClick={() => setActiveBudget(b.name)}
+              aria-pressed={(activeBudget ?? budgetsWithNihul[0]?.name) === b.name}
+              style={PILL_STYLE((activeBudget ?? budgetsWithNihul[0]?.name) === b.name)}
+            >
+              {b.name}
+            </button>
+          ))}
+        </div>
+      )}
+      <YozmaSupplierBreakdown
+        breakdown={breakdownData}
+        title="פירוט ספקים - ניהול ותפעול"
+      />
     </div>
   );
 }
@@ -1949,6 +2015,15 @@ export default function ResultsView({ result, runId, onNewRun, onTikhnunUpdate =
           {tikhnunTikkon   && <DualTikhnunSection label={tikhnunTikkon.school_stage}><YozmaTab tikhnun={tikhnunTikkon} multiplier={yozmaMultiplierTikkon} autoSwitch={yozmaAutoSwitchTikkon} /></DualTikhnunSection>}
           {tikhnunBeinayim && <DualTikhnunSection label={tikhnunBeinayim.school_stage}><YozmaTab tikhnun={tikhnunBeinayim} multiplier={yozmaMultiplierBeinayim} autoSwitch={yozmaAutoSwitchBeinayim} /></DualTikhnunSection>}
         </div>
+        {activeTab === "nihul" && !isDualTikhnun && (
+          <NihulTab tikhnun={hasTikhnun ? tikhnun : null} />
+        )}
+        {activeTab === "nihul" && isDualTikhnun && (
+          <div className="flex flex-col gap-24">
+            {tikhnunTikkon   && <DualTikhnunSection label={tikhnunTikkon.school_stage}><NihulTab tikhnun={tikhnunTikkon} /></DualTikhnunSection>}
+            {tikhnunBeinayim && <DualTikhnunSection label={tikhnunBeinayim.school_stage}><NihulTab tikhnun={tikhnunBeinayim} /></DualTikhnunSection>}
+          </div>
+        )}
       </div>
 
       <TabDownloadBar

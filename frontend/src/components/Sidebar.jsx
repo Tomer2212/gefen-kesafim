@@ -3,6 +3,7 @@ import { useNavigate, useLocation } from "react-router-dom";
 import axios from "axios";
 import { supabase } from "../lib/supabase";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import sidebarLogoImg from "../assets/logo-sidebar.png";
 
 const ROLE_LABEL = { owner: "בעלים", manager: "מנהל", advisor: "יועץ" };
 
@@ -349,24 +350,10 @@ export default function Sidebar({ dark = false }) {
           className="flex flex-col items-center px-4 pt-6 pb-4 hover:opacity-90 transition-opacity w-full"
           style={{ background: "none", border: "none", cursor: "pointer" }}
         >
-          <div
-            className="w-14 h-14 rounded-2xl flex items-center justify-center flex-shrink-0"
-            style={{ background: "linear-gradient(135deg, #0070F3 0%, #0055cc 100%)", boxShadow: "0 6px 20px rgba(0,112,243,0.35)" }}
-          >
-            <svg aria-hidden="true" width="28" height="28" viewBox="0 0 28 28" fill="none">
-              <rect x="3" y="3" width="9" height="9" rx="2" fill="white" fillOpacity="0.9"/>
-              <rect x="16" y="3" width="9" height="9" rx="2" fill="white" fillOpacity="0.5"/>
-              <rect x="3" y="16" width="9" height="9" rx="2" fill="white" fillOpacity="0.5"/>
-              <rect x="16" y="16" width="9" height="9" rx="2" fill="white" fillOpacity="0.9"/>
-            </svg>
-          </div>
-          {!collapsed && (
-            <>
-              <span className="font-bold text-base mt-2 whitespace-nowrap" style={{ color: dark ? "white" : "#0070F3" }}>גפן AI</span>
-              <p className={`text-xs text-center mt-1 leading-relaxed px-2 whitespace-nowrap ${dark ? "text-white/40" : "text-slate-400"}`}>
-                כל מה שצריך בגפן במקום אחד
-              </p>
-            </>
+          {collapsed ? (
+            <span style={{ fontFamily: "'Outfit', sans-serif", fontWeight: 700, fontSize: "1.5rem", lineHeight: 1, color: "white" }}>G</span>
+          ) : (
+            <img src={sidebarLogoImg} alt="גפן AI לוגו" className="h-10 w-auto object-contain" />
           )}
         </button>
 

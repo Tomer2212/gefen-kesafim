@@ -500,9 +500,17 @@ async def classify_rows(
         except Exception as _ye:
             logger.warning("per-budget yozma (classify) failed: %s", _ye)
         try:
+            _propagate_meshuyakh_to_root(tikhnun)
+        except Exception as _pe:
+            logger.warning("meshuyakh propagation (classify) failed: %s", _pe)
+        try:
             _build_and_attach_yozma_breakdown(tikhnun["budgets"], perut_rows, results_clean)
         except Exception as _ybe:
             logger.warning("per-budget yozma breakdown (classify) failed: %s", _ybe)
+        try:
+            _build_and_attach_nihul_breakdown(tikhnun["budgets"], results_clean)
+        except Exception as _nhe:
+            logger.warning("per-budget nihul breakdown (classify) failed: %s", _nhe)
     try:
         per_bud_rej = _build_rejected_from_results_clean(results_clean)
         if per_bud_rej:
@@ -632,9 +640,17 @@ async def retry_finance(
                 except Exception as _ye:
                     logger.warning("per-budget yozma (classify2) failed: %s", _ye)
                 try:
+                    _propagate_meshuyakh_to_root(tikhnun)
+                except Exception as _pe:
+                    logger.warning("meshuyakh propagation (classify2) failed: %s", _pe)
+                try:
                     _build_and_attach_yozma_breakdown(tikhnun["budgets"], perut_rows, results_clean)
                 except Exception as _ybe:
                     logger.warning("per-budget yozma breakdown (classify2) failed: %s", _ybe)
+                try:
+                    _build_and_attach_nihul_breakdown(tikhnun["budgets"], results_clean)
+                except Exception as _nhe:
+                    logger.warning("per-budget nihul breakdown (classify2) failed: %s", _nhe)
             try:
                 per_bud_rej = _build_rejected_from_results_clean(results_clean)
                 if per_bud_rej:
@@ -1702,6 +1718,30 @@ def _compute_per_budget_yozma(
             }
 
 
+def _propagate_meshuyakh_to_root(tikhnun_result: dict) -> None:
+    """Copy meshuyakh from per-budget yozma detail back to root yozma_03/yozma_04 detail.
+
+    _compute_per_budget_yozma writes meshuyakh onto each tikhnun_result["budgets"][i]["yozma_03/04"].
+    The frontend reads the ROOT tikhnun_result["yozma_03/04"] for single-budget schools (no pills).
+    This function merges the meshuyakh values into the root detail by matching report codes.
+    """
+    budgets = tikhnun_result.get("budgets") or []
+    if not budgets:
+        return
+    for mult in ("03", "04"):
+        root_detail = (tikhnun_result.get(f"yozma_{mult}") or {}).get("detail") or []
+        if not root_detail:
+            continue
+        code_to_idx = {item["code"]: i for i, item in enumerate(root_detail)}
+        for item in root_detail:
+            item["meshuyakh"] = 0
+        for bdict in budgets:
+            for bitem in (bdict.get(f"yozma_{mult}") or {}).get("detail") or []:
+                cd = bitem.get("code", "")
+                if cd in code_to_idx:
+                    root_detail[code_to_idx[cd]]["meshuyakh"] += bitem.get("meshuyakh") or 0
+
+
 def _build_and_attach_yozma_breakdown(budgets_list: list, perut_rows: list, results_clean: list) -> None:
     """Add yozma_breakdown to each budget dict — supplier totals and transactions per (plan, code)."""
     import re as _re
@@ -1796,6 +1836,84 @@ def _build_and_attach_yozma_breakdown(budgets_list: list, perut_rows: list, resu
         items.sort(key=lambda x: (int(x["code"]) if x["code"].isdigit() else 0, x["plan_number"]))
         if items:
             bdict["yozma_breakdown"] = items
+
+
+_NIHUL_CODE_TIKKON   = "104"
+_NIHUL_CODE_BEINAYIM = "67"
+
+
+def _build_and_attach_nihul_breakdown(budgets_list: list, results_clean: list) -> None:
+    """Add nihul_breakdown to each budget dict — supplier totals per (code 104 or 67)."""
+    import re as _re
+    from collections import defaultdict as _dd
+    from zihuy_core import normalize_budget_name as _nb_nihul
+
+    if not results_clean or not budgets_list:
+        return
+
+    def _to_f(v):
+        if v is None: return 0.0
+        try: return float(str(v).replace(",", "").strip())
+        except Exception: return 0.0
+
+    # Group all doch rows by (norm_budget, code) → sup_num → transaction list
+    code_sups: dict = _dd(lambda: _dd(list))
+    for r in results_clean:
+        if not r.get("budget"):
+            continue
+        orig = r.get("orig", ())
+        if len(orig) < 12:
+            continue
+        nb  = _nb_nihul(str(r["budget"]))
+        cd  = str(orig[1] or "").strip()
+        sup_num  = str(r.get("sup_num") or "").strip()
+        sup_raw  = str(orig[6] or "")
+        sup_name = _re.sub(r'^\s*\d+\s*-\s*', '', sup_raw).strip()
+        code_sups[(nb, cd)][sup_num].append({
+            "date":          _normalize_date(str(orig[5])) if orig[5] is not None else "",
+            "invoice":       str(orig[4] or "").strip(),
+            "description":   str(orig[10] or "").strip(),
+            "amount":        int(round(_to_f(orig[11]))),
+            "supplier_name": sup_name,
+        })
+
+    for bdict in budgets_list:
+        budget_norm = bdict.get("name", "")
+        # Determine stage to pick the correct nihul code
+        stage = None
+        for r in results_clean:
+            if _nb_nihul(r.get("budget", "")) == budget_norm and r.get("stage"):
+                stage = r["stage"]
+                break
+        nihul_code = _NIHUL_CODE_TIKKON if stage == "תיכון" else _NIHUL_CODE_BEINAYIM
+
+        sup_dict = code_sups.get((budget_norm, nihul_code), {})
+        if not sup_dict:
+            continue
+
+        suppliers: list = []
+        total = 0.0
+        for sup_num, txns in sup_dict.items():
+            sup_total = sum(_to_f(t["amount"]) for t in txns)
+            total += sup_total
+            suppliers.append({
+                "supplier_number": sup_num,
+                "supplier_name":   txns[0]["supplier_name"],
+                "total_amount":    int(round(sup_total)),
+                "transactions": [
+                    {"date": t["date"], "invoice": t["invoice"],
+                     "description": t["description"], "amount": t["amount"]}
+                    for t in txns
+                ],
+            })
+        suppliers.sort(key=lambda x: -x["total_amount"])
+        bdict["nihul_breakdown"] = [{
+            "code":            nihul_code,
+            "initiative_name": "ניהול ותפעול",
+            "plan_number":     "",
+            "total_amount":    int(round(total)),
+            "suppliers":       suppliers,
+        }]
 
 
 def _compute_multi_budget_tikhnun(
@@ -1932,6 +2050,10 @@ def _compute_multi_budget_tikhnun(
                     _compute_per_budget_yozma(tikhnun_result["budgets"], perut_rows, None)
                 except Exception as _ye:
                     logger.warning("per-budget yozma (no-doch) failed: %s", _ye)
+                try:
+                    _propagate_meshuyakh_to_root(tikhnun_result)
+                except Exception as _pe:
+                    logger.warning("meshuyakh propagation (no-doch) failed: %s", _pe)
             return tikhnun_result, None
 
         # Run zihuy identification
@@ -2010,9 +2132,17 @@ def _compute_multi_budget_tikhnun(
             except Exception as _ye:
                 logger.warning("per-budget yozma failed: %s", _ye)
             try:
+                _propagate_meshuyakh_to_root(tikhnun_result)
+            except Exception as _pe:
+                logger.warning("meshuyakh propagation failed: %s", _pe)
+            try:
                 _build_and_attach_yozma_breakdown(tikhnun_result["budgets"], perut_rows, results_clean)
             except Exception as _ybe:
                 logger.warning("per-budget yozma breakdown failed: %s", _ybe)
+            try:
+                _build_and_attach_nihul_breakdown(tikhnun_result["budgets"], results_clean)
+            except Exception as _nhe:
+                logger.warning("per-budget nihul breakdown failed: %s", _nhe)
         try:
             per_bud_rej = _build_rejected_from_results_clean(results_clean)
             if per_bud_rej:
