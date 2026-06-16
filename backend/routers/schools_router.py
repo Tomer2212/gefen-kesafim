@@ -328,14 +328,24 @@ def list_advisors(
     user: Annotated[dict, Depends(get_current_user)],
 ):
     _require_manager(user)
-    db = get_admin_client()
-    rows = (
-        db.table("advisor_schools")
-        .select("advisor_id, profiles(id, email, full_name, role)")
-        .eq("school_id", school_id)
-        .execute()
-    )
-    return [r["profiles"] for r in rows.data if r.get("profiles")]
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            rows = (
+                db.table("advisor_schools")
+                .select("advisor_id, profiles(id, email, full_name, role)")
+                .eq("school_id", school_id)
+                .execute()
+            )
+            return [r["profiles"] for r in rows.data if r.get("profiles")]
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("list_advisors attempt 1 failed: %s — resetting client and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("list_advisors failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
 
 @router.post("/{school_id}/advisors")

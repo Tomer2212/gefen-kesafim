@@ -39,6 +39,42 @@ def _col(ws, idx, width):
     ws.column_dimensions[get_column_letter(idx)].width = width
 
 
+def _get_breakdown(tikhnun: dict, breakdown_key: str) -> list:
+    """
+    Return a breakdown list from the first budget that has it,
+    stripping the individual transactions from each supplier.
+    breakdown_key: "yozma_breakdown" | "nihul_breakdown"
+    """
+    for bdict in (tikhnun.get("budgets") or []):
+        bd = bdict.get(breakdown_key)
+        if bd:
+            result = []
+            for item in bd:
+                sups = [
+                    {"number": s.get("supplier_number", ""),
+                     "name":   s.get("supplier_name", ""),
+                     "total":  s.get("total_amount") or 0}
+                    for s in (item.get("suppliers") or [])
+                ]
+                result.append({
+                    "code":             item.get("code", ""),
+                    "initiative_name":  item.get("initiative_name", ""),
+                    "plan_number":      item.get("plan_number", ""),
+                    "total":            item.get("total_amount") or 0,
+                    "suppliers":        sups,
+                })
+            return result
+    return []
+
+
+def _get_supplier_breakdown(tikhnun: dict) -> list:
+    return _get_breakdown(tikhnun, "yozma_breakdown")
+
+
+def _get_nihul_breakdown(tikhnun: dict) -> list:
+    return _get_breakdown(tikhnun, "nihul_breakdown")
+
+
 def export_tikhnun_excel(tikhnun: dict, section: str, multiplier: str = "03") -> bytes:
     """
     Export a single tikhnun section to Excel bytes.
@@ -62,6 +98,9 @@ def export_tikhnun_excel(tikhnun: dict, section: str, multiplier: str = "03") ->
         yozma_key = "yozma_04" if multiplier == "04" else "yozma_03"
         _write_yozma(ws, tikhnun, yozma_key)
         ws.title = "יוזמות וצרכים"
+    elif section == "nihul":
+        _write_nihul(ws, tikhnun)
+        ws.title = "ניהול ותפעול"
     else:
         raise ValueError(f"Unknown section: {section}")
 
@@ -211,7 +250,7 @@ def _write_partial(ws, tikhnun: dict):
 def _write_yozma(ws, tikhnun: dict, yozma_key: str):
     yozma = tikhnun.get(yozma_key, tikhnun.get("yozma_03", {}))
 
-    ws.column_dimensions["A"].width = 32
+    ws.column_dimensions["A"].width = 34
     ws.column_dimensions["B"].width = 18
     ws.column_dimensions["C"].width = 18
     ws.column_dimensions["D"].width = 22
@@ -241,7 +280,8 @@ def _write_yozma(ws, tikhnun: dict, yozma_key: str):
     for ci, h in enumerate(["סעיף", "תקרה", "בתכנון", "הפרש שניתן לתכנון"], 1):
         _hdr(ws, 7, ci, h)
 
-    for ri, item in enumerate(yozma.get("detail", []), 8):
+    detail = yozma.get("detail", [])
+    for ri, item in enumerate(detail, 8):
         ws.cell(ri, 1, item.get("label", "")).alignment = _ALIGN_R
         c = ws.cell(ri, 2, _fmt_num(item.get("cap"))); c.number_format = _MONEY_FMT; c.alignment = _ALIGN_R
         c = ws.cell(ri, 3, _fmt_num(item.get("betikhnun"))); c.number_format = _MONEY_FMT; c.alignment = _ALIGN_R
@@ -249,6 +289,79 @@ def _write_yozma(ws, tikhnun: dict, yozma_key: str):
         c = ws.cell(ri, 4, _fmt_num(h_val)); c.number_format = _MONEY_FMT; c.alignment = _ALIGN_R
         if h_val < 0:
             c.font = _RED_FONT
+
+    # ---- supplier breakdown section ----
+    sup_data = _get_supplier_breakdown(tikhnun)
+    if sup_data:
+        ri = 8 + len(detail) + 1  # blank row after detail
+
+        sec_title = ws.cell(ri, 1, "פירוט ספקים לפי יוזמה")
+        sec_title.font = Font(name="Arial", bold=True, size=11)
+        sec_title.alignment = _ALIGN_R
+        ri += 1
+
+        _hdr(ws, ri, 1, "יוזמה / שם ספק")
+        _hdr(ws, ri, 2, "מספר ספק / מענה")
+        _hdr(ws, ri, 3, "סכום")
+        ri += 1
+
+        for item in sup_data:
+            # Initiative header row (gray background)
+            for ci in range(1, 4):
+                ws.cell(ri, ci).fill = _GRAY_ROW
+            hdr_label = f"קוד {item['code']} — {item['initiative_name']}"
+            lc = ws.cell(ri, 1, hdr_label)
+            lc.font = _NRM_BOLD; lc.alignment = _ALIGN_R
+            mc = ws.cell(ri, 2, f"מענה {item['plan_number']}")
+            mc.font = _NRM_BOLD; mc.alignment = _ALIGN_R
+            tc = ws.cell(ri, 3, _fmt_num(item["total"]))
+            tc.number_format = _MONEY_FMT; tc.alignment = _ALIGN_R; tc.font = _NRM_BOLD
+            ri += 1
+
+            for sup in item["suppliers"]:
+                ws.cell(ri, 1, sup["name"]).alignment = _ALIGN_R
+                ws.cell(ri, 2, sup["number"]).alignment = _ALIGN_R
+                c = ws.cell(ri, 3, sup["total"])
+                c.number_format = _MONEY_FMT; c.alignment = _ALIGN_R
+                ri += 1
+
+
+def _write_nihul(ws, tikhnun: dict):
+    ws.column_dimensions["A"].width = 34
+    ws.column_dimensions["B"].width = 20
+    ws.column_dimensions["C"].width = 18
+
+    title = ws.cell(1, 1, "ניהול ותפעול - פירוט ספקים")
+    title.font = Font(name="Arial", bold=True, size=12)
+    title.alignment = _ALIGN_R
+
+    sup_data = _get_nihul_breakdown(tikhnun)
+    if not sup_data:
+        ws.cell(3, 1, "אין נתוני ניהול ותפעול לבדיקה זו").alignment = _ALIGN_R
+        return
+
+    _hdr(ws, 3, 1, "שם ספק")
+    _hdr(ws, 3, 2, "מספר ספק")
+    _hdr(ws, 3, 3, "סכום")
+    ri = 4
+
+    for item in sup_data:
+        # Initiative/code header row (gray)
+        for ci in range(1, 4):
+            ws.cell(ri, ci).fill = _GRAY_ROW
+        hdr_label = f"קוד {item['code']} — {item['initiative_name']}"
+        lc = ws.cell(ri, 1, hdr_label)
+        lc.font = _NRM_BOLD; lc.alignment = _ALIGN_R
+        tc = ws.cell(ri, 3, _fmt_num(item["total"]))
+        tc.number_format = _MONEY_FMT; tc.alignment = _ALIGN_R; tc.font = _NRM_BOLD
+        ri += 1
+
+        for sup in item["suppliers"]:
+            ws.cell(ri, 1, sup["name"]).alignment = _ALIGN_R
+            ws.cell(ri, 2, sup["number"]).alignment = _ALIGN_R
+            c = ws.cell(ri, 3, sup["total"])
+            c.number_format = _MONEY_FMT; c.alignment = _ALIGN_R
+            ri += 1
 
 
 # ---------------------------------------------------------------------------
@@ -406,6 +519,101 @@ def build_tikhnun_section_story(tikhnun: dict, section: str, multiplier: str = "
         tbl2.setStyle(_tbl_style(4, len(data)))
         story.append(tbl2)
 
+        # ---- supplier breakdown ----
+        sup_data = _get_supplier_breakdown(tikhnun)
+        if sup_data:
+            from reportlab.lib.units import cm as _cm
+            story.append(Spacer(1, 0.5*_cm))
+            style_sec = ParagraphStyle("tkh_sup_sec", fontName=font_bold, fontSize=11, alignment=1)
+            story.append(Paragraph(rtl("פירוט ספקים לפי יוזמה"), style_sec))
+            story.append(Spacer(1, 0.3*_cm))
+
+            # One continuous table: initiative header row + supplier rows per plan entry
+            # Columns (RTL visual order): initiative/name | plan/number | amount
+            sup_headers = [rtl("יוזמה / שם ספק"), rtl("מספר ספק / מענה"), rtl("סכום")]
+            sup_table_data = [sup_headers]
+            subhdr_rows = []
+
+            for item in sup_data:
+                subhdr_rows.append(len(sup_table_data))
+                hdr_label = f"קוד {item['code']} — {item['initiative_name']}"
+                sup_table_data.append([
+                    rtl(hdr_label),
+                    rtl(f"מענה {item['plan_number']}"),
+                    fmt_money(item["total"]),
+                ])
+                for sup in item["suppliers"]:
+                    sup_table_data.append([
+                        rtl(sup["name"]),
+                        rtl(sup["number"]),
+                        fmt_money(sup["total"]),
+                    ])
+
+            sup_col_widths = [9*_cm, 4*_cm, 4*_cm]
+            sup_tbl = Table(_rev(sup_table_data), colWidths=list(reversed(sup_col_widths)))
+
+            base_sup_style = [
+                ("FONTNAME",   (0, 0), (-1, -1), font_name),
+                ("FONTSIZE",   (0, 0), (-1, -1), 8),
+                ("BACKGROUND", (0, 0), (-1, 0),  HDR_COLOR),
+                ("TEXTCOLOR",  (0, 0), (-1, 0),  colors.white),
+                ("FONTNAME",   (0, 0), (-1, 0),  font_bold),
+                ("ALIGN",      (0, 0), (-1, -1), "RIGHT"),
+                ("VALIGN",     (0, 0), (-1, -1), "MIDDLE"),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F5F7FA")]),
+                ("GRID",       (0, 0), (-1, -1), 0.3, colors.HexColor("#CCCCCC")),
+            ]
+            for r in subhdr_rows:
+                base_sup_style += [
+                    ("BACKGROUND", (0, r), (-1, r), GRAY),
+                    ("FONTNAME",   (0, r), (-1, r), font_bold),
+                    ("TEXTCOLOR",  (0, r), (-1, r), colors.HexColor("#0f172a")),
+                ]
+            sup_tbl.setStyle(TableStyle(base_sup_style))
+            story.append(sup_tbl)
+
+    elif section == "nihul":
+        story.append(Paragraph(rtl("ניהול ותפעול - פירוט ספקים"), style_title))
+        story.append(Spacer(1, 0.4*cm))
+
+        sup_data = _get_nihul_breakdown(tikhnun)
+        if not sup_data:
+            style_msg = ParagraphStyle("tkh_nihul_empty", fontName=font_name, fontSize=10, alignment=1)
+            story.append(Paragraph(rtl("אין נתוני ניהול ותפעול לבדיקה זו"), style_msg))
+        else:
+            sup_headers = [rtl("שם ספק"), rtl("מספר ספק"), rtl("סכום")]
+            sup_table_data = [sup_headers]
+            subhdr_rows = []
+
+            for item in sup_data:
+                subhdr_rows.append(len(sup_table_data))
+                hdr_label = f"קוד {item['code']} — {item['initiative_name']}"
+                sup_table_data.append([rtl(hdr_label), "", fmt_money(item["total"])])
+                for sup in item["suppliers"]:
+                    sup_table_data.append([rtl(sup["name"]), rtl(sup["number"]), fmt_money(sup["total"])])
+
+            sup_col_widths = [9*cm, 4*cm, 4*cm]
+            sup_tbl = Table(_rev(sup_table_data), colWidths=list(reversed(sup_col_widths)))
+            base_nihul_style = [
+                ("FONTNAME",   (0, 0), (-1, -1), font_name),
+                ("FONTSIZE",   (0, 0), (-1, -1), 8),
+                ("BACKGROUND", (0, 0), (-1, 0),  HDR_COLOR),
+                ("TEXTCOLOR",  (0, 0), (-1, 0),  colors.white),
+                ("FONTNAME",   (0, 0), (-1, 0),  font_bold),
+                ("ALIGN",      (0, 0), (-1, -1), "RIGHT"),
+                ("VALIGN",     (0, 0), (-1, -1), "MIDDLE"),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F5F7FA")]),
+                ("GRID",       (0, 0), (-1, -1), 0.3, colors.HexColor("#CCCCCC")),
+            ]
+            for r in subhdr_rows:
+                base_nihul_style += [
+                    ("BACKGROUND", (0, r), (-1, r), GRAY),
+                    ("FONTNAME",   (0, r), (-1, r), font_bold),
+                    ("TEXTCOLOR",  (0, r), (-1, r), colors.HexColor("#0f172a")),
+                ]
+            sup_tbl.setStyle(TableStyle(base_nihul_style))
+            story.append(sup_tbl)
+
     return story
 
 
@@ -426,7 +634,7 @@ def export_tikhnun_pdf(tikhnun: dict, section: str, multiplier: str = "03") -> b
     # Always prepend school info for non-sikar sections (sikar IS the school info)
     if section != "sikar":
         story.extend(build_school_info_story(tikhnun))
-        story.append(PageBreak() if section in ("kvua", "partial", "yozma") else __import__("reportlab.platypus", fromlist=["Spacer"]).Spacer(1, 0.3*__import__("reportlab.lib.units", fromlist=["cm"]).cm))
+        story.append(PageBreak() if section in ("kvua", "partial", "yozma", "nihul") else __import__("reportlab.platypus", fromlist=["Spacer"]).Spacer(1, 0.3*__import__("reportlab.lib.units", fromlist=["cm"]).cm))
 
     story.extend(build_tikhnun_section_story(tikhnun, section, multiplier))
     doc.build(story)

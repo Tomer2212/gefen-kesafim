@@ -13,6 +13,7 @@ runs/
 skills-lock.json
 .agents/
 *.png
+!frontend/src/assets/*.png
 backend/result_debug.json
 .claude/
 temp_*.json

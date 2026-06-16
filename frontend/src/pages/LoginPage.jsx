@@ -1,19 +1,10 @@
 import { useState } from "react";
 import { supabase } from "../lib/supabase";
+import logoImg from "../assets/logo.png";
 
 const LogoMark = () => (
   <div className="flex justify-center mb-6">
-    <div
-      className="w-14 h-14 rounded-2xl flex items-center justify-center"
-      style={{ background: "linear-gradient(135deg, #0070F3 0%, #0055cc 100%)", boxShadow: "0 6px 20px rgba(0,112,243,0.35)" }}
-    >
-      <svg aria-hidden="true" width="28" height="28" viewBox="0 0 28 28" fill="none">
-        <rect x="3" y="3" width="9" height="9" rx="2" fill="white" fillOpacity="0.9"/>
-        <rect x="16" y="3" width="9" height="9" rx="2" fill="white" fillOpacity="0.5"/>
-        <rect x="3" y="16" width="9" height="9" rx="2" fill="white" fillOpacity="0.5"/>
-        <rect x="16" y="16" width="9" height="9" rx="2" fill="white" fillOpacity="0.9"/>
-      </svg>
-    </div>
+    <img src={logoImg} alt="גפן AI לוגו" className="h-[12.96rem] w-auto object-contain" />
   </div>
 );
 
@@ -77,11 +68,8 @@ export default function LoginPage() {
           {view === "login" && (
             <>
               <LogoMark />
-              <h1 className="text-center text-2xl font-800 mb-1" style={{ color: "#0070F3", fontWeight: 800 }}>
-                גפן AI
-              </h1>
-              <p className="text-center text-sm text-slate-400 mb-8 font-medium">
-                כניסה למערכת בדיקת תקציב
+              <p className="text-center text-sm text-black mb-8 font-medium">
+                מערכת חכמה לניהול תקציב הגפן
               </p>
 
               <form onSubmit={handleSubmit} className="flex flex-col gap-4">
@@ -264,9 +252,6 @@ export default function LoginPage() {
           )}
         </div>
 
-        <p className="text-center text-xs text-slate-400 mt-6">
-          מערכת חכמה לניהול תקציב הגפן
-        </p>
       </div>
     </div>
   );
