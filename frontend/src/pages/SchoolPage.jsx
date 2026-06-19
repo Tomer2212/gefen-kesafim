@@ -766,13 +766,6 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
     axios.get("/schools/users/me").then(r => setMeUser(r.data)).catch(() => {});
   }, []);
 
-  // When "היועצים המלווים שנבחרו" mode is active, keep restrict_access_to in sync
-  useEffect(() => {
-    if (!accessLinkedToAdvisors) return;
-    const ids = schoolAdvisors.map(a => a.id).filter(Boolean);
-    setEditForm(p => ({ ...p, restrict_access_to: ids.length > 0 ? ids : null }));
-  }, [schoolAdvisors, accessLinkedToAdvisors]);
-
   useEffect(() => {
     if (!showColPicker) return;
     function h(e) {
@@ -2791,6 +2784,13 @@ export default function SchoolPage() {
       if (users.length === 0 && (role === "owner" || role === "manager")) loadUsers();
     }
   }, [activeTab, schoolId, role]);
+
+  // When "היועצים המלווים שנבחרו" mode is active, keep restrict_access_to in sync
+  useEffect(() => {
+    if (!accessLinkedToAdvisors) return;
+    const ids = schoolAdvisors.map(a => a.id).filter(Boolean);
+    setEditForm(p => ({ ...p, restrict_access_to: ids.length > 0 ? ids : null }));
+  }, [schoolAdvisors, accessLinkedToAdvisors]);
 
   async function startNewMeeting() {
     const defaultAdvisor = schoolAdvisors[0] || null;
