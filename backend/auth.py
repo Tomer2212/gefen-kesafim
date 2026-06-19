@@ -64,41 +64,47 @@ _profile_cache: dict = {}
 _PROFILE_TTL = 300  # 5 minutes
 
 
-def _get_profile(user_id: str) -> tuple[str, str]:
+def _get_profile(user_id: str) -> dict:
     now = time.monotonic()
     cached = _profile_cache.get(user_id)
-    if cached and (now - cached[2]) < _PROFILE_TTL:
-        return cached[0], cached[1]
+    if cached and (now - cached["_cached_at"]) < _PROFILE_TTL:
+        return cached
 
     for attempt in range(2):
         try:
             db = get_admin_client()
             profile = (
                 db.table("profiles")
-                .select("role, full_name")
+                .select("role, full_name, org_id, is_superadmin, onboarding_dismissed")
                 .eq("id", user_id)
                 .single()
                 .execute()
             )
-            role = profile.data.get("role", "advisor") if profile.data else "advisor"
-            full_name = profile.data.get("full_name", "") if profile.data else ""
-            _profile_cache[user_id] = (role, full_name, time.monotonic())
-            return role, full_name
+            d = profile.data or {}
+            result = {
+                "role": d.get("role", "advisor"),
+                "full_name": d.get("full_name", ""),
+                "org_id": d.get("org_id"),
+                "is_superadmin": bool(d.get("is_superadmin", False)),
+                "onboarding_dismissed": d.get("onboarding_dismissed") or {},
+                "_cached_at": time.monotonic(),
+            }
+            _profile_cache[user_id] = result
+            return result
         except Exception as exc:
             if attempt == 0:
                 logger.warning("_get_profile attempt 1 failed for %s: %s — resetting and retrying", user_id, exc)
                 reset_admin_client()
                 time.sleep(0.05)
-                # A concurrent thread may have already succeeded and populated the cache
                 fresh = _profile_cache.get(user_id)
                 if fresh:
-                    return fresh[0], fresh[1]
+                    return fresh
             else:
                 logger.warning("_get_profile failed after 2 attempts for %s: %s", user_id, exc)
                 fresh = _profile_cache.get(user_id)
                 if fresh:
-                    return fresh[0], fresh[1]
-                return "advisor", ""
+                    return fresh
+                return {"role": "advisor", "full_name": "", "org_id": None, "is_superadmin": False, "onboarding_dismissed": {}, "_cached_at": time.monotonic()}
 
 
 def invalidate_profile_cache(user_id: str) -> None:
@@ -134,11 +140,14 @@ def get_current_user(
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    role, full_name = _get_profile(user_id)
+    profile = _get_profile(user_id)
 
     return {
         "id": user_id,
         "email": email,
-        "role": role,
-        "full_name": full_name,
+        "role": profile["role"],
+        "full_name": profile["full_name"],
+        "org_id": profile["org_id"],
+        "is_superadmin": profile["is_superadmin"],
+        "onboarding_dismissed": profile["onboarding_dismissed"],
     }

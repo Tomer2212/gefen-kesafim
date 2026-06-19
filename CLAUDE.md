@@ -721,6 +721,165 @@ Skipping step 2 will cause silent 42501 errors from Supabase after October 30, 2
 
 ---
 
+### 5. `get_admin_client()` Must Be Fetched Inside the Retry `try` Block
+
+**Absolute rule:** `db = get_admin_client()` must appear as the first line **inside** the `try` block of every retry loop — never before the loop.
+
+When `reset_admin_client()` is called in the `except` branch of attempt 0, it sets the singleton to `None`. A `db` reference captured *before the loop* still points to the old stale httpx client. Attempt 1 will use the stale client again and fail → both attempts fail → 503.
+
+**Forbidden pattern:**
+```python
+db = get_admin_client()       # ← captured before the loop
+for attempt in range(2):
+    try:
+        rows = db.table(...)  # attempt 1 fails → reset_admin_client()
+                              # attempt 2: SAME stale db reference!
+    except Exception as exc:
+        if attempt == 0:
+            reset_admin_client()  # resets singleton, but `db` is still stale
+```
+
+**Required pattern (matches `list_schools`):**
+```python
+for attempt in range(2):
+    try:
+        db = get_admin_client()   # ← fresh reference on every attempt
+        rows = db.table(...).execute()
+        break
+    except Exception as exc:
+        if attempt == 0:
+            logger.warning("... attempt 1 failed: %s — resetting and retrying", exc)
+            reset_admin_client()
+            time.sleep(0.1)
+        else:
+            logger.error("... failed after 2 attempts: %s", exc, exc_info=True)
+            raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+```
+
+This rule applies to **every** `GET` endpoint in `schools_router.py` and `analyze_router.py`.
+
+---
+
+### 6. Secondary Enrichment Queries Must Be Non-Fatal
+
+**Rule:** Any query that enriches primary data with secondary information (profile names, advisor details, meeting stats, etc.) must be wrapped in its own independent `try/except` block. A transient failure in enrichment must never crash the primary endpoint.
+
+**Forbidden pattern:**
+```python
+# Main query succeeded and returned logs. Now enriching:
+user_ids = [r["run_by"] for r in logs]
+p_rows = db.table("profiles").select(...).in_("id", user_ids).execute()  # ← unprotected
+```
+
+**Required pattern:**
+```python
+try:
+    db = get_admin_client()
+    p_rows = db.table("profiles").select(...).in_("id", user_ids).execute()
+    profiles_map = {p["id"]: p for p in (p_rows.data or [])}
+    for row in logs:
+        row["profiles"] = profiles_map.get(row.get("run_by"))
+except Exception as exc:
+    logger.warning("profile enrichment failed (non-fatal): %s", exc)
+    # Primary data (logs) still returned without profile names
+```
+
+Endpoints that follow this pattern: `list_logs`, `list_meetings`, `list_schools` (Q3/Q4).
+
+---
+
+### 7. DB-Level Filtering — No Python-Side Table Scans
+
+**Absolute prohibition:** Never fetch a full table into Python and filter in a loop. This breaks at scale and wastes worker memory.
+
+For advisors (restricted access), the required two-step pattern:
+
+```python
+# Step 1: lightweight pre-fetch of the advisor's assigned IDs
+assigned = db.table("advisor_schools").select("school_id").eq("advisor_id", user["id"]).execute()
+assigned_ids = [r["school_id"] for r in (assigned.data or [])]
+
+# Step 2: DB-side filter via .or_() / .in_()
+filters = [
+    "restrict_access_to.is.null",
+    f'restrict_access_to.cs.["{user["id"]}"]',
+]
+if assigned_ids:
+    filters.append(f"id.in.({','.join(assigned_ids)})")
+
+rows = db.table("schools").select("*").or_(",".join(filters)).execute()
+```
+
+This scales to 10,000 schools. Python-side filtering does not.
+
+---
+
+### 8. No `ThreadPoolExecutor` on the Shared Supabase Singleton
+
+**Rule:** Do NOT use `ThreadPoolExecutor` to parallelize Supabase queries inside sync FastAPI endpoints (`def`, not `async def`) that share the singleton `httpx.Client`.
+
+**Why:** The singleton uses http/2 multiplexing. In local dev (single uvicorn worker) and on Render under load, launching a second concurrent connection from `ThreadPoolExecutor` forces a new http/2 handshake. The combined overhead (handshake + query) regularly exceeds the 3s timeout, causing one future to return empty results or fail silently.
+
+**Forbidden pattern:**
+```python
+with ThreadPoolExecutor(max_workers=2) as pool:
+    f1 = pool.submit(lambda: db.table("profiles").select(...).execute())
+    f2 = pool.submit(lambda: db.rpc("get_meetings_stats", {...}).execute())
+    profiles = f1.result()   # may time out — second http/2 connection
+    stats = f2.result()
+```
+
+**Required pattern:** run sequentially, each with its own non-fatal try/except:
+```python
+try:
+    p_rows = db.table("profiles").select(...).execute()
+except Exception as exc:
+    logger.warning("profiles enrichment failed (non-fatal): %s", exc)
+
+try:
+    stats_res = db.rpc("get_meetings_stats", {...}).execute()
+except Exception as exc:
+    logger.warning("meetings stats enrichment failed (non-fatal): %s", exc)
+```
+
+---
+
+### 9. Silent Fallback for Non-Critical Polling Endpoints
+
+**Rule:** Endpoints that are polled periodically by the UI for non-critical data (notification counts, sidebar badges, stats) must **never** raise `HTTPException`. On failure they must return a safe empty default.
+
+**Why:** These endpoints fire on every page load and on a timer. A 503 from a notification badge polling request triggers the frontend error handler, potentially disrupting the active user session.
+
+**Forbidden pattern:**
+```python
+@router.get("/notifications")
+def get_notifications(user):
+    ...
+    raise HTTPException(status_code=503, ...)  # ← breaks the UI on transient failure
+```
+
+**Required pattern:**
+```python
+@router.get("/notifications")
+def get_notifications(user):
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            ...
+            break
+        except Exception as exc:
+            if attempt == 0:
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.warning("get_notifications failed after 2 attempts: %s", exc)
+                return {"count": 0, "items": []}   # ← silent safe default
+```
+
+Endpoints that require this pattern: `get_notifications`, any future stats/badge endpoint.
+
+---
+
 ## Development Rules
 
 1. **Always use plan mode** before implementing any new feature

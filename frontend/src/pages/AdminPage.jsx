@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useBlocker } from "react-router-dom";
 import axios from "axios";
 import * as XLSX from "xlsx";
 import Sidebar from "../components/Sidebar";
@@ -50,6 +51,8 @@ const CONTACT_ROWS = [
   { label: "אחראי/ת כספים", nameField: "finance_contact_name", phoneField: "finance_contact_phone", emailField: "finance_contact_email" },
 ];
 const ROLE_LABELS = { owner: "בעלים", manager: "מנהל", advisor: "יועץ" };
+const ROLE_SORT_ORDER = { owner: 0, manager: 1, advisor: 2 };
+function sortByRole(arr) { return [...arr].sort((a, b) => (ROLE_SORT_ORDER[a.role] ?? 3) - (ROLE_SORT_ORDER[b.role] ?? 3)); }
 
 const DISTRICT_OPTIONS = ["צפון", "דרום", "מרכז", "ירושלים", "תל-אביב", "חיפה", "חינוך התיישבותי", "חרדי"];
 
@@ -57,7 +60,7 @@ function AdvisorSearch({ schoolId, assigned, users, loadingUsers, onAdd, onRetry
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
 
-  const filtered = users.filter(u =>
+  const filtered = sortByRole(users).filter(u =>
     !query.trim() || (u.full_name || u.email || "").toLowerCase().includes(query.toLowerCase())
   );
 
@@ -107,7 +110,7 @@ function AdvisorSearch({ schoolId, assigned, users, loadingUsers, onAdd, onRetry
   );
 }
 
-function AccessSelector({ restrictTo, users, loadingUsers, onChange }) {
+function AccessSelector({ restrictTo, users, loadingUsers, onChange, schoolAdvisors, onSelectAdvisors }) {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const containerRef = useRef(null);
@@ -188,7 +191,29 @@ function AccessSelector({ restrictTo, users, loadingUsers, onChange }) {
               <span className="font-medium">כולם</span>
               <span className="text-xs text-slate-400 mr-auto">ללא הגבלה</span>
             </button>
-            {(loadingUsers ? [] : users)
+            {/* היועצים המלווים שנבחרו option */}
+            {schoolAdvisors && schoolAdvisors.length > 0 && (
+              <button
+                type="button"
+                role="option"
+                onMouseDown={e => {
+                  e.preventDefault();
+                  if (onSelectAdvisors) {
+                    onSelectAdvisors();
+                  } else {
+                    const ids = schoolAdvisors.map(a => a.id).filter(Boolean);
+                    onChange(ids.length > 0 ? ids : null);
+                  }
+                  setOpen(false);
+                }}
+                className="w-full text-right px-4 py-2.5 text-sm hover:bg-blue-50 flex items-center gap-2"
+              >
+                <span className="w-4 h-4 rounded border border-slate-300 flex-shrink-0" aria-hidden="true" />
+                <span className="font-medium">היועצים המלווים שנבחרו</span>
+                <span className="text-xs text-slate-400 mr-auto">{schoolAdvisors.length} יועצים</span>
+              </button>
+            )}
+            {sortByRole(loadingUsers ? [] : users)
               .filter(u => !query.trim() || (u.full_name || u.email || "").toLowerCase().includes(query.toLowerCase()))
               .map(u => (
                 <button
@@ -262,7 +287,7 @@ function validateSymbol(val) {
   return "";
 }
 
-const EMPTY_FORM = { name: "", symbol: "", city: "", authority: "", stage: "", finance_software: "", principal_name: "", principal_phone: "", principal_email: "", secretary_name: "", secretary_phone: "", secretary_email: "", finance_contact_name: "", finance_contact_phone: "", finance_contact_email: "", school_phone: "", address: "", district: "", restrict_access_to: null };
+const EMPTY_FORM = { name: "", symbol: "", city: "", authority: "", stage: "", finance_software: "", principal_name: "", principal_phone: "", principal_email: "", secretary_name: "", secretary_phone: "", secretary_email: "", finance_contact_name: "", finance_contact_phone: "", finance_contact_email: "", school_phone: "", address: "", district: "", restrict_access_to: null, extra_contacts: [] };
 
 const IMPORT_FIELD_CONFIG = [
   { key: "name",                  label: "שם בית ספר",          required: true },
@@ -283,6 +308,12 @@ const IMPORT_FIELD_CONFIG = [
   { key: "principal_email",       label: "מייל מנהל/ת",           required: false },
   { key: "secretary_email",       label: "מייל מנהלנ/ית",         required: false },
   { key: "finance_contact_email", label: "מייל אחראי/ת כספים",    required: false },
+];
+
+const USER_IMPORT_FIELD_CONFIG = [
+  { key: "email",     label: "אימייל",  required: true },
+  { key: "full_name", label: "שם מלא",  required: true },
+  { key: "role",      label: "תפקיד",   required: false, hint: "יועץ / מנהל / בעלים — ברירת מחדל: יועץ" },
 ];
 
 function normalizeStage(raw) {
@@ -318,6 +349,13 @@ function normalizeFinanceSoftware(raw) {
   return "";
 }
 
+function normalizeRole(raw) {
+  const t = String(raw || "").trim().toLowerCase();
+  if (t.includes("בעלים") || t === "owner") return "owner";
+  if (t.includes("מנהל") || t === "manager") return "manager";
+  return "advisor";
+}
+
 function FieldMappingRow({ label, hint, required, headers, previewRow, value, error, onChange }) {
   return (
     <div className="flex items-start gap-3">
@@ -348,14 +386,14 @@ function FieldMappingRow({ label, hint, required, headers, previewRow, value, er
   );
 }
 
-function ImportMappingModal({ headers, previewRow, totalRows, onConfirm, onCancel }) {
+function ImportMappingModal({ headers, previewRow, totalRows, fieldConfig, confirmLabel, onConfirm, onCancel }) {
   const { ref, handleKeyDown } = useFocusTrap(onCancel);
-  const [mapping, setMapping] = useState(() => Object.fromEntries(IMPORT_FIELD_CONFIG.map(f => [f.key, null])));
+  const [mapping, setMapping] = useState(() => Object.fromEntries(fieldConfig.map(f => [f.key, null])));
   const [tried, setTried] = useState(false);
 
   function handleConfirm() {
     setTried(true);
-    if (IMPORT_FIELD_CONFIG.some(f => f.required && mapping[f.key] === null)) return;
+    if (fieldConfig.some(f => f.required && mapping[f.key] === null)) return;
     onConfirm(mapping);
   }
 
@@ -385,7 +423,7 @@ function ImportMappingModal({ headers, previewRow, totalRows, onConfirm, onCance
         <div className="flex-1 overflow-y-auto px-6 py-4">
           <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide mb-3">שדות חובה</p>
           <div className="flex flex-col gap-3 mb-6">
-            {IMPORT_FIELD_CONFIG.filter(f => f.required).map(f => (
+            {fieldConfig.filter(f => f.required).map(f => (
               <FieldMappingRow
                 key={f.key}
                 label={f.label}
@@ -402,7 +440,7 @@ function ImportMappingModal({ headers, previewRow, totalRows, onConfirm, onCance
           <div className="h-px bg-slate-100 mb-5" />
           <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide mb-3">שדות אופציונליים</p>
           <div className="flex flex-col gap-3">
-            {IMPORT_FIELD_CONFIG.filter(f => !f.required).map(f => (
+            {fieldConfig.filter(f => !f.required).map(f => (
               <FieldMappingRow
                 key={f.key}
                 label={f.label}
@@ -418,9 +456,47 @@ function ImportMappingModal({ headers, previewRow, totalRows, onConfirm, onCance
 
         <div className="px-6 py-4 border-t border-slate-100 flex items-center gap-3 flex-shrink-0">
           <button onClick={handleConfirm} className="btn-blue text-sm px-5 py-2">
-            ייבא {totalRows} בתי ספר
+            {confirmLabel}
           </button>
           <button onClick={onCancel} className="btn-ghost text-sm px-5 py-2">ביטול</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function UnsavedChangesModal({ onSave, onDiscard, onCancel, saving }) {
+  const { ref, handleKeyDown } = useFocusTrap(onCancel);
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ background: "rgba(15,23,42,0.55)" }}
+    >
+      <div
+        ref={ref}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="unsaved-changes-title"
+        onKeyDown={handleKeyDown}
+        dir="rtl"
+        className="glass-card rounded-2xl p-6 w-full max-w-sm flex flex-col gap-5"
+      >
+        <div>
+          <h2 id="unsaved-changes-title" className="font-bold text-slate-900 text-lg">שינויים שלא נשמרו</h2>
+          <p className="text-sm text-slate-500 mt-1 leading-relaxed">
+            ביצעת שינויים שטרם נשמרו. האם לשמור לפני היציאה?
+          </p>
+        </div>
+        <div className="flex flex-col gap-2">
+          <button onClick={onSave} disabled={saving} className="btn-blue text-sm px-5 py-2.5">
+            {saving ? "שומר..." : "שמור שינויים"}
+          </button>
+          <button onClick={onDiscard} disabled={saving} className="btn-ghost text-sm px-5 py-2.5">
+            אל תשמור
+          </button>
+          <button onClick={onCancel} disabled={saving} className="btn-ghost text-sm px-5 py-2.5">
+            ביטול
+          </button>
         </div>
       </div>
     </div>
@@ -430,6 +506,7 @@ function ImportMappingModal({ headers, previewRow, totalRows, onConfirm, onCance
 export default function AdminPage() {
   const [activeTab, setActiveTab] = useState("schools");
   const importRef = useRef(null);
+  const userImportRef = useRef(null);
 
   // Schools state
   const [schools, setSchools] = useState([]);
@@ -438,6 +515,8 @@ export default function AdminPage() {
   const [schoolStage, setSchoolStage] = useState("");
   const [advisorListOpen, setAdvisorListOpen] = useState(false);
   const advisorContainerRef = useRef(null);
+  const advisorInputRef = useRef(null);
+  const [accessLinkedToAdvisors, setAccessLinkedToAdvisors] = useState(false);
   const [customDivisions, setCustomDivisions] = useState(DEFAULT_CUSTOM_DIVISIONS);
   const [editingSchool, setEditingSchool] = useState(null);
   const [showSchoolForm, setShowSchoolForm] = useState(false);
@@ -474,6 +553,11 @@ export default function AdminPage() {
   const [inviteForm, setInviteForm] = useState({ email: "", full_name: "", role: "advisor" });
   const [inviting, setInviting] = useState(false);
   const [inviteMsg, setInviteMsg] = useState("");
+  const [userImportMappingData, setUserImportMappingData] = useState(null);
+  const [importingUsers, setImportingUsers] = useState(false);
+  const [userImportResult, setUserImportResult] = useState(null);
+  const [userImportProgressMsg, setUserImportProgressMsg] = useState("");
+  const [resendingUserId, setResendingUserId] = useState(null);
 
   // User edit / delete
   const [editingUser, setEditingUser] = useState(null);
@@ -483,8 +567,56 @@ export default function AdminPage() {
   const [confirmingUserDelete, setConfirmingUserDelete] = useState(false);
   const [userDeleteError, setUserDeleteError] = useState("");
 
+  const isDirty = showSchoolForm || editingUser !== null || !!(inviteForm.email || inviteForm.full_name);
+  const blocker = useBlocker(isDirty);
+  const blockSaving = savingSchool || savingUser || inviting;
+
+  async function handleSaveAndProceed() {
+    if (showSchoolForm) {
+      const saved = await saveSchool();
+      if (saved) blocker.proceed?.();
+      else blocker.reset?.();
+      return;
+    }
+    if (editingUser !== null) {
+      await saveEditUser();
+      blocker.proceed?.();
+      return;
+    }
+    if (inviteForm.email && inviteForm.full_name) {
+      await inviteUser();
+    }
+    setInviteForm({ email: "", full_name: "", role: "advisor" });
+    blocker.proceed?.();
+  }
+
+  function handleDiscardAndProceed() {
+    setShowSchoolForm(false);
+    setEditingSchool(null);
+    setSchoolForm(EMPTY_FORM);
+    setSelectedAdvisors([]);
+    setSchoolStage("");
+    setCustomDivisions(DEFAULT_CUSTOM_DIVISIONS);
+    setTriedSave(false);
+    setAccessLinkedToAdvisors(false);
+    setEditingUser(null);
+    setEditingUserName("");
+    setInviteForm({ email: "", full_name: "", role: "advisor" });
+    setInviteMsg("");
+    blocker.proceed?.();
+  }
+
   useEffect(() => { loadSchools(); }, []);
   useEffect(() => { if (activeTab === "users" && users.length === 0) loadUsers(); }, [activeTab]);
+
+  // When "היועצים המלווים שנבחרו" mode is active, keep restrict_access_to in sync with selected advisors
+  useEffect(() => {
+    if (!accessLinkedToAdvisors) return;
+    const ids = editingSchool
+      ? (schoolAdvisors[editingSchool.id] || []).map(a => a.id).filter(Boolean)
+      : selectedAdvisors;
+    setSchoolForm(p => ({ ...p, restrict_access_to: ids.length > 0 ? ids : null }));
+  }, [selectedAdvisors, schoolAdvisors, editingSchool, accessLinkedToAdvisors]);
 
   async function loadSchools() {
     setLoadingSchools(true);
@@ -546,6 +678,7 @@ export default function AdminPage() {
       setCustomDivisions(DEFAULT_CUSTOM_DIVISIONS);
       setTriedSave(false);
       await loadSchools();
+      return true;
     } finally {
       setSavingSchool(false);
     }
@@ -558,6 +691,7 @@ export default function AdminPage() {
   }
 
   function startEdit(school) {
+    setAccessLinkedToAdvisors(false);
     setEditingSchool(school);
     setSchoolForm({
       name: school.name || "",
@@ -579,6 +713,7 @@ export default function AdminPage() {
       address: school.address || "",
       district: school.district || "",
       restrict_access_to: school.restrict_access_to || null,
+      extra_contacts: school.extra_contacts || [],
     });
     setTriedSave(false);
     setAdvisorSearchQuery("");
@@ -614,6 +749,7 @@ export default function AdminPage() {
     setSchoolStage("");
     setCustomDivisions(DEFAULT_CUSTOM_DIVISIONS);
     setTriedSave(false);
+    setAccessLinkedToAdvisors(false);
     setShowSchoolForm(true);
     loadUsers();
   }
@@ -720,6 +856,79 @@ export default function AdminPage() {
     } finally {
       setInviting(false);
     }
+  }
+
+  async function resendInvite(u) {
+    setResendingUserId(u.id);
+    try {
+      await axios.post("/schools/users/invite", { email: u.email, full_name: u.full_name, role: u.role });
+    } finally {
+      setResendingUserId(null);
+    }
+  }
+
+  function handleUserImport(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    e.target.value = "";
+    setUserImportResult(null);
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const wb = XLSX.read(ev.target.result, { type: "array" });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const allRows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
+        const nonEmpty = allRows.filter(r => r.some(c => String(c).trim() !== ""));
+        if (nonEmpty.length < 2) {
+          setUserImportResult({ imported: 0, errors: ["הקובץ ריק או לא מכיל נתונים"] });
+          return;
+        }
+        const headers = nonEmpty[0].map(h => String(h).trim());
+        const previewRow = nonEmpty[1].map(v => String(v).trim());
+        const dataRows = nonEmpty.slice(1);
+        setUserImportMappingData({ headers, previewRow, dataRows });
+      } catch {
+        setUserImportResult({ imported: 0, errors: ["שגיאה בקריאת הקובץ — ודא שמדובר בקובץ Excel תקין"] });
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  }
+
+  async function confirmUserImport(mapping) {
+    if (!userImportMappingData) return;
+    setUserImportMappingData(null);
+    setImportingUsers(true);
+    setUserImportResult(null);
+    const { dataRows } = userImportMappingData;
+    let imported = 0;
+    const errors = [];
+
+    for (let i = 0; i < dataRows.length; i++) {
+      const row = dataRows[i];
+      setUserImportProgressMsg(`מזמין... ${i + 1} / ${dataRows.length}`);
+      const email = String(row[mapping.email] ?? "").trim();
+      const full_name = String(row[mapping.full_name] ?? "").trim();
+      const role = mapping.role !== null
+        ? normalizeRole(String(row[mapping.role] ?? "").trim())
+        : "advisor";
+
+      if (!email || !full_name) {
+        errors.push(`שורה ${i + 2}: חסר אימייל או שם מלא`);
+        continue;
+      }
+      try {
+        await axios.post("/schools/users/invite", { email, full_name, role });
+        imported++;
+      } catch (err) {
+        const detail = err.response?.data?.detail || "שגיאה לא ידועה";
+        errors.push(`שורה ${i + 2} (${email}): ${detail}`);
+      }
+    }
+
+    setUserImportProgressMsg("");
+    setImportingUsers(false);
+    setUserImportResult({ imported, errors });
+    if (imported > 0) await loadUsers();
   }
 
   function handleImport(e) {
@@ -853,187 +1062,116 @@ export default function AdminPage() {
 
                   <p className="text-sm font-semibold text-slate-700 mb-3">פרטי בית הספר</p>
 
-                  {/* Row 1: שם | סמל | שלב מוסד */}
-                  <div className="grid grid-cols-3 gap-4">
-                    <div className="flex flex-col gap-1.5">
-                      <label htmlFor="school-name" className="text-xs text-slate-800">שם בית ספר *</label>
-                      <input id="school-name" className="input-field" autoComplete="off" value={schoolForm.name}
-                        onChange={e => setSchoolForm(p => ({ ...p, name: e.target.value }))} placeholder="שם בית הספר" />
-                      {triedSave && !schoolForm.name && <span className="text-xs text-red-500" role="alert">שדה חובה</span>}
-                    </div>
-                    <div className="flex flex-col gap-1.5">
-                      <label htmlFor="school-symbol" className="text-xs text-slate-800">סמל מוסד *</label>
-                      <input id="school-symbol" className={`input-field ${triedSave && symbolError ? "border-red-400" : ""}`}
-                        autoComplete="off" value={schoolForm.symbol}
-                        onChange={e => setSchoolForm(p => ({ ...p, symbol: e.target.value.replace(/\D/g, "").slice(0, 6) }))}
-                        placeholder="5-6 ספרות" dir="ltr" inputMode="numeric" maxLength={6} />
-                      {schoolForm.symbol.length > 0 && symbolError && <span className="text-xs text-red-500" role="alert">{symbolError}</span>}
-                      {triedSave && !schoolForm.symbol && <span className="text-xs text-red-500" role="alert">שדה חובה</span>}
-                      {!editingSchool && triedSave && schoolForm.symbol && !symbolError && schools.some(s => s.symbol === schoolForm.symbol) && (
-                        <span className="text-xs text-red-500" role="alert">סמל זה כבר קיים בארגון</span>
-                      )}
-                    </div>
-                    {editingSchool ? (
-                      <div className="flex flex-col gap-1.5">
-                        <label htmlFor="school-stage-edit" className="text-xs text-slate-800">שלב מוסד</label>
-                        <select id="school-stage-edit" className="input-field text-sm"
-                          value={schoolForm.stage || ""}
-                          onChange={e => setSchoolForm(p => ({ ...p, stage: e.target.value }))}>
-                          {SCHOOL_STAGE_OPTIONS.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
-                        </select>
+                  {/* 3-column grid matching SchoolPage.jsx edit layout */}
+                  <div className="grid grid-cols-3 gap-x-8">
+                    {/* Right column: שם | סמל | שלב */}
+                    <div style={{ display: "grid", gridTemplateColumns: "max-content 1fr", columnGap: 10, alignItems: "start" }}>
+                      <label htmlFor="school-name" className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">שם מוסד:</label>
+                      <div className="py-0.5">
+                        <input id="school-name" className={`input-field ${triedSave && !schoolForm.name ? "border-red-400" : ""}`}
+                          autoComplete="off" value={schoolForm.name}
+                          onChange={e => setSchoolForm(p => ({ ...p, name: e.target.value }))} />
+                        {triedSave && !schoolForm.name && <span className="text-xs text-red-500 block mt-0.5" role="alert">שדה חובה</span>}
                       </div>
-                    ) : (
-                      <div className="flex flex-col gap-1.5">
-                        <label htmlFor="school-stage" className="text-xs text-slate-800">שלב מוסד *</label>
-                        <select id="school-stage"
-                          className={`input-field text-sm ${triedSave && !schoolStage ? "border-red-400" : ""}`}
-                          value={schoolStage}
-                          onChange={e => {
-                            setSchoolStage(e.target.value);
-                            if (e.target.value === "sheshshnati" || e.target.value === "other") {
-                              setCustomDivisions(DEFAULT_CUSTOM_DIVISIONS);
-                            }
-                          }}
-                        >
-                          {SCHOOL_STAGE_OPTIONS.map(s => (
-                            <option key={s.value} value={s.value} disabled={s.value === ""}>{s.label}</option>
-                          ))}
-                        </select>
-                        {triedSave && !schoolStage && <span className="text-xs text-red-500" role="alert">שדה חובה</span>}
-                      </div>
-                    )}
-                  </div>
 
-                  {/* Row 2: עיר | רשות | מחוז | טלפון */}
-                  <div className="grid grid-cols-4 gap-4 mt-4">
-                    <div className="flex flex-col gap-1.5">
-                      <label htmlFor="school-city" className="text-xs text-slate-800">עיר</label>
-                      <input id="school-city" className="input-field" autoComplete="off" value={schoolForm.city}
-                        onChange={e => setSchoolForm(p => ({ ...p, city: e.target.value }))} placeholder="עיר" />
-                    </div>
-                    <div className="flex flex-col gap-1.5">
-                      <label htmlFor="school-authority" className="text-xs text-slate-800">בעלות</label>
-                      <input id="school-authority" className="input-field" autoComplete="off" value={schoolForm.authority}
-                        onChange={e => setSchoolForm(p => ({ ...p, authority: e.target.value }))} placeholder="שם הרשות" />
-                    </div>
-                    <div className="flex flex-col gap-1.5">
-                      <label htmlFor="school-district" className="text-xs text-slate-800">מחוז</label>
-                      <select id="school-district" className="input-field text-sm"
-                        value={schoolForm.district}
-                        onChange={e => setSchoolForm(p => ({ ...p, district: e.target.value }))}>
-                        <option value="">בחר</option>
-                        {DISTRICT_OPTIONS.map(d => <option key={d} value={d}>{d}</option>)}
-                      </select>
-                    </div>
-                    <div className="flex flex-col gap-1.5">
-                      <label htmlFor="school-phone" className="text-xs text-slate-800">טלפון בית הספר</label>
-                      <input id="school-phone"
-                        className={`input-field ${schoolForm.school_phone && schoolPhoneError ? "border-red-400" : ""}`}
-                        autoComplete="off" value={schoolForm.school_phone}
-                        onChange={e => setSchoolForm(p => ({ ...p, school_phone: e.target.value.replace(/\D/g, "").slice(0, 10) }))}
-                        placeholder="031234567" dir="ltr" inputMode="numeric" />
-                      {schoolForm.school_phone && schoolPhoneError && (
-                        <span className="text-xs text-red-500" role="alert">{schoolPhoneError}</span>
-                      )}
-                    </div>
-                  </div>
+                      <label htmlFor="school-symbol" className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">סמל מוסד:</label>
+                      <div className="py-0.5">
+                        <input id="school-symbol" className={`input-field ${(triedSave && symbolError) ? "border-red-400" : ""}`}
+                          autoComplete="off" value={schoolForm.symbol}
+                          onChange={e => setSchoolForm(p => ({ ...p, symbol: e.target.value.replace(/\D/g, "").slice(0, 6) }))}
+                          dir="ltr" inputMode="numeric" maxLength={6} />
+                        {schoolForm.symbol.length > 0 && symbolError && <span className="text-xs text-red-500 block mt-0.5" role="alert">{symbolError}</span>}
+                        {triedSave && !schoolForm.symbol && <span className="text-xs text-red-500 block mt-0.5" role="alert">שדה חובה</span>}
+                        {!editingSchool && triedSave && schoolForm.symbol && !symbolError && schools.some(s => s.symbol === schoolForm.symbol) && (
+                          <span className="text-xs text-red-500 block mt-0.5" role="alert">סמל זה כבר קיים בארגון</span>
+                        )}
+                      </div>
 
-                  {/* Row 3: יועץ | תוכנת כספים | כתובת (new) / תוכנת כספים | כתובת (edit) */}
-                  {editingSchool ? (
-                    <div className="grid grid-cols-2 gap-4 mt-4">
-                      <div className="flex flex-col gap-1.5">
-                        <label htmlFor="school-finance-software" className="text-xs text-slate-800">תוכנת כספים</label>
-                        <select id="school-finance-software" className="input-field text-sm"
-                          value={schoolForm.finance_software}
-                          onChange={e => setSchoolForm(p => ({ ...p, finance_software: e.target.value }))}>
-                          {FINANCE_SOFTWARE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                        </select>
-                      </div>
-                      <div className="flex flex-col gap-1.5">
-                        <label htmlFor="school-address" className="text-xs text-slate-800">כתובת</label>
-                        <input id="school-address" className="input-field" autoComplete="off" value={schoolForm.address}
-                          onChange={e => setSchoolForm(p => ({ ...p, address: e.target.value }))} placeholder="כתובת בית הספר" />
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-3 gap-4 mt-4">
-                      <div className="flex flex-col gap-1.5">
-                        <p className="text-xs text-slate-800 font-medium">
-                          יועצים אחראיים <span className="text-red-500">*</span>
-                        </p>
-                        {loadingUsers ? (
-                          <p className="text-sm text-slate-400 py-1">טוען...</p>
+                      <label htmlFor={editingSchool ? "school-stage-edit" : "school-stage"} className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">שלב מוסד:</label>
+                      <div className="py-0.5">
+                        {editingSchool ? (
+                          <select id="school-stage-edit" className="input-field text-sm"
+                            value={schoolForm.stage || ""}
+                            onChange={e => setSchoolForm(p => ({ ...p, stage: e.target.value }))}>
+                            {SCHOOL_STAGE_OPTIONS.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
+                          </select>
                         ) : (
-                          <div
-                            ref={advisorContainerRef}
-                            onFocus={() => setAdvisorListOpen(true)}
-                            onBlur={e => {
-                              if (!advisorContainerRef.current?.contains(e.relatedTarget)) setAdvisorListOpen(false);
-                            }}
-                            className="relative"
-                          >
-                            <label htmlFor="new-school-advisor-search" className="sr-only">חיפוש יועץ</label>
-                            <input
-                              id="new-school-advisor-search"
-                              type="search"
-                              className={`input-field text-sm ${triedSave && selectedAdvisors.length === 0 ? "border-red-400" : ""}`}
-                              placeholder="לחץ לבחירת יועץ..."
-                              value={advisorSearchQuery}
-                              onChange={e => setAdvisorSearchQuery(e.target.value)}
-                            />
-                            {advisorListOpen && (
-                              <div className="absolute z-20 right-0 left-0 border border-slate-200 rounded-xl overflow-y-auto max-h-44 bg-white divide-y divide-slate-50 mt-1 shadow-lg">
-                                {users.length === 0 && <p className="text-sm text-slate-400 px-3 py-2">אין משתמשים</p>}
-                                {users.filter(u => !advisorSearchQuery.trim() || (u.full_name || u.email || "").toLowerCase().includes(advisorSearchQuery.toLowerCase())).map(u => (
-                                  <label key={u.id} className="flex items-center gap-2 px-2.5 py-1.5 hover:bg-slate-50 cursor-pointer">
-                                    <input type="checkbox"
-                                      checked={selectedAdvisors.includes(u.id)}
-                                      onChange={e => {
-                                        if (e.target.checked) setSelectedAdvisors(prev => [...prev, u.id]);
-                                        else setSelectedAdvisors(prev => prev.filter(id => id !== u.id));
-                                      }}
-                                      className="w-3.5 h-3.5 rounded flex-shrink-0" />
-                                    <span className="text-xs text-slate-700 flex-1">{u.full_name || u.email}</span>
-                                    <span className="text-xs text-slate-400">{ROLE_LABELS[u.role]}</span>
-                                  </label>
-                                ))}
-                              </div>
-                            )}
-                            {selectedAdvisors.length > 0 && (
-                              <div className="flex flex-wrap gap-1.5 mt-2">
-                                {selectedAdvisors.map(id => {
-                                  const u = users.find(u => u.id === id);
-                                  return u ? (
-                                    <span key={id} className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full" style={{ background: "rgba(0,112,243,0.08)", color: "#1d4ed8" }}>
-                                      {u.full_name || u.email}
-                                      <button type="button" onClick={() => setSelectedAdvisors(prev => prev.filter(i => i !== id))}
-                                        className="hover:text-red-500 leading-none text-base" aria-label={`הסר ${u.full_name || u.email}`}>×</button>
-                                    </span>
-                                  ) : null;
-                                })}
-                              </div>
-                            )}
-                          </div>
-                        )}
-                        {triedSave && selectedAdvisors.length === 0 && (
-                          <span className="text-xs text-red-500 mt-1 block" role="alert">יש לבחור לפחות יועץ אחד</span>
+                          <>
+                            <select id="school-stage"
+                              className={`input-field text-sm ${triedSave && !schoolStage ? "border-red-400" : ""}`}
+                              value={schoolStage}
+                              onChange={e => {
+                                setSchoolStage(e.target.value);
+                                if (e.target.value === "sheshshnati" || e.target.value === "other") {
+                                  setCustomDivisions(DEFAULT_CUSTOM_DIVISIONS);
+                                }
+                              }}
+                            >
+                              {SCHOOL_STAGE_OPTIONS.map(s => (
+                                <option key={s.value} value={s.value} disabled={s.value === ""}>{s.label}</option>
+                              ))}
+                            </select>
+                            {triedSave && !schoolStage && <span className="text-xs text-red-500 block mt-0.5" role="alert">שדה חובה</span>}
+                          </>
                         )}
                       </div>
-                      <div className="flex flex-col gap-1.5">
-                        <label htmlFor="school-finance-software" className="text-xs text-slate-800">תוכנת כספים</label>
+                    </div>
+
+                    {/* Middle column: עיר | בעלות | מחוז */}
+                    <div style={{ display: "grid", gridTemplateColumns: "max-content 1fr", columnGap: 10, alignItems: "start" }}>
+                      <label htmlFor="school-city" className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">עיר:</label>
+                      <div className="py-0.5">
+                        <input id="school-city" className="input-field" autoComplete="off" value={schoolForm.city}
+                          onChange={e => setSchoolForm(p => ({ ...p, city: e.target.value }))} />
+                      </div>
+
+                      <label htmlFor="school-authority" className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">בעלות:</label>
+                      <div className="py-0.5">
+                        <input id="school-authority" className="input-field" autoComplete="off" value={schoolForm.authority}
+                          onChange={e => setSchoolForm(p => ({ ...p, authority: e.target.value }))} />
+                      </div>
+
+                      <label htmlFor="school-district" className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">מחוז:</label>
+                      <div className="py-0.5">
+                        <select id="school-district" className="input-field text-sm"
+                          value={schoolForm.district}
+                          onChange={e => setSchoolForm(p => ({ ...p, district: e.target.value }))}>
+                          <option value="">בחר</option>
+                          {DISTRICT_OPTIONS.map(d => <option key={d} value={d}>{d}</option>)}
+                        </select>
+                      </div>
+                    </div>
+
+                    {/* Left column: תוכנת כספים | טלפון | כתובת */}
+                    <div style={{ display: "grid", gridTemplateColumns: "max-content 1fr", columnGap: 10, alignItems: "start" }}>
+                      <label htmlFor="school-finance-software" className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">תוכנת כספים:</label>
+                      <div className="py-0.5">
                         <select id="school-finance-software" className="input-field text-sm"
                           value={schoolForm.finance_software}
                           onChange={e => setSchoolForm(p => ({ ...p, finance_software: e.target.value }))}>
                           {FINANCE_SOFTWARE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                         </select>
                       </div>
-                      <div className="flex flex-col gap-1.5">
-                        <label htmlFor="school-address" className="text-xs text-slate-800">כתובת</label>
+
+                      <label htmlFor="school-phone" className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">טלפון בית הספר:</label>
+                      <div className="py-0.5">
+                        <input id="school-phone"
+                          className={`input-field ${schoolForm.school_phone && schoolPhoneError ? "border-red-400" : ""}`}
+                          autoComplete="off" value={schoolForm.school_phone}
+                          onChange={e => setSchoolForm(p => ({ ...p, school_phone: e.target.value.replace(/\D/g, "").slice(0, 10) }))}
+                          dir="ltr" inputMode="numeric" />
+                        {schoolForm.school_phone && schoolPhoneError && (
+                          <span className="text-xs text-red-500 block mt-0.5" role="alert">{schoolPhoneError}</span>
+                        )}
+                      </div>
+
+                      <label htmlFor="school-address" className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">כתובת:</label>
+                      <div className="py-0.5">
                         <input id="school-address" className="input-field" autoComplete="off" value={schoolForm.address}
-                          onChange={e => setSchoolForm(p => ({ ...p, address: e.target.value }))} placeholder="כתובת בית הספר" />
+                          onChange={e => setSchoolForm(p => ({ ...p, address: e.target.value }))} />
                       </div>
                     </div>
-                  )}
+                  </div>
 
                   {/* Custom divisions — new schools with שש שנתי / אחר */}
                   {!editingSchool && (schoolStage === "sheshshnati" || schoolStage === "other") && (
@@ -1125,61 +1263,192 @@ export default function AdminPage() {
                             </td>
                           </tr>
                         ))}
+
+                        {/* Extra contact rows */}
+                        {(schoolForm.extra_contacts || []).map((ec, i) => (
+                          <tr key={`extra-${i}`} className="border-t border-slate-100">
+                            <td className="py-1.5 pr-1">
+                              <label htmlFor={`extra-role-${i}`} className="sr-only">תפקיד</label>
+                              <input id={`extra-role-${i}`} className="input-field text-sm" value={ec.role}
+                                onChange={e => setSchoolForm(p => { const ec2 = [...(p.extra_contacts || [])]; ec2[i] = { ...ec2[i], role: e.target.value }; return { ...p, extra_contacts: ec2 }; })}
+                                autoComplete="off" placeholder="תפקיד..." />
+                            </td>
+                            <td className="py-1.5 px-2">
+                              <label htmlFor={`extra-name-${i}`} className="sr-only">שם</label>
+                              <input id={`extra-name-${i}`} className="input-field text-sm" value={ec.name}
+                                onChange={e => setSchoolForm(p => { const ec2 = [...(p.extra_contacts || [])]; ec2[i] = { ...ec2[i], name: e.target.value }; return { ...p, extra_contacts: ec2 }; })}
+                                autoComplete="off" placeholder="שם..." />
+                            </td>
+                            <td className="py-1.5 px-2">
+                              <label htmlFor={`extra-phone-${i}`} className="sr-only">טלפון</label>
+                              <input id={`extra-phone-${i}`} className="input-field text-sm" value={ec.phone}
+                                onChange={e => setSchoolForm(p => { const ec2 = [...(p.extra_contacts || [])]; ec2[i] = { ...ec2[i], phone: e.target.value.replace(/\D/g, "").slice(0, 10) }; return { ...p, extra_contacts: ec2 }; })}
+                                dir="ltr" inputMode="numeric" autoComplete="off" placeholder="טלפון..." />
+                            </td>
+                            <td className="py-1.5 px-2">
+                              <div className="flex items-center gap-1">
+                                <label htmlFor={`extra-email-${i}`} className="sr-only">מייל</label>
+                                <input id={`extra-email-${i}`} className="input-field text-sm" value={ec.email}
+                                  onChange={e => setSchoolForm(p => { const ec2 = [...(p.extra_contacts || [])]; ec2[i] = { ...ec2[i], email: e.target.value }; return { ...p, extra_contacts: ec2 }; })}
+                                  dir="ltr" type="email" autoComplete="off" placeholder="מייל..." />
+                                <button type="button"
+                                  onClick={() => setSchoolForm(p => ({ ...p, extra_contacts: (p.extra_contacts || []).filter((_, j) => j !== i) }))}
+                                  className="text-slate-400 hover:text-red-500 flex-shrink-0 mr-1 text-base leading-none"
+                                  aria-label="הסר שורת איש קשר">✕</button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+
+                        {/* Add contact button */}
+                        {(schoolForm.extra_contacts || []).length < 3 && (
+                          <tr>
+                            <td colSpan={4} className="pt-3 pb-1">
+                              <button type="button"
+                                onClick={() => setSchoolForm(p => ({ ...p, extra_contacts: [...(p.extra_contacts || []), { role: "", name: "", phone: "", email: "" }] }))}
+                                className="text-sm text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1 transition-colors">
+                                <span aria-hidden="true">+</span> הוסף איש קשר
+                              </button>
+                            </td>
+                          </tr>
+                        )}
                       </tbody>
                     </table>
                   </div>
 
-                  {/* ליווי — edit school */}
-                  {editingSchool && (
-                    <div className="mt-4 pt-4 border-t border-slate-100">
-                      <p className="text-sm font-semibold text-slate-700 mb-4">ליווי</p>
-                      <div className="grid grid-cols-2 gap-6">
-                        {/* יועצים אחראיים */}
-                        <div>
-                          <p className="text-xs text-slate-800 mb-2 font-medium">יועצים אחראיים</p>
-                          <div className="flex flex-wrap gap-2 mb-2 min-h-[28px]">
-                            {(schoolAdvisors[editingSchool.id] || []).length === 0 && (
-                              <p className="text-sm text-slate-400">אין יועצים מוקצים</p>
+                  {/* ליווי */}
+                  <div className="mt-4 pt-4 border-t border-slate-100">
+                    <p className="text-sm font-semibold text-slate-700 mb-4">ליווי</p>
+                    <div className="grid grid-cols-2 gap-6">
+                      {/* יועצים אחראיים */}
+                      <div>
+                        <p className="text-xs text-slate-800 mb-2 font-medium">
+                          יועצים אחראיים {!editingSchool && <span className="text-red-500">*</span>}
+                        </p>
+                        {editingSchool ? (
+                          <>
+                            <div className="flex flex-wrap gap-2 mb-2 min-h-[28px]">
+                              {(schoolAdvisors[editingSchool.id] || []).length === 0 && (
+                                <p className="text-sm text-slate-400">אין יועצים מוקצים</p>
+                              )}
+                              {(schoolAdvisors[editingSchool.id] || []).map(adv => (
+                                <span key={adv.id} className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full" style={{ background: "rgba(0,112,243,0.08)", color: "#1d4ed8" }}>
+                                  {adv.full_name || adv.email}
+                                  <button onClick={() => removeAdvisorFromSchool(editingSchool.id, adv.id)}
+                                    className="hover:text-red-500 transition-colors leading-none text-base"
+                                    aria-label={`הסר ${adv.full_name || adv.email}`}>×</button>
+                                </span>
+                              ))}
+                            </div>
+                            <AdvisorSearch
+                              schoolId={editingSchool.id}
+                              assigned={schoolAdvisors[editingSchool.id] || []}
+                              users={users}
+                              loadingUsers={loadingUsers}
+                              onAdd={addAdvisorToSchool}
+                              onRetry={loadUsers}
+                            />
+                          </>
+                        ) : (
+                          <>
+                            {loadingUsers ? (
+                              <p className="text-sm text-slate-400 py-1">טוען...</p>
+                            ) : (
+                              <div
+                                ref={advisorContainerRef}
+                                onBlur={e => {
+                                  if (!advisorContainerRef.current?.contains(e.relatedTarget)) setAdvisorListOpen(false);
+                                }}
+                                className="relative"
+                              >
+                                <label htmlFor="new-school-advisor-search" className="sr-only">חיפוש יועץ</label>
+                                {/* Chip + input container */}
+                                <div
+                                  className={`input-field flex flex-wrap items-center gap-1.5 min-h-[38px] cursor-text ${triedSave && selectedAdvisors.length === 0 ? "border-red-400" : ""}`}
+                                  onClick={() => { setAdvisorListOpen(true); advisorInputRef.current?.focus(); }}
+                                >
+                                  {selectedAdvisors.map(id => {
+                                    const u = users.find(u => u.id === id);
+                                    return u ? (
+                                      <span key={id} className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full" style={{ background: "rgba(0,112,243,0.08)", color: "#1d4ed8" }}>
+                                        {u.full_name || u.email}
+                                        <button
+                                          type="button"
+                                          onMouseDown={e => { e.stopPropagation(); e.preventDefault(); setSelectedAdvisors(prev => prev.filter(i => i !== id)); }}
+                                          className="hover:text-red-500 leading-none text-base"
+                                          aria-label={`הסר ${u.full_name || u.email}`}
+                                        >×</button>
+                                      </span>
+                                    ) : null;
+                                  })}
+                                  <input
+                                    ref={advisorInputRef}
+                                    id="new-school-advisor-search"
+                                    type="search"
+                                    className="flex-1 min-w-[80px] text-sm outline-none bg-transparent"
+                                    placeholder={selectedAdvisors.length === 0 ? "לחץ לבחירת יועץ..." : ""}
+                                    value={advisorSearchQuery}
+                                    onFocus={() => setAdvisorListOpen(true)}
+                                    onChange={e => setAdvisorSearchQuery(e.target.value)}
+                                  />
+                                </div>
+                                {advisorListOpen && (
+                                  <div className="absolute z-20 right-0 left-0 border border-slate-200 rounded-xl overflow-y-auto max-h-44 bg-white divide-y divide-slate-50 mt-1 shadow-lg">
+                                    {users.length === 0 && <p className="text-sm text-slate-400 px-3 py-2">אין משתמשים</p>}
+                                    {sortByRole(users).filter(u => !advisorSearchQuery.trim() || (u.full_name || u.email || "").toLowerCase().includes(advisorSearchQuery.toLowerCase())).map(u => (
+                                      <button
+                                        key={u.id}
+                                        type="button"
+                                        onMouseDown={e => {
+                                          e.preventDefault();
+                                          if (selectedAdvisors.includes(u.id))
+                                            setSelectedAdvisors(prev => prev.filter(id => id !== u.id));
+                                          else
+                                            setSelectedAdvisors(prev => [...prev, u.id]);
+                                        }}
+                                        className="w-full text-right flex items-center gap-2 px-2.5 py-1.5 hover:bg-slate-50 cursor-pointer"
+                                      >
+                                        <span className={`w-3.5 h-3.5 rounded border flex-shrink-0 ${selectedAdvisors.includes(u.id) ? "bg-blue-500 border-blue-500" : "border-slate-300"}`} aria-hidden="true" />
+                                        <span className="text-xs text-slate-700 flex-1">{u.full_name || u.email}</span>
+                                        <span className="text-xs text-slate-400">{ROLE_LABELS[u.role]}</span>
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
                             )}
-                            {(schoolAdvisors[editingSchool.id] || []).map(adv => (
-                              <span key={adv.id} className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full" style={{ background: "rgba(0,112,243,0.08)", color: "#1d4ed8" }}>
-                                {adv.full_name || adv.email}
-                                <button onClick={() => removeAdvisorFromSchool(editingSchool.id, adv.id)}
-                                  className="hover:text-red-500 transition-colors leading-none text-base"
-                                  aria-label={`הסר ${adv.full_name || adv.email}`}>×</button>
-                              </span>
-                            ))}
-                          </div>
-                          <AdvisorSearch
-                            schoolId={editingSchool.id}
-                            assigned={schoolAdvisors[editingSchool.id] || []}
-                            users={users}
-                            loadingUsers={loadingUsers}
-                            onAdd={addAdvisorToSchool}
-                            onRetry={loadUsers}
-                          />
-                        </div>
+                            {triedSave && selectedAdvisors.length === 0 && (
+                              <span className="text-xs text-red-500 mt-1 block" role="alert">יש לבחור לפחות יועץ אחד</span>
+                            )}
+                          </>
+                        )}
+                      </div>
 
-                        {/* גישה */}
-                        <div>
-                          <div className="flex items-center gap-1.5 mb-2">
-                            <p className="text-xs text-slate-800 font-medium">גישה</p>
-                            <span
-                              title="בחר למי תהיה גישה לצפות בנתוני בית הספר. 'כולם' מאפשר לכל היועצים במערכת לראות את בית הספר."
-                              className="w-4 h-4 rounded-full border border-slate-300 text-slate-400 text-xs flex items-center justify-center flex-shrink-0 cursor-help"
-                              aria-label="מידע על הגדרת גישה"
-                            >?</span>
-                          </div>
-                          <AccessSelector
-                            restrictTo={schoolForm.restrict_access_to}
-                            users={users}
-                            loadingUsers={loadingUsers}
-                            onChange={val => setSchoolForm(p => ({ ...p, restrict_access_to: val }))}
-                          />
+                      {/* גישה */}
+                      <div>
+                        <div className="flex items-center gap-1.5 mb-2">
+                          <p className="text-xs text-slate-800 font-medium">גישה</p>
+                          <span
+                            title="בחר למי תהיה גישה לצפות בנתוני בית הספר. 'כולם' מאפשר לכל היועצים במערכת לראות את בית הספר."
+                            className="w-4 h-4 rounded-full border border-slate-300 text-slate-400 text-xs flex items-center justify-center flex-shrink-0 cursor-help"
+                            aria-label="מידע על הגדרת גישה"
+                          >?</span>
                         </div>
+                        <AccessSelector
+                          restrictTo={schoolForm.restrict_access_to}
+                          users={users}
+                          loadingUsers={loadingUsers}
+                          onChange={val => { setAccessLinkedToAdvisors(false); setSchoolForm(p => ({ ...p, restrict_access_to: val })); }}
+                          onSelectAdvisors={() => setAccessLinkedToAdvisors(true)}
+                          schoolAdvisors={
+                            editingSchool
+                              ? (schoolAdvisors[editingSchool.id] || [])
+                              : selectedAdvisors.map(id => users.find(u => u.id === id)).filter(Boolean)
+                          }
+                        />
                       </div>
                     </div>
-                  )}
+                  </div>
 
                   <div className="flex items-center justify-between mt-5">
                     <div className="flex gap-3">
@@ -1316,6 +1585,23 @@ export default function AdminPage() {
           {/* Users Tab */}
           {activeTab === "users" && (
             <div>
+              <div className="flex justify-end mb-4">
+                <input ref={userImportRef} type="file" accept=".xlsx,.xls" className="hidden" onChange={handleUserImport} aria-label="ייבוא משתמשים מאקסל" />
+                <button onClick={() => userImportRef.current?.click()} disabled={importingUsers} className="btn-ghost text-sm px-4 py-2">
+                  {importingUsers ? (userImportProgressMsg || "מייבא...") : "ייבוא מאקסל"}
+                </button>
+              </div>
+
+              {userImportResult && (
+                <div className={`glass-card rounded-xl p-4 mb-4 border ${userImportResult.errors.length > 0 ? "border-orange-200" : "border-green-200"}`}>
+                  <p className="font-medium text-slate-800 text-sm">
+                    {userImportResult.imported > 0 ? `הוזמנו ${userImportResult.imported} משתמשים בהצלחה` : "לא הוזמנו משתמשים"}
+                    {userImportResult.errors.length > 0 && ` · ${userImportResult.errors.length} שגיאות`}
+                  </p>
+                  {userImportResult.errors.map((e, i) => <p key={i} className="text-red-500 text-xs mt-1">{e}</p>)}
+                </div>
+              )}
+
               <div className="glass-card rounded-2xl p-6 mb-6">
                 <h3 className="font-bold text-slate-800 mb-4">הזמן משתמש חדש</h3>
                 <div className="grid grid-cols-3 gap-4">
@@ -1419,6 +1705,15 @@ export default function AdminPage() {
                         </td>
                         <td className="px-5 py-3">
                           <div className="flex gap-1 justify-end">
+                            {u.status === "pending" && (
+                              <button
+                                onClick={() => resendInvite(u)}
+                                disabled={resendingUserId === u.id}
+                                className="text-xs px-3 py-1.5 rounded-lg text-amber-600 hover:bg-amber-50 transition-colors disabled:opacity-40"
+                              >
+                                {resendingUserId === u.id ? "שולח..." : "שלח מחדש"}
+                              </button>
+                            )}
                             <button onClick={() => startEditUser(u)} disabled={editingUser?.id === u.id}
                               className="text-xs px-3 py-1.5 rounded-lg text-blue-600 hover:bg-blue-50 transition-colors disabled:opacity-30">ערוך</button>
                             <button onClick={() => setUserToDelete(u)}
@@ -1440,8 +1735,21 @@ export default function AdminPage() {
           headers={importMappingData.headers}
           previewRow={importMappingData.previewRow}
           totalRows={importMappingData.dataRows.length}
+          fieldConfig={IMPORT_FIELD_CONFIG}
+          confirmLabel={`ייבא ${importMappingData.dataRows.length} בתי ספר`}
           onConfirm={confirmImport}
           onCancel={() => setImportMappingData(null)}
+        />
+      )}
+      {userImportMappingData && (
+        <ImportMappingModal
+          headers={userImportMappingData.headers}
+          previewRow={userImportMappingData.previewRow}
+          totalRows={userImportMappingData.dataRows.length}
+          fieldConfig={USER_IMPORT_FIELD_CONFIG}
+          confirmLabel={`הזמן ${userImportMappingData.dataRows.length} משתמשים`}
+          onConfirm={confirmUserImport}
+          onCancel={() => setUserImportMappingData(null)}
         />
       )}
       {showDeleteConfirm && editingSchool && (
@@ -1463,6 +1771,14 @@ export default function AdminPage() {
           onConfirm={handleDeleteUser}
           onCancel={() => { setUserToDelete(null); setUserDeleteError(""); }}
           confirming={confirmingUserDelete}
+        />
+      )}
+      {blocker.state === "blocked" && (
+        <UnsavedChangesModal
+          onSave={handleSaveAndProceed}
+          onDiscard={handleDiscardAndProceed}
+          onCancel={() => blocker.reset?.()}
+          saving={blockSaving}
         />
       )}
     </div>

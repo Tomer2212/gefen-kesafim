@@ -271,6 +271,8 @@ export default function Sidebar({ dark = false }) {
   const [userName, setUserName] = useState("");
   const [userEmail, setUserEmail] = useState("");
   const [role, setRole] = useState("advisor");
+  const [orgName, setOrgName] = useState("");
+  const [isSuperAdmin, setIsSuperAdmin] = useState(false);
   const [notifCount, setNotifCount] = useState(0);
   const [showProfile, setShowProfile] = useState(false);
   const [collapsed, setCollapsed] = useState(() => {
@@ -290,16 +292,14 @@ export default function Sidebar({ dark = false }) {
       const metaRole = session.user.user_metadata?.role || "advisor";
       setRole(metaRole);
       setUserEmail(session.user.email || "");
-      if (metaName) {
-        setUserName(metaName);
-      } else {
-        try {
-          const res = await axios.get("/schools/users/me");
-          setUserName(res.data.full_name || session.user.email);
-          setRole(res.data.role || metaRole);
-        } catch {
-          setUserName(session.user.email || "");
-        }
+      try {
+        const res = await axios.get("/schools/users/me");
+        setUserName(res.data.full_name || session.user.email);
+        setRole(res.data.role || metaRole);
+        setOrgName(res.data.org?.name || "");
+        setIsSuperAdmin(!!res.data.is_superadmin);
+      } catch {
+        setUserName(metaName || session.user.email || "");
       }
     }
     load();
@@ -366,7 +366,9 @@ export default function Sidebar({ dark = false }) {
               : { background: "#f8fafc", border: "1px solid #f1f5f9" }}
           >
             <p className={`text-sm font-semibold truncate ${dark ? "text-white" : "text-slate-800"}`}>{userName || "..."}</p>
-            <p className={`text-xs mt-0.5 ${dark ? "text-white/40" : "text-slate-400"}`}>{ROLE_LABEL[role] || role}</p>
+            <p className={`text-xs mt-0.5 ${dark ? "text-white/40" : "text-slate-400"}`}>
+              {ROLE_LABEL[role] || role}{orgName ? `, ${orgName}` : ""}
+            </p>
           </div>
         )}
 
@@ -390,6 +392,12 @@ export default function Sidebar({ dark = false }) {
             <NavItem dark={dark} collapsed={collapsed}
               icon={<Icon d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" circle={[12, 12, 3]} />}
               label="ניהול" active={is("/admin")} onClick={() => navigate("/admin")}
+            />
+          )}
+          {isSuperAdmin && (
+            <NavItem dark={dark} collapsed={collapsed}
+              icon={<Icon d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />}
+              label="ניהול מערכת" active={is("/super-admin")} onClick={() => navigate("/super-admin")}
             />
           )}
 

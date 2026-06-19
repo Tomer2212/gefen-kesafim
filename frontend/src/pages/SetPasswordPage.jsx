@@ -14,9 +14,18 @@ export default function SetPasswordPage() {
   const [loading, setLoading] = useState(false);
   const [checking, setChecking] = useState(true);
   const [isRecovery, setIsRecovery] = useState(false);
+  const [linkExpired, setLinkExpired] = useState(false);
 
   useEffect(() => {
     let handled = false;
+
+    // Detect expired/invalid token from URL hash before setting up auth listener
+    const hashParams = new URLSearchParams(window.location.hash.substring(1));
+    if (hashParams.get("error")) {
+      setLinkExpired(true);
+      setChecking(false);
+      return;
+    }
 
     async function handleSession(session) {
       if (handled) return;
@@ -92,6 +101,31 @@ export default function SetPasswordPage() {
     } finally {
       setLoading(false);
     }
+  }
+
+  if (linkExpired) {
+    return (
+      <div className="bg-scene min-h-screen flex items-center justify-center p-4" dir="rtl">
+        <div className="glass-card rounded-3xl px-8 py-10 w-full max-w-sm text-center">
+          <div
+            className="w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-6"
+            style={{ background: "rgba(239,68,68,0.1)" }}
+          >
+            <svg aria-hidden="true" width="28" height="28" viewBox="0 0 24 24" fill="none"
+              stroke="#ef4444" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10"/>
+              <line x1="12" y1="8" x2="12" y2="12"/>
+              <line x1="12" y1="16" x2="12.01" y2="16"/>
+            </svg>
+          </div>
+          <h1 className="text-xl font-bold text-slate-800 mb-2">קישור לא תקין</h1>
+          <p className="text-sm text-slate-500 leading-relaxed">
+            קישור ההזמנה פג תוקף או שכבר נעשה בו שימוש.<br />
+            אנא פנה למנהל המערכת כדי לשלוח לך הזמנה חדשה.
+          </p>
+        </div>
+      </div>
+    );
   }
 
   if (checking) {
