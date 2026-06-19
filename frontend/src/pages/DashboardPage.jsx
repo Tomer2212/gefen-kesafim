@@ -4,6 +4,7 @@ import axios from "axios";
 import * as XLSX from "xlsx";
 import { supabase } from "../lib/supabase";
 import Sidebar from "../components/Sidebar";
+import OnboardingToast from "../components/OnboardingToast";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 
 const DIVISION_LABEL = {
@@ -452,6 +453,9 @@ export default function DashboardPage() {
   const [selectedIds, setSelectedIds] = useState({});
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deletingSchool, setDeletingSchool] = useState(false);
+  const [trialInfo, setTrialInfo] = useState(null);
+  const [onboardingDismissed, setOnboardingDismissed] = useState(null);
+  const [isOwner, setIsOwner] = useState(false);
 
   function saveColPrefs(order, visible) {
     if (!userId) return;
@@ -578,6 +582,13 @@ export default function DashboardPage() {
         const meRes = await axios.get("/schools/users/me");
         setCanDelete(!!meRes.data?.managers_can_delete);
         confirmedIsManager = meRes.data?.role === "owner" || meRes.data?.role === "manager";
+        if (meRes.data?.role === "owner" && meRes.data?.org?.subscription_status === "trial") {
+          setTrialInfo(meRes.data.org);
+        }
+        if (meRes.data?.role === "owner") {
+          setIsOwner(true);
+          setOnboardingDismissed(meRes.data?.onboarding_dismissed || {});
+        }
       } catch {
         confirmedIsManager = isManagerFrontend;
       }
@@ -679,6 +690,20 @@ export default function DashboardPage() {
       <Sidebar dark />
 
       <div style={{ marginRight: "var(--sidebar-w, 240px)", transition: "margin-right 0.25s cubic-bezier(0.4,0,0.2,1)" }}>
+        {trialInfo && (() => {
+          const daysLeft = Math.ceil((new Date(trialInfo.trial_ends_at) - Date.now()) / 86400000);
+          const urgent = daysLeft <= 3;
+          return (
+            <div className={`px-6 py-3 flex items-center gap-3 text-sm font-medium ${urgent ? "bg-red-500 text-white" : "bg-amber-400 text-amber-900"}`}>
+              <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>
+              </svg>
+              {daysLeft > 0
+                ? `תקופת הניסיון שלך: נותרו עוד ${daysLeft} ${daysLeft === 1 ? "יום" : "ימים"}`
+                : "תקופת הניסיון שלך הסתיימה"}
+            </div>
+          );
+        })()}
         <div className="max-w-5xl mx-auto px-6 py-10">
           <div className="flex items-center justify-between mb-8">
             <div>
@@ -1025,6 +1050,13 @@ export default function DashboardPage() {
           onConfirm={handleDeleteConfirmed}
           onCancel={() => setDeleteTarget(null)}
           confirming={deletingSchool}
+        />
+      )}
+
+      {isOwner && onboardingDismissed !== null && (
+        <OnboardingToast
+          dismissed={onboardingDismissed}
+          onDismissed={key => setOnboardingDismissed(prev => ({ ...prev, [key]: true }))}
         />
       )}
     </div>

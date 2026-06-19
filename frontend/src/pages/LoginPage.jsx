@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import logoImg from "../assets/logo.png";
 
@@ -156,6 +157,15 @@ export default function LoginPage() {
                 >
                   שכחת סיסמה?
                 </button>
+
+                <div className="border-t border-slate-100 mt-2 pt-4 text-center">
+                  <Link
+                    to="/register"
+                    className="text-sm text-slate-500 hover:text-blue-600 hover:underline"
+                  >
+                    אין לכם חשבון עדיין? הגישו בקשת הרשמה
+                  </Link>
+                </div>
               </form>
             </>
           )}

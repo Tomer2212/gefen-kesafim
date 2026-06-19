@@ -14,6 +14,9 @@ import ContactPage from "./pages/ContactPage";
 import AccessibilityStatementPage from "./pages/AccessibilityStatementPage";
 import NotificationsPage from "./pages/NotificationsPage";
 import SetPasswordPage from "./pages/SetPasswordPage";
+import RegisterPage from "./pages/RegisterPage";
+import SuperAdminPage from "./pages/SuperAdminPage";
+import UnsubscribePage from "./pages/UnsubscribePage";
 
 export const SessionContext = createContext(undefined);
 
@@ -32,6 +35,7 @@ function AdminRoute({ children }) {
 
 const router = createBrowserRouter([
   { path: "/login", element: <LoginPage /> },
+  { path: "/register", element: <RegisterPage /> },
   { path: "/terms", element: <TermsPage /> },
   { path: "/privacy", element: <PrivacyPage /> },
   { path: "/guide", element: <GuidePage /> },
@@ -42,7 +46,9 @@ const router = createBrowserRouter([
   { path: "/check", element: <PrivateRoute><MainPage /></PrivateRoute> },
   { path: "/admin", element: <AdminRoute><AdminPage /></AdminRoute> },
   { path: "/notifications", element: <PrivateRoute><NotificationsPage /></PrivateRoute> },
+  { path: "/super-admin", element: <PrivateRoute><SuperAdminPage /></PrivateRoute> },
   { path: "/set-password", element: <SetPasswordPage /> },
+  { path: "/unsubscribe", element: <UnsubscribePage /> },
   { path: "*", element: <Navigate to="/" replace /> },
 ]);
 

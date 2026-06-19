@@ -49,6 +49,8 @@ const SCHOOL_STAGE_LABEL = Object.fromEntries(
 );
 
 const ROLE_LABELS = { owner: "בעלים", manager: "מנהל", advisor: "יועץ" };
+const ROLE_SORT_ORDER = { owner: 0, manager: 1, advisor: 2 };
+function sortByRole(arr) { return [...arr].sort((a, b) => (ROLE_SORT_ORDER[a.role] ?? 3) - (ROLE_SORT_ORDER[b.role] ?? 3)); }
 
 const DISTRICT_OPTIONS = ["צפון", "דרום", "מרכז", "ירושלים", "תל-אביב", "חיפה", "חינוך התיישבותי", "חרדי"];
 
@@ -763,6 +765,13 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
   useEffect(() => {
     axios.get("/schools/users/me").then(r => setMeUser(r.data)).catch(() => {});
   }, []);
+
+  // When "היועצים המלווים שנבחרו" mode is active, keep restrict_access_to in sync
+  useEffect(() => {
+    if (!accessLinkedToAdvisors) return;
+    const ids = schoolAdvisors.map(a => a.id).filter(Boolean);
+    setEditForm(p => ({ ...p, restrict_access_to: ids.length > 0 ? ids : null }));
+  }, [schoolAdvisors, accessLinkedToAdvisors]);
 
   useEffect(() => {
     if (!showColPicker) return;
@@ -2451,7 +2460,7 @@ function AdvisorSearch({ schoolId, assigned, users, loadingUsers, onAdd, onRemov
   const [open, setOpen] = useState(false);
   const containerRef = useRef(null);
 
-  const filtered = users.filter(u =>
+  const filtered = sortByRole(users).filter(u =>
     !query.trim() || (u.full_name || u.email || "").toLowerCase().includes(query.toLowerCase())
   );
 
@@ -2522,7 +2531,7 @@ function AdvisorSearch({ schoolId, assigned, users, loadingUsers, onAdd, onRemov
   );
 }
 
-function AccessSelector({ restrictTo, users, loadingUsers, onChange, schoolAdvisors }) {
+function AccessSelector({ restrictTo, users, loadingUsers, onChange, schoolAdvisors, onSelectAdvisors }) {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const containerRef = useRef(null);
@@ -2611,8 +2620,12 @@ function AccessSelector({ restrictTo, users, loadingUsers, onChange, schoolAdvis
                 aria-selected={false}
                 onMouseDown={e => {
                   e.preventDefault();
-                  const ids = (schoolAdvisors || []).map(a => a.id).filter(id => nonOwnerUsers.some(u => u.id === id));
-                  onChange(ids.length > 0 ? ids : null);
+                  if (onSelectAdvisors) {
+                    onSelectAdvisors();
+                  } else {
+                    const ids = (schoolAdvisors || []).map(a => a.id).filter(Boolean);
+                    onChange(ids.length > 0 ? ids : null);
+                  }
                   setOpen(false);
                 }}
                 className="w-full text-right px-4 py-2.5 text-sm hover:bg-blue-50 flex items-center gap-2"
@@ -2622,7 +2635,7 @@ function AccessSelector({ restrictTo, users, loadingUsers, onChange, schoolAdvis
                 <span className="text-xs text-slate-400 mr-auto">{(schoolAdvisors || []).length} יועצים</span>
               </button>
             )}
-            {(loadingUsers ? [] : nonOwnerUsers)
+            {sortByRole(loadingUsers ? [] : nonOwnerUsers)
               .filter(u => !query.trim() || (u.full_name || u.email || "").toLowerCase().includes(query.toLowerCase()))
               .map(u => (
                 <button
@@ -2663,6 +2676,7 @@ export default function SchoolPage() {
   const [activeTab, setActiveTab] = useState("info");
   const [activeSubTab, setActiveSubTab] = useState("tikkon");
   const [role, setRole] = useState("advisor");
+  const [subscriptionStatus, setSubscriptionStatus] = useState(null);
 
   // Meetings state
   const [meetings, setMeetings] = useState([]);
@@ -2678,6 +2692,7 @@ export default function SchoolPage() {
 
   const [isEditing, setIsEditing] = useState(false);
   const [originalForm, setOriginalForm] = useState(null);
+  const [accessLinkedToAdvisors, setAccessLinkedToAdvisors] = useState(false);
   const [editForm, setEditForm] = useState({
     name: "", symbol: "", city: "", authority: "",
     stage: "",
@@ -2718,6 +2733,16 @@ export default function SchoolPage() {
       const { data: { session } } = await supabase.auth.getSession();
       const userRole = session?.user.user_metadata?.role || "advisor";
       if (session) setRole(userRole);
+
+      try {
+        const meRes = await axios.get("/schools/users/me");
+        if (meRes.data?.org?.subscription_status) {
+          setSubscriptionStatus(meRes.data.org.subscription_status);
+        }
+        if (meRes.data?.role) setRole(meRes.data.role);
+      } catch {
+        // non-fatal
+      }
 
       const [accountsResult, logsResult] = await Promise.allSettled([
         axios.get(`/schools/${schoolId}/accounts`),
@@ -2881,6 +2906,7 @@ export default function SchoolPage() {
     setEditForm(formData);
     setOriginalForm(formData);
     setTriedSave(false);
+    setAccessLinkedToAdvisors(false);
     axios.get(`/schools/${schoolId}/advisors`).then(res => setSchoolAdvisors(res.data || [])).catch(() => {});
     loadUsers();
     setIsEditing(true);
@@ -3042,6 +3068,43 @@ export default function SchoolPage() {
     );
   }
 
+  if (subscriptionStatus === "expired") {
+    return (
+      <div dir="rtl" className="bg-scene min-h-screen">
+        <Sidebar dark />
+        <div style={{ marginRight: "var(--sidebar-w, 240px)" }} className="flex items-center justify-center min-h-screen p-6">
+          <div className="bg-white rounded-2xl shadow-lg max-w-md w-full p-8 text-center border border-slate-100">
+            <div className="w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-4" style={{ background: "linear-gradient(135deg, #ef4444 0%, #dc2626 100%)" }}>
+              <svg aria-hidden="true" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>
+              </svg>
+            </div>
+            <h2 className="text-lg font-bold text-slate-800 mb-2">תמו ימי הניסיון</h2>
+            <p className="text-sm text-slate-500 leading-relaxed mb-6">
+              כדי לצפות בפרטי בית הספר ולהמשיך לעבוד יש להסדיר את המנוי.<br />
+              הנתונים שלכם יישמרו ל-30 הימים הקרובים ולאחר מכן יימחקו.
+            </p>
+            <div className="flex gap-3 justify-center">
+              <a
+                href="/contact"
+                className="px-5 py-2.5 rounded-xl text-sm font-semibold text-white"
+                style={{ background: "#0070F3" }}
+              >
+                צור קשר לשדרוג
+              </a>
+              <button
+                onClick={() => navigate(-1)}
+                className="px-5 py-2.5 rounded-xl text-sm font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 transition-colors"
+              >
+                חזרה
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div dir="rtl" className="bg-scene min-h-screen">
       <Sidebar dark />
@@ -3127,7 +3190,7 @@ export default function SchoolPage() {
                         <button onClick={saveEdit} disabled={saving} className="btn-blue text-sm px-5 py-2">
                           {saving ? "שומר..." : "שמור שינויים"}
                         </button>
-                        <button onClick={() => { setIsEditing(false); setOriginalForm(null); setSaveError(""); }} className="btn-ghost text-sm px-5 py-2">ביטול</button>
+                        <button onClick={() => { setIsEditing(false); setOriginalForm(null); setSaveError(""); setAccessLinkedToAdvisors(false); }} className="btn-ghost text-sm px-5 py-2">ביטול</button>
                       </div>
                     </div>
                     {saveError && (
@@ -3336,7 +3399,9 @@ export default function SchoolPage() {
                           </span>
                           <div className="flex-1 min-w-0">
                             <AccessSelector restrictTo={editForm.restrict_access_to} users={users}
-                              loadingUsers={loadingUsers} onChange={val => setEditForm(p => ({ ...p, restrict_access_to: val }))}
+                              loadingUsers={loadingUsers}
+                              onChange={val => { setAccessLinkedToAdvisors(false); setEditForm(p => ({ ...p, restrict_access_to: val })); }}
+                              onSelectAdvisors={() => setAccessLinkedToAdvisors(true)}
                               schoolAdvisors={schoolAdvisors} />
                           </div>
                         </div>

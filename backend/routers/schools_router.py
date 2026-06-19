@@ -129,15 +129,17 @@ def list_schools(user: Annotated[dict, Depends(get_current_user)]):
                 all_res = (
                     db.table("schools")
                     .select("*, gefen_accounts(*), advisor_schools(advisor_id)")
+                    .eq("org_id", user["org_id"])
                     .or_(",".join(filters))
                     .order("name")
                     .execute()
                 )
             else:
-                # Q1 (manager/owner): fetch all schools
+                # Q1 (manager/owner): fetch all schools within their org
                 all_res = (
                     db.table("schools")
                     .select("*, gefen_accounts(*), advisor_schools(advisor_id)")
+                    .eq("org_id", user["org_id"])
                     .order("name")
                     .execute()
                 )
@@ -198,7 +200,9 @@ def create_school(
 ):
     _require_manager(user)
     db = get_admin_client()
-    row = db.table("schools").insert(body.model_dump(exclude_none=True)).execute()
+    payload = body.model_dump(exclude_none=True)
+    payload["org_id"] = user["org_id"]
+    row = db.table("schools").insert(payload).execute()
     return row.data[0]
 
 
@@ -218,6 +222,7 @@ def update_school(
         db.table("schools")
         .update(update_data)
         .eq("id", school_id)
+        .eq("org_id", user["org_id"])
         .execute()
     )
     if not row.data:
@@ -232,7 +237,7 @@ def delete_school(
 ):
     _require_manager(user)
     db = get_admin_client()
-    db.table("schools").delete().eq("id", school_id).execute()
+    db.table("schools").delete().eq("id", school_id).eq("org_id", user["org_id"]).execute()
     return {"ok": True}
 
 
@@ -387,29 +392,31 @@ class ReviewRequestIn(BaseModel):
     reviewer_note: str | None = None
 
 
-_approver_ids_cache: tuple[list[str], float] | None = None
+_approver_ids_cache: dict[str, tuple[list[str], float]] = {}
 _APPROVER_TTL = 300  # 5 minutes
 
 
 def invalidate_approver_ids_cache() -> None:
     global _approver_ids_cache
-    _approver_ids_cache = None
+    _approver_ids_cache = {}
 
 
-def _get_approver_ids(db) -> list[str]:
-    """Return IDs of who should receive approval notifications.
+def _get_approver_ids(db, org_id: str) -> list[str]:
+    """Return IDs of who should receive approval notifications within an org.
     If any owner has delegate_approvals_to_managers=True, include managers too.
-    Result cached for 5 minutes; single query instead of two.
+    Result cached per org for 5 minutes.
     """
     global _approver_ids_cache
     now = time.monotonic()
-    if _approver_ids_cache and (now - _approver_ids_cache[1]) < _APPROVER_TTL:
-        return _approver_ids_cache[0]
+    cached = _approver_ids_cache.get(org_id)
+    if cached and (now - cached[1]) < _APPROVER_TTL:
+        return cached[0]
 
     all_candidates = (
         db.table("profiles")
         .select("id, role, delegate_approvals_to_managers")
         .in_("role", ["owner", "manager"])
+        .eq("org_id", org_id)
         .execute()
     )
     candidates = all_candidates.data or []
@@ -418,7 +425,7 @@ def _get_approver_ids(db) -> list[str]:
     ids = [r["id"] for r in owners]
     if any(r.get("delegate_approvals_to_managers") for r in owners):
         ids += [r["id"] for r in managers]
-    _approver_ids_cache = (ids, now)
+    _approver_ids_cache[org_id] = (ids, now)
     return ids
 
 
@@ -440,23 +447,38 @@ def submit_update_request(
 
 @router.get("/update-requests")
 def list_update_requests(user: Annotated[dict, Depends(get_current_user)]):
-    db = get_admin_client()
-    if user["role"] in ("owner", "manager"):
-        rows = (
-            db.table("school_update_requests")
-            .select("*, schools(name), requester:profiles!requester_id(full_name, email)")
-            .order("created_at", desc=True)
-            .execute()
-        )
-    else:
-        rows = (
-            db.table("school_update_requests")
-            .select("*, schools(name), requester:profiles!requester_id(full_name, email)")
-            .eq("requester_id", user["id"])
-            .order("created_at", desc=True)
-            .execute()
-        )
-    return rows.data
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            if user["role"] in ("owner", "manager"):
+                school_ids_res = db.table("schools").select("id").eq("org_id", user["org_id"]).execute()
+                school_ids = [r["id"] for r in (school_ids_res.data or [])]
+                if not school_ids:
+                    return []
+                rows = (
+                    db.table("school_update_requests")
+                    .select("*, schools(name), requester:profiles!requester_id(full_name, email)")
+                    .in_("school_id", school_ids)
+                    .order("created_at", desc=True)
+                    .execute()
+                )
+            else:
+                rows = (
+                    db.table("school_update_requests")
+                    .select("*, schools(name), requester:profiles!requester_id(full_name, email)")
+                    .eq("requester_id", user["id"])
+                    .order("created_at", desc=True)
+                    .execute()
+                )
+            return rows.data
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("list_update_requests attempt 1 failed: %s — resetting", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("list_update_requests failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
 
 @router.patch("/update-requests/{req_id}")
@@ -503,15 +525,22 @@ def get_notifications(user: Annotated[dict, Depends(get_current_user)]):
 
             # Approval requests (for approvers)
             if user["role"] in ("owner", "manager"):
-                approver_ids = _get_approver_ids(db)
+                approver_ids = _get_approver_ids(db, user["org_id"])
                 if user["id"] in approver_ids:
-                    rows = (
-                        db.table("school_update_requests")
-                        .select("*, schools(name), requester:profiles!requester_id(full_name, email)")
-                        .eq("status", "pending")
-                        .order("created_at", desc=True)
-                        .execute()
-                    )
+                    school_ids_res = db.table("schools").select("id").eq("org_id", user["org_id"]).execute()
+                    org_school_ids = [r["id"] for r in (school_ids_res.data or [])]
+                    if org_school_ids:
+                        rows = (
+                            db.table("school_update_requests")
+                            .select("*, schools(name), requester:profiles!requester_id(full_name, email)")
+                            .in_("school_id", org_school_ids)
+                            .eq("status", "pending")
+                            .order("created_at", desc=True)
+                            .execute()
+                        )
+                    else:
+                        rows = type("_empty", (), {"data": []})()
+
                     for r in (rows.data or []):
                         r["_type"] = "update_request"
                     items.extend(rows.data or [])
@@ -624,14 +653,57 @@ class DelegationSettingIn(BaseModel):
 @router.get("/users/me")
 def get_me(user: Annotated[dict, Depends(get_current_user)]):
     result = dict(user)
-    db = get_admin_client()
+
+    # managers_can_delete — DB call only for manager role
     if user["role"] == "owner":
         result["managers_can_delete"] = True
     elif user["role"] == "manager":
-        owners = db.table("profiles").select("delegate_approvals_to_managers").eq("role", "owner").execute()
-        result["managers_can_delete"] = any(r.get("delegate_approvals_to_managers") for r in (owners.data or []))
+        for attempt in range(2):
+            try:
+                db = get_admin_client()
+                owners = (
+                    db.table("profiles")
+                    .select("delegate_approvals_to_managers")
+                    .eq("role", "owner")
+                    .eq("org_id", user["org_id"])
+                    .execute()
+                )
+                result["managers_can_delete"] = any(r.get("delegate_approvals_to_managers") for r in (owners.data or []))
+                break
+            except Exception as exc:
+                if attempt == 0:
+                    logger.warning("get_me managers_can_delete attempt 1 failed: %s — resetting", exc)
+                    reset_admin_client()
+                    time.sleep(0.1)
+                else:
+                    logger.warning("get_me managers_can_delete failed after 2 attempts: %s", exc)
+                    result["managers_can_delete"] = False
     else:
         result["managers_can_delete"] = False
+
+    # org subscription info
+    if user.get("org_id"):
+        for attempt in range(2):
+            try:
+                db = get_admin_client()
+                org_res = (
+                    db.table("organizations")
+                    .select("subscription_status, trial_started_at, trial_ends_at, name")
+                    .eq("id", user["org_id"])
+                    .single()
+                    .execute()
+                )
+                result["org"] = org_res.data or {}
+                break
+            except Exception as exc:
+                if attempt == 0:
+                    logger.warning("get_me org fetch attempt 1 failed: %s — resetting", exc)
+                    reset_admin_client()
+                    time.sleep(0.1)
+                else:
+                    logger.warning("get_me org fetch failed after 2 attempts: %s", exc)
+                    result["org"] = {}
+
     return result
 
 
@@ -645,6 +717,24 @@ def update_my_settings(
     db = get_admin_client()
     db.table("profiles").update({"delegate_approvals_to_managers": body.delegate_approvals_to_managers}).eq("id", user["id"]).execute()
     invalidate_approver_ids_cache()
+    return {"ok": True}
+
+
+class OnboardingDismissIn(BaseModel):
+    key: str  # "add_school" | "add_user"
+
+
+@router.patch("/users/me/onboarding")
+def dismiss_onboarding(
+    body: OnboardingDismissIn,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    if body.key not in {"add_school", "add_user"}:
+        raise HTTPException(status_code=400, detail="מפתח לא חוקי")
+    db = get_admin_client()
+    merged = {**(user.get("onboarding_dismissed") or {}), body.key: True}
+    db.table("profiles").update({"onboarding_dismissed": merged}).eq("id", user["id"]).execute()
+    invalidate_profile_cache(user["id"])
     return {"ok": True}
 
 
@@ -672,7 +762,7 @@ def list_users(user: Annotated[dict, Depends(get_current_user)]):
     for attempt in range(2):
         try:
             db = get_admin_client()
-            rows = db.table("profiles").select("*").order("full_name").execute()
+            rows = db.table("profiles").select("*").eq("org_id", user["org_id"]).order("full_name").execute()
             return rows.data
         except Exception as exc:
             if attempt == 0:
@@ -700,7 +790,14 @@ def invite_user(
         },
     )
     user_id = str(result.user.id)
-    db.table("profiles").update({"status": "pending"}).eq("id", user_id).execute()
+    db.table("profiles").upsert({
+        "id": user_id,
+        "email": body.email,
+        "full_name": body.full_name or "",
+        "role": body.role,
+        "org_id": user["org_id"],
+        "status": "pending",
+    }).execute()
     return {"ok": True, "user_id": user_id}
 
 
@@ -720,8 +817,24 @@ def update_role(
     _require_owner(user)
     if body.role not in ("owner", "manager", "advisor"):
         raise HTTPException(status_code=400, detail="תפקיד לא חוקי")
-    db = get_admin_client()
-    db.table("profiles").update({"role": body.role}).eq("id", user_id).execute()
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            target = db.table("profiles").select("org_id").eq("id", user_id).execute()
+            if not target.data or target.data[0].get("org_id") != user["org_id"]:
+                raise HTTPException(status_code=404, detail="המשתמש לא נמצא")
+            db.table("profiles").update({"role": body.role}).eq("id", user_id).execute()
+            break
+        except HTTPException:
+            raise
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("update_role attempt 1 failed: %s — resetting", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("update_role failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
     invalidate_profile_cache(user_id)
     invalidate_approver_ids_cache()
     return {"ok": True}
@@ -738,11 +851,28 @@ def update_user_profile(
     user: Annotated[dict, Depends(get_current_user)],
 ):
     _require_manager(user)
-    db = get_admin_client()
     data = {k: v for k, v in body.model_dump().items() if v is not None}
-    if data:
-        db.table("profiles").update(data).eq("id", user_id).execute()
-        invalidate_profile_cache(user_id)
+    if not data:
+        return {"ok": True}
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            target = db.table("profiles").select("org_id").eq("id", user_id).execute()
+            if not target.data or target.data[0].get("org_id") != user["org_id"]:
+                raise HTTPException(status_code=404, detail="המשתמש לא נמצא")
+            db.table("profiles").update(data).eq("id", user_id).execute()
+            break
+        except HTTPException:
+            raise
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("update_user_profile attempt 1 failed: %s — resetting", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("update_user_profile failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+    invalidate_profile_cache(user_id)
     return {"ok": True}
 
 
@@ -754,8 +884,24 @@ def delete_user(
     _require_owner(user)
     if user_id == user["id"]:
         raise HTTPException(status_code=400, detail="לא ניתן למחוק את המשתמש הנוכחי")
-    db = get_admin_client()
-    db.auth.admin.delete_user(user_id)
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            target = db.table("profiles").select("org_id").eq("id", user_id).execute()
+            if not target.data or target.data[0].get("org_id") != user["org_id"]:
+                raise HTTPException(status_code=404, detail="המשתמש לא נמצא")
+            db.auth.admin.delete_user(user_id)
+            break
+        except HTTPException:
+            raise
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("delete_user attempt 1 failed: %s — resetting", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("delete_user failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
     return {"ok": True}
 
 
@@ -843,9 +989,9 @@ def delete_log(
     if not _can_delete_check_log(user, db):
         raise HTTPException(status_code=403, detail="אין הרשאה למחיקת בדיקות")
     # Delete stored files from Supabase Storage before removing the DB record
-    log_row = db.table("check_logs").select("summary").eq("id", log_id).single().execute()
+    log_row = db.table("check_logs").select("summary").eq("id", log_id).eq("school_id", school_id).execute()
     if log_row.data:
-        stored_paths = (log_row.data.get("summary") or {}).get("stored_file_paths") or []
+        stored_paths = (log_row.data[0].get("summary") or {}).get("stored_file_paths") or []
         if stored_paths:
             try:
                 keys = [sp["path"] if isinstance(sp, dict) else sp for sp in stored_paths]
@@ -908,7 +1054,7 @@ async def import_schools(
             continue
 
         try:
-            school_data: dict = {"name": name, "symbol": symbol}
+            school_data: dict = {"name": name, "symbol": symbol, "org_id": user["org_id"]}
             if city:
                 school_data["city"] = city
             if notes:
