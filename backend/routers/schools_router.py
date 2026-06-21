@@ -8,8 +8,8 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Annotated
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
-from gotrue.types import GenerateLinkParams, GenerateLinkType
 from openpyxl import load_workbook
 from pydantic import BaseModel
 
@@ -784,25 +784,37 @@ def invite_user(
     user: Annotated[dict, Depends(get_current_user)],
 ):
     _require_manager(user)
-    db = get_admin_client()
-    app_url = os.getenv("APP_URL", "http://localhost:5173")
-    result = db.auth.admin.invite_user_by_email(
-        body.email,
-        {
-            "data": {"full_name": body.full_name or "", "role": body.role},
-            "redirect_to": f"{app_url}/set-password",
-        },
-    )
-    user_id = str(result.user.id)
-    db.table("profiles").upsert({
-        "id": user_id,
-        "email": body.email,
-        "full_name": body.full_name or "",
-        "role": body.role,
-        "org_id": user["org_id"],
-        "status": "pending",
-    }).execute()
-    return {"ok": True, "user_id": user_id}
+    app_url = os.getenv("APP_URL", "https://gefenai.co.il")
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            result = db.auth.admin.invite_user_by_email(
+                body.email,
+                {
+                    "data": {"full_name": body.full_name or "", "role": body.role},
+                    "redirect_to": f"{app_url}/set-password",
+                },
+            )
+            user_id = str(result.user.id)
+            db.table("profiles").upsert({
+                "id": user_id,
+                "email": body.email,
+                "full_name": body.full_name or "",
+                "role": body.role,
+                "org_id": user["org_id"],
+                "status": "pending",
+            }).execute()
+            return {"ok": True, "user_id": user_id}
+        except HTTPException:
+            raise
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("invite_user attempt 1 failed: %s — resetting", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("invite_user failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
 
 def _send_reinvite_email(to_email: str, full_name: str, action_link: str):
@@ -874,16 +886,26 @@ def resend_invite(
             profile = target.data[0]
             if profile.get("status") != "pending":
                 raise HTTPException(status_code=400, detail="המשתמש כבר פעיל — לא ניתן לשלוח הזמנה מחדש")
-            # generate_link works even when the user already confirmed their email
-            # (invite_user_by_email would fail with "User already registered" in that case)
-            result = db.auth.admin.generate_link(
-                GenerateLinkParams(
-                    type=GenerateLinkType.recovery,
-                    email=profile["email"],
-                    redirect_to=f"{app_url}/set-password",
-                )
+            # Use REST API directly — works even when the user already confirmed
+            # their email (invite_user_by_email fails with "User already registered")
+            supabase_url = os.getenv("SUPABASE_URL", "")
+            service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+            resp = httpx.post(
+                f"{supabase_url}/auth/v1/admin/generate_link",
+                headers={
+                    "apikey": service_key,
+                    "Authorization": f"Bearer {service_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "type": "recovery",
+                    "email": profile["email"],
+                    "redirect_to": f"{app_url}/set-password",
+                },
+                timeout=10,
             )
-            action_link = result.properties.action_link
+            resp.raise_for_status()
+            action_link = resp.json()["action_link"]
             _send_reinvite_email(profile["email"], profile.get("full_name") or "", action_link)
             break
         except HTTPException:
