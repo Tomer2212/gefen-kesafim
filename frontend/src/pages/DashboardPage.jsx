@@ -438,6 +438,7 @@ export default function DashboardPage() {
   const [filters, setFilters] = useState(EMPTY_FILTERS);
   const [queries, setQueries] = useState(EMPTY_QUERIES);
   const [showFilters, setShowFilters] = useState(false);
+  const [filtersPersistKey, setFiltersPersistKey] = useState(null);
   const [colOrder, setColOrder] = useState(DEFAULT_COL_ORDER);
   const [colVisible, setColVisible] = useState(Object.fromEntries(DEFAULT_COL_ORDER.map(k => [k, true])));
   const [dragIndex, setDragIndex] = useState(null);
@@ -456,6 +457,13 @@ export default function DashboardPage() {
   const [trialInfo, setTrialInfo] = useState(null);
   const [onboardingDismissed, setOnboardingDismissed] = useState(null);
   const [isOwner, setIsOwner] = useState(false);
+
+  useEffect(() => {
+    if (!filtersPersistKey) return;
+    try {
+      sessionStorage.setItem(filtersPersistKey, JSON.stringify({ searchQuery, filters, queries, showFilters }));
+    } catch {}
+  }, [filtersPersistKey, searchQuery, filters, queries, showFilters]);
 
   function saveColPrefs(order, visible) {
     if (!userId) return;
@@ -560,8 +568,22 @@ export default function DashboardPage() {
       if (!session) { navigate("/login"); return; }
       const uid = session.user.id;
       setUserId(uid);
+      const key = `dashboard-filters-${uid}`;
+      setFiltersPersistKey(key);
       const roleValue = session.user.user_metadata?.role || "advisor";
       setRole(roleValue);
+
+      // Restore filter state from sessionStorage
+      try {
+        const saved = sessionStorage.getItem(key);
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (parsed.searchQuery !== undefined) setSearchQuery(parsed.searchQuery);
+          if (parsed.filters) setFilters(parsed.filters);
+          if (parsed.queries) setQueries(parsed.queries);
+          if (parsed.showFilters !== undefined) setShowFilters(parsed.showFilters);
+        }
+      } catch {}
 
       // Load localStorage prefs immediately (synchronous, no wait)
       const savedOrder = JSON.parse(localStorage.getItem(`dashboard-col-order-${uid}`) || "null");
@@ -711,7 +733,7 @@ export default function DashboardPage() {
               <p className="text-slate-500 text-sm mt-1">בחר בית ספר כדי לצפות בפרטיו או לבצע בדיקה</p>
             </div>
             {(role === "owner" || role === "manager") && (
-              <button onClick={() => navigate("/admin")} className="btn-blue text-sm px-4 py-2">
+              <button onClick={() => navigate("/admin", { state: { openNewSchool: true } })} className="btn-blue text-sm px-4 py-2">
                 + הוסף בית ספר
               </button>
             )}
@@ -887,6 +909,18 @@ export default function DashboardPage() {
                       )
                     )}
                   </div>
+                  <div className="flex justify-end mt-4 pt-3 border-t border-slate-200">
+                    <button
+                      type="button"
+                      onClick={() => { setFilters(EMPTY_FILTERS); setQueries(EMPTY_QUERIES); setSearchQuery(""); }}
+                      className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 transition-colors px-2 py-1 rounded-lg hover:bg-slate-100"
+                    >
+                      <svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                      </svg>
+                      ניקוי סינון
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
@@ -915,7 +949,7 @@ export default function DashboardPage() {
             <div className="glass-card rounded-2xl p-12 text-center">
               <p className="text-slate-500 text-lg">אין בתי ספר משויכים לחשבונך</p>
               {(role === "owner" || role === "manager") && (
-                <button onClick={() => navigate("/admin")} className="btn-blue mt-4 px-6 py-2 text-sm">
+                <button onClick={() => navigate("/admin", { state: { openNewSchool: true } })} className="btn-blue mt-4 px-6 py-2 text-sm">
                   הוסף בית ספר ראשון
                 </button>
               )}

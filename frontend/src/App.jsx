@@ -17,6 +17,7 @@ import SetPasswordPage from "./pages/SetPasswordPage";
 import RegisterPage from "./pages/RegisterPage";
 import SuperAdminPage from "./pages/SuperAdminPage";
 import UnsubscribePage from "./pages/UnsubscribePage";
+import ProfilePage from "./pages/ProfilePage";
 
 export const SessionContext = createContext(undefined);
 
@@ -46,6 +47,7 @@ const router = createBrowserRouter([
   { path: "/check", element: <PrivateRoute><MainPage /></PrivateRoute> },
   { path: "/admin", element: <AdminRoute><AdminPage /></AdminRoute> },
   { path: "/notifications", element: <PrivateRoute><NotificationsPage /></PrivateRoute> },
+  { path: "/profile", element: <PrivateRoute><ProfilePage /></PrivateRoute> },
   { path: "/super-admin", element: <PrivateRoute><SuperAdminPage /></PrivateRoute> },
   { path: "/set-password", element: <SetPasswordPage /> },
   { path: "/unsubscribe", element: <UnsubscribePage /> },

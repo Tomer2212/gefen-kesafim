@@ -801,6 +801,43 @@ def invite_user(
     return {"ok": True, "user_id": user_id}
 
 
+@router.post("/users/{user_id}/resend-invite")
+def resend_invite(
+    user_id: str,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    _require_manager(user)
+    app_url = os.getenv("APP_URL", "http://localhost:5173")
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            target = db.table("profiles").select("email, org_id, full_name, role, status").eq("id", user_id).execute()
+            if not target.data or target.data[0].get("org_id") != user["org_id"]:
+                raise HTTPException(status_code=404, detail="המשתמש לא נמצא")
+            profile = target.data[0]
+            if profile.get("status") != "pending":
+                raise HTTPException(status_code=400, detail="המשתמש כבר פעיל — לא ניתן לשלוח הזמנה מחדש")
+            db.auth.admin.invite_user_by_email(
+                profile["email"],
+                {
+                    "data": {"full_name": profile["full_name"] or "", "role": profile["role"]},
+                    "redirect_to": f"{app_url}/set-password",
+                },
+            )
+            break
+        except HTTPException:
+            raise
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("resend_invite attempt 1 failed: %s — resetting", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("resend_invite failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+    return {"ok": True}
+
+
 @router.post("/users/me/setup-complete")
 def setup_complete(user: Annotated[dict, Depends(get_current_user)]):
     db = get_admin_client()

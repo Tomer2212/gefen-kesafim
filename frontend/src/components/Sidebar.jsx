@@ -274,7 +274,6 @@ export default function Sidebar({ dark = false }) {
   const [orgName, setOrgName] = useState("");
   const [isSuperAdmin, setIsSuperAdmin] = useState(false);
   const [notifCount, setNotifCount] = useState(0);
-  const [showProfile, setShowProfile] = useState(false);
   const [collapsed, setCollapsed] = useState(() => {
     try { return localStorage.getItem("sidebar-collapsed") === "true"; } catch { return false; }
   });
@@ -382,7 +381,7 @@ export default function Sidebar({ dark = false }) {
           />
           <NavItem dark={dark} collapsed={collapsed}
             icon={<Icon d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" circle={[12, 7, 4]} />}
-            label="אזור אישי" active={false} onClick={() => setShowProfile(true)}
+            label="אזור אישי" active={is("/profile")} onClick={() => navigate("/profile")}
           />
           <NavItem dark={dark} collapsed={collapsed}
             icon={<Icon d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" d2="M13.73 21a2 2 0 0 1-3.46 0" />}
@@ -473,14 +472,6 @@ export default function Sidebar({ dark = false }) {
         </svg>
       </button>
 
-      {showProfile && (
-        <ProfileModal
-          userName={userName}
-          userEmail={userEmail}
-          onClose={() => setShowProfile(false)}
-          onNameSaved={(newName) => setUserName(newName)}
-        />
-      )}
     </>
   );
 }
