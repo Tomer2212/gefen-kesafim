@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import axios from "axios";
+import logoImg from "../assets/logo.png";
 
 export default function SetPasswordPage() {
   const navigate = useNavigate();
@@ -15,17 +16,10 @@ export default function SetPasswordPage() {
   const [checking, setChecking] = useState(true);
   const [isRecovery, setIsRecovery] = useState(false);
   const [linkExpired, setLinkExpired] = useState(false);
+  const [succeeded, setSucceeded] = useState(false);
 
   useEffect(() => {
     let handled = false;
-
-    // Detect expired/invalid token from URL hash before setting up auth listener
-    const hashParams = new URLSearchParams(window.location.hash.substring(1));
-    if (hashParams.get("error")) {
-      setLinkExpired(true);
-      setChecking(false);
-      return;
-    }
 
     async function handleSession(session) {
       if (handled) return;
@@ -41,6 +35,21 @@ export default function SetPasswordPage() {
       } catch {
         navigate("/login", { replace: true });
       }
+    }
+
+    // Detect expired/invalid token from URL hash before setting up auth listener
+    const hashParams = new URLSearchParams(window.location.hash.substring(1));
+    if (hashParams.get("error")) {
+      // Token may have been consumed on a prior visit — check if the session is still alive
+      supabase.auth.getSession().then(({ data: { session } }) => {
+        if (session) {
+          handleSession(session);
+        } else {
+          setLinkExpired(true);
+          setChecking(false);
+        }
+      });
+      return;
     }
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
@@ -92,10 +101,15 @@ export default function SetPasswordPage() {
         setError("שגיאה בהגדרת הסיסמה. נסה שנית.");
         return;
       }
-      if (!isRecovery) {
+      if (isRecovery) {
+        // Password reset flow — go straight to dashboard (user is already registered)
+        window.location.replace("/");
+      } else {
+        // Invite flow — mark active, sign out, then show welcome screen
         await axios.post("/schools/users/me/setup-complete");
+        await supabase.auth.signOut();
+        setSucceeded(true);
       }
-      window.location.replace("/");
     } catch {
       setError("שגיאה. אנא נסה שנית.");
     } finally {
@@ -138,6 +152,43 @@ export default function SetPasswordPage() {
     );
   }
 
+  if (succeeded) {
+    return (
+      <div dir="rtl" className="bg-scene min-h-screen flex items-center justify-center p-4">
+        <div className="w-full max-w-sm anim-fade-up">
+          <div className="glass-card rounded-3xl px-8 py-10 text-center">
+            <div
+              className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-6"
+              style={{ background: "linear-gradient(135deg, #10b981 0%, #059669 100%)", boxShadow: "0 8px 24px rgba(16,185,129,0.35)" }}
+            >
+              <svg aria-hidden="true" width="32" height="32" viewBox="0 0 24 24" fill="none"
+                stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="20 6 9 17 4 12"/>
+              </svg>
+            </div>
+            <h1 className="text-2xl mb-2" style={{ color: "#10b981", fontWeight: 800 }}>
+              ברוכים הבאים!
+            </h1>
+            <p className="text-sm text-slate-500 leading-relaxed mb-8">
+              ההרשמה הושלמה בהצלחה.<br />
+              כעת ניתן להיכנס למערכת גפן AI.
+            </p>
+            <Link
+              to="/login"
+              className="btn-blue block py-3 text-base text-center"
+              style={{ textDecoration: "none" }}
+            >
+              כניסה למערכת
+            </Link>
+          </div>
+          <p className="text-center text-xs text-slate-400 mt-6">
+            מערכת חכמה לניהול תקציב הגפן
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div dir="rtl" className="bg-scene min-h-screen flex items-center justify-center p-4">
       <div className="w-full max-w-sm anim-fade-up">
@@ -146,24 +197,14 @@ export default function SetPasswordPage() {
 
           {/* Logo */}
           <div className="flex justify-center mb-6">
-            <div
-              className="w-14 h-14 rounded-2xl flex items-center justify-center"
-              style={{ background: "linear-gradient(135deg, #0070F3 0%, #0055cc 100%)", boxShadow: "0 6px 20px rgba(0,112,243,0.35)" }}
-            >
-              <svg aria-hidden="true" width="28" height="28" viewBox="0 0 28 28" fill="none">
-                <rect x="3" y="3" width="9" height="9" rx="2" fill="white" fillOpacity="0.9"/>
-                <rect x="16" y="3" width="9" height="9" rx="2" fill="white" fillOpacity="0.5"/>
-                <rect x="3" y="16" width="9" height="9" rx="2" fill="white" fillOpacity="0.5"/>
-                <rect x="16" y="16" width="9" height="9" rx="2" fill="white" fillOpacity="0.9"/>
-              </svg>
-            </div>
+            <img src={logoImg} alt="גפן AI לוגו" className="h-[12.96rem] w-auto object-contain" />
           </div>
 
           <h1 className="text-center text-2xl mb-1" style={{ color: "#0070F3", fontWeight: 800 }}>
-            {isRecovery ? "איפוס סיסמה" : "ברוכים הבאים לגפן AI"}
+            {isRecovery ? "איפוס סיסמה" : "ברוכים הבאים!"}
           </h1>
-          <p className="text-center text-sm text-slate-400 mb-8 font-medium">
-            {isRecovery ? "בחר סיסמה חדשה לחשבונך" : "בחר סיסמה כדי להשלים את הרישום"}
+          <p className="text-center text-sm text-black mb-8 font-medium">
+            {isRecovery ? "בחר סיסמה חדשה לחשבונך" : "נא לבחור סיסמה כדי להשלים את הרישום"}
           </p>
 
           <form onSubmit={handleSubmit} className="flex flex-col gap-4">

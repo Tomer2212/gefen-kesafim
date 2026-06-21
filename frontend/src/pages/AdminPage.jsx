@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useBlocker } from "react-router-dom";
+import { useBlocker, useLocation } from "react-router-dom";
 import axios from "axios";
 import * as XLSX from "xlsx";
 import Sidebar from "../components/Sidebar";
@@ -504,6 +504,7 @@ function UnsavedChangesModal({ onSave, onDiscard, onCancel, saving }) {
 }
 
 export default function AdminPage() {
+  const location = useLocation();
   const [activeTab, setActiveTab] = useState("schools");
   const importRef = useRef(null);
   const userImportRef = useRef(null);
@@ -558,6 +559,7 @@ export default function AdminPage() {
   const [userImportResult, setUserImportResult] = useState(null);
   const [userImportProgressMsg, setUserImportProgressMsg] = useState("");
   const [resendingUserId, setResendingUserId] = useState(null);
+  const [resendMsg, setResendMsg] = useState(null); // { id, ok }
 
   // User edit / delete
   const [editingUser, setEditingUser] = useState(null);
@@ -608,6 +610,7 @@ export default function AdminPage() {
 
   useEffect(() => { loadSchools(); }, []);
   useEffect(() => { if (activeTab === "users" && users.length === 0) loadUsers(); }, [activeTab]);
+  useEffect(() => { if (location.state?.openNewSchool) openNewForm(); }, []);
 
   // When "היועצים המלווים שנבחרו" mode is active, keep restrict_access_to in sync with selected advisors
   useEffect(() => {
@@ -860,8 +863,14 @@ export default function AdminPage() {
 
   async function resendInvite(u) {
     setResendingUserId(u.id);
+    setResendMsg(null);
     try {
-      await axios.post("/schools/users/invite", { email: u.email, full_name: u.full_name, role: u.role });
+      await axios.post(`/schools/users/${u.id}/resend-invite`);
+      setResendMsg({ id: u.id, ok: true });
+      setTimeout(() => setResendMsg(null), 4000);
+    } catch {
+      setResendMsg({ id: u.id, ok: false });
+      setTimeout(() => setResendMsg(null), 4000);
     } finally {
       setResendingUserId(null);
     }
@@ -1019,12 +1028,16 @@ export default function AdminPage() {
           </div>
 
           {/* Tabs */}
-          <div className="flex gap-2 mb-6">
+          <div className="flex items-end border-b border-slate-200 mb-6 gap-1">
             {tabs.map(t => (
               <button
                 key={t.id}
                 onClick={() => setActiveTab(t.id)}
-                className={`px-4 py-2 rounded-xl text-sm font-medium transition-all ${activeTab === t.id ? "btn-blue" : "btn-ghost"}`}
+                className={`px-4 py-2.5 text-sm font-medium transition-all border-b-2 -mb-px whitespace-nowrap ${
+                  activeTab === t.id
+                    ? "border-blue-600 text-blue-600 font-semibold"
+                    : "border-transparent text-slate-500 hover:text-slate-800 hover:border-slate-300"
+                }`}
               >
                 {t.label}
               </button>
@@ -1651,7 +1664,7 @@ export default function AdminPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {users.map(u => (
+                    {sortByRole(users).map(u => (
                       <tr key={u.id} className="border-b border-slate-50 hover:bg-slate-50 transition-colors">
                         <td className="px-5 py-3">
                           {editingUser?.id === u.id ? (
@@ -1681,13 +1694,6 @@ export default function AdminPage() {
                               <option value="manager">מנהל</option>
                               <option value="owner">בעלים</option>
                             </select>
-                            <span className="text-xs px-2.5 py-1 rounded-full font-medium" style={
-                              u.role === "owner"   ? { background: "rgba(245,158,11,0.12)", color: "#b45309" } :
-                              u.role === "manager" ? { background: "rgba(0,112,243,0.1)",   color: "#1d4ed8" } :
-                                                     { background: "rgba(100,116,139,0.1)", color: "#475569" }
-                            }>
-                              {ROLE_LABELS[u.role]}
-                            </span>
                           </div>
                         </td>
                         <td className="px-5 py-3">
@@ -1704,15 +1710,22 @@ export default function AdminPage() {
                           )}
                         </td>
                         <td className="px-5 py-3">
-                          <div className="flex gap-1 justify-end">
+                          <div className="flex gap-1 items-center justify-end">
                             {u.status === "pending" && (
-                              <button
-                                onClick={() => resendInvite(u)}
-                                disabled={resendingUserId === u.id}
-                                className="text-xs px-3 py-1.5 rounded-lg text-amber-600 hover:bg-amber-50 transition-colors disabled:opacity-40"
-                              >
-                                {resendingUserId === u.id ? "שולח..." : "שלח מחדש"}
-                              </button>
+                              <>
+                                <button
+                                  onClick={() => resendInvite(u)}
+                                  disabled={resendingUserId === u.id}
+                                  className="text-xs px-3 py-1.5 rounded-lg text-amber-600 hover:bg-amber-50 transition-colors disabled:opacity-40"
+                                >
+                                  {resendingUserId === u.id ? "שולח..." : "שלח מחדש"}
+                                </button>
+                                {resendMsg?.id === u.id && (
+                                  <span className={`text-xs font-medium ${resendMsg.ok ? "text-green-600" : "text-red-500"}`}>
+                                    {resendMsg.ok ? "✓ נשלח" : "שגיאה"}
+                                  </span>
+                                )}
+                              </>
                             )}
                             <button onClick={() => startEditUser(u)} disabled={editingUser?.id === u.id}
                               className="text-xs px-3 py-1.5 rounded-lg text-blue-600 hover:bg-blue-50 transition-colors disabled:opacity-30">ערוך</button>
