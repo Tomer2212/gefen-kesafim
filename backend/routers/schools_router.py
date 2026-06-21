@@ -1,11 +1,15 @@
 import io
 import logging
 import os
+import smtplib
 import time
 from concurrent.futures import ThreadPoolExecutor, wait as futures_wait, FIRST_COMPLETED
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from gotrue.types import GenerateLinkParams, GenerateLinkType
 from openpyxl import load_workbook
 from pydantic import BaseModel
 
@@ -801,6 +805,59 @@ def invite_user(
     return {"ok": True, "user_id": user_id}
 
 
+def _send_reinvite_email(to_email: str, full_name: str, action_link: str):
+    gmail_user = os.getenv("GMAIL_USER", "")
+    gmail_password = os.getenv("GMAIL_APP_PASSWORD", "")
+    if not gmail_user or not gmail_password:
+        logger.warning("Gmail not configured — skipping reinvite email to %s", to_email)
+        return
+    greeting = f"שלום {full_name}," if full_name else "שלום,"
+    html = f"""
+<html>
+<body dir="rtl" style="font-family: Arial, sans-serif; font-size: 14px; color: #1e293b;
+                       background: #f8fafc; margin: 0; padding: 24px;">
+  <div style="max-width: 520px; margin: 0 auto; background: white;
+              border-radius: 12px; border: 1px solid #e2e8f0; overflow: hidden;">
+    <div style="background: #0070F3; padding: 20px 24px;">
+      <p style="margin: 0; color: white; font-size: 14px; font-weight: 700;">גפן AI</p>
+      <p style="margin: 4px 0 0 0; color: rgba(255,255,255,0.8); font-size: 12px;">הזמנה למערכת</p>
+    </div>
+    <div style="padding: 28px 24px;">
+      <p style="margin: 0 0 16px 0; font-size: 15px;">{greeting}</p>
+      <p style="margin: 0 0 24px 0; color: #334155; line-height: 1.6;">
+        קיבלת הזמנה להצטרף למערכת גפן AI.<br>
+        לחץ על הכפתור למטה כדי להגדיר סיסמה ולהשלים את הרישום.
+      </p>
+      <div style="text-align: center; margin-bottom: 24px;">
+        <a href="{action_link}"
+           style="display: inline-block; background: #0070F3; color: white;
+                  font-size: 14px; font-weight: 700; padding: 12px 28px;
+                  border-radius: 8px; text-decoration: none;">
+          הגדרת סיסמה וכניסה למערכת
+        </a>
+      </div>
+      <p style="margin: 0; font-size: 12px; color: #94a3b8; text-align: center;">
+        הקישור תקף ל-24 שעות. אם לא ביקשת הזמנה זו, ניתן להתעלם ממייל זה.
+      </p>
+    </div>
+    <div style="background: #f1f5f9; padding: 12px 24px; text-align: center;">
+      <p style="margin: 0; font-size: 11px; color: #94a3b8;">נשלח מגפן AI</p>
+    </div>
+  </div>
+</body>
+</html>"""
+    msg = MIMEMultipart()
+    msg["From"] = f"גפן AI <{gmail_user}>"
+    msg["To"] = to_email
+    msg["Subject"] = "הזמנה למערכת גפן AI"
+    msg.attach(MIMEText(html, "html", "utf-8"))
+    with smtplib.SMTP("smtp.gmail.com", 587, timeout=15) as server:
+        server.ehlo()
+        server.starttls()
+        server.login(gmail_user, gmail_password)
+        server.send_message(msg)
+
+
 @router.post("/users/{user_id}/resend-invite")
 def resend_invite(
     user_id: str,
@@ -817,13 +874,17 @@ def resend_invite(
             profile = target.data[0]
             if profile.get("status") != "pending":
                 raise HTTPException(status_code=400, detail="המשתמש כבר פעיל — לא ניתן לשלוח הזמנה מחדש")
-            db.auth.admin.invite_user_by_email(
-                profile["email"],
-                {
-                    "data": {"full_name": profile["full_name"] or "", "role": profile["role"]},
-                    "redirect_to": f"{app_url}/set-password",
-                },
+            # generate_link works even when the user already confirmed their email
+            # (invite_user_by_email would fail with "User already registered" in that case)
+            result = db.auth.admin.generate_link(
+                GenerateLinkParams(
+                    type=GenerateLinkType.recovery,
+                    email=profile["email"],
+                    redirect_to=f"{app_url}/set-password",
+                )
             )
+            action_link = result.properties.action_link
+            _send_reinvite_email(profile["email"], profile.get("full_name") or "", action_link)
             break
         except HTTPException:
             raise

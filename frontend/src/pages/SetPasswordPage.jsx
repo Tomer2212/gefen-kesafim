@@ -15,6 +15,7 @@ export default function SetPasswordPage() {
   const [loading, setLoading] = useState(false);
   const [checking, setChecking] = useState(true);
   const [isRecovery, setIsRecovery] = useState(false);
+  const [isPending, setIsPending] = useState(false);
   const [linkExpired, setLinkExpired] = useState(false);
   const [succeeded, setSucceeded] = useState(false);
 
@@ -52,13 +53,18 @@ export default function SetPasswordPage() {
       return;
     }
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
       if (handled) return;
       if (event === "PASSWORD_RECOVERY") {
-        // User clicked the reset link from email
+        // User clicked a recovery link — could be forgot-password OR resent invite
         handled = true;
         setEmail(session.user.email || "");
         setIsRecovery(true);
+        // Check if still pending (resent invite) vs active (forgot password)
+        try {
+          const res = await axios.get("/schools/users/me");
+          if (res.data.status === "pending") setIsPending(true);
+        } catch { /* non-fatal — treat as forgot-password */ }
         setChecking(false);
       } else if (event === "SIGNED_IN" || (event === "INITIAL_SESSION" && session)) {
         handleSession(session);
@@ -101,11 +107,11 @@ export default function SetPasswordPage() {
         setError("שגיאה בהגדרת הסיסמה. נסה שנית.");
         return;
       }
-      if (isRecovery) {
-        // Password reset flow — go straight to dashboard (user is already registered)
+      if (isRecovery && !isPending) {
+        // Forgot-password flow — user is already registered, go to dashboard
         window.location.replace("/");
       } else {
-        // Invite flow — mark active, sign out, then show welcome screen
+        // Invite flow (original or resent) — mark active, sign out, show welcome
         await axios.post("/schools/users/me/setup-complete");
         await supabase.auth.signOut();
         setSucceeded(true);
@@ -201,10 +207,10 @@ export default function SetPasswordPage() {
           </div>
 
           <h1 className="text-center text-2xl mb-1" style={{ color: "#0070F3", fontWeight: 800 }}>
-            {isRecovery ? "איפוס סיסמה" : "ברוכים הבאים!"}
+            {isRecovery && !isPending ? "איפוס סיסמה" : "ברוכים הבאים!"}
           </h1>
           <p className="text-center text-sm text-black mb-8 font-medium">
-            {isRecovery ? "בחר סיסמה חדשה לחשבונך" : "נא לבחור סיסמה כדי להשלים את הרישום"}
+            {isRecovery && !isPending ? "בחר סיסמה חדשה לחשבונך" : "נא לבחור סיסמה כדי להשלים את הרישום"}
           </p>
 
           <form onSubmit={handleSubmit} className="flex flex-col gap-4">
