@@ -1,5 +1,11 @@
 # Dev Log
 
+## 2026-06-22 — תיקון: setup_complete לא נקרא בflow שליחה מחדש
+- **שורש הבעיה:** `_get_profile()` ב-auth.py לא שלף את שדה `status`, ולכן `/users/me` החזיר `undefined` לפרונטאנד. SetPasswordPage בדק `status === "pending"` וקיבל `undefined`, אז `isPending` נשאר false ו-`setup_complete` מעולם לא נקרא בflow recovery
+- **תיקון auth.py:** הוסף `status` ל-SELECT של `_get_profile()` ולreturn של `get_current_user`
+- **תיקון setup_complete:** הוסף retry loop + `invalidate_profile_cache` כדי שהקאש לא ישמור `pending` אחרי העדכון
+- **תיקון ידני ב-DB:** עדכון `funnyfootballstories@gmail.com` לstatus=active (כבר השלים הרשמה)
+
 ## 2026-06-21 — תיקון קריטי: import שבור גרם לכשל כל ה-schools router
 - הסרת `from gotrue.types import GenerateLinkParams, GenerateLinkType` שגרם לכשל טעינת המודול כולו (כל endpoints ב-schools_router החזירו שגיאה)
 - החלפה ב-REST API ישיר דרך httpx ל-generate_link

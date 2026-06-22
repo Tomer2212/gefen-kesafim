@@ -923,9 +923,20 @@ def resend_invite(
 
 @router.post("/users/me/setup-complete")
 def setup_complete(user: Annotated[dict, Depends(get_current_user)]):
-    db = get_admin_client()
-    db.table("profiles").update({"status": "active"}).eq("id", user["id"]).execute()
-    return {"ok": True}
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            db.table("profiles").update({"status": "active"}).eq("id", user["id"]).execute()
+            invalidate_profile_cache(user["id"])
+            return {"ok": True}
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("setup_complete attempt 1 failed: %s — resetting", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("setup_complete failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב")
 
 
 @router.patch("/users/{user_id}/role")
