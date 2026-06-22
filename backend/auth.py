@@ -75,7 +75,7 @@ def _get_profile(user_id: str) -> dict:
             db = get_admin_client()
             profile = (
                 db.table("profiles")
-                .select("role, full_name, org_id, is_superadmin, onboarding_dismissed")
+                .select("role, full_name, org_id, status, is_superadmin, onboarding_dismissed")
                 .eq("id", user_id)
                 .single()
                 .execute()
@@ -85,6 +85,7 @@ def _get_profile(user_id: str) -> dict:
                 "role": d.get("role", "advisor"),
                 "full_name": d.get("full_name", ""),
                 "org_id": d.get("org_id"),
+                "status": d.get("status", "active"),
                 "is_superadmin": bool(d.get("is_superadmin", False)),
                 "onboarding_dismissed": d.get("onboarding_dismissed") or {},
                 "_cached_at": time.monotonic(),
@@ -148,6 +149,7 @@ def get_current_user(
         "role": profile["role"],
         "full_name": profile["full_name"],
         "org_id": profile["org_id"],
+        "status": profile["status"],
         "is_superadmin": profile["is_superadmin"],
         "onboarding_dismissed": profile["onboarding_dismissed"],
     }
