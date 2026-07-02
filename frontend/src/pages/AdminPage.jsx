@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from "react";
-import { useBlocker, useLocation } from "react-router-dom";
+import { Fragment, useEffect, useRef, useState } from "react";
+import { useBlocker, useLocation, useNavigate } from "react-router-dom";
 import axios from "axios";
 import * as XLSX from "xlsx";
 import Sidebar from "../components/Sidebar";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { supabase } from "../lib/supabase";
 
 const DIVISION_OPTIONS = [
   { value: "tikkon", label: "חטיבה עליונה" },
@@ -56,29 +57,55 @@ function sortByRole(arr) { return [...arr].sort((a, b) => (ROLE_SORT_ORDER[a.rol
 
 const DISTRICT_OPTIONS = ["צפון", "דרום", "מרכז", "ירושלים", "תל-אביב", "חיפה", "חינוך התיישבותי", "חרדי"];
 
-function AdvisorSearch({ schoolId, assigned, users, loadingUsers, onAdd, onRetry }) {
+const HEBREW_MONTHS = ["ינואר", "פברואר", "מרץ", "אפריל", "מאי", "יוני", "יולי", "אוגוסט", "ספטמבר", "אוקטובר", "נובמבר", "דצמבר"];
+
+function AdvisorSearch({ schoolId, assigned, users, loadingUsers, onAdd, onRemove, onRetry }) {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
+  const containerRef = useRef(null);
+  const inputRef = useRef(null);
 
   const filtered = sortByRole(users).filter(u =>
     !query.trim() || (u.full_name || u.email || "").toLowerCase().includes(query.toLowerCase())
   );
 
   return (
-    <div className="relative">
+    <div
+      ref={containerRef}
+      className="relative"
+      onBlur={e => { if (!containerRef.current?.contains(e.relatedTarget)) setOpen(false); }}
+    >
       <label htmlFor={`advisor-search-${schoolId}`} className="sr-only">חיפוש יועץ</label>
-      <input
-        id={`advisor-search-${schoolId}`}
-        type="text"
-        className="input-field text-sm w-full"
-        placeholder={loadingUsers ? "טוען..." : "לחץ לפתיחת רשימה, או הקלד שם לסינון..."}
-        disabled={loadingUsers}
-        value={query}
-        onChange={e => setQuery(e.target.value)}
-        onFocus={() => setOpen(true)}
-        onBlur={() => setOpen(false)}
-        autoComplete="off"
-      />
+      <div
+        className="input-field flex flex-wrap items-center gap-1.5 min-h-[38px] cursor-text"
+        onClick={() => { setOpen(true); inputRef.current?.focus(); }}
+      >
+        {(assigned || []).map(adv => (
+          <span key={adv.id} className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full flex-shrink-0" style={{ background: "rgba(0,112,243,0.08)", color: "#1d4ed8" }}>
+            {adv.full_name || adv.email}
+            {onRemove && (
+              <button
+                type="button"
+                onMouseDown={e => { e.stopPropagation(); e.preventDefault(); onRemove(schoolId, adv.id); }}
+                className="hover:text-red-500 leading-none text-base"
+                aria-label={`הסר ${adv.full_name || adv.email}`}
+              >×</button>
+            )}
+          </span>
+        ))}
+        <input
+          ref={inputRef}
+          id={`advisor-search-${schoolId}`}
+          type="text"
+          className="flex-1 min-w-[80px] text-sm outline-none bg-transparent"
+          placeholder={loadingUsers ? "טוען..." : (assigned || []).length === 0 ? "לחץ לפתיחת רשימה, או הקלד שם לסינון..." : ""}
+          disabled={loadingUsers}
+          value={query}
+          onChange={e => setQuery(e.target.value)}
+          onFocus={() => setOpen(true)}
+          autoComplete="off"
+        />
+      </div>
       {open && (
         <div className="absolute z-20 right-0 left-0 mt-1 border border-slate-200 rounded-xl overflow-hidden bg-white max-h-52 overflow-y-auto shadow-lg">
           {filtered.length === 0 ? (
@@ -122,7 +149,6 @@ function AccessSelector({ restrictTo, users, loadingUsers, onChange, schoolAdvis
     <div
       ref={containerRef}
       className="relative"
-      onFocus={() => setOpen(true)}
       onBlur={e => { if (!containerRef.current?.contains(e.relatedTarget)) setOpen(false); }}
     >
       {/* Display chip area */}
@@ -153,7 +179,7 @@ function AccessSelector({ restrictTo, users, loadingUsers, onChange, schoolAdvis
             </span>
           ) : null;
         })}
-        {!isAll && (
+        {selected.length > 0 && (
           <button
             type="button"
             onMouseDown={e => { e.stopPropagation(); e.preventDefault(); onChange(null); }}
@@ -281,13 +307,47 @@ function DeleteConfirmModal({ title, subtitle, message, error, onConfirm, onCanc
   );
 }
 
+function RoleChangeConfirmModal({ userName, oldRole, newRole, onConfirm, onCancel }) {
+  const { ref, handleKeyDown } = useFocusTrap(onCancel);
+  const labels = { owner: "בעלים", manager: "מנהל", advisor: "יועץ" };
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ background: "rgba(15,23,42,0.55)" }}
+      onClick={e => { if (e.target === e.currentTarget) onCancel(); }}
+    >
+      <div
+        ref={ref}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="role-confirm-title"
+        onKeyDown={handleKeyDown}
+        dir="rtl"
+        className="glass-card rounded-2xl p-6 w-full max-w-sm flex flex-col gap-5"
+      >
+        <h2 id="role-confirm-title" className="font-bold text-slate-900 text-lg">שינוי תפקיד</h2>
+        <p className="text-sm text-slate-600 leading-relaxed">
+          האם אתה בטוח שאתה רוצה לשנות את התפקיד של{" "}
+          <span className="font-semibold text-slate-800">{userName}</span>{" "}
+          מ<span className="font-semibold text-slate-800">'{labels[oldRole] || oldRole}'</span>{" "}
+          ל<span className="font-semibold text-slate-800">'{labels[newRole] || newRole}'</span>?
+        </p>
+        <div className="flex gap-3">
+          <button onClick={onConfirm} className="btn-blue text-sm px-6 py-2">כן</button>
+          <button onClick={onCancel} className="btn-ghost text-sm px-6 py-2">לא</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function validateSymbol(val) {
   if (!val) return "סמל מוסד הוא שדה חובה";
   if (val.length < 5 || val.length > 6) return "נדרש 5 או 6 ספרות";
   return "";
 }
 
-const EMPTY_FORM = { name: "", symbol: "", city: "", authority: "", stage: "", finance_software: "", principal_name: "", principal_phone: "", principal_email: "", secretary_name: "", secretary_phone: "", secretary_email: "", finance_contact_name: "", finance_contact_phone: "", finance_contact_email: "", school_phone: "", address: "", district: "", restrict_access_to: null, extra_contacts: [] };
+const EMPTY_FORM = { name: "", symbol: "", city: "", authority: "", stage: "", finance_software: "", principal_name: "", principal_phone: "", principal_email: "", secretary_name: "", secretary_phone: "", secretary_email: "", finance_contact_name: "", finance_contact_phone: "", finance_contact_email: "", school_phone: "", address: "", district: "", restrict_access_to: [], extra_contacts: [] };
 
 const IMPORT_FIELD_CONFIG = [
   { key: "name",                  label: "שם בית ספר",          required: true },
@@ -465,6 +525,61 @@ function ImportMappingModal({ headers, previewRow, totalRows, fieldConfig, confi
   );
 }
 
+function RecycleBinInfoModal({ schoolName, onClose }) {
+  const { ref, handleKeyDown } = useFocusTrap(onClose);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="recycle-modal-title">
+      <div ref={ref} onKeyDown={handleKeyDown} className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 p-6 flex flex-col gap-4 text-right" dir="rtl">
+        <div className="flex items-center gap-3">
+          <span className="text-2xl" aria-hidden="true">🗑️</span>
+          <h2 id="recycle-modal-title" className="text-lg font-bold text-slate-900">הועבר לסל המחזור</h2>
+        </div>
+        <p className="text-sm text-slate-700 leading-relaxed">
+          בית הספר <span className="font-semibold">{schoolName}</span> הועבר לסל המחזור ונתוניו יימחקו לחלוטין מהמערכת תוך 30 יום.
+        </p>
+        <p className="text-sm text-slate-700 leading-relaxed">
+          אם תרצו לשחזר את בית הספר, ניתן לבצע זאת בפרק הזמן הזה בלבד דרך אזור <span className="font-medium">ניהול ← בתי ספר ← סל מחזור</span>.
+        </p>
+        <div className="flex justify-end pt-1">
+          <button
+            onClick={onClose}
+            className="px-6 py-2 rounded-xl text-sm font-semibold bg-emerald-100 text-emerald-800 hover:bg-emerald-200 transition-colors"
+            autoFocus
+          >
+            אישור
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RestoreSuccessModal({ schoolName, onClose }) {
+  const { ref, handleKeyDown } = useFocusTrap(onClose);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="restore-modal-title">
+      <div ref={ref} onKeyDown={handleKeyDown} className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 p-6 flex flex-col gap-4 text-right" dir="rtl">
+        <div className="flex items-center gap-3">
+          <span className="text-2xl" aria-hidden="true">✅</span>
+          <h2 id="restore-modal-title" className="text-lg font-bold text-slate-900">בית הספר שוחזר בהצלחה</h2>
+        </div>
+        <p className="text-sm text-slate-700 leading-relaxed">
+          בית הספר <span className="font-semibold">{schoolName}</span> שוחזר בהצלחה ומופיע כעת ברשימת בתי הספר הפעילים.
+        </p>
+        <div className="flex justify-end pt-1">
+          <button
+            onClick={onClose}
+            className="px-6 py-2 rounded-xl text-sm font-semibold bg-emerald-100 text-emerald-800 hover:bg-emerald-200 transition-colors"
+            autoFocus
+          >
+            אישור
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function UnsavedChangesModal({ onSave, onDiscard, onCancel, saving }) {
   const { ref, handleKeyDown } = useFocusTrap(onCancel);
   return (
@@ -479,7 +594,7 @@ function UnsavedChangesModal({ onSave, onDiscard, onCancel, saving }) {
         aria-labelledby="unsaved-changes-title"
         onKeyDown={handleKeyDown}
         dir="rtl"
-        className="glass-card rounded-2xl p-6 w-full max-w-sm flex flex-col gap-5"
+        className="glass-card rounded-2xl p-6 w-full max-w-lg flex flex-col gap-5"
       >
         <div>
           <h2 id="unsaved-changes-title" className="font-bold text-slate-900 text-lg">שינויים שלא נשמרו</h2>
@@ -487,14 +602,18 @@ function UnsavedChangesModal({ onSave, onDiscard, onCancel, saving }) {
             ביצעת שינויים שטרם נשמרו. האם לשמור לפני היציאה?
           </p>
         </div>
-        <div className="flex flex-col gap-2">
-          <button onClick={onSave} disabled={saving} className="btn-blue text-sm px-5 py-2.5">
+        <div className="flex flex-row gap-2">
+          <button onClick={onSave} disabled={saving}
+            className="flex-1 whitespace-nowrap text-sm px-5 py-2.5 rounded-xl font-semibold text-white transition-colors"
+            style={{ background: "#16a34a" }}>
             {saving ? "שומר..." : "שמור שינויים"}
           </button>
-          <button onClick={onDiscard} disabled={saving} className="btn-ghost text-sm px-5 py-2.5">
+          <button onClick={onDiscard} disabled={saving}
+            className="flex-1 whitespace-nowrap text-sm px-5 py-2.5 rounded-xl font-semibold text-white transition-colors"
+            style={{ background: "#dc2626" }}>
             אל תשמור
           </button>
-          <button onClick={onCancel} disabled={saving} className="btn-ghost text-sm px-5 py-2.5">
+          <button onClick={onCancel} disabled={saving} className="flex-1 whitespace-nowrap btn-ghost text-sm px-5 py-2.5">
             ביטול
           </button>
         </div>
@@ -503,11 +622,134 @@ function UnsavedChangesModal({ onSave, onDiscard, onCancel, saving }) {
   );
 }
 
+const OVERRIDE_STATE_LABEL = {
+  true:  "מורשה תמיד",
+  false: "חסום תמיד",
+  null:  "ברירת מחדל",
+};
+
+function UserPermissionsModal({ user, permDefaults, overrides, loading, saving, onSave, onClose }) {
+  const { ref, handleKeyDown } = useFocusTrap(onClose);
+  const roleLabel = { manager: "מנהל", advisor: "יועץ" }[user.role] ?? user.role;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" dir="rtl">
+      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="uperm-title"
+        onKeyDown={handleKeyDown}
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 max-h-[90vh] flex flex-col">
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+          <div>
+            <h2 id="uperm-title" className="font-bold text-slate-800">הרשאות אישיות</h2>
+            <p className="text-xs text-slate-400 mt-0.5">{user.full_name || user.email} · {roleLabel}</p>
+          </div>
+          <button onClick={onClose} aria-label="סגור" className="p-1.5 rounded-lg hover:bg-slate-100 transition-colors text-slate-400">
+            <svg aria-hidden="true" className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="overflow-y-auto flex-1 px-6 py-4">
+          {loading ? (
+            <div role="status" aria-label="טוען הרשאות" className="flex justify-center py-10">
+              <div aria-hidden="true" className="spinner w-7 h-7" />
+            </div>
+          ) : (
+            <>
+              <p className="text-xs text-slate-400 mb-4 leading-relaxed">
+                כאן ניתן להחריג משתמש זה מברירות המחדל של תפקידו.
+                "ברירת מחדל" משמעותה שהמשתמש ירש את ההרשאה מהגדרות תפקיד {roleLabel}.
+              </p>
+              <div className="divide-y divide-slate-100">
+                {Object.entries(permDefaults).map(([perm, data]) => {
+                  const currentOverride = overrides[perm];   // true | false | undefined
+                  const isSaving = saving[perm];
+                  const roleDefault = data[user.role];
+                  const effectiveLabel = currentOverride !== undefined
+                    ? OVERRIDE_STATE_LABEL[String(currentOverride)]
+                    : `ברירת מחדל (${roleDefault ? "מורשה" : "חסום"})`;
+
+                  return (
+                    <div key={perm} className="py-4">
+                      <p className="text-sm font-medium text-slate-700 mb-2">{data.label}</p>
+                      <div className="flex gap-2 flex-wrap">
+                        {[
+                          { value: null,  label: `ברירת מחדל (${roleDefault ? "מורשה" : "חסום"})` },
+                          { value: true,  label: "מורשה תמיד" },
+                          { value: false, label: "חסום תמיד" },
+                        ].map(opt => {
+                          const isActive = opt.value === null
+                            ? currentOverride === undefined
+                            : currentOverride === opt.value;
+                          return (
+                            <button
+                              key={String(opt.value)}
+                              onClick={() => !isActive && onSave(perm, opt.value)}
+                              disabled={isSaving}
+                              className={`text-xs px-3 py-1.5 rounded-full border transition-all ${
+                                isSaving ? "opacity-50 cursor-wait" : ""
+                              } ${isActive
+                                ? opt.value === true  ? "bg-blue-600 text-white border-blue-600"
+                                : opt.value === false ? "bg-red-500 text-white border-red-500"
+                                :                       "bg-slate-700 text-white border-slate-700"
+                                : "bg-white text-slate-500 border-slate-200 hover:border-slate-400"
+                              }`}
+                            >
+                              {opt.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+        </div>
+
+        <div className="px-6 py-4 border-t border-slate-100 flex justify-end">
+          <button onClick={onClose} className="btn-ghost px-5 py-2 text-sm">סגור</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const PERM_GROUPS = [
+  {
+    label: "בתי ספר",
+    perms: ["can_add_school", "can_delete_schools", "can_edit_school_directly", "can_request_school_update", "can_approve_update_requests", "can_delete_own_meetings"],
+    advisorNA: new Set(["can_approve_update_requests"]),
+  },
+  {
+    label: "משתמשים",
+    perms: ["can_invite_users", "can_delete_users", "can_change_user_role", "can_manage_user_permissions"],
+    advisorNA: new Set(["can_invite_users", "can_delete_users", "can_change_user_role", "can_manage_user_permissions"]),
+  },
+  {
+    label: "חיובים",
+    perms: ["can_view_billing", "can_manage_billing"],
+    advisorNA: new Set(["can_view_billing", "can_manage_billing"]),
+    ownerOnly: true,
+  },
+];
+const ADVISOR_NA_PERMS = new Set(PERM_GROUPS.flatMap(g => [...(g.advisorNA || [])]));
+
 export default function AdminPage() {
   const location = useLocation();
+  const navigate  = useNavigate();
   const [activeTab, setActiveTab] = useState("schools");
   const importRef = useRef(null);
   const userImportRef = useRef(null);
+  const [myRole, setMyRole] = useState("");
+  const [myUserId, setMyUserId] = useState(null);
+  const [canDeleteSchool, setCanDeleteSchool] = useState(false);
+  const [canInviteUsers, setCanInviteUsers] = useState(false);
+  const [canDeleteUsers, setCanDeleteUsers] = useState(false);
+  const [canManagePermissions, setCanManagePermissions] = useState(false);
 
   // Schools state
   const [schools, setSchools] = useState([]);
@@ -544,6 +786,10 @@ export default function AdminPage() {
   // Delete confirmation modal
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deletingSchool, setDeletingSchool] = useState(false);
+  const [showSchoolFormDots, setShowSchoolFormDots] = useState(false);
+  const [recycleInfoSchoolName, setRecycleInfoSchoolName] = useState(null);
+  const [restoreSuccessSchoolName, setRestoreSuccessSchoolName] = useState(null);
+  const schoolFormDotsRef = useRef(null);
 
   // Search filter for new-school advisor checkbox list
   const [advisorSearchQuery, setAdvisorSearchQuery] = useState("");
@@ -551,6 +797,8 @@ export default function AdminPage() {
   // Users state
   const [users, setUsers] = useState([]);
   const [loadingUsers, setLoadingUsers] = useState(false);
+  const [roleError, setRoleError] = useState("");
+  const [roleChangeConfirm, setRoleChangeConfirm] = useState(null); // { userId, userName, oldRole, newRole }
   const [inviteForm, setInviteForm] = useState({ email: "", full_name: "", role: "advisor" });
   const [inviting, setInviting] = useState(false);
   const [inviteMsg, setInviteMsg] = useState("");
@@ -569,7 +817,11 @@ export default function AdminPage() {
   const [confirmingUserDelete, setConfirmingUserDelete] = useState(false);
   const [userDeleteError, setUserDeleteError] = useState("");
 
-  const isDirty = showSchoolForm || editingUser !== null || !!(inviteForm.email || inviteForm.full_name);
+  const schoolFormDirty = showSchoolForm && (
+    editingSchool !== null ||
+    !!(schoolForm.name || schoolForm.symbol || schoolStage || selectedAdvisors.length > 0)
+  );
+  const isDirty = schoolFormDirty || editingUser !== null || !!(inviteForm.email || inviteForm.full_name);
   const blocker = useBlocker(isDirty);
   const blockSaving = savingSchool || savingUser || inviting;
 
@@ -608,9 +860,120 @@ export default function AdminPage() {
     blocker.proceed?.();
   }
 
-  useEffect(() => { loadSchools(); }, []);
-  useEffect(() => { if (activeTab === "users" && users.length === 0) loadUsers(); }, [activeTab]);
-  useEffect(() => { if (location.state?.openNewSchool) openNewForm(); }, []);
+  // Permissions state
+  const [permDefaults, setPermDefaults] = useState(null);   // { [key]: { label, manager, advisor } }
+  const [permLoading, setPermLoading] = useState(false);
+  const [permSaving, setPermSaving] = useState({});          // { [roleKey]: true }
+  const [permError, setPermError] = useState("");
+  // Per-user overrides panel
+  const [overrideUser, setOverrideUser] = useState(null);    // user object
+  const [overrides, setOverrides] = useState({});            // { [perm]: true|false }
+  const [overrideLoading, setOverrideLoading] = useState(false);
+  const [overrideSaving, setOverrideSaving] = useState({});  // { [perm]: true }
+
+  // Billing tab
+  const [billingMonthTab, setBillingMonthTab] = useState(null);
+  const [billingData] = useState({});                        // { "YYYY-MM": { ... } } — populated when billing DB is connected
+
+  async function loadPermDefaults() {
+    setPermLoading(true);
+    setPermError("");
+    try {
+      const res = await axios.get("/schools/permissions/defaults");
+      setPermDefaults(res.data);
+    } catch {
+      setPermError("שגיאה בטעינת ההרשאות — נסה לרענן");
+    } finally {
+      setPermLoading(false);
+    }
+  }
+
+  async function savePermDefault(role, permission, allowed) {
+    const key = `${role}_${permission}`;
+    setPermSaving(s => ({ ...s, [key]: true }));
+    // enabling can_manage_billing must also enable can_view_billing
+    const alsoEnable = (permission === "can_manage_billing" && allowed) ? "can_view_billing" : null;
+    // disabling can_edit_school_directly must also disable can_delete_schools
+    const alsoDisable = (permission === "can_edit_school_directly" && !allowed) ? "can_delete_schools" : null;
+    // enabling can_edit_school_directly must also enable can_request_school_update (it becomes irrelevant but keep value consistent)
+    // no cascade needed — the toggle just grays out; value stays for when direct edit is turned off again
+    try {
+      await axios.put("/schools/permissions/defaults", { role, permission, allowed });
+      setPermDefaults(d => ({ ...d, [permission]: { ...d[permission], [role]: allowed } }));
+      if (alsoEnable && permDefaults?.[alsoEnable]?.[role] === false) {
+        await axios.put("/schools/permissions/defaults", { role, permission: alsoEnable, allowed: true });
+        setPermDefaults(d => ({ ...d, [alsoEnable]: { ...d[alsoEnable], [role]: true } }));
+      }
+      if (alsoDisable && permDefaults?.[alsoDisable]?.[role] === true) {
+        await axios.put("/schools/permissions/defaults", { role, permission: alsoDisable, allowed: false });
+        setPermDefaults(d => ({ ...d, [alsoDisable]: { ...d[alsoDisable], [role]: false } }));
+      }
+    } catch {
+      setPermError("שגיאה בשמירה — נסה שוב");
+    } finally {
+      setPermSaving(s => { const n = { ...s }; delete n[key]; return n; });
+    }
+  }
+
+  async function openOverridePanel(u) {
+    setOverrideUser(u);
+    setOverrides({});
+    setOverrideLoading(true);
+    try {
+      const res = await axios.get(`/schools/permissions/overrides/${u.id}`);
+      setOverrides(res.data || {});
+    } catch {
+      /* non-fatal */
+    } finally {
+      setOverrideLoading(false);
+    }
+  }
+
+  async function saveOverride(permission, allowed) {
+    setOverrideSaving(s => ({ ...s, [permission]: true }));
+    try {
+      await axios.put(`/schools/permissions/overrides/${overrideUser.id}`, { permission, allowed });
+      setOverrides(o => {
+        const n = { ...o };
+        if (allowed === null) delete n[permission];
+        else n[permission] = allowed;
+        return n;
+      });
+    } catch {
+      /* non-fatal */
+    } finally {
+      setOverrideSaving(s => { const n = { ...s }; delete n[permission]; return n; });
+    }
+  }
+
+  useEffect(() => {
+    loadSchools();
+    supabase.auth.getSession().then(({ data }) => {
+      const role = data.session?.user?.user_metadata?.role || "";
+      setMyRole(role);
+      setMyUserId(data.session?.user?.id || null);
+      // eagerly load permissions so billing tab visibility is known immediately
+      if (!permDefaults && !permLoading) loadPermDefaults();
+      // Confirm role from server — JWT user_metadata can be stale after role changes
+      axios.get("/schools/users/me").then(res => {
+        if (res.data?.role) setMyRole(res.data.role);
+        setCanDeleteSchool(!!res.data?.can_delete_schools);
+        setCanInviteUsers(!!res.data?.can_invite_users);
+        setCanDeleteUsers(!!res.data?.can_delete_users);
+        setCanManagePermissions(!!res.data?.can_manage_user_permissions);
+      }).catch(() => {});
+    });
+  }, []);
+  useEffect(() => { if ((activeTab === "users" || activeTab === "billing") && users.length === 0) loadUsers(); }, [activeTab]);
+  useEffect(() => { if (activeTab === "permissions" && !permDefaults && !permLoading) loadPermDefaults(); }, [activeTab]);
+  // Advisors must not access the admin area — redirect immediately once role is confirmed
+  useEffect(() => { if (myRole === "advisor") navigate("/", { replace: true }); }, [myRole]);
+
+  useEffect(() => {
+    function handler(e) { if (schoolFormDotsRef.current && !schoolFormDotsRef.current.contains(e.target)) setShowSchoolFormDots(false); }
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
 
   // When "היועצים המלווים שנבחרו" mode is active, keep restrict_access_to in sync with selected advisors
   useEffect(() => {
@@ -624,10 +987,21 @@ export default function AdminPage() {
   async function loadSchools() {
     setLoadingSchools(true);
     try {
-      const res = await axios.get("/schools/");
+      const res = await axios.get("/schools/?include_deleted=true");
       setSchools(Array.isArray(res.data) ? res.data : []);
     } finally {
       setLoadingSchools(false);
+    }
+  }
+
+  async function restoreSchool(schoolId) {
+    const school = schools.find(s => s.id === schoolId);
+    try {
+      await axios.post(`/schools/${schoolId}/restore`);
+      await loadSchools();
+      if (school?.name) setRestoreSuccessSchoolName(school.name);
+    } catch {
+      alert("שגיאה בשחזור בית הספר — נסה שוב");
     }
   }
 
@@ -689,8 +1063,10 @@ export default function AdminPage() {
 
   async function deleteSchool(id) {
     if (!window.confirm("למחוק את בית הספר? פעולה זו תמחק גם את כל החטיבות הקשורות אליו.")) return;
+    const school = schools.find(s => s.id === id);
     await axios.delete(`/schools/${id}`);
     await loadSchools();
+    if (school?.name) setRecycleInfoSchoolName(school.name);
   }
 
   function startEdit(school) {
@@ -731,6 +1107,7 @@ export default function AdminPage() {
   async function handleDeleteConfirmed() {
     if (!editingSchool) return;
     setDeletingSchool(true);
+    const schoolName = editingSchool.name;
     try {
       await axios.delete(`/schools/${editingSchool.id}`);
       setShowDeleteConfirm(false);
@@ -740,6 +1117,7 @@ export default function AdminPage() {
       setSchoolStage("");
       setCustomDivisions(DEFAULT_CUSTOM_DIVISIONS);
       await loadSchools();
+      setRecycleInfoSchoolName(schoolName);
     } finally {
       setDeletingSchool(false);
     }
@@ -809,9 +1187,25 @@ export default function AdminPage() {
     setEditingAccount(null);
   }
 
-  async function changeRole(userId, role) {
-    await axios.patch(`/schools/users/${userId}/role`, { role });
-    await loadUsers();
+  const ROLE_LABELS = { owner: "בעלים", manager: "מנהל", advisor: "יועץ" };
+
+  function requestRoleChange(u, newRole) {
+    if (newRole === u.role) return;
+    setRoleChangeConfirm({ userId: u.id, userName: u.full_name || u.email, oldRole: u.role, newRole });
+  }
+
+  async function confirmRoleChange() {
+    if (!roleChangeConfirm) return;
+    const { userId, newRole } = roleChangeConfirm;
+    setRoleChangeConfirm(null);
+    setRoleError("");
+    try {
+      await axios.patch(`/schools/users/${userId}/role`, { role: newRole });
+      await loadUsers();
+    } catch (err) {
+      const detail = err?.response?.data?.detail || "שגיאה בשינוי תפקיד";
+      setRoleError(detail);
+    }
   }
 
   function startEditUser(u) {
@@ -1011,9 +1405,52 @@ export default function AdminPage() {
   const symbolError = validateSymbol(schoolForm.symbol);
   const schoolPhoneError = validateSchoolPhone(schoolForm.school_phone);
 
+  // Compute the months to show in the billing tab (newest first = rightmost in RTL)
+  const orgJoinDate = users.length > 0
+    ? users.reduce((min, u) => {
+        if (!u.created_at) return min;
+        const d = new Date(u.created_at);
+        return (!min || d < min) ? d : min;
+      }, null)
+    : null;
+  const billingMonths = (() => {
+    const today = new Date();
+    const result = [];
+    for (let i = 0; i < 6; i++) {
+      const d = new Date(today.getFullYear(), today.getMonth() - i, 1);
+      if (orgJoinDate) {
+        const orgStart = new Date(orgJoinDate.getFullYear(), orgJoinDate.getMonth(), 1);
+        if (d < orgStart) break;
+      }
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      result.push({ key, year: d.getFullYear(), month: d.getMonth(), label: `${HEBREW_MONTHS[d.getMonth()]} ${d.getFullYear()}` });
+    }
+    return result;
+  })();
+  const activeBillingMonth = billingMonthTab && billingMonths.some(m => m.key === billingMonthTab)
+    ? billingMonthTab
+    : (billingMonths[0]?.key ?? null);
+
+  const showBillingTab = myRole === "owner" || (myRole === "manager" && permDefaults?.can_view_billing?.manager === true);
+  // null=loading, true=allowed, false=denied
+  // owner → always true; manager → depends on permDefaults (null while loading → treat as not-yet-known)
+  const canAddSchool = myRole === "owner"
+    ? true
+    : myRole === "manager" && permDefaults !== null
+      ? permDefaults?.can_add_school?.manager !== false
+      : null;
+
+  const canChangeRole = myRole === "owner"
+    ? true
+    : myRole === "manager" && permDefaults !== null
+      ? permDefaults?.can_change_user_role?.manager === true
+      : null;
+
   const tabs = [
     { id: "schools", label: "בתי ספר" },
     { id: "users", label: "משתמשים" },
+    { id: "permissions", label: "הרשאות" },
+    ...(showBillingTab ? [{ id: "billing", label: "חיובים" }] : []),
   ];
 
   return (
@@ -1052,7 +1489,18 @@ export default function AdminPage() {
                 <button onClick={() => importRef.current?.click()} disabled={importing} className="btn-ghost text-sm px-4 py-2">
                   {importing ? (importProgressMsg || "מייבא...") : "ייבוא מאקסל"}
                 </button>
-                <button onClick={openNewForm} className="btn-blue text-sm px-4 py-2">+ הוסף בית ספר</button>
+                <div className="relative group">
+                  <button
+                    onClick={canAddSchool === true ? openNewForm : undefined}
+                    disabled={canAddSchool !== true}
+                    className={`btn-blue text-sm px-4 py-2 ${canAddSchool !== true ? "opacity-40 cursor-not-allowed" : ""}`}
+                  >+ הוסף בית ספר</button>
+                  {canAddSchool === false && (
+                    <div className="absolute left-1/2 -translate-x-1/2 top-full mt-1.5 z-50 hidden group-hover:block w-max max-w-xs bg-yellow-50 border border-yellow-300 text-yellow-800 text-xs rounded-lg px-3 py-2 shadow-md whitespace-nowrap">
+                      יש לבקש הרשאה מהבעלים כדי להוסיף בית ספר
+                    </div>
+                  )}
+                </div>
               </div>
 
               {importResult && (
@@ -1069,9 +1517,37 @@ export default function AdminPage() {
               {/* School form */}
               {showSchoolForm && (
                 <div className="glass-card rounded-2xl p-6 mb-4">
-                  <h3 className="font-bold text-slate-800 mb-5 text-center">
-                    {editingSchool ? "עריכת פרטי בית הספר" : "הוספת בית ספר חדש"}
-                  </h3>
+                  <div className="relative flex items-center justify-center mb-5">
+                    <h3 className="font-bold text-slate-800 text-center">
+                      {editingSchool ? "עריכת פרטי בית הספר" : "הוספת בית ספר חדש"}
+                    </h3>
+                    {editingSchool && canDeleteSchool && (
+                      <div className="absolute left-0" ref={schoolFormDotsRef}>
+                        <button
+                          type="button"
+                          onClick={() => setShowSchoolFormDots(o => !o)}
+                          className="p-1.5 rounded-lg hover:bg-slate-100 transition-colors text-slate-400"
+                          aria-label="אפשרויות נוספות"
+                          aria-expanded={showSchoolFormDots}
+                        >
+                          <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                            <circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/>
+                          </svg>
+                        </button>
+                        {showSchoolFormDots && (
+                          <div className="absolute left-0 top-full mt-1 z-20 bg-white rounded-xl py-1 shadow-lg border border-slate-100" style={{ minWidth: 150 }} dir="rtl">
+                            <button
+                              type="button"
+                              onClick={() => { setShowDeleteConfirm(true); setShowSchoolFormDots(false); }}
+                              className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-red-500 hover:bg-red-50 text-right transition-colors"
+                            >
+                              מחק בית ספר
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
 
                   <p className="text-sm font-semibold text-slate-700 mb-3">פרטי בית הספר</p>
 
@@ -1339,29 +1815,15 @@ export default function AdminPage() {
                           יועצים אחראיים {!editingSchool && <span className="text-red-500">*</span>}
                         </p>
                         {editingSchool ? (
-                          <>
-                            <div className="flex flex-wrap gap-2 mb-2 min-h-[28px]">
-                              {(schoolAdvisors[editingSchool.id] || []).length === 0 && (
-                                <p className="text-sm text-slate-400">אין יועצים מוקצים</p>
-                              )}
-                              {(schoolAdvisors[editingSchool.id] || []).map(adv => (
-                                <span key={adv.id} className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full" style={{ background: "rgba(0,112,243,0.08)", color: "#1d4ed8" }}>
-                                  {adv.full_name || adv.email}
-                                  <button onClick={() => removeAdvisorFromSchool(editingSchool.id, adv.id)}
-                                    className="hover:text-red-500 transition-colors leading-none text-base"
-                                    aria-label={`הסר ${adv.full_name || adv.email}`}>×</button>
-                                </span>
-                              ))}
-                            </div>
-                            <AdvisorSearch
-                              schoolId={editingSchool.id}
-                              assigned={schoolAdvisors[editingSchool.id] || []}
-                              users={users}
-                              loadingUsers={loadingUsers}
-                              onAdd={addAdvisorToSchool}
-                              onRetry={loadUsers}
-                            />
-                          </>
+                          <AdvisorSearch
+                            schoolId={editingSchool.id}
+                            assigned={schoolAdvisors[editingSchool.id] || []}
+                            users={users}
+                            loadingUsers={loadingUsers}
+                            onAdd={addAdvisorToSchool}
+                            onRemove={removeAdvisorFromSchool}
+                            onRetry={loadUsers}
+                          />
                         ) : (
                           <>
                             {loadingUsers ? (
@@ -1387,7 +1849,15 @@ export default function AdminPage() {
                                         {u.full_name || u.email}
                                         <button
                                           type="button"
-                                          onMouseDown={e => { e.stopPropagation(); e.preventDefault(); setSelectedAdvisors(prev => prev.filter(i => i !== id)); }}
+                                          onMouseDown={e => {
+                                            e.stopPropagation(); e.preventDefault();
+                                            const newList = selectedAdvisors.filter(i => i !== id);
+                                            setSelectedAdvisors(newList);
+                                            if (newList.length === 0) {
+                                              setAccessLinkedToAdvisors(false);
+                                              setSchoolForm(p => ({ ...p, restrict_access_to: [] }));
+                                            }
+                                          }}
                                           className="hover:text-red-500 leading-none text-base"
                                           aria-label={`הסר ${u.full_name || u.email}`}
                                         >×</button>
@@ -1414,10 +1884,17 @@ export default function AdminPage() {
                                         type="button"
                                         onMouseDown={e => {
                                           e.preventDefault();
-                                          if (selectedAdvisors.includes(u.id))
-                                            setSelectedAdvisors(prev => prev.filter(id => id !== u.id));
-                                          else
+                                          if (selectedAdvisors.includes(u.id)) {
+                                            const newList = selectedAdvisors.filter(id => id !== u.id);
+                                            setSelectedAdvisors(newList);
+                                            if (newList.length === 0) {
+                                              setAccessLinkedToAdvisors(false);
+                                              setSchoolForm(p => ({ ...p, restrict_access_to: [] }));
+                                            }
+                                          } else {
                                             setSelectedAdvisors(prev => [...prev, u.id]);
+                                            if (selectedAdvisors.length === 0) setAccessLinkedToAdvisors(true);
+                                          }
                                         }}
                                         className="w-full text-right flex items-center gap-2 px-2.5 py-1.5 hover:bg-slate-50 cursor-pointer"
                                       >
@@ -1463,19 +1940,11 @@ export default function AdminPage() {
                     </div>
                   </div>
 
-                  <div className="flex items-center justify-between mt-5">
-                    <div className="flex gap-3">
-                      <button onClick={saveSchool} disabled={savingSchool} className="btn-blue text-sm px-5 py-2">
-                        {savingSchool ? "שומר..." : editingSchool ? "שמור שינויים" : "שמור"}
-                      </button>
-                      <button onClick={() => setShowSchoolForm(false)} className="btn-ghost text-sm px-5 py-2">ביטול</button>
-                    </div>
-                    {editingSchool && (
-                      <button onClick={() => setShowDeleteConfirm(true)}
-                        className="text-sm px-4 py-2 rounded-xl font-medium text-red-500 hover:bg-red-50 transition-colors">
-                        מחק בית ספר
-                      </button>
-                    )}
+                  <div className="flex items-center justify-center gap-3 mt-5">
+                    <button onClick={saveSchool} disabled={savingSchool} className={`${editingSchool ? "btn-green-light" : "btn-blue"} text-sm px-5 py-2`}>
+                      {savingSchool ? "שומר..." : editingSchool ? "שמור שינויים" : "שמור"}
+                    </button>
+                    <button onClick={() => setShowSchoolForm(false)} className="btn-ghost text-sm px-5 py-2">ביטול</button>
                   </div>
                 </div>
               )}
@@ -1487,8 +1956,14 @@ export default function AdminPage() {
               )}
 
               {!showSchoolForm && (
+              <>
+              {schools.some(s => s.status === "pending_deletion") && (
+                <h3 className="text-sm font-semibold text-slate-500 mb-3 flex items-center gap-2">
+                  🏫 בתי ספר פעילים ({schools.filter(s => s.status === "active" || !s.status).length})
+                </h3>
+              )}
               <div className="flex flex-col gap-3">
-                {schools.map(school => (
+                {schools.filter(s => s.status === "active" || !s.status).map(school => (
                   <div key={school.id} className="glass-card rounded-2xl overflow-hidden">
                     <div className="flex items-center justify-between px-6 py-4 gap-4">
                       <div className="flex-1 min-w-0">
@@ -1503,7 +1978,6 @@ export default function AdminPage() {
                           {expandedSchool === school.id ? "סגור" : "חטיבות"}
                         </button>
                         <button onClick={() => startEdit(school)} className="btn-ghost text-xs px-3 py-1.5">✏️ ערוך</button>
-                        <button onClick={() => deleteSchool(school.id)} className="text-xs px-3 py-1.5 rounded-xl text-red-500 hover:bg-red-50 transition-colors">מחק</button>
                       </div>
                     </div>
 
@@ -1591,6 +2065,44 @@ export default function AdminPage() {
                   </div>
                 ))}
               </div>
+
+              {schools.some(s => s.status === "pending_deletion") && (
+                <div className="mt-8">
+                  <h3 className="text-sm font-semibold text-slate-500 mb-3 flex items-center gap-2">
+                    🗑️ סל מחזור ({schools.filter(s => s.status === "pending_deletion").length})
+                  </h3>
+                  <div className="flex flex-col gap-3">
+                    {schools.filter(s => s.status === "pending_deletion").map(school => {
+                      const daysLeft = Math.max(0, 30 - Math.floor((Date.now() - new Date(school.deleted_at)) / 86400000));
+                      return (
+                        <div key={school.id} className="glass-card rounded-2xl overflow-hidden opacity-50 grayscale">
+                          <div className="flex items-center justify-between px-6 py-4 gap-4">
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-3 flex-wrap">
+                                <span className="font-bold text-slate-900">{school.name}</span>
+                                {school.symbol && <span className="text-xs text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">סמל {school.symbol}</span>}
+                                {school.city && <span className="text-xs text-slate-800">{school.city}</span>}
+                                <span className="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-medium">מיועד למחיקה</span>
+                                <span className="text-xs text-slate-500">{daysLeft} ימים נותרו</span>
+                              </div>
+                            </div>
+                            {myRole === "owner" && (
+                              <button
+                                onClick={() => restoreSchool(school.id)}
+                                className="btn-ghost text-xs px-3 py-1.5 text-emerald-700 border border-emerald-200 hover:bg-emerald-50"
+                                aria-label={`שחזר את ${school.name}`}
+                              >
+                                שחזר
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+              </>
               )}
             </div>
           )}
@@ -1598,58 +2110,68 @@ export default function AdminPage() {
           {/* Users Tab */}
           {activeTab === "users" && (
             <div>
-              <div className="flex justify-end mb-4">
-                <input ref={userImportRef} type="file" accept=".xlsx,.xls" className="hidden" onChange={handleUserImport} aria-label="ייבוא משתמשים מאקסל" />
-                <button onClick={() => userImportRef.current?.click()} disabled={importingUsers} className="btn-ghost text-sm px-4 py-2">
-                  {importingUsers ? (userImportProgressMsg || "מייבא...") : "ייבוא מאקסל"}
-                </button>
-              </div>
+              {(myRole === "owner" || canInviteUsers) && (
+                <>
+                  <div className="flex justify-end mb-4">
+                    <input ref={userImportRef} type="file" accept=".xlsx,.xls" className="hidden" onChange={handleUserImport} aria-label="ייבוא משתמשים מאקסל" />
+                    <button onClick={() => userImportRef.current?.click()} disabled={importingUsers} className="btn-ghost text-sm px-4 py-2">
+                      {importingUsers ? (userImportProgressMsg || "מייבא...") : "ייבוא מאקסל"}
+                    </button>
+                  </div>
 
-              {userImportResult && (
-                <div className={`glass-card rounded-xl p-4 mb-4 border ${userImportResult.errors.length > 0 ? "border-orange-200" : "border-green-200"}`}>
-                  <p className="font-medium text-slate-800 text-sm">
-                    {userImportResult.imported > 0 ? `הוזמנו ${userImportResult.imported} משתמשים בהצלחה` : "לא הוזמנו משתמשים"}
-                    {userImportResult.errors.length > 0 && ` · ${userImportResult.errors.length} שגיאות`}
-                  </p>
-                  {userImportResult.errors.map((e, i) => <p key={i} className="text-red-500 text-xs mt-1">{e}</p>)}
-                </div>
+                  {userImportResult && (
+                    <div className={`glass-card rounded-xl p-4 mb-4 border ${userImportResult.errors.length > 0 ? "border-orange-200" : "border-green-200"}`}>
+                      <p className="font-medium text-slate-800 text-sm">
+                        {userImportResult.imported > 0 ? `הוזמנו ${userImportResult.imported} משתמשים בהצלחה` : "לא הוזמנו משתמשים"}
+                        {userImportResult.errors.length > 0 && ` · ${userImportResult.errors.length} שגיאות`}
+                      </p>
+                      {userImportResult.errors.map((e, i) => <p key={i} className="text-red-500 text-xs mt-1">{e}</p>)}
+                    </div>
+                  )}
+
+                  <div className="glass-card rounded-2xl p-6 mb-6">
+                    <h3 className="font-bold text-slate-800 mb-4">הזמן משתמש חדש</h3>
+                    <div className="grid grid-cols-3 gap-4">
+                      <div className="flex flex-col gap-1.5">
+                        <label htmlFor="invite-email" className="text-xs text-slate-800">אימייל *</label>
+                        <input id="invite-email" className="input-field" type="email" dir="ltr" value={inviteForm.email}
+                          onChange={e => setInviteForm(p => ({ ...p, email: e.target.value }))} placeholder="user@example.com" />
+                      </div>
+                      <div className="flex flex-col gap-1.5">
+                        <label htmlFor="invite-name" className="text-xs text-slate-800">שם מלא *</label>
+                        <input id="invite-name" className="input-field" value={inviteForm.full_name}
+                          onChange={e => setInviteForm(p => ({ ...p, full_name: e.target.value }))} placeholder="שם מלא" />
+                      </div>
+                      <div className="flex flex-col gap-1.5">
+                        <label htmlFor="invite-role" className="text-xs text-slate-800">תפקיד</label>
+                        <select id="invite-role" className="input-field text-sm" value={inviteForm.role}
+                          onChange={e => setInviteForm(p => ({ ...p, role: e.target.value }))}>
+                          <option value="advisor">יועץ</option>
+                          <option value="manager">מנהל</option>
+                          {myRole === "owner" && <option value="owner">בעלים</option>}
+                        </select>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-3 mt-4">
+                      <button onClick={inviteUser} disabled={!inviteForm.email || !inviteForm.full_name || inviting} className="btn-blue text-sm px-5 py-2">
+                        {inviting ? "שולח..." : "שלח הזמנה"}
+                      </button>
+                      {inviteMsg && <span className={`text-sm ${inviteMsg.includes("שגיאה") ? "text-red-500" : "text-green-600"}`}>{inviteMsg}</span>}
+                    </div>
+                  </div>
+                </>
               )}
-
-              <div className="glass-card rounded-2xl p-6 mb-6">
-                <h3 className="font-bold text-slate-800 mb-4">הזמן משתמש חדש</h3>
-                <div className="grid grid-cols-3 gap-4">
-                  <div className="flex flex-col gap-1.5">
-                    <label htmlFor="invite-email" className="text-xs text-slate-800">אימייל *</label>
-                    <input id="invite-email" className="input-field" type="email" dir="ltr" value={inviteForm.email}
-                      onChange={e => setInviteForm(p => ({ ...p, email: e.target.value }))} placeholder="user@example.com" />
-                  </div>
-                  <div className="flex flex-col gap-1.5">
-                    <label htmlFor="invite-name" className="text-xs text-slate-800">שם מלא *</label>
-                    <input id="invite-name" className="input-field" value={inviteForm.full_name}
-                      onChange={e => setInviteForm(p => ({ ...p, full_name: e.target.value }))} placeholder="שם מלא" />
-                  </div>
-                  <div className="flex flex-col gap-1.5">
-                    <label htmlFor="invite-role" className="text-xs text-slate-800">תפקיד</label>
-                    <select id="invite-role" className="input-field text-sm" value={inviteForm.role}
-                      onChange={e => setInviteForm(p => ({ ...p, role: e.target.value }))}>
-                      <option value="advisor">יועץ</option>
-                      <option value="manager">מנהל</option>
-                      <option value="owner">בעלים</option>
-                    </select>
-                  </div>
-                </div>
-                <div className="flex items-center gap-3 mt-4">
-                  <button onClick={inviteUser} disabled={!inviteForm.email || !inviteForm.full_name || inviting} className="btn-blue text-sm px-5 py-2">
-                    {inviting ? "שולח..." : "שלח הזמנה"}
-                  </button>
-                  {inviteMsg && <span className={`text-sm ${inviteMsg.includes("שגיאה") ? "text-red-500" : "text-green-600"}`}>{inviteMsg}</span>}
-                </div>
-              </div>
 
               {loadingUsers && (
                 <div role="status" aria-label="טוען משתמשים" className="flex justify-center py-10">
                   <div aria-hidden="true" className="spinner w-8 h-8" />
                 </div>
+              )}
+
+              {roleError && (
+                <p role="alert" className="text-sm text-red-600 font-medium bg-red-50 border border-red-200 rounded-xl px-4 py-3 mb-3">
+                  {roleError}
+                </p>
               )}
 
               <div className="glass-card rounded-2xl overflow-hidden">
@@ -1688,11 +2210,19 @@ export default function AdminPage() {
                         <td className="px-5 py-3">
                           <div className="flex items-center gap-2">
                             <label htmlFor={`role-${u.id}`} className="sr-only">תפקיד {u.full_name || u.email}</label>
-                            <select id={`role-${u.id}`} value={u.role} onChange={e => changeRole(u.id, e.target.value)}
-                              className="text-sm text-slate-700 border border-slate-200 rounded-lg px-2 py-1 bg-white">
+                            <select id={`role-${u.id}`} value={u.role}
+                              onChange={e => requestRoleChange(u, e.target.value)}
+                              disabled={canChangeRole !== true || (myRole === "manager" && u.role === "owner") || (myRole === "manager" && u.id === myUserId)}
+                              title={
+                                myRole === "manager" && u.id === myUserId ? "מנהל לא יכול לשנות את תפקיד עצמו" :
+                                canChangeRole !== true ? "אין הרשאה לשנות תפקידים" :
+                                myRole === "manager" && u.role === "owner" ? "מנהל לא יכול לשנות תפקיד של בעלים" :
+                                undefined
+                              }
+                              className={`text-sm text-slate-700 border border-slate-200 rounded-lg px-2 py-1 bg-white ${canChangeRole !== true || (myRole === "manager" && u.role === "owner") || (myRole === "manager" && u.id === myUserId) ? "opacity-40 cursor-not-allowed" : ""}`}>
                               <option value="advisor">יועץ</option>
                               <option value="manager">מנהל</option>
-                              <option value="owner">בעלים</option>
+                              {(myRole === "owner" || u.role === "owner") && <option value="owner">בעלים</option>}
                             </select>
                           </div>
                         </td>
@@ -1729,8 +2259,15 @@ export default function AdminPage() {
                             )}
                             <button onClick={() => startEditUser(u)} disabled={editingUser?.id === u.id}
                               className="text-xs px-3 py-1.5 rounded-lg text-blue-600 hover:bg-blue-50 transition-colors disabled:opacity-30">ערוך</button>
-                            <button onClick={() => setUserToDelete(u)}
-                              className="text-xs px-3 py-1.5 rounded-lg text-red-500 hover:bg-red-50 transition-colors">מחק</button>
+                            {u.role !== "owner" && (
+                              <button onClick={() => openOverridePanel(u)}
+                                aria-label={`הרשאות אישיות: ${u.full_name || u.email}`}
+                                className="text-xs px-3 py-1.5 rounded-lg text-slate-500 hover:bg-slate-100 transition-colors">הרשאות</button>
+                            )}
+                            {(myRole === "owner" || canDeleteUsers) && (
+                              <button onClick={() => setUserToDelete(u)}
+                                className="text-xs px-3 py-1.5 rounded-lg text-red-500 hover:bg-red-50 transition-colors">מחק</button>
+                            )}
                           </div>
                         </td>
                       </tr>
@@ -1738,6 +2275,164 @@ export default function AdminPage() {
                   </tbody>
                 </table>
               </div>
+            </div>
+          )}
+
+          {/* Billing Tab */}
+          {activeTab === "billing" && (
+            <div>
+              {loadingUsers && billingMonths.length === 0 ? (
+                <div role="status" aria-label="טוען נתוני חיובים" className="flex justify-center py-16">
+                  <div aria-hidden="true" className="spinner w-8 h-8" />
+                </div>
+              ) : (
+                <>
+                  {/* Month sub-tabs */}
+                  <div className="flex gap-1 border-b border-slate-200 mb-6 overflow-x-auto" role="tablist" aria-label="בחירת חודש חיוב">
+                    {billingMonths.map(({ key, label }) => (
+                      <button
+                        key={key}
+                        role="tab"
+                        aria-selected={activeBillingMonth === key}
+                        onClick={() => setBillingMonthTab(key)}
+                        className={`px-4 py-2.5 text-sm font-medium whitespace-nowrap border-b-2 -mb-px transition-all ${
+                          activeBillingMonth === key
+                            ? "border-blue-600 text-blue-600 font-semibold"
+                            : "border-transparent text-slate-500 hover:text-slate-800 hover:border-slate-300"
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Month content */}
+                  {activeBillingMonth && (
+                    <div className="glass-card rounded-2xl overflow-hidden">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b border-slate-100">
+                            <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium">תקופת חיוב</th>
+                            <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium">מספר בתי ספר</th>
+                            <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium">חיוב</th>
+                            <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium">אמצעי תשלום</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(() => {
+                            const found = billingMonths.find(m => m.key === activeBillingMonth);
+                            const data = billingData[activeBillingMonth];
+                            return (
+                              <tr className="border-b border-slate-50">
+                                <td className="px-5 py-4 text-slate-700 font-medium">{found?.label ?? activeBillingMonth}</td>
+                                <td className="px-5 py-4 text-slate-400">{data?.school_count != null ? data.school_count : "—"}</td>
+                                <td className="px-5 py-4 text-slate-400">{data?.billing_amount != null ? `₪${data.billing_amount.toLocaleString("he-IL")}` : "—"}</td>
+                                <td className="px-5 py-4 text-slate-400">{data?.payment_method ?? "—"}</td>
+                              </tr>
+                            );
+                          })()}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
+          {/* Permissions Tab */}
+          {activeTab === "permissions" && (
+            <div>
+              {permError && <div role="alert" className="mb-4 text-sm text-red-600 bg-red-50 border border-red-200 rounded-xl px-4 py-3">{permError}</div>}
+              {permLoading ? (
+                <div role="status" aria-label="טוען הרשאות" className="flex justify-center py-16">
+                  <div aria-hidden="true" className="spinner w-8 h-8" />
+                </div>
+              ) : permDefaults && (() => {
+                function PermToggle({ role, perm, data }) {
+                  const key = `${role}_${perm}`;
+                  const saving = permSaving[key];
+                  const deleteBlocked = perm === "can_delete_schools" && role === "manager" && !permDefaults.can_edit_school_directly?.[role];
+                  const requestBlocked = perm === "can_request_school_update" && permDefaults.can_edit_school_directly?.[role] === true;
+                  const advisorNA = role === "advisor" && ADVISOR_NA_PERMS.has(perm);
+                  const noPermEdit = myRole === "manager" && !canManagePermissions;
+                  const editBlocked = deleteBlocked;
+                  const allowed = editBlocked ? false : data[role];
+                  const disabled = saving || editBlocked || noPermEdit;
+                  if (requestBlocked || advisorNA) {
+                    return <span className="text-xs text-slate-400 italic">לא רלוונטי</span>;
+                  }
+                  return (
+                    <div
+                      role="group"
+                      aria-label={data.label}
+                      title={deleteBlocked ? "לא ניתן להפעיל מחיקה כאשר עריכה ישירה מכובה" : undefined}
+                      className={`inline-flex rounded-lg border border-slate-200 overflow-hidden text-xs font-semibold flex-shrink-0 ${disabled ? "opacity-50 pointer-events-none" : ""}`}
+                      style={{ direction: "ltr" }}
+                    >
+                      <button
+                        onClick={() => !disabled && allowed && savePermDefault(role, perm, false)}
+                        aria-pressed={!allowed}
+                        className={`px-3 py-1.5 transition-colors focus:outline-none ${!allowed ? "bg-red-100 text-red-700" : "bg-white text-slate-400 hover:bg-slate-50"}`}
+                      >לא</button>
+                      <button
+                        onClick={() => !disabled && !allowed && savePermDefault(role, perm, true)}
+                        aria-pressed={allowed}
+                        className={`px-3 py-1.5 border-r border-slate-200 transition-colors focus:outline-none ${allowed ? "bg-green-500 text-white" : "bg-white text-slate-400 hover:bg-slate-50"}`}
+                      >כן</button>
+                    </div>
+                  );
+                }
+
+
+                const colCount = myRole === "owner" ? 3 : 2;
+                return (
+                  <div className="glass-card rounded-2xl overflow-hidden">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr style={{ backgroundColor: "#1e3a5f" }}>
+                          <th scope="col" className="text-right px-5 py-3 font-semibold text-white w-full">הרשאה</th>
+                          {myRole === "owner" && (
+                            <th scope="col" className="px-5 py-3 font-semibold text-white whitespace-nowrap text-center">מנהל</th>
+                          )}
+                          <th scope="col" className="px-5 py-3 font-semibold text-white whitespace-nowrap text-center">יועץ</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {PERM_GROUPS.filter(g => !(myRole === "manager" && g.ownerOnly)).map(group => (
+                          <Fragment key={group.label}>
+                            <tr>
+                              <td colSpan={colCount} className="px-5 pt-6 pb-1.5">
+                                <span className="font-bold text-slate-700 border-b border-slate-200 pb-1 block" style={{ fontSize: "1.4em" }}>{group.label}</span>
+                              </td>
+                            </tr>
+                            {group.perms.map(perm => {
+                              const data = permDefaults[perm];
+                              if (!data) return null;
+                              return (
+                                <tr key={perm} className="border-b border-slate-100 hover:bg-slate-50/50">
+                                  <td className="px-5 py-3 text-slate-700">{data.label}</td>
+                                  {myRole === "owner" && (
+                                    <td className="px-5 py-3 text-center">
+                                      <PermToggle role="manager" perm={perm} data={data} />
+                                    </td>
+                                  )}
+                                  <td className="px-5 py-3 text-center">
+                                    {group.advisorNA.has(perm)
+                                      ? <span className="text-xs text-slate-400 italic">לא רלוונטי</span>
+                                      : <PermToggle role="advisor" perm={perm} data={data} />
+                                    }
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </Fragment>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                );
+              })()}
             </div>
           )}
         </div>
@@ -1775,6 +2470,18 @@ export default function AdminPage() {
           confirming={deletingSchool}
         />
       )}
+      {recycleInfoSchoolName && (
+        <RecycleBinInfoModal
+          schoolName={recycleInfoSchoolName}
+          onClose={() => setRecycleInfoSchoolName(null)}
+        />
+      )}
+      {restoreSuccessSchoolName && (
+        <RestoreSuccessModal
+          schoolName={restoreSuccessSchoolName}
+          onClose={() => setRestoreSuccessSchoolName(null)}
+        />
+      )}
       {userToDelete && (
         <DeleteConfirmModal
           title="מחיקת משתמש"
@@ -1792,6 +2499,29 @@ export default function AdminPage() {
           onDiscard={handleDiscardAndProceed}
           onCancel={() => blocker.reset?.()}
           saving={blockSaving}
+        />
+      )}
+
+      {/* Per-user permissions override modal */}
+      {overrideUser && permDefaults && (
+        <UserPermissionsModal
+          user={overrideUser}
+          permDefaults={permDefaults}
+          overrides={overrides}
+          loading={overrideLoading}
+          saving={overrideSaving}
+          onSave={saveOverride}
+          onClose={() => setOverrideUser(null)}
+        />
+      )}
+
+      {roleChangeConfirm && (
+        <RoleChangeConfirmModal
+          userName={roleChangeConfirm.userName}
+          oldRole={roleChangeConfirm.oldRole}
+          newRole={roleChangeConfirm.newRole}
+          onConfirm={confirmRoleChange}
+          onCancel={() => setRoleChangeConfirm(null)}
         />
       )}
     </div>

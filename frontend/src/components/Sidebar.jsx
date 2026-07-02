@@ -1,11 +1,19 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import axios from "axios";
 import { supabase } from "../lib/supabase";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import sidebarLogoImg from "../assets/logo-sidebar.png";
+import NotificationToastContainer from "./NotificationToast";
+import { useMeetingReminders } from "../context/MeetingRemindersContext";
 
 const ROLE_LABEL = { owner: "בעלים", manager: "מנהל", advisor: "יועץ" };
+
+function sessionIsValid(session) {
+  if (!session?.access_token) return false;
+  if (!session.expires_at) return true;
+  return (session.expires_at - 60) > Math.floor(Date.now() / 1000);
+}
 
 function Icon({ d, d2, circle, rect, viewBox = "0 0 24 24" }) {
   return (
@@ -270,10 +278,21 @@ export default function Sidebar({ dark = false }) {
   const location = useLocation();
   const [userName, setUserName] = useState("");
   const [userEmail, setUserEmail] = useState("");
-  const [role, setRole] = useState("advisor");
+  const [role, setRole] = useState(null);
   const [orgName, setOrgName] = useState("");
   const [isSuperAdmin, setIsSuperAdmin] = useState(false);
   const [notifCount, setNotifCount] = useState(0);
+  const [toasts, setToasts] = useState([]);
+  const { addMeetingReminder, addStatusReminder, setUserName: setCtxUserName } = useMeetingReminders();
+  const prevCountRef = useRef(0);
+  const lastPollTimeRef = useRef(Date.now());
+  const notifPrefsRef = useRef({ meeting_reminder: true, meeting_reminder_minutes: 10 });
+  const wakeRefreshRef = useRef(null);
+
+  const dismissToast = useCallback((id) => {
+    setToasts(prev => prev.filter(t => t.id !== id));
+  }, []);
+
   const [collapsed, setCollapsed] = useState(() => {
     try { return localStorage.getItem("sidebar-collapsed") === "true"; } catch { return false; }
   });
@@ -289,16 +308,21 @@ export default function Sidebar({ dark = false }) {
       if (!session) return;
       const metaName = session.user.user_metadata?.full_name;
       const metaRole = session.user.user_metadata?.role || "advisor";
-      setRole(metaRole);
       setUserEmail(session.user.email || "");
       try {
         const res = await axios.get("/schools/users/me");
-        setUserName(res.data.full_name || session.user.email);
+        const name = res.data.full_name || session.user.email;
+        setUserName(name);
+        setCtxUserName(name);
         setRole(res.data.role || metaRole);
         setOrgName(res.data.org?.name || "");
         setIsSuperAdmin(!!res.data.is_superadmin);
+        if (res.data.notification_preferences) {
+          notifPrefsRef.current = res.data.notification_preferences;
+        }
       } catch {
         setUserName(metaName || session.user.email || "");
+        setRole(metaRole);
       }
     }
     load();
@@ -306,16 +330,107 @@ export default function Sidebar({ dark = false }) {
 
   useEffect(() => {
     async function fetchCount() {
+      if (wakeRefreshRef.current) await wakeRefreshRef.current;
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!sessionIsValid(session)) return;
       try {
+        const pollTime = Date.now();
         const res = await axios.get("/schools/notifications");
-        setNotifCount(res.data.count || 0);
+        const newCount = res.data.count || 0;
+        const items = res.data.items || [];
+
+        // Show toasts for new unread notifications (not on first load)
+        if (newCount > prevCountRef.current && prevCountRef.current > 0) {
+          const newItems = items.filter(n =>
+            !n.read_at && new Date(n.created_at).getTime() > lastPollTimeRef.current
+          );
+          if (newItems.length > 0) {
+            setToasts(prev => [
+              ...prev,
+              ...newItems.map(n => ({ id: `notif-${n.id}`, type: n.type, data: n.data })),
+            ]);
+          }
+        }
+        prevCountRef.current = newCount;
+        lastPollTimeRef.current = pollTime;
+        setNotifCount(newCount);
       } catch {
         // silent
       }
     }
+
+    async function checkMeetingReminders() {
+      if (wakeRefreshRef.current) await wakeRefreshRef.current;
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!sessionIsValid(session)) return;
+      const userId = session.user.id;
+      const prefs = notifPrefsRef.current;
+      if (!prefs.meeting_reminder) return;
+      try {
+        const res = await axios.get("/schools/upcoming-meetings");
+        const meetings = res.data || [];
+        const now = new Date();
+        const reminderMs = (prefs.meeting_reminder_minutes || 10) * 60 * 1000;
+        const twoHours = 2 * 60 * 60 * 1000;
+
+        for (const m of meetings) {
+          if (!m.start_time || !m.meeting_date) continue;
+          // Parse as local time (no UTC offset) to avoid midnight timezone shift
+          const meetingTime = new Date(`${m.meeting_date}T${m.start_time}:00`);
+          const msUntil = meetingTime.getTime() - now.getTime();
+          const key = `reminder-${m.id}-${m.meeting_date}-${m.start_time}`;
+
+          const stored = sessionStorage.getItem(key);
+          const dismissed = stored === "1";
+          const snoozed = stored?.startsWith("snooze:");
+          const snoozeDue = snoozed && Date.now() >= parseInt(stored.slice(7));
+
+          const inWindow = msUntil >= 0 && msUntil <= reminderMs;
+          const shouldFire = (!dismissed && !snoozed && inWindow) || (snoozeDue && msUntil >= 0);
+
+          if (shouldFire) {
+            sessionStorage.setItem(key, "1");
+            addMeetingReminder({ ...m, msUntil });
+          }
+
+          // End-of-meeting status update reminder
+          if (m.end_time && m.status === "scheduled") {
+            const meetingAdvisors = (m.advisor_ids || []).length > 0
+              ? m.advisor_ids
+              : (m.school_advisor_ids || []);
+            const isAssigned = meetingAdvisors.includes(userId);
+            if (isAssigned) {
+              const endTime = new Date(`${m.meeting_date}T${m.end_time}:00`);
+              const msAfterEnd = now.getTime() - endTime.getTime();
+              const statusKey = `status-reminder-${m.id}-${m.meeting_date}-${m.end_time}`;
+              if (msAfterEnd >= 0 && msAfterEnd <= twoHours && !sessionStorage.getItem(statusKey)) {
+                sessionStorage.setItem(statusKey, "1");
+                addStatusReminder({ ...m });
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.error("[Reminders] error:", e);
+      }
+    }
+
     fetchCount();
-    const t = setInterval(fetchCount, 60000);
+    checkMeetingReminders();
+    const t = setInterval(() => { fetchCount(); checkMeetingReminders(); }, 60000);
     return () => clearInterval(t);
+  }, []);
+
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        wakeRefreshRef.current = supabase.auth.refreshSession().finally(() => {
+          wakeRefreshRef.current = null;
+        });
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
   }, []);
 
   async function handleLogout() {
@@ -446,6 +561,8 @@ export default function Sidebar({ dark = false }) {
           </button>
         </div>
       </aside>
+
+      <NotificationToastContainer toasts={toasts} onDismiss={dismissToast} />
 
       {/* Collapse/expand toggle — floats on the sidebar's left border, vertically centered */}
       <button
