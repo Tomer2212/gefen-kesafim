@@ -75,7 +75,7 @@ def _get_profile(user_id: str) -> dict:
             db = get_admin_client()
             profile = (
                 db.table("profiles")
-                .select("role, full_name, org_id, status, is_superadmin, onboarding_dismissed")
+                .select("role, full_name, org_id, status, is_superadmin, onboarding_dismissed, notification_preferences")
                 .eq("id", user_id)
                 .single()
                 .execute()
@@ -88,6 +88,7 @@ def _get_profile(user_id: str) -> dict:
                 "status": d.get("status", "active"),
                 "is_superadmin": bool(d.get("is_superadmin", False)),
                 "onboarding_dismissed": d.get("onboarding_dismissed") or {},
+                "notification_preferences": d.get("notification_preferences") or {"meeting_reminder": True, "meeting_reminder_minutes": 10},
                 "_cached_at": time.monotonic(),
             }
             _profile_cache[user_id] = result
@@ -105,7 +106,7 @@ def _get_profile(user_id: str) -> dict:
                 fresh = _profile_cache.get(user_id)
                 if fresh:
                     return fresh
-                return {"role": "advisor", "full_name": "", "org_id": None, "is_superadmin": False, "onboarding_dismissed": {}, "_cached_at": time.monotonic()}
+                return {"role": "advisor", "full_name": "", "org_id": None, "is_superadmin": False, "onboarding_dismissed": {}, "notification_preferences": {"meeting_reminder": True, "meeting_reminder_minutes": 10}, "_cached_at": time.monotonic()}
 
 
 def invalidate_profile_cache(user_id: str) -> None:
@@ -123,22 +124,26 @@ def get_current_user(
     token = credentials.credentials
 
     try:
+        import datetime as _dt
         public_key = _get_public_key()
         payload = jwt.decode(
             token,
             public_key,
             algorithms=["ES256"],
             audience="authenticated",
+            leeway=_dt.timedelta(seconds=60),
         )
         user_id = payload.get("sub")
         email = payload.get("email", "")
         if not user_id:
             raise HTTPException(status_code=401, detail="Invalid token")
     except jwt.ExpiredSignatureError:
+        logger.warning("JWT rejected — expired (token prefix=%s)", token[:20] if token else "?")
         raise HTTPException(status_code=401, detail="Token expired")
     except HTTPException:
         raise
-    except Exception:
+    except Exception as exc:
+        logger.warning("JWT rejected — invalid (%s): %s", type(exc).__name__, exc)
         raise HTTPException(status_code=401, detail="Invalid token")
 
     profile = _get_profile(user_id)
@@ -152,4 +157,5 @@ def get_current_user(
         "status": profile["status"],
         "is_superadmin": profile["is_superadmin"],
         "onboarding_dismissed": profile["onboarding_dismissed"],
+        "notification_preferences": profile["notification_preferences"],
     }

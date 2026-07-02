@@ -1,4 +1,5 @@
 import io
+import json
 import logging
 import os
 import smtplib
@@ -6,18 +7,94 @@ import time
 from concurrent.futures import ThreadPoolExecutor, wait as futures_wait, FIRST_COMPLETED
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from pathlib import Path
 from typing import Annotated
 
 import httpx
+from bidi.algorithm import get_display
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi.responses import Response
 from openpyxl import load_workbook
 from pydantic import BaseModel
+from reportlab.lib import colors as rl_colors
+from reportlab.lib.pagesizes import A4, landscape as rl_landscape
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.units import cm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from auth import get_current_user, invalidate_profile_cache
 from supabase_client import get_admin_client, reset_admin_client
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# ---------------------------------------------------------------------------
+# Schools list PDF export helpers
+# ---------------------------------------------------------------------------
+
+_EXPORT_FONTS_DIR = Path(__file__).parent.parent / "logic" / "fonts"
+_EXPORT_FONT = "SchExportHeb"
+_EXPORT_FONT_BOLD = "SchExportHebBold"
+_EXPORT_FONTS_OK = False
+
+
+def _ensure_export_fonts() -> tuple[str, str]:
+    global _EXPORT_FONTS_OK, _EXPORT_FONT, _EXPORT_FONT_BOLD
+    if _EXPORT_FONTS_OK:
+        return _EXPORT_FONT, _EXPORT_FONT_BOLD
+    try:
+        pdfmetrics.registerFont(TTFont(_EXPORT_FONT, str(_EXPORT_FONTS_DIR / "NotoSansHebrew-Regular.ttf")))
+        pdfmetrics.registerFont(TTFont(_EXPORT_FONT_BOLD, str(_EXPORT_FONTS_DIR / "NotoSansHebrew-Bold.ttf")))
+    except Exception:
+        _EXPORT_FONT = "Helvetica"
+        _EXPORT_FONT_BOLD = "Helvetica-Bold"
+    _EXPORT_FONTS_OK = True
+    return _EXPORT_FONT, _EXPORT_FONT_BOLD
+
+
+def _he(text: str) -> str:
+    s = str(text) if text else ""
+    if any("א" <= c <= "ת" for c in s):
+        return get_display(s)
+    return s
+
+
+def _build_schools_pdf(title: str, headers: list[str], rows: list[list[str]]) -> bytes:
+    font, font_bold = _ensure_export_fonts()
+    buf = io.BytesIO()
+    page_size = rl_landscape(A4) if len(headers) > 4 else A4
+    doc = SimpleDocTemplate(
+        buf, pagesize=page_size,
+        rightMargin=1.5 * cm, leftMargin=1.5 * cm,
+        topMargin=1.5 * cm, bottomMargin=1.5 * cm,
+    )
+    page_w = page_size[0] - 3 * cm
+    col_w = page_w / max(len(headers), 1)
+    t_headers = [_he(h) for h in reversed(headers)]
+    t_rows = [[_he(str(c)) for c in reversed(row)] for row in rows]
+    tbl = Table([t_headers, *t_rows], colWidths=[col_w] * len(headers), repeatRows=1)
+    tbl.setStyle(TableStyle([
+        ("FONTNAME",       (0, 0), (-1, 0),  font_bold),
+        ("FONTNAME",       (0, 1), (-1, -1), font),
+        ("FONTSIZE",       (0, 0), (-1, -1), 9),
+        ("BACKGROUND",     (0, 0), (-1, 0),  rl_colors.HexColor("#1e3a5f")),
+        ("TEXTCOLOR",      (0, 0), (-1, 0),  rl_colors.white),
+        ("ALIGN",          (0, 0), (-1, -1), "RIGHT"),
+        ("VALIGN",         (0, 0), (-1, -1), "MIDDLE"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [rl_colors.white, rl_colors.HexColor("#f8fafc")]),
+        ("GRID",           (0, 0), (-1, -1), 0.5, rl_colors.HexColor("#e2e8f0")),
+        ("TOPPADDING",     (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING",  (0, 0), (-1, -1), 6),
+        ("LEFTPADDING",    (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING",   (0, 0), (-1, -1), 8),
+    ]))
+    title_style = ParagraphStyle("sch_title", fontName=font_bold, fontSize=13, alignment=2)
+    doc.build([Paragraph(_he(title), title_style), Spacer(1, 0.4 * cm), tbl])
+    return buf.getvalue()
+
+# ---------------------------------------------------------------------------
 
 DIVISION_LABELS = {
     "tikkon": "חטיבה עליונה",
@@ -80,6 +157,13 @@ class MeetingIn(BaseModel):
     reminder_enabled: bool | None = False
 
 
+class MeetingStatusPatchIn(BaseModel):
+    status: str | None = None
+    notes: str | None = None
+    start_time: str | None = None
+    end_time: str | None = None
+
+
 class UserInviteIn(BaseModel):
     email: str
     full_name: str | None = None
@@ -104,13 +188,50 @@ def _require_owner(user: dict):
         raise HTTPException(status_code=403, detail="פעולה זו מיועדת לבעלים בלבד")
 
 
+def _create_notifications(db, notifications: list[dict], pref_key: str | None = None):
+    """Insert notification rows, optionally filtering by per-recipient preferences. Non-fatal."""
+    if not notifications:
+        return
+    try:
+        if pref_key:
+            ids = [n["recipient_id"] for n in notifications]
+            prefs_rows = (db.table("profiles")
+                          .select("id, notification_preferences")
+                          .in_("id", ids).execute().data or [])
+            prefs_map = {r["id"]: (r.get("notification_preferences") or {}) for r in prefs_rows}
+            notifications = [n for n in notifications
+                             if prefs_map.get(n["recipient_id"], {}).get(pref_key, True)]
+        if notifications:
+            db.table("notifications").insert(notifications).execute()
+    except Exception as exc:
+        logger.warning("_create_notifications failed (non-fatal): %s", exc)
+
+
+class NotificationPreferencesIn(BaseModel):
+    meeting_reminder: bool | None = None
+    meeting_reminder_minutes: int | None = None
+    notify_update_request_submitted: bool | None = None
+    notify_update_request_reviewed: bool | None = None
+    notify_update_request_result: bool | None = None
+    notify_school_created: bool | None = None
+    notify_school_deleted: bool | None = None
+    notify_advisor_assignment: bool | None = None
+    notify_role_changed: bool | None = None
+    notify_mention: bool | None = None
+
+
 # ---------------------------------------------------------------------------
 # Schools
 # ---------------------------------------------------------------------------
 
 @router.get("/")
-def list_schools(user: Annotated[dict, Depends(get_current_user)]):
+def list_schools(
+    user: Annotated[dict, Depends(get_current_user)],
+    include_deleted: bool = False,
+):
     is_advisor = user["role"] not in ("owner", "manager")
+    if include_deleted and is_advisor:
+        include_deleted = False
     schools = []
 
     for attempt in range(2):
@@ -122,45 +243,65 @@ def list_schools(user: Annotated[dict, Depends(get_current_user)]):
                 assigned = db.table("advisor_schools").select("school_id").eq("advisor_id", user["id"]).execute()
                 assigned_ids = [r["school_id"] for r in (assigned.data or [])]
 
-                # Q1 (advisor): DB-side filter — only return schools this advisor can see
-                filters = [
-                    "restrict_access_to.is.null",                    # open to everyone
-                    f'restrict_access_to.cs.["{user["id"]}"]',       # advisor explicitly in restrict list
-                ]
+                # Q1: open-to-all schools + directly assigned schools
+                # Note: restrict_access_to.cs.[uuid] is intentionally kept OUT of or_() here.
+                # PostgREST's or= parser misinterprets JSON array brackets as grouping syntax,
+                # causing an APIError. Instead we use a separate direct .filter() call (Q2).
+                open_filters = ["restrict_access_to.is.null"]
                 if assigned_ids:
-                    filters.append(f"id.in.({','.join(assigned_ids)})")  # directly assigned
-
-                all_res = (
+                    open_filters.append(f"id.in.({','.join(assigned_ids)})")
+                q1_builder = (
                     db.table("schools")
                     .select("*, gefen_accounts(*), advisor_schools(advisor_id)")
                     .eq("org_id", user["org_id"])
-                    .or_(",".join(filters))
+                    .or_(",".join(open_filters))
                     .order("name")
-                    .execute()
                 )
+                if not include_deleted:
+                    q1_builder = q1_builder.eq("status", "active")
+                q1 = q1_builder.execute()
+
+                # Q2: schools with an explicit allow-list that includes this advisor.
+                # Uses direct .filter() (not inside or_()) so PostgREST parses the JSON value correctly.
+                q2_builder = (
+                    db.table("schools")
+                    .select("*, gefen_accounts(*), advisor_schools(advisor_id)")
+                    .eq("org_id", user["org_id"])
+                    .filter("restrict_access_to", "cs", json.dumps([user["id"]]))
+                )
+                if not include_deleted:
+                    q2_builder = q2_builder.eq("status", "active")
+                q2 = q2_builder.execute()
+
+                # Merge Q1 + Q2, deduplicate by ID, re-sort by name
+                seen_ids = {s["id"] for s in (q1.data or [])}
+                schools = (q1.data or []) + [s for s in (q2.data or []) if s["id"] not in seen_ids]
+                schools.sort(key=lambda s: s.get("name") or "")
             else:
                 # Q1 (manager/owner): fetch all schools within their org
-                all_res = (
+                all_builder = (
                     db.table("schools")
                     .select("*, gefen_accounts(*), advisor_schools(advisor_id)")
                     .eq("org_id", user["org_id"])
                     .order("name")
-                    .execute()
                 )
+                if not include_deleted:
+                    all_builder = all_builder.eq("status", "active")
+                all_res = all_builder.execute()
+                schools = all_res.data or []
 
-            schools = all_res.data or []
             break  # success
         except Exception as exc:
             if attempt == 0:
                 logger.warning("list_schools attempt 1 failed: %s — resetting client and retrying", exc)
                 reset_admin_client()
-                time.sleep(0.1)
+                time.sleep(0.3)
             else:
                 logger.error("list_schools failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
     # Enrich Q3 (profiles) and Q4 (meetings stats) sequentially — safer with 3s timeout
-    db = get_admin_client()
+    # db is the singleton already acquired inside the retry loop above — still valid.
     all_advisor_ids = list({
         row["advisor_id"]
         for s in schools
@@ -202,12 +343,48 @@ def create_school(
     body: SchoolIn,
     user: Annotated[dict, Depends(get_current_user)],
 ):
-    _require_manager(user)
+    if user["role"] not in ("owner", "manager", "advisor"):
+        raise HTTPException(status_code=403, detail="אין הרשאה לפעולה זו")
     db = get_admin_client()
+    if not _check_permission(db, user, "can_add_school"):
+        raise HTTPException(status_code=403, detail="אין הרשאה להוסיף בתי ספר")
     payload = body.model_dump(exclude_none=True)
     payload["org_id"] = user["org_id"]
     row = db.table("schools").insert(payload).execute()
-    return row.data[0]
+    new_school = row.data[0]
+    new_school_id = new_school["id"]
+    # Auto-assign advisor creators so subsequent account creation is authorized
+    if user["role"] == "advisor":
+        try:
+            db.table("advisor_schools").upsert({"advisor_id": user["id"], "school_id": new_school_id}).execute()
+        except Exception as e:
+            logger.warning("Failed to auto-assign advisor to new school (non-fatal): %s", e)
+    # Notify owners (and managers when advisor creates) about the new school
+    try:
+        if user["role"] in ("advisor", "manager"):
+            school_name = new_school.get("name", "בית ספר")
+            notif_title = f'{user.get("full_name", "יועץ")} הוסיף את בית הספר {school_name}'
+            if user["role"] == "advisor":
+                # Notify all owners + all managers
+                recipients = db.table("profiles").select("id").eq("org_id", user["org_id"]).in_("role", ["owner", "manager"]).execute()
+            else:
+                # Manager created — notify owners only
+                recipients = db.table("profiles").select("id").eq("org_id", user["org_id"]).eq("role", "owner").execute()
+            notif_rows = [{
+                "recipient_id": r["id"],
+                "type": "school_created",
+                "school_id": new_school_id,
+                "data": {
+                    "title": notif_title,
+                    "school_name": school_name,
+                    "sender_name": user.get("full_name", ""),
+                    "deeplink": f"/school/{new_school_id}",
+                }
+            } for r in (recipients.data or []) if r["id"] != user["id"]]
+            _create_notifications(db, notif_rows, pref_key="notify_school_created")
+    except Exception as exc:
+        logger.warning("school_created notification failed (non-fatal): %s", exc)
+    return new_school
 
 
 @router.put("/{school_id}")
@@ -216,8 +393,24 @@ def update_school(
     body: SchoolIn,
     user: Annotated[dict, Depends(get_current_user)],
 ):
-    _require_manager(user)
     db = get_admin_client()
+    if user["role"] not in ("owner", "manager"):
+        if not _check_permission(db, user, "can_edit_school_directly"):
+            raise HTTPException(status_code=403, detail="אין הרשאה לפעולה זו")
+        assigned = (
+            db.table("advisor_schools")
+            .select("school_id")
+            .eq("advisor_id", user["id"])
+            .eq("school_id", school_id)
+            .execute()
+        )
+        if not assigned.data:
+            raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
+    # Fetch current restrict_access_to before update (for diff → notifications)
+    old_school = db.table("schools").select("name, restrict_access_to").eq("id", school_id).eq("org_id", user["org_id"]).execute()
+    old_restrict = set(old_school.data[0].get("restrict_access_to") or []) if old_school.data else set()
+    school_name = old_school.data[0]["name"] if old_school.data else "בית ספר"
+
     update_data = body.model_dump(exclude_none=True)
     # Allow explicitly clearing restrict_access_to (null = כולם)
     if "restrict_access_to" in body.model_fields_set and body.restrict_access_to is None:
@@ -231,6 +424,41 @@ def update_school(
     )
     if not row.data:
         raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
+
+    # Non-fatal: notify advisors added/removed from restrict_access_to
+    if "restrict_access_to" in body.model_fields_set:
+        try:
+            new_restrict = set(body.restrict_access_to or [])
+            added = new_restrict - old_restrict
+            removed = old_restrict - new_restrict
+            notif_rows = [
+                *[{
+                    "recipient_id": aid,
+                    "type": "advisor_assigned",
+                    "school_id": school_id,
+                    "data": {
+                        "title": f"קיבלת גישה לבית הספר {school_name}",
+                        "school_name": school_name,
+                        "sender_name": user.get("full_name", ""),
+                        "deeplink": f"/school/{school_id}",
+                    }
+                } for aid in added],
+                *[{
+                    "recipient_id": aid,
+                    "type": "advisor_removed",
+                    "school_id": school_id,
+                    "data": {
+                        "title": f"הגישה שלך לבית הספר {school_name} הוסרה",
+                        "school_name": school_name,
+                        "sender_name": user.get("full_name", ""),
+                    }
+                } for aid in removed],
+            ]
+            if notif_rows:
+                _create_notifications(db, notif_rows, pref_key="notify_advisor_assignment")
+        except Exception as exc:
+            logger.warning("restrict_access_to change notification failed (non-fatal): %s", exc)
+
     return row.data[0]
 
 
@@ -239,9 +467,82 @@ def delete_school(
     school_id: str,
     user: Annotated[dict, Depends(get_current_user)],
 ):
-    _require_manager(user)
     db = get_admin_client()
-    db.table("schools").delete().eq("id", school_id).eq("org_id", user["org_id"]).execute()
+    if not _check_permission(db, user, "can_delete_schools"):
+        raise HTTPException(status_code=403, detail="אין הרשאה למחוק בתי ספר")
+    if user["role"] == "advisor":
+        assigned = db.table("advisor_schools").select("school_id").eq("advisor_id", user["id"]).eq("school_id", school_id).execute()
+        if not assigned.data:
+            raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
+    school_row = db.table("schools").select("name").eq("id", school_id).eq("org_id", user["org_id"]).execute()
+    school_name = school_row.data[0]["name"] if school_row.data else "בית ספר"
+    from datetime import datetime, timezone
+    db.table("schools").update({
+        "status": "pending_deletion",
+        "deleted_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", school_id).eq("org_id", user["org_id"]).execute()
+    try:
+        owner_ids = [r["id"] for r in (db.table("profiles").select("id").eq("role", "owner").eq("org_id", user["org_id"]).execute().data or [])]
+        notif_rows = [{
+            "recipient_id": oid,
+            "type": "school_deleted",
+            "data": {
+                "title": f'{user.get("full_name", "מנהל")} העביר את בית הספר {school_name} לסל המחזור',
+                "school_name": school_name,
+                "sender_name": user.get("full_name", ""),
+            }
+        } for oid in owner_ids if oid != user["id"]]
+        _create_notifications(db, notif_rows, pref_key="notify_school_deleted")
+    except Exception as exc:
+        logger.warning("school_deleted notification failed (non-fatal): %s", exc)
+    return {"ok": True}
+
+
+
+@router.post("/{school_id}/restore")
+def restore_school(
+    school_id: str,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    if user["role"] != "owner":
+        raise HTTPException(status_code=403, detail="רק בעלים יכולים לשחזר בית ספר")
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            db.table("schools").update({
+                "status": "active",
+                "deleted_at": None,
+            }).eq("id", school_id).eq("org_id", user["org_id"]).execute()
+            break
+        except Exception as exc:
+            if attempt == 0:
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשחזור בית הספר — נסה שוב")
+
+    # Non-fatal: notify assigned advisors that the school was restored
+    try:
+        db = get_admin_client()
+        school_row = db.table("schools").select("name").eq("id", school_id).execute()
+        school_name = school_row.data[0]["name"] if school_row.data else "בית ספר"
+        advisor_rows = db.table("advisor_schools").select("advisor_id").eq("school_id", school_id).execute()
+        advisor_ids = [r["advisor_id"] for r in (advisor_rows.data or [])]
+        notif_rows = [{
+            "recipient_id": aid,
+            "type": "advisor_assigned",
+            "school_id": school_id,
+            "data": {
+                "title": f"בית הספר {school_name} שוחזר על ידי הבעלים והוחזר לטיפולך",
+                "school_name": school_name,
+                "sender_name": user.get("full_name", ""),
+                "deeplink": f"/school/{school_id}",
+            }
+        } for aid in advisor_ids]
+        _create_notifications(db, notif_rows, pref_key="notify_advisor_assignment")
+    except Exception as exc:
+        logger.warning("restore_school advisor notification failed (non-fatal): %s", exc)
+
     return {"ok": True}
 
 
@@ -269,7 +570,7 @@ def list_accounts(
             if attempt == 0:
                 logger.warning("list_accounts attempt 1 failed: %s — resetting client and retrying", exc)
                 reset_admin_client()
-                time.sleep(0.1)
+                time.sleep(0.3)
             else:
                 logger.error("list_accounts failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
@@ -281,10 +582,17 @@ def create_account(
     body: GefenAccountIn,
     user: Annotated[dict, Depends(get_current_user)],
 ):
-    _require_manager(user)
+    if user["role"] not in ("owner", "manager", "advisor"):
+        raise HTTPException(status_code=403, detail="אין הרשאה לפעולה זו")
     if body.division_type not in DIVISION_LABELS:
         raise HTTPException(status_code=400, detail="סוג חטיבה לא חוקי")
     db = get_admin_client()
+    if user["role"] == "advisor":
+        if not _check_permission(db, user, "can_add_school"):
+            raise HTTPException(status_code=403, detail="אין הרשאה להוסיף חטיבות")
+        assigned = db.table("advisor_schools").select("school_id").eq("advisor_id", user["id"]).eq("school_id", school_id).execute()
+        if not (assigned.data):
+            raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
     row = (
         db.table("gefen_accounts")
         .insert({"school_id": school_id, **body.model_dump(exclude_none=True)})
@@ -351,7 +659,7 @@ def list_advisors(
             if attempt == 0:
                 logger.warning("list_advisors attempt 1 failed: %s — resetting client and retrying", exc)
                 reset_admin_client()
-                time.sleep(0.1)
+                time.sleep(0.3)
             else:
                 logger.error("list_advisors failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
@@ -368,6 +676,22 @@ def assign_advisor(
     db.table("advisor_schools").upsert(
         {"advisor_id": body.advisor_id, "school_id": school_id}
     ).execute()
+    try:
+        school_row = db.table("schools").select("name").eq("id", school_id).execute()
+        school_name = school_row.data[0]["name"] if school_row.data else "בית ספר"
+        _create_notifications(db, [{
+            "recipient_id": body.advisor_id,
+            "type": "advisor_assigned",
+            "school_id": school_id,
+            "data": {
+                "title": f"שויכת לבית הספר {school_name}",
+                "school_name": school_name,
+                "sender_name": user.get("full_name", ""),
+                "deeplink": f"/school/{school_id}",
+            }
+        }], pref_key="notify_advisor_assignment")
+    except Exception as exc:
+        logger.warning("advisor_assigned notification failed (non-fatal): %s", exc)
     return {"ok": True}
 
 
@@ -379,7 +703,24 @@ def unassign_advisor(
 ):
     _require_manager(user)
     db = get_admin_client()
+    try:
+        school_row = db.table("schools").select("name").eq("id", school_id).execute()
+        school_name = school_row.data[0]["name"] if school_row.data else "בית ספר"
+    except Exception:
+        school_name = "בית ספר"
     db.table("advisor_schools").delete().eq("advisor_id", advisor_id).eq("school_id", school_id).execute()
+    try:
+        _create_notifications(db, [{
+            "recipient_id": advisor_id,
+            "type": "advisor_removed",
+            "data": {
+                "title": f"הוסרת מבית הספר {school_name}",
+                "school_name": school_name,
+                "sender_name": user.get("full_name", ""),
+            }
+        }], pref_key="notify_advisor_assignment")
+    except Exception as exc:
+        logger.warning("advisor_removed notification failed (non-fatal): %s", exc)
     return {"ok": True}
 
 
@@ -394,6 +735,7 @@ class UpdateRequestIn(BaseModel):
 class ReviewRequestIn(BaseModel):
     status: str  # "approved" | "rejected"
     reviewer_note: str | None = None
+    approved_fields: list[str] | None = None  # if set, only these fields are applied on approval
 
 
 _approver_ids_cache: dict[str, tuple[list[str], float]] = {}
@@ -407,7 +749,8 @@ def invalidate_approver_ids_cache() -> None:
 
 def _get_approver_ids(db, org_id: str) -> list[str]:
     """Return IDs of who should receive approval notifications within an org.
-    If any owner has delegate_approvals_to_managers=True, include managers too.
+    Always includes all owners. Includes each manager only if they have
+    can_approve_update_requests permission (via override or role default).
     Result cached per org for 5 minutes.
     """
     global _approver_ids_cache
@@ -418,7 +761,7 @@ def _get_approver_ids(db, org_id: str) -> list[str]:
 
     all_candidates = (
         db.table("profiles")
-        .select("id, role, delegate_approvals_to_managers")
+        .select("id, role")
         .in_("role", ["owner", "manager"])
         .eq("org_id", org_id)
         .execute()
@@ -427,8 +770,11 @@ def _get_approver_ids(db, org_id: str) -> list[str]:
     owners = [r for r in candidates if r["role"] == "owner"]
     managers = [r for r in candidates if r["role"] == "manager"]
     ids = [r["id"] for r in owners]
-    if any(r.get("delegate_approvals_to_managers") for r in owners):
-        ids += [r["id"] for r in managers]
+    # Include each manager individually based on their effective permission
+    for mgr in managers:
+        mgr_user = {"id": mgr["id"], "role": "manager", "org_id": org_id}
+        if _check_permission(db, mgr_user, "can_approve_update_requests"):
+            ids.append(mgr["id"])
     _approver_ids_cache[org_id] = (ids, now)
     return ids
 
@@ -440,12 +786,51 @@ def submit_update_request(
     user: Annotated[dict, Depends(get_current_user)],
 ):
     db = get_admin_client()
+    is_delete_action = body.proposed_changes.get("_action") == "delete_school"
+    if not is_delete_action and not _check_permission(db, user, "can_edit_school_directly"):
+        if not _check_permission(db, user, "can_request_school_update"):
+            raise HTTPException(status_code=403, detail="אין הרשאה להגיש בקשות עריכה")
     row = db.table("school_update_requests").insert({
         "school_id": school_id,
         "requester_id": user["id"],
         "proposed_changes": body.proposed_changes,
         "status": "pending",
     }).execute()
+    req_id = row.data[0]["id"]
+    try:
+        school_row = db.table("schools").select("*").eq("id", school_id).execute()
+        school_name = school_row.data[0]["name"] if school_row.data else "בית ספר"
+        approver_ids = _get_approver_ids(db, user["org_id"])
+        if is_delete_action:
+            notif_title = f'{user.get("full_name", "יועץ")} הגיש בקשה למחיקת בית הספר {school_name}'
+            extra_data = {"is_delete_request": True}
+        else:
+            notif_title = f'{user.get("full_name", "יועץ")} ביקש לערוך את פרטי {school_name}'
+            # Include current field values so approvers can see what's changing from→to
+            school_obj = school_row.data[0] if school_row.data else {}
+            current_values = {
+                k: school_obj.get(k)
+                for k in body.proposed_changes
+                if k != "_action"
+            }
+            extra_data = {"current_values": current_values}
+        notif_rows = [{
+            "recipient_id": aid,
+            "type": "update_request_submitted",
+            "ref_id": req_id,
+            "school_id": school_id,
+            "data": {
+                "title": notif_title,
+                "school_name": school_name,
+                "sender_name": user.get("full_name", ""),
+                "proposed_changes": body.proposed_changes,
+                "deeplink": "/notifications",
+                **extra_data,
+            }
+        } for aid in approver_ids if aid != user["id"]]
+        _create_notifications(db, notif_rows, pref_key="notify_update_request_submitted")
+    except Exception as exc:
+        logger.warning("update_request_submitted notification failed (non-fatal): %s", exc)
     return row.data[0]
 
 
@@ -479,7 +864,7 @@ def list_update_requests(user: Annotated[dict, Depends(get_current_user)]):
             if attempt == 0:
                 logger.warning("list_update_requests attempt 1 failed: %s — resetting", exc)
                 reset_admin_client()
-                time.sleep(0.1)
+                time.sleep(0.3)
             else:
                 logger.error("list_update_requests failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
@@ -494,100 +879,316 @@ def review_update_request(
     _require_manager(user)
     if body.status not in ("approved", "rejected"):
         raise HTTPException(status_code=400, detail="סטטוס לא חוקי")
-    db = get_admin_client()
-    req_row = db.table("school_update_requests").select("*").eq("id", req_id).execute()
-    if not req_row.data:
-        raise HTTPException(status_code=404, detail="הבקשה לא נמצאה")
-    req = req_row.data[0]
-    # Apply changes if approved
+
+    # Phase 1: read + validate only (NO status update — must happen after physical action)
+    req = None
+    school_name = "בית ספר"
+    is_delete_req = False
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            if not _check_permission(db, user, "can_approve_update_requests"):
+                raise HTTPException(status_code=403, detail="אין הרשאה לאשר בקשות עדכון")
+            req_row = db.table("school_update_requests").select("*").eq("id", req_id).execute()
+            if not req_row.data:
+                raise HTTPException(status_code=404, detail="הבקשה לא נמצאה")
+            req = req_row.data[0]
+            if req["status"] != "pending":
+                raise HTTPException(status_code=400, detail="הבקשה כבר טופלה")
+            if req.get("school_id"):
+                school_row = db.table("schools").select("name").eq("id", req["school_id"]).execute()
+                school_name = school_row.data[0]["name"] if school_row.data else "בית ספר"
+            is_delete_req = req.get("proposed_changes", {}).get("_action") == "delete_school"
+            break
+        except HTTPException:
+            raise
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("review_update_request attempt 1 failed: %s — resetting", exc)
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.error("review_update_request failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    # Phase 2: apply changes (school deletion may cascade-delete many rows → may timeout)
+    school_deleted = False
     if body.status == "approved" and req.get("proposed_changes"):
         changes = dict(req["proposed_changes"])
-        if "add_advisor_to_school" in changes:
-            advisor_id = changes.pop("add_advisor_to_school")
-            db.table("advisor_schools").upsert({"advisor_id": advisor_id, "school_id": req["school_id"]}).execute()
-        if changes:
-            db.table("schools").update(changes).eq("id", req["school_id"]).execute()
+        if changes.get("_action") == "delete_school":
+            for del_attempt in range(2):
+                try:
+                    db = get_admin_client()
+                    from datetime import datetime, timezone
+                    db.table("schools").update({
+                        "status": "pending_deletion",
+                        "deleted_at": datetime.now(timezone.utc).isoformat(),
+                    }).eq("id", req["school_id"]).execute()
+                    school_deleted = True
+                    break
+                except Exception as del_exc:
+                    if del_attempt == 0:
+                        logger.warning("school soft-delete attempt 1 failed: %s — resetting and retrying", del_exc)
+                        reset_admin_client()
+                        time.sleep(0.3)
+                    else:
+                        logger.error("school soft-delete failed after 2 attempts: %s", del_exc, exc_info=True)
+                        raise HTTPException(status_code=500, detail="שגיאה זמנית בעדכון בית הספר — נסה שוב")
+        else:
+            db = get_admin_client()
+            # Partial approval: if approved_fields is specified, only apply those fields
+            if body.approved_fields is not None:
+                changes = {k: v for k, v in changes.items() if k in body.approved_fields}
+            if "add_advisor_to_school" in changes:
+                advisor_id = changes.pop("add_advisor_to_school")
+                db.table("advisor_schools").upsert({"advisor_id": advisor_id, "school_id": req["school_id"]}).execute()
+            if changes:
+                db.table("schools").update(changes).eq("id", req["school_id"]).execute()
+
+    # Phase 3: update request status — AFTER physical action succeeds
     from datetime import datetime, timezone
-    db.table("school_update_requests").update({
-        "status": body.status,
-        "reviewer_id": user["id"],
-        "reviewer_note": body.reviewer_note,
-        "resolved_at": datetime.now(timezone.utc).isoformat(),
-    }).eq("id", req_id).execute()
+    for status_attempt in range(2):
+        try:
+            db = get_admin_client()
+            db.table("school_update_requests").update({
+                "status": body.status,
+                "reviewer_id": user["id"],
+                "reviewer_note": body.reviewer_note,
+                "resolved_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("id", req_id).execute()
+            break
+        except Exception as exc:
+            if status_attempt == 0:
+                logger.warning("status update attempt 1 failed: %s — resetting", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.warning("status update failed after 2 attempts (non-fatal — action already applied): %s", exc)
+
+    # Phase 4: notifications — each section independently non-fatal
+    action_label = "מחיקת" if is_delete_req else "עריכת"
+    notif_school_id = None if school_deleted else req.get("school_id")
+    deeplink_advisor = "/notifications" if school_deleted else f'/school/{req.get("school_id")}'
+
+    # Compute partial-approval metadata for advisor notification
+    all_field_keys = [k for k in (req.get("proposed_changes") or {}) if k != "_action"]
+    approved_fields_list = body.approved_fields  # None = full decision; list = partial
+    is_partial = (
+        not is_delete_req
+        and approved_fields_list is not None
+        and body.status == "approved"
+        and len(approved_fields_list) < len(all_field_keys)
+    )
+    if is_partial:
+        advisor_title = f'בקשתך לעריכת {school_name} אושרה באופן חלקי'
+    elif body.status == "approved":
+        advisor_title = f'בקשתך ל{action_label} {school_name} אושרה'
+    else:
+        advisor_title = f'בקשתך ל{action_label} {school_name} נדחתה'
+
+    try:
+        db = get_admin_client()
+        _create_notifications(db, [{
+            "recipient_id": req["requester_id"],
+            "type": f"update_request_{body.status}",
+            "ref_id": req_id,
+            "school_id": notif_school_id,
+            "data": {
+                "title": advisor_title,
+                "school_name": school_name,
+                "sender_name": user.get("full_name", ""),
+                "reviewer_note": body.reviewer_note,
+                "deeplink": deeplink_advisor,
+                "proposed_changes": req.get("proposed_changes"),
+                "approved_fields": approved_fields_list,
+                "is_partial": is_partial,
+            }
+        }], pref_key="notify_update_request_reviewed")
+    except Exception as exc:
+        logger.warning("advisor review notification failed (non-fatal): %s", exc)
+
+    if user.get("role") != "owner":
+        try:
+            db = get_admin_client()
+            req_submitter_name = ""
+            try:
+                sub_row = db.table("profiles").select("full_name").eq("id", req["requester_id"]).execute()
+                req_submitter_name = sub_row.data[0]["full_name"] if sub_row.data else ""
+            except Exception:
+                pass
+            owner_rows = db.table("profiles").select("id").eq("role", "owner").eq("org_id", user["org_id"]).execute()
+            owner_ids = [r["id"] for r in (owner_rows.data or []) if r["id"] != user["id"]]
+            if is_delete_req and body.status == "approved":
+                owner_title = f'{user.get("full_name", "מנהל")} אישר את בקשת המחיקה של {school_name}'
+                if req_submitter_name:
+                    owner_title += f' שהוגשה על ידי {req_submitter_name}'
+                owner_title += ' — הנתונים יימחקו סופית תוך 30 יום'
+            elif is_delete_req:
+                owner_title = f'{user.get("full_name", "מנהל")} דחה את בקשת המחיקה של {school_name}'
+                if req_submitter_name:
+                    owner_title += f' שהוגשה על ידי {req_submitter_name}'
+            else:
+                if is_partial:
+                    status_verb = "אישר באופן חלקי"
+                elif body.status == "approved":
+                    status_verb = "אישר"
+                else:
+                    status_verb = "דחה"
+                owner_title = f'{user.get("full_name", "מנהל")} {status_verb} את בקשת העריכה של {school_name}'
+                if req_submitter_name:
+                    owner_title += f' שהוגשה על ידי {req_submitter_name}'
+            owner_notif_rows = [{
+                "recipient_id": oid,
+                "type": "update_request_result",
+                "ref_id": req_id,
+                "school_id": notif_school_id,
+                "data": {
+                    "title": owner_title,
+                    "school_name": school_name,
+                    "reviewer_name": user.get("full_name", ""),
+                    "requester_name": req_submitter_name,
+                    "status": body.status,
+                    "reviewer_note": body.reviewer_note,
+                    "deeplink": "/notifications",
+                    "proposed_changes": req.get("proposed_changes"),
+                    "approved_fields": approved_fields_list,
+                    "is_partial": is_partial,
+                }
+            } for oid in owner_ids]
+            _create_notifications(db, owner_notif_rows, pref_key="notify_update_request_result")
+        except Exception as exc:
+            logger.warning("owner review notification failed (non-fatal): %s", exc)
+
     return {"ok": True}
 
 
 @router.get("/notifications")
 def get_notifications(user: Annotated[dict, Depends(get_current_user)]):
-    """Return pending items relevant to the current user."""
-    items = []
-
+    """Return all notifications for the current user from the unified notifications table."""
     for attempt in range(2):
         try:
             db = get_admin_client()
-            items = []
-
-            # Approval requests (for approvers)
-            if user["role"] in ("owner", "manager"):
-                approver_ids = _get_approver_ids(db, user["org_id"])
-                if user["id"] in approver_ids:
-                    school_ids_res = db.table("schools").select("id").eq("org_id", user["org_id"]).execute()
-                    org_school_ids = [r["id"] for r in (school_ids_res.data or [])]
-                    if org_school_ids:
-                        rows = (
-                            db.table("school_update_requests")
-                            .select("*, schools(name), requester:profiles!requester_id(full_name, email)")
-                            .in_("school_id", org_school_ids)
-                            .eq("status", "pending")
-                            .order("created_at", desc=True)
-                            .execute()
-                        )
-                    else:
-                        rows = type("_empty", (), {"data": []})()
-
-                    for r in (rows.data or []):
-                        r["_type"] = "update_request"
-                    items.extend(rows.data or [])
-            else:
-                # Status updates on advisor's own requests
-                rows = (
-                    db.table("school_update_requests")
-                    .select("*, schools(name)")
-                    .eq("requester_id", user["id"])
-                    .neq("status", "pending")
-                    .order("resolved_at", desc=True)
-                    .limit(20)
-                    .execute()
-                )
-                for r in (rows.data or []):
-                    r["_type"] = "update_request"
-                items.extend(rows.data or [])
-
-            # Mention notifications (for everyone)
-            mentions = (
-                db.table("mention_notifications")
-                .select("*, schools(name), sender:profiles!sender_id(full_name, email)")
+            rows = (
+                db.table("notifications")
+                .select("*")
                 .eq("recipient_id", user["id"])
-                .is_("read_at", "null")
                 .order("created_at", desc=True)
-                .limit(20)
+                .limit(50)
                 .execute()
             )
-            for m in (mentions.data or []):
-                m["_type"] = "mention"
-            items.extend(mentions.data or [])
-            break  # success
+            items = rows.data or []
+            # Enrich update_request_submitted notifications with the current request status
+            # so the frontend can show the correct reviewed state on remount (non-fatal)
+            try:
+                action_ids = [n["ref_id"] for n in items
+                              if n.get("type") == "update_request_submitted" and n.get("ref_id")]
+                if action_ids:
+                    req_rows = (db.table("school_update_requests")
+                                .select("id, status")
+                                .in_("id", action_ids)
+                                .execute())
+                    status_map = {r["id"]: r["status"] for r in (req_rows.data or [])}
+                    for n in items:
+                        if n.get("type") == "update_request_submitted" and n.get("ref_id"):
+                            n["data"] = {**(n.get("data") or {}),
+                                         "request_status": status_map.get(n["ref_id"])}
+            except Exception as enrich_exc:
+                logger.warning("request status enrichment failed (non-fatal): %s", enrich_exc)
+            count = sum(1 for r in items if not r.get("read_at"))
+            return {"count": count, "items": items}
         except Exception as exc:
             if attempt == 0:
                 logger.warning("get_notifications attempt 1 failed: %s — resetting and retrying", exc)
                 reset_admin_client()
-                time.sleep(0.1)
+                time.sleep(0.3)
             else:
                 logger.warning("get_notifications failed after 2 attempts: %s", exc)
                 return {"count": 0, "items": []}  # silent fallback — not critical
 
-    items.sort(key=lambda x: x.get("created_at", ""), reverse=True)
-    return {"count": len(items), "items": items}
+
+@router.patch("/notifications/read-all")
+def mark_all_notifications_read(user: Annotated[dict, Depends(get_current_user)]):
+    from datetime import datetime, timezone
+    try:
+        db = get_admin_client()
+        db.table("notifications").update({"read_at": datetime.now(timezone.utc).isoformat()}).eq("recipient_id", user["id"]).is_("read_at", "null").execute()
+    except Exception as exc:
+        logger.warning("mark_all_notifications_read failed: %s", exc)
+    return {"ok": True}
+
+
+@router.patch("/notifications/{notification_id}/read")
+def mark_notification_read(notification_id: str, user: Annotated[dict, Depends(get_current_user)]):
+    from datetime import datetime, timezone
+    try:
+        db = get_admin_client()
+        db.table("notifications").update({"read_at": datetime.now(timezone.utc).isoformat()}).eq("id", notification_id).eq("recipient_id", user["id"]).is_("read_at", "null").execute()
+    except Exception as exc:
+        logger.warning("mark_notification_read failed: %s", exc)
+    return {"ok": True}
+
+
+@router.get("/upcoming-meetings")
+def get_upcoming_meetings(user: Annotated[dict, Depends(get_current_user)]):
+    """Return today's meetings for the current user (for frontend meeting reminders)."""
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).date().isoformat()
+    try:
+        db = get_admin_client()
+        if user["role"] in ("owner", "manager"):
+            school_ids_res = db.table("schools").select("id").eq("org_id", user["org_id"]).execute()
+            school_ids = [r["id"] for r in (school_ids_res.data or [])]
+        else:
+            assigned = db.table("advisor_schools").select("school_id").eq("advisor_id", user["id"]).execute()
+            school_ids = [r["school_id"] for r in (assigned.data or [])]
+
+        if not school_ids:
+            return []
+
+        meetings_res = (
+            db.table("meetings")
+            .select("id, school_id, meeting_date, start_time, end_time, status, advisor_ids, notes")
+            .in_("school_id", school_ids)
+            .eq("meeting_date", today)
+            .execute()
+        )
+        meetings = meetings_res.data or []
+
+        if user["role"] not in ("owner", "manager"):
+            meetings = [m for m in meetings if user["id"] in (m.get("advisor_ids") or [])]
+
+        if meetings:
+            s_ids = list({m["school_id"] for m in meetings})
+            school_names = {r["id"]: r["name"] for r in (db.table("schools").select("id, name").in_("id", s_ids).execute().data or [])}
+            # Fetch school-level advisors so the frontend knows fallback recipients for status reminders
+            school_advisors_rows = db.table("advisor_schools").select("school_id, advisor_id").in_("school_id", s_ids).execute().data or []
+            school_advisors_map: dict = {}
+            for row in school_advisors_rows:
+                school_advisors_map.setdefault(row["school_id"], []).append(row["advisor_id"])
+            for m in meetings:
+                m["school_name"] = school_names.get(m["school_id"], "")
+                m["school_advisor_ids"] = school_advisors_map.get(m["school_id"], [])
+        return meetings
+    except Exception as exc:
+        logger.warning("get_upcoming_meetings failed (non-fatal): %s", exc)
+        return []
+
+
+@router.patch("/users/me/notification-preferences")
+def update_notification_preferences(
+    body: NotificationPreferencesIn,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    db = get_admin_client()
+    current = user.get("notification_preferences") or {"meeting_reminder": True, "meeting_reminder_minutes": 10}
+    new_prefs = dict(current)
+    if body.meeting_reminder is not None:
+        new_prefs["meeting_reminder"] = body.meeting_reminder
+    if body.meeting_reminder_minutes is not None:
+        new_prefs["meeting_reminder_minutes"] = body.meeting_reminder_minutes
+    db.table("profiles").update({"notification_preferences": new_prefs}).eq("id", user["id"]).execute()
+    invalidate_profile_cache(user["id"])
+    return {"ok": True, "notification_preferences": new_prefs}
 
 
 # ---------------------------------------------------------------------------
@@ -647,43 +1248,79 @@ def get_meetings_stats(user: Annotated[dict, Depends(get_current_user)]):
 
 
 # ---------------------------------------------------------------------------
-# Users (owner/manager only)
+# Single school fetch (used when navigating via deeplink / notification)
 # ---------------------------------------------------------------------------
 
-class DelegationSettingIn(BaseModel):
-    delegate_approvals_to_managers: bool
+@router.get("/{school_id}")
+def get_school(
+    school_id: str,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            rows = (
+                db.table("schools")
+                .select("*, gefen_accounts(*), advisor_schools(advisor_id)")
+                .eq("id", school_id)
+                .eq("org_id", user["org_id"])
+                .execute()
+            )
+            if not rows.data:
+                raise HTTPException(status_code=404, detail="בית ספר לא נמצא")
+            school_data = rows.data[0]
+            break
+        except HTTPException:
+            raise
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("get_school attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.error("get_school failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
+    # Access check for advisors
+    is_advisor = user["role"] not in ("owner", "manager")
+    if is_advisor:
+        restrict = school_data.get("restrict_access_to")
+        if restrict is not None and user["id"] not in (restrict or []):
+            assigned = (
+                db.table("advisor_schools")
+                .select("school_id")
+                .eq("advisor_id", user["id"])
+                .eq("school_id", school_id)
+                .execute()
+            )
+            if not assigned.data:
+                raise HTTPException(status_code=403, detail="אין הרשאה לצפות בבית ספר זה")
+
+    # Enrich advisor_schools + restrict_access_to with profile data in a single query (non-fatal)
+    advisor_ids = [r["advisor_id"] for r in (school_data.get("advisor_schools") or []) if r.get("advisor_id")]
+    restrict_ids = school_data.get("restrict_access_to") or []
+    all_profile_ids = list(set(advisor_ids + restrict_ids))
+    school_data["restrict_access_profiles"] = []
+    if all_profile_ids:
+        try:
+            p_rows = db.table("profiles").select("id, full_name, email, role").in_("id", all_profile_ids).execute()
+            profiles_map = {p["id"]: p for p in (p_rows.data or [])}
+            for row in school_data.get("advisor_schools") or []:
+                row["profiles"] = profiles_map.get(row["advisor_id"])
+            school_data["restrict_access_profiles"] = [profiles_map[i] for i in restrict_ids if i in profiles_map]
+        except Exception as exc:
+            logger.warning("get_school profiles enrichment failed (non-fatal): %s", exc)
+
+    return school_data
+
+
+# ---------------------------------------------------------------------------
+# Users (owner/manager only)
+# ---------------------------------------------------------------------------
 
 @router.get("/users/me")
 def get_me(user: Annotated[dict, Depends(get_current_user)]):
     result = dict(user)
-
-    # managers_can_delete — DB call only for manager role
-    if user["role"] == "owner":
-        result["managers_can_delete"] = True
-    elif user["role"] == "manager":
-        for attempt in range(2):
-            try:
-                db = get_admin_client()
-                owners = (
-                    db.table("profiles")
-                    .select("delegate_approvals_to_managers")
-                    .eq("role", "owner")
-                    .eq("org_id", user["org_id"])
-                    .execute()
-                )
-                result["managers_can_delete"] = any(r.get("delegate_approvals_to_managers") for r in (owners.data or []))
-                break
-            except Exception as exc:
-                if attempt == 0:
-                    logger.warning("get_me managers_can_delete attempt 1 failed: %s — resetting", exc)
-                    reset_admin_client()
-                    time.sleep(0.1)
-                else:
-                    logger.warning("get_me managers_can_delete failed after 2 attempts: %s", exc)
-                    result["managers_can_delete"] = False
-    else:
-        result["managers_can_delete"] = False
 
     # org subscription info
     if user.get("org_id"):
@@ -703,25 +1340,32 @@ def get_me(user: Annotated[dict, Depends(get_current_user)]):
                 if attempt == 0:
                     logger.warning("get_me org fetch attempt 1 failed: %s — resetting", exc)
                     reset_admin_client()
-                    time.sleep(0.1)
+                    time.sleep(0.3)
                 else:
                     logger.warning("get_me org fetch failed after 2 attempts: %s", exc)
                     result["org"] = {}
 
+    try:
+        db = get_admin_client()
+        result["can_delete_schools"] = _check_permission(db, user, "can_delete_schools")
+        result["can_edit_school_directly"] = _check_permission(db, user, "can_edit_school_directly")
+        result["can_request_school_update"] = _check_permission(db, user, "can_request_school_update")
+        result["can_delete_own_meetings"] = _check_permission(db, user, "can_delete_own_meetings")
+        result["can_invite_users"] = _check_permission(db, user, "can_invite_users")
+        result["can_delete_users"] = _check_permission(db, user, "can_delete_users")
+        result["can_manage_user_permissions"] = _check_permission(db, user, "can_manage_user_permissions")
+    except Exception as exc:
+        logger.warning("get_me permission check failed (non-fatal): %s", exc)
+        result["can_delete_schools"] = user.get("role") == "owner"
+        result["can_edit_school_directly"] = user.get("role") in ("owner", "manager")
+        result["can_request_school_update"] = True
+        result["can_delete_own_meetings"] = user.get("role") in ("owner", "manager")
+        result["can_invite_users"] = user.get("role") in ("owner", "manager")
+        result["can_delete_users"] = user.get("role") == "owner"
+        result["can_manage_user_permissions"] = user.get("role") == "owner"
+
     return result
 
-
-@router.patch("/users/me/settings")
-def update_my_settings(
-    body: DelegationSettingIn,
-    user: Annotated[dict, Depends(get_current_user)],
-):
-    if user["role"] != "owner":
-        raise HTTPException(status_code=403, detail="רק בעלים יכולים לשנות הגדרה זו")
-    db = get_admin_client()
-    db.table("profiles").update({"delegate_approvals_to_managers": body.delegate_approvals_to_managers}).eq("id", user["id"]).execute()
-    invalidate_approver_ids_cache()
-    return {"ok": True}
 
 
 class OnboardingDismissIn(BaseModel):
@@ -772,7 +1416,7 @@ def list_users(user: Annotated[dict, Depends(get_current_user)]):
             if attempt == 0:
                 logger.warning("list_users attempt 1 failed: %s — resetting client and retrying", exc)
                 reset_admin_client()
-                time.sleep(0.1)
+                time.sleep(0.3)
             else:
                 logger.error("list_users failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
@@ -784,6 +1428,9 @@ def invite_user(
     user: Annotated[dict, Depends(get_current_user)],
 ):
     _require_manager(user)
+    db_pre = get_admin_client()
+    if not _check_permission(db_pre, user, "can_invite_users"):
+        raise HTTPException(status_code=403, detail="אין הרשאה להזמין משתמשים חדשים")
     app_url = os.getenv("APP_URL", "https://gefenai.co.il")
     for attempt in range(2):
         try:
@@ -811,7 +1458,7 @@ def invite_user(
             if attempt == 0:
                 logger.warning("invite_user attempt 1 failed: %s — resetting", exc)
                 reset_admin_client()
-                time.sleep(0.1)
+                time.sleep(0.3)
             else:
                 logger.error("invite_user failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
@@ -914,7 +1561,7 @@ def resend_invite(
             if attempt == 0:
                 logger.warning("resend_invite attempt 1 failed: %s — resetting", exc)
                 reset_admin_client()
-                time.sleep(0.1)
+                time.sleep(0.3)
             else:
                 logger.error("resend_invite failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
@@ -933,7 +1580,7 @@ def setup_complete(user: Annotated[dict, Depends(get_current_user)]):
             if attempt == 0:
                 logger.warning("setup_complete attempt 1 failed: %s — resetting", exc)
                 reset_admin_client()
-                time.sleep(0.1)
+                time.sleep(0.3)
             else:
                 logger.error("setup_complete failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב")
@@ -945,16 +1592,74 @@ def update_role(
     body: UserRoleIn,
     user: Annotated[dict, Depends(get_current_user)],
 ):
-    _require_owner(user)
+    if user["role"] not in ("owner", "manager"):
+        raise HTTPException(status_code=403, detail="אין הרשאה")
     if body.role not in ("owner", "manager", "advisor"):
         raise HTTPException(status_code=400, detail="תפקיד לא חוקי")
     for attempt in range(2):
         try:
             db = get_admin_client()
-            target = db.table("profiles").select("org_id").eq("id", user_id).execute()
+            if user["role"] == "manager":
+                if user_id == user["id"]:
+                    raise HTTPException(status_code=403, detail="מנהל לא יכול לשנות את תפקיד עצמו")
+                if not _check_permission(db, user, "can_change_user_role"):
+                    raise HTTPException(status_code=403, detail="אין הרשאה לשנות תפקידים")
+                if body.role == "owner":
+                    raise HTTPException(status_code=403, detail="מנהל לא יכול להעניק תפקיד בעלים")
+            target = db.table("profiles").select("id, org_id, role, full_name, email").eq("id", user_id).execute()
             if not target.data or target.data[0].get("org_id") != user["org_id"]:
                 raise HTTPException(status_code=404, detail="המשתמש לא נמצא")
+            current_role = target.data[0].get("role")
+            if current_role == "owner" and user["role"] == "manager":
+                raise HTTPException(status_code=403, detail="מנהל לא יכול לשנות תפקיד של בעלים")
+            if current_role == "owner" and body.role != "owner":
+                owners = db.table("profiles").select("id").eq("org_id", user["org_id"]).eq("role", "owner").execute()
+                if len(owners.data or []) <= 1:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="לא ניתן לשנות את תפקיד הבעלים היחיד. יש להגדיר בעלים אחר לפני שינוי תפקיד זה."
+                    )
             db.table("profiles").update({"role": body.role}).eq("id", user_id).execute()
+            # Update user_metadata in Auth so the next JWT refresh reflects the new role
+            try:
+                db.auth.admin.update_user_by_id(user_id, {"user_metadata": {"role": body.role}})
+            except Exception as meta_exc:
+                logger.warning("update_role user_metadata update failed (non-fatal): %s", meta_exc)
+            # Notifications (non-fatal)
+            try:
+                role_labels = {"owner": "בעלים", "manager": "מנהל", "advisor": "יועץ"}
+                target_name = target.data[0].get("full_name") or target.data[0].get("email", "משתמש")
+                changer_name = user.get("full_name") or user.get("email", "")
+                old_label = role_labels.get(current_role, current_role)
+                new_label = role_labels.get(body.role, body.role)
+                # Notify the user whose role changed
+                _create_notifications(db, [{
+                    "recipient_id": user_id,
+                    "type": "role_changed",
+                    "data": {
+                        "title": f"התפקיד שלך שונה מ{old_label} ל{new_label}",
+                        "changer_name": changer_name,
+                        "old_role": current_role,
+                        "new_role": body.role,
+                    },
+                }], pref_key="notify_role_changed")
+                # Notify all owners + managers (except the changer)
+                mgr_rows = db.table("profiles").select("id").eq("org_id", user["org_id"]).in_("role", ["owner", "manager"]).execute()
+                recipient_ids = [r["id"] for r in (mgr_rows.data or []) if r["id"] != user["id"] and r["id"] != user_id]
+                if recipient_ids:
+                    _create_notifications(db, [{
+                        "recipient_id": rid,
+                        "type": "role_changed",
+                        "data": {
+                            "title": f"התפקיד של {target_name} שונה מ{old_label} ל{new_label}",
+                            "changer_name": changer_name,
+                            "target_name": target_name,
+                            "old_role": current_role,
+                            "new_role": body.role,
+                        },
+                    } for rid in recipient_ids], pref_key="notify_role_changed")
+            except Exception as notif_exc:
+                logger.warning("update_role notification failed (non-fatal): %s", notif_exc)
             break
         except HTTPException:
             raise
@@ -962,7 +1667,7 @@ def update_role(
             if attempt == 0:
                 logger.warning("update_role attempt 1 failed: %s — resetting", exc)
                 reset_admin_client()
-                time.sleep(0.1)
+                time.sleep(0.3)
             else:
                 logger.error("update_role failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
@@ -999,7 +1704,7 @@ def update_user_profile(
             if attempt == 0:
                 logger.warning("update_user_profile attempt 1 failed: %s — resetting", exc)
                 reset_admin_client()
-                time.sleep(0.1)
+                time.sleep(0.3)
             else:
                 logger.error("update_user_profile failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
@@ -1012,12 +1717,15 @@ def delete_user(
     user_id: str,
     user: Annotated[dict, Depends(get_current_user)],
 ):
-    _require_owner(user)
+    if user["role"] not in ("owner", "manager"):
+        raise HTTPException(status_code=403, detail="אין הרשאה")
     if user_id == user["id"]:
         raise HTTPException(status_code=400, detail="לא ניתן למחוק את המשתמש הנוכחי")
     for attempt in range(2):
         try:
             db = get_admin_client()
+            if user["role"] == "manager" and not _check_permission(db, user, "can_delete_users"):
+                raise HTTPException(status_code=403, detail="אין הרשאה למחוק משתמשים")
             target = db.table("profiles").select("org_id").eq("id", user_id).execute()
             if not target.data or target.data[0].get("org_id") != user["org_id"]:
                 raise HTTPException(status_code=404, detail="המשתמש לא נמצא")
@@ -1029,7 +1737,7 @@ def delete_user(
             if attempt == 0:
                 logger.warning("delete_user attempt 1 failed: %s — resetting", exc)
                 reset_admin_client()
-                time.sleep(0.1)
+                time.sleep(0.3)
             else:
                 logger.error("delete_user failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
@@ -1062,7 +1770,7 @@ def list_logs(
             if attempt == 0:
                 logger.warning("list_logs attempt 1 failed: %s — resetting client and retrying", exc)
                 reset_admin_client()
-                time.sleep(0.1)
+                time.sleep(0.3)
             else:
                 logger.error("list_logs failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
@@ -1102,12 +1810,7 @@ def get_log(
 
 
 def _can_delete_check_log(user: dict, db) -> bool:
-    if user["role"] == "owner":
-        return True
-    if user["role"] == "manager":
-        owners = db.table("profiles").select("delegate_approvals_to_managers").eq("role", "owner").execute()
-        return any(r.get("delegate_approvals_to_managers") for r in (owners.data or []))
-    return False
+    return _check_permission(db, user, "can_delete_own_meetings")
 
 
 @router.delete("/{school_id}/logs/{log_id}")
@@ -1229,7 +1932,7 @@ def list_meetings(school_id: str, user: Annotated[dict, Depends(get_current_user
             if attempt == 0:
                 logger.warning("list_meetings attempt 1 failed: %s — resetting client and retrying", exc)
                 reset_admin_client()
-                time.sleep(0.1)
+                time.sleep(0.3)
             else:
                 logger.error("list_meetings failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
@@ -1321,9 +2024,29 @@ def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annot
         raise HTTPException(status_code=500, detail=f"שגיאת DB: {str(e)}")
 
 
+@router.patch("/{school_id}/meetings/{meeting_id}")
+def patch_meeting(school_id: str, meeting_id: str, body: MeetingStatusPatchIn, user: Annotated[dict, Depends(get_current_user)]):
+    """Partial update — only updates the fields provided. Does not touch advisor_ids, participants, etc."""
+    db = get_admin_client()
+    data = {}
+    if body.status is not None: data["status"] = body.status
+    if body.notes is not None: data["notes"] = body.notes
+    if body.start_time is not None: data["start_time"] = body.start_time
+    if body.end_time is not None: data["end_time"] = body.end_time
+    if not data:
+        return {"ok": True}
+    try:
+        db.table("meetings").update(data).eq("id", meeting_id).eq("school_id", school_id).execute()
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="שגיאה בעדכון פגישה")
+
+
 @router.delete("/{school_id}/meetings/{meeting_id}")
 def delete_meeting(school_id: str, meeting_id: str, user: Annotated[dict, Depends(get_current_user)]):
     db = get_admin_client()
+    if not _check_permission(db, user, "can_delete_own_meetings"):
+        raise HTTPException(status_code=403, detail="אין הרשאה למחוק פגישות")
     db.table("meetings").delete().eq("id", meeting_id).eq("school_id", school_id).execute()
     return {"ok": True}
 
@@ -1336,17 +2059,269 @@ class MentionIn(BaseModel):
 @router.post("/{school_id}/meetings/{meeting_id}/mentions")
 def create_mentions(school_id: str, meeting_id: str, body: MentionIn, user: Annotated[dict, Depends(get_current_user)]):
     db = get_admin_client()
-    rows = [
-        {
+    recipients = [uid for uid in body.mentioned_user_ids if uid != user["id"]]
+    if not recipients:
+        return {"ok": True, "sent": 0}
+    try:
+        school_row = db.table("schools").select("name").eq("id", school_id).execute()
+        school_name = school_row.data[0]["name"] if school_row.data else "בית ספר"
+        rows = [{
             "recipient_id": uid,
-            "sender_id": user["id"],
+            "type": "mention",
+            "ref_id": meeting_id,
             "school_id": school_id,
-            "meeting_id": meeting_id,
-            "note_preview": body.note_preview,
-        }
-        for uid in body.mentioned_user_ids
-        if uid != user["id"]
-    ]
-    if rows:
-        db.table("mention_notifications").insert(rows).execute()
-    return {"ok": True, "sent": len(rows)}
+            "data": {
+                "title": f'{user.get("full_name", "משתמש")} תייג אותך בהערה ב-{school_name}',
+                "school_name": school_name,
+                "sender_name": user.get("full_name", ""),
+                "note_preview": body.note_preview,
+                "deeplink": f"/school/{school_id}?tab=meetings&meeting={meeting_id}",
+            }
+        } for uid in recipients]
+        _create_notifications(db, rows, pref_key="notify_mention")
+    except Exception as exc:
+        logger.warning("create_mentions failed (non-fatal): %s", exc)
+    return {"ok": True, "sent": len(recipients)}
+
+
+# ---------------------------------------------------------------------------
+# Permissions — role defaults + per-user overrides
+# ---------------------------------------------------------------------------
+
+# All supported permission keys with their role defaults
+PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
+    "can_approve_update_requests":  {"manager": True,  "advisor": False},
+    "can_invite_users":             {"manager": True,  "advisor": False},
+    "can_delete_users":             {"manager": False, "advisor": False},
+    "can_change_user_role":         {"manager": False, "advisor": False},
+    "can_delete_schools":           {"manager": False, "advisor": False},
+    "can_add_school":               {"manager": True,  "advisor": False},
+    "can_edit_school_directly":     {"manager": True,  "advisor": False},
+    "can_request_school_update":    {"manager": True,  "advisor": True},
+    "can_delete_own_meetings":      {"manager": True,  "advisor": True},
+    "can_manage_user_permissions":  {"manager": False, "advisor": False},
+    "can_view_billing":             {"manager": False, "advisor": False},
+    "can_manage_billing":           {"manager": False, "advisor": False},
+}
+
+PERMISSION_LABELS: dict[str, str] = {
+    "can_approve_update_requests":  "לאשר בקשות עריכת פרטים",
+    "can_invite_users":             "להוסיף משתמש חדש",
+    "can_delete_users":             "למחוק משתמש קיים",
+    "can_change_user_role":         "לשנות תפקיד של משתמש",
+    "can_delete_schools":           "למחוק בית ספר קיים",
+    "can_add_school":               "להוסיף בית ספר חדש",
+    "can_edit_school_directly":     "לערוך בית ספר קיים ישירות (מבלי להגיש בקשה לעריכת פרטים)",
+    "can_request_school_update":    "להגיש בקשה לעריכת פרטי בית ספר",
+    "can_delete_own_meetings":      "למחוק נתוני פגישה של בית ספר",
+    "can_manage_user_permissions":  "לערוך הרשאות של יועצים",
+    "can_view_billing":             "לצפות באזור 'חיובים' של הארגון",
+    "can_manage_billing":           "לנהל את אזור 'חיובים' (לרבות אמצעי תשלום)",
+}
+
+
+class PermissionSettingIn(BaseModel):
+    role: str
+    permission: str
+    allowed: bool
+
+
+class UserPermissionOverrideIn(BaseModel):
+    permission: str
+    allowed: bool | None  # None = remove override (revert to role default)
+
+
+def _get_owner_id(db, user: dict) -> str:
+    """Return the owner's profile ID for the current tenant.
+    org_id on profiles is the organizations table ID, NOT the owner's profile ID.
+    To find the owner: query profiles WHERE role='owner' AND org_id=user['org_id'].
+    """
+    if user["role"] == "owner":
+        return user["id"]
+    if user.get("org_id"):
+        rows = db.table("profiles").select("id").eq("role", "owner").eq("org_id", user["org_id"]).execute().data or []
+        if rows:
+            return rows[0]["id"]
+    # final fallback (single-tenant dev only)
+    rows = db.table("profiles").select("id").eq("role", "owner").execute().data or []
+    if not rows:
+        raise HTTPException(status_code=404, detail="לא נמצא בעלים בארגון")
+    return rows[0]["id"]
+
+
+def _check_permission(db, user: dict, permission: str) -> bool:
+    """Resolve effective permission for a user: override → role default → system default.
+    Owner always returns True. Errors fall through to system default (fail-open for non-destructive,
+    but callers decide whether to raise 403 or silently skip).
+    """
+    if user["role"] == "owner":
+        return True
+
+    # Layer 1: per-user override
+    try:
+        ov = db.table("user_permission_overrides").select("allowed") \
+            .eq("user_id", user["id"]).eq("permission", permission).execute()
+        if ov.data:
+            return ov.data[0]["allowed"]
+    except Exception as exc:
+        logger.warning("_check_permission override lookup failed (non-fatal): %s", exc)
+
+    # Layer 2: org role default
+    try:
+        owner_id = _get_owner_id(db, user)
+        rs = db.table("permission_settings").select("allowed") \
+            .eq("owner_id", owner_id).eq("role", user["role"]).eq("permission", permission).execute()
+        if rs.data:
+            return rs.data[0]["allowed"]
+    except Exception as exc:
+        logger.warning("_check_permission role default lookup failed (non-fatal): %s", exc)
+
+    # Layer 3: system default
+    return PERMISSION_DEFAULTS.get(permission, {}).get(user["role"], False)
+
+
+@router.get("/permissions/defaults")
+def get_permission_defaults(user: Annotated[dict, Depends(get_current_user)]):
+    """Return role defaults for this org merged with system defaults."""
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            owner_id = _get_owner_id(db, user)
+            saved = db.table("permission_settings").select("role,permission,allowed").eq("owner_id", owner_id).execute().data or []
+            saved_map = {(r["role"], r["permission"]): r["allowed"] for r in saved}
+
+            result = {}
+            for perm, role_defaults in PERMISSION_DEFAULTS.items():
+                result[perm] = {
+                    "label": PERMISSION_LABELS[perm],
+                    "manager": saved_map.get(("manager", perm), role_defaults["manager"]),
+                    "advisor": saved_map.get(("advisor", perm), role_defaults["advisor"]),
+                }
+            return result
+        except HTTPException:
+            raise
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("get_permission_defaults attempt 1 failed: %s — retrying", exc)
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.error("get_permission_defaults failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב")
+
+
+@router.put("/permissions/defaults")
+def set_permission_default(body: PermissionSettingIn, user: Annotated[dict, Depends(get_current_user)]):
+    """Owner saves a role-level default. Manager with can_manage_user_permissions can edit advisor defaults only."""
+    if user["role"] == "manager":
+        db_pre = get_admin_client()
+        if not _check_permission(db_pre, user, "can_manage_user_permissions"):
+            raise HTTPException(status_code=403, detail="אין הרשאה לעריכת הרשאות")
+        if body.role != "advisor":
+            raise HTTPException(status_code=403, detail="מנהל יכול לערוך הרשאות של יועצים בלבד")
+    elif user["role"] != "owner":
+        raise HTTPException(status_code=403, detail="פעולה זו מיועדת לבעלים בלבד")
+
+    if body.permission not in PERMISSION_DEFAULTS:
+        raise HTTPException(status_code=400, detail="הרשאה לא מוכרת")
+    if body.role not in ("manager", "advisor"):
+        raise HTTPException(status_code=400, detail="תפקיד לא תקין")
+
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            owner_id = _get_owner_id(db, user)
+            db.table("permission_settings").upsert(
+                {"owner_id": owner_id, "role": body.role, "permission": body.permission, "allowed": body.allowed},
+                on_conflict="owner_id,role,permission",
+            ).execute()
+            return {"ok": True}
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("set_permission_default attempt 1 failed: %s — retrying", exc)
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.error("set_permission_default failed: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב")
+
+
+@router.get("/permissions/overrides/{user_id}")
+def get_user_overrides(user_id: str, user: Annotated[dict, Depends(get_current_user)]):
+    """Return per-user overrides for a specific user (manager+ or self)."""
+    if user["role"] not in ("owner", "manager") and user["id"] != user_id:
+        raise HTTPException(status_code=403, detail="אין הרשאה")
+
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            rows = db.table("user_permission_overrides").select("permission,allowed").eq("user_id", user_id).execute().data or []
+            return {r["permission"]: r["allowed"] for r in rows}
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("get_user_overrides attempt 1 failed: %s — retrying", exc)
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.error("get_user_overrides failed: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב")
+
+
+@router.put("/permissions/overrides/{user_id}")
+def set_user_override(user_id: str, body: UserPermissionOverrideIn, user: Annotated[dict, Depends(get_current_user)]):
+    """Set or remove a per-user permission override (owner, or manager with can_manage_user_permissions)."""
+    _require_manager(user)
+    if user["role"] != "owner":
+        db_pre = get_admin_client()
+        if not _check_permission(db_pre, user, "can_manage_user_permissions"):
+            raise HTTPException(status_code=403, detail="אין הרשאה לעריכת הרשאות משתמשים")
+        # managers can only edit advisor overrides, not other managers
+        target_rows = db_pre.table("profiles").select("role").eq("id", user_id).execute().data or []
+        if not target_rows or target_rows[0]["role"] != "advisor":
+            raise HTTPException(status_code=403, detail="מנהל יכול לערוך הרשאות של יועצים בלבד")
+    if body.permission not in PERMISSION_DEFAULTS:
+        raise HTTPException(status_code=400, detail="הרשאה לא מוכרת")
+
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            owner_id = _get_owner_id(db, user)
+            if body.allowed is None:
+                db.table("user_permission_overrides").delete().eq("user_id", user_id).eq("permission", body.permission).execute()
+            else:
+                db.table("user_permission_overrides").upsert(
+                    {"user_id": user_id, "owner_id": owner_id, "permission": body.permission, "allowed": body.allowed},
+                    on_conflict="user_id,permission",
+                ).execute()
+            return {"ok": True}
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("set_user_override attempt 1 failed: %s — retrying", exc)
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.error("set_user_override failed: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב")
+
+
+# ---------------------------------------------------------------------------
+# Schools list export — PDF
+# ---------------------------------------------------------------------------
+
+class SchoolsPdfExportIn(BaseModel):
+    title: str = "רשימת בתי ספר"
+    headers: list[str]
+    rows: list[list[str]]
+
+
+@router.post("/export-pdf")
+def export_schools_pdf(
+    body: SchoolsPdfExportIn,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    pdf_bytes = _build_schools_pdf(body.title, body.headers, body.rows)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'attachment; filename="schools.pdf"'},
+    )

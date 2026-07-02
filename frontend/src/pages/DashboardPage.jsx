@@ -384,6 +384,36 @@ function applyFilters(school, filters, queries) {
   return true;
 }
 
+function RecycleBinInfoModal({ count, onClose }) {
+  const { ref, handleKeyDown } = useFocusTrap(onClose);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm"
+         role="dialog" aria-modal="true" aria-labelledby="recycle-modal-title">
+      <div ref={ref} onKeyDown={handleKeyDown}
+           className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 p-6 flex flex-col gap-4 text-right" dir="rtl">
+        <div className="flex items-center gap-3">
+          <span className="text-2xl" aria-hidden="true">🗑️</span>
+          <h2 id="recycle-modal-title" className="text-lg font-bold text-slate-900">הועברו לסל המחזור</h2>
+        </div>
+        <p className="text-sm text-slate-700 leading-relaxed">
+          {count === 1 ? "בית הספר הועבר לסל המחזור" : `${count} בתי ספר הועברו לסל המחזור`}
+          {" "}ונתוניהם יימחקו לחלוטין מהמערכת תוך 30 יום.
+        </p>
+        <p className="text-sm text-slate-700 leading-relaxed">
+          לשחזור ניתן לבצע זאת בפרק הזמן הזה בלבד דרך אזור{" "}
+          <span className="font-medium">ניהול ← בתי ספר ← סל מחזור</span>.
+        </p>
+        <div className="flex justify-end pt-1">
+          <button onClick={onClose} autoFocus
+            className="px-6 py-2 rounded-xl text-sm font-semibold bg-emerald-100 text-emerald-800 hover:bg-emerald-200 transition-colors">
+            אישור
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function DeleteConfirmModal({ title, subtitle, message, onConfirm, onCancel, confirming }) {
   const { ref, handleKeyDown } = useFocusTrap(onCancel);
   return (
@@ -446,6 +476,7 @@ export default function DashboardPage() {
   const [showColPicker, setShowColPicker] = useState(false);
   const [colPickerQuery, setColPickerQuery] = useState("");
   const colPickerRef = useRef(null);
+  const loadAbortRef = useRef(null);
   const [userId, setUserId] = useState(null);
   const [canDelete, setCanDelete] = useState(false);
   const [showTableMenu, setShowTableMenu] = useState(false);
@@ -454,9 +485,13 @@ export default function DashboardPage() {
   const [selectedIds, setSelectedIds] = useState({});
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deletingSchool, setDeletingSchool] = useState(false);
+  const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [recycleInfoCount, setRecycleInfoCount] = useState(0);
   const [trialInfo, setTrialInfo] = useState(null);
   const [onboardingDismissed, setOnboardingDismissed] = useState(null);
   const [isOwner, setIsOwner] = useState(false);
+  const [canAddSchool, setCanAddSchool] = useState(null); // null=loading, true=allowed, false=denied
 
   useEffect(() => {
     if (!filtersPersistKey) return;
@@ -506,6 +541,10 @@ export default function DashboardPage() {
     return () => document.removeEventListener("mousedown", handleOutside);
   }, [showTableMenu]);
 
+  useEffect(() => {
+    return () => { loadAbortRef.current?.abort(); };
+  }, []);
+
   async function handleDeleteConfirmed() {
     if (!deleteTarget) return;
     setDeletingSchool(true);
@@ -521,14 +560,36 @@ export default function DashboardPage() {
     }
   }
 
+  async function handleBulkDeleteConfirmed() {
+    const ids = Object.entries(selectedIds).filter(([, v]) => v).map(([id]) => id);
+    const deletedCount = ids.length;
+    setBulkDeleting(true);
+    try {
+      await Promise.all(ids.map(id => axios.delete(`/schools/${id}`)));
+      setShowBulkDeleteConfirm(false);
+      setSelectedIds({});
+      setSelectMode(false);
+      await loadSchools();
+      setRecycleInfoCount(deletedCount);
+    } catch {
+      // silently ignore
+    } finally {
+      setBulkDeleting(false);
+    }
+  }
+
   async function loadSchools() {
+    loadAbortRef.current?.abort();
+    const controller = new AbortController();
+    loadAbortRef.current = controller;
+
     setLoading(true);
     setSlowLoading(false);
     setError("");
     const slowTimer = setTimeout(() => setSlowLoading(true), 8000);
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const res = await axios.get("/schools/");
+        const res = await axios.get("/schools/", { signal: controller.signal });
         clearTimeout(slowTimer);
         const schoolsData = Array.isArray(res.data) ? res.data : [];
         setSchools(schoolsData);
@@ -541,11 +602,19 @@ export default function DashboardPage() {
         setLoading(false);
         return;
       } catch (err) {
+        if (err.name === "CanceledError" || err.code === "ERR_CANCELED") {
+          clearTimeout(slowTimer);
+          return;
+        }
         const is5xx = err.response?.status >= 500;
         if (attempt === 0 && is5xx) {
           setRetrying(true);
           await new Promise(r => setTimeout(r, 400));
           setRetrying(false);
+          if (controller.signal.aborted) {
+            clearTimeout(slowTimer);
+            return;
+          }
           continue;
         }
         clearTimeout(slowTimer);
@@ -572,6 +641,7 @@ export default function DashboardPage() {
       setFiltersPersistKey(key);
       const roleValue = session.user.user_metadata?.role || "advisor";
       setRole(roleValue);
+      // canAddSchool is determined after /users/me confirms the real role (JWT may be stale)
 
       // Restore filter state from sessionStorage
       try {
@@ -602,17 +672,30 @@ export default function DashboardPage() {
       let confirmedIsManager = false;
       try {
         const meRes = await axios.get("/schools/users/me");
-        setCanDelete(!!meRes.data?.managers_can_delete);
-        confirmedIsManager = meRes.data?.role === "owner" || meRes.data?.role === "manager";
-        if (meRes.data?.role === "owner" && meRes.data?.org?.subscription_status === "trial") {
+        const confirmedRole = meRes.data?.role || roleValue;
+        setRole(confirmedRole);
+        setCanDelete(!!meRes.data?.can_delete_schools);
+        confirmedIsManager = confirmedRole === "owner" || confirmedRole === "manager";
+        if (confirmedRole === "owner" && meRes.data?.org?.subscription_status === "trial") {
           setTrialInfo(meRes.data.org);
         }
-        if (meRes.data?.role === "owner") {
+        if (confirmedRole === "owner") {
           setIsOwner(true);
           setOnboardingDismissed(meRes.data?.onboarding_dismissed || {});
         }
+        // Determine canAddSchool using server-confirmed role (not stale JWT)
+        if (confirmedRole === "owner") {
+          setCanAddSchool(true);
+        } else {
+          try {
+            const permRes = await axios.get("/schools/permissions/defaults");
+            const permKey = confirmedRole === "manager" ? "manager" : "advisor";
+            setCanAddSchool(permRes.data?.can_add_school?.[permKey] !== false);
+          } catch { setCanAddSchool(true); }
+        }
       } catch {
         confirmedIsManager = isManagerFrontend;
+        setCanAddSchool(roleValue === "owner" ? true : null);
       }
 
       const [usersResult, prefsResult] = await Promise.allSettled([
@@ -688,6 +771,53 @@ export default function DashboardPage() {
     setQueries(EMPTY_QUERIES);
   }
 
+  function exportSelectedToExcel() {
+    const selected = filteredSchools.filter(s => selectedIds[s.id]);
+    const colLabels = [
+      "שם מוסד",
+      ...visibleColOrder.map(key => MOVABLE_COLUMNS.find(c => c.key === key)?.label || key),
+    ];
+    const rows = selected.map(school => [
+      school.name || "",
+      ...visibleColOrder.map(key => renderCellText(school, key, meetingsStats)),
+    ]);
+    const wsData = [colLabels, ...rows];
+    const ws = XLSX.utils.aoa_to_sheet(wsData);
+    ws["!cols"] = colLabels.map(() => ({ wch: 22 }));
+    ws["!views"] = [{ rightToLeft: true, workbookViewId: 0 }];
+    const wb = XLSX.utils.book_new();
+    wb.Workbook = { Views: [{ RTL: true }] };
+    XLSX.utils.book_append_sheet(wb, ws, "בתי ספר");
+    XLSX.writeFile(wb, "בתי_ספר_נבחרים.xlsx");
+  }
+
+  async function exportSelectedToPdf() {
+    const selected = filteredSchools.filter(s => selectedIds[s.id]);
+    const headers = [
+      "שם מוסד",
+      ...visibleColOrder.map(key => MOVABLE_COLUMNS.find(c => c.key === key)?.label || key),
+    ];
+    const rows = selected.map(school => [
+      school.name || "",
+      ...visibleColOrder.map(key => renderCellText(school, key, meetingsStats)),
+    ]);
+    try {
+      const res = await axios.post(
+        "/schools/export-pdf",
+        { title: `רשימת בתי ספר נבחרים (${selected.length})`, headers, rows },
+        { responseType: "blob" },
+      );
+      const url = URL.createObjectURL(new Blob([res.data], { type: "application/pdf" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "בתי_ספר_נבחרים.pdf";
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      // silently ignore
+    }
+  }
+
   function exportToExcel() {
     const colLabels = [
       "שם מוסד",
@@ -732,10 +862,11 @@ export default function DashboardPage() {
               <h1 className="text-2xl font-bold text-slate-900">בתי הספר שלי</h1>
               <p className="text-slate-500 text-sm mt-1">בחר בית ספר כדי לצפות בפרטיו או לבצע בדיקה</p>
             </div>
-            {(role === "owner" || role === "manager") && (
-              <button onClick={() => navigate("/admin", { state: { openNewSchool: true } })} className="btn-blue text-sm px-4 py-2">
-                + הוסף בית ספר
-              </button>
+            {canAddSchool === true && (
+              <button
+                onClick={() => navigate("/school/new")}
+                className="btn-blue text-sm px-4 py-2"
+              >+ הוסף בית ספר</button>
             )}
           </div>
 
@@ -837,6 +968,52 @@ export default function DashboardPage() {
                     </button>
                   )}
 
+                  {selectMode && Object.values(selectedIds).some(Boolean) && (
+                    <>
+                      <button
+                        onClick={exportSelectedToPdf}
+                        className="text-xs px-3 py-1.5 rounded-xl font-semibold text-white transition-colors flex items-center gap-1.5"
+                        style={{ background: "#b45309" }}
+                        aria-label="הורד PDF"
+                      >
+                        <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                          <polyline points="7 10 12 15 17 10"/>
+                          <line x1="12" y1="15" x2="12" y2="3"/>
+                        </svg>
+                        הורד PDF
+                      </button>
+                      <button
+                        onClick={exportSelectedToExcel}
+                        className="text-xs px-3 py-1.5 rounded-xl font-semibold text-white transition-colors flex items-center gap-1.5"
+                        style={{ background: "#16a34a" }}
+                        aria-label="הורד EXCEL"
+                      >
+                        <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                          <polyline points="7 10 12 15 17 10"/>
+                          <line x1="12" y1="15" x2="12" y2="3"/>
+                        </svg>
+                        הורד EXCEL
+                      </button>
+                      <button
+                        onClick={() => { setSelectedIds({}); setSelectMode(false); }}
+                        className="text-xs px-3 py-1.5 rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50 transition-colors"
+                      >
+                        ביטול סימון
+                      </button>
+                      {canDelete && (
+                        <button
+                          onClick={() => setShowBulkDeleteConfirm(true)}
+                          className="text-xs px-3 py-1.5 rounded-xl font-semibold text-white transition-colors"
+                          style={{ background: "#dc2626" }}
+                        >
+                          מחק
+                        </button>
+                      )}
+                    </>
+                  )}
+
                   {/* Three-dot menu */}
                   <div className="relative" ref={tableMenuRef}>
                     <button
@@ -862,19 +1039,17 @@ export default function DashboardPage() {
                           </svg>
                           הורד לאקסל
                         </button>
-                        {canDelete && (
-                          <button
-                            onClick={() => { setSelectMode(o => !o); setSelectedIds({}); setShowTableMenu(false); }}
-                            className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 text-right"
-                          >
-                            <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                              <rect x="3" y="5" width="4" height="4" rx="1"/><line x1="10" y1="7" x2="21" y2="7"/>
-                              <rect x="3" y="11" width="4" height="4" rx="1"/><line x1="10" y1="13" x2="21" y2="13"/>
-                              <rect x="3" y="17" width="4" height="4" rx="1"/><line x1="10" y1="19" x2="21" y2="19"/>
-                            </svg>
-                            {selectMode ? "סיים סימון" : "סמן בית ספר"}
-                          </button>
-                        )}
+                        <button
+                          onClick={() => { setSelectMode(o => !o); setSelectedIds({}); setShowTableMenu(false); }}
+                          className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 text-right"
+                        >
+                          <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <rect x="3" y="5" width="4" height="4" rx="1"/><line x1="10" y1="7" x2="21" y2="7"/>
+                            <rect x="3" y="11" width="4" height="4" rx="1"/><line x1="10" y1="13" x2="21" y2="13"/>
+                            <rect x="3" y="17" width="4" height="4" rx="1"/><line x1="10" y1="19" x2="21" y2="19"/>
+                          </svg>
+                          {selectMode ? "סיים סימון" : "סמן בית ספר"}
+                        </button>
                       </div>
                     )}
                   </div>
@@ -948,10 +1123,11 @@ export default function DashboardPage() {
           {!loading && !error && schools.length === 0 && (
             <div className="glass-card rounded-2xl p-12 text-center">
               <p className="text-slate-500 text-lg">אין בתי ספר משויכים לחשבונך</p>
-              {(role === "owner" || role === "manager") && (
-                <button onClick={() => navigate("/admin", { state: { openNewSchool: true } })} className="btn-blue mt-4 px-6 py-2 text-sm">
-                  הוסף בית ספר ראשון
-                </button>
+              {canAddSchool === true && (
+                <button
+                  onClick={() => navigate("/school/new")}
+                  className="btn-blue px-6 py-2 text-sm mt-4"
+                >הוסף בית ספר ראשון</button>
               )}
             </div>
           )}
@@ -1008,7 +1184,6 @@ export default function DashboardPage() {
                               </th>
                             );
                           })}
-                          {selectMode && <th scope="col" className="w-10 px-3 py-3" />}
                         </tr>
                       </thead>
                       <tbody>
@@ -1045,24 +1220,6 @@ export default function DashboardPage() {
                                   {renderCell(school, key, meetingsStats)}
                                 </td>
                               ))}
-                              {selectMode && (
-                                <td className="px-3 py-3 text-center">
-                                  {isSelected && (
-                                    <button
-                                      onClick={e => { e.stopPropagation(); setDeleteTarget(school); }}
-                                      className="text-red-400 hover:text-red-600 transition-colors p-1 rounded"
-                                      aria-label={`מחק ${school.name}`}
-                                    >
-                                      <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                        <polyline points="3 6 5 6 21 6"/>
-                                        <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
-                                        <path d="M10 11v6"/><path d="M14 11v6"/>
-                                        <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
-                                      </svg>
-                                    </button>
-                                  )}
-                                </td>
-                              )}
                             </tr>
                           );
                         })}
@@ -1084,6 +1241,24 @@ export default function DashboardPage() {
           onConfirm={handleDeleteConfirmed}
           onCancel={() => setDeleteTarget(null)}
           confirming={deletingSchool}
+        />
+      )}
+
+      {showBulkDeleteConfirm && (
+        <DeleteConfirmModal
+          title="מחיקת בתי ספר"
+          subtitle={`${Object.values(selectedIds).filter(Boolean).length} בתי ספר מסומנים`}
+          message="מחיקת בתי הספר תגרום למחיקת כלל הנתונים עליהם לצמיתות."
+          onConfirm={handleBulkDeleteConfirmed}
+          onCancel={() => setShowBulkDeleteConfirm(false)}
+          confirming={bulkDeleting}
+        />
+      )}
+
+      {recycleInfoCount > 0 && (
+        <RecycleBinInfoModal
+          count={recycleInfoCount}
+          onClose={() => setRecycleInfoCount(0)}
         />
       )}
 

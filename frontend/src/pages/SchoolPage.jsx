@@ -54,6 +54,82 @@ function sortByRole(arr) { return [...arr].sort((a, b) => (ROLE_SORT_ORDER[a.rol
 
 const DISTRICT_OPTIONS = ["צפון", "דרום", "מרכז", "ירושלים", "תל-אביב", "חיפה", "חינוך התיישבותי", "חרדי"];
 
+const FIELD_LABELS = {
+  name: "שם מוסד",
+  symbol: "סמל מוסד",
+  city: "עיר",
+  authority: "בעלות",
+  stage: "שלב מוסד",
+  finance_software: "תוכנת כספים",
+  school_phone: "טלפון בית הספר",
+  address: "כתובת",
+  district: "מחוז",
+  notes: "הערות",
+  principal_name: "שם מנהל/ת",
+  principal_phone: "טלפון מנהל/ת",
+  principal_email: "מייל מנהל/ת",
+  secretary_name: "שם מנהלנ/ית",
+  secretary_phone: "טלפון מנהלנ/ית",
+  secretary_email: "מייל מנהלנ/ית",
+  finance_contact_name: "שם אחראי/ת כספים",
+  finance_contact_phone: "טלפון אחראי/ת כספים",
+  finance_contact_email: "מייל אחראי/ת כספים",
+};
+
+function formatFieldValue(field, value) {
+  if (value === null || value === undefined || value === "") return "—";
+  if (field === "stage") return SCHOOL_STAGE_LABEL[value] || value;
+  if (field === "finance_software") return FINANCE_SOFTWARE_LABEL[value] || value;
+  if (Array.isArray(value)) return value.length === 0 ? "—" : value.join(", ");
+  return String(value);
+}
+
+function UpdateRequestSuccessModal({ changes, originalValues, onClose }) {
+  const { ref, handleKeyDown } = useFocusTrap(onClose);
+  const rows = Object.entries(changes).filter(([f]) => f !== "_action" && FIELD_LABELS[f]);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(15,23,42,0.55)" }}
+      onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
+      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="req-success-title"
+        onKeyDown={handleKeyDown} dir="rtl"
+        className="bg-white rounded-2xl p-6 w-full max-w-lg flex flex-col gap-4 shadow-2xl max-h-[85vh] overflow-y-auto">
+        <div className="flex items-start gap-3">
+          <span className="text-2xl" aria-hidden="true">✅</span>
+          <div>
+            <h2 id="req-success-title" className="font-bold text-slate-900 text-lg">הבקשה נשלחה בהצלחה</h2>
+            <p className="text-sm text-slate-500 mt-0.5">הבקשה תועבר לאישור הבעלים/מנהל</p>
+          </div>
+        </div>
+        {rows.length > 0 && (
+          <div className="border border-slate-100 rounded-xl overflow-hidden">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-slate-50 border-b border-slate-100">
+                  <th scope="col" className="text-right px-4 py-2 text-xs font-semibold text-slate-500">שדה</th>
+                  <th scope="col" className="text-right px-4 py-2 text-xs font-semibold text-slate-500">לפני</th>
+                  <th scope="col" className="text-right px-4 py-2 text-xs font-semibold text-slate-500">אחרי</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {rows.map(([field, newVal]) => (
+                  <tr key={field}>
+                    <td className="px-4 py-2.5 text-slate-600 font-medium whitespace-nowrap">{FIELD_LABELS[field]}</td>
+                    <td className="px-4 py-2.5 text-slate-400">{formatFieldValue(field, originalValues?.[field])}</td>
+                    <td className="px-4 py-2.5 text-slate-800 font-semibold">{formatFieldValue(field, newVal)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <div className="flex justify-end">
+          <button onClick={onClose} className="btn-ghost text-sm px-5 py-2">סגור</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const EMPTY_BORDER_STYLE = {
   border: "1px solid #fca5a5",
   borderRadius: "4px",
@@ -163,7 +239,7 @@ function UnsavedChangesModal({ onSave, onDiscard, onCancel, saving }) {
         aria-labelledby="unsaved-modal-title"
         onKeyDown={handleKeyDown}
         dir="rtl"
-        className="glass-card rounded-2xl p-6 w-full max-w-md flex flex-col gap-5"
+        className="glass-card rounded-2xl p-6 w-full max-w-lg flex flex-col gap-5"
       >
         <div>
           <h2 id="unsaved-modal-title" className="font-bold text-slate-900 text-lg">נא לשים לב!</h2>
@@ -173,13 +249,91 @@ function UnsavedChangesModal({ onSave, onDiscard, onCancel, saving }) {
           <button
             onClick={onSave}
             disabled={saving}
-            className="flex-1 text-sm px-4 py-2 rounded-xl font-semibold text-white disabled:opacity-60 transition-colors"
-            style={{ background: "#16a34a" }}
+            className="btn-green-light flex-1 whitespace-nowrap text-sm px-4 py-2"
           >
             {saving ? "שומר..." : "שמור שינויים"}
           </button>
-          <button onClick={onCancel} disabled={saving} className="btn-ghost flex-1 text-sm px-4 py-2">ביטול</button>
-          <button onClick={onDiscard} disabled={saving} className="btn-ghost flex-1 text-sm px-4 py-2">אל תשמור</button>
+          <button onClick={onCancel} disabled={saving} className="btn-ghost flex-1 whitespace-nowrap text-sm px-4 py-2">ביטול</button>
+          <button onClick={onDiscard} disabled={saving} className="btn-ghost flex-1 whitespace-nowrap text-sm px-4 py-2">אל תשמור</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RecycleBinInfoModal({ schoolName, onClose }) {
+  const { ref, handleKeyDown } = useFocusTrap(onClose);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="recycle-modal-title">
+      <div ref={ref} onKeyDown={handleKeyDown} className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 p-6 flex flex-col gap-4 text-right" dir="rtl">
+        <div className="flex items-center gap-3">
+          <span className="text-2xl" aria-hidden="true">🗑️</span>
+          <h2 id="recycle-modal-title" className="text-lg font-bold text-slate-900">הועבר לסל המחזור</h2>
+        </div>
+        <p className="text-sm text-slate-700 leading-relaxed">
+          בית הספר <span className="font-semibold">{schoolName}</span> הועבר לסל המחזור ונתוניו יימחקו לחלוטין מהמערכת תוך 30 יום.
+        </p>
+        <p className="text-sm text-slate-700 leading-relaxed">
+          אם תרצו לשחזר את בית הספר, ניתן לבצע זאת בפרק הזמן הזה בלבד דרך אזור <span className="font-medium">ניהול ← בתי ספר ← סל מחזור</span>.
+        </p>
+        <div className="flex justify-end pt-1">
+          <button
+            onClick={onClose}
+            className="px-6 py-2 rounded-xl text-sm font-semibold bg-emerald-100 text-emerald-800 hover:bg-emerald-200 transition-colors"
+            autoFocus
+          >
+            אישור
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SchoolDeleteConfirmModal({ schoolName, confirming, onConfirm, onCancel }) {
+  const { ref, handleKeyDown } = useFocusTrap(onCancel);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(15,23,42,0.55)" }}
+      onClick={e => { if (e.target === e.currentTarget) onCancel(); }}>
+      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="school-del-title"
+        onKeyDown={handleKeyDown} dir="rtl" className="bg-white rounded-2xl p-6 w-full max-w-sm flex flex-col gap-4 shadow-2xl">
+        <div>
+          <h2 id="school-del-title" className="font-bold text-slate-900 text-lg">מחיקת בית ספר</h2>
+          {schoolName && <p className="text-sm text-slate-500 mt-0.5">{schoolName}</p>}
+        </div>
+        <p className="text-sm text-slate-600 leading-relaxed">מחיקת בית הספר תגרום למחיקת כלל הנתונים עליו לצמיתות.</p>
+        <div className="flex gap-3">
+          <button onClick={onConfirm} disabled={confirming}
+            className="text-sm px-5 py-2 rounded-xl font-semibold text-white transition-colors disabled:opacity-60"
+            style={{ background: "#dc2626" }}>
+            {confirming ? "מוחק..." : "מחק בכל זאת"}
+          </button>
+          <button onClick={onCancel} disabled={confirming} className="btn-ghost text-sm px-5 py-2">ביטול</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SchoolDeleteRequestConfirmModal({ schoolName, confirming, onConfirm, onCancel }) {
+  const { ref, handleKeyDown } = useFocusTrap(onCancel);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(15,23,42,0.55)" }}
+      onClick={e => { if (e.target === e.currentTarget) onCancel(); }}>
+      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="del-req-title"
+        onKeyDown={handleKeyDown} dir="rtl" className="bg-white rounded-2xl p-6 w-full max-w-sm flex flex-col gap-4 shadow-2xl">
+        <div>
+          <h2 id="del-req-title" className="font-bold text-slate-900 text-lg">הגשת בקשת מחיקה</h2>
+          {schoolName && <p className="text-sm text-slate-500 mt-0.5">{schoolName}</p>}
+        </div>
+        <p className="text-sm text-slate-600 leading-relaxed">האם אתה בטוח שאתה רוצה להגיש בקשה למחיקת בית הספר? הבקשה תועבר לאישור הבעלים/מנהל.</p>
+        <div className="flex gap-3">
+          <button onClick={onConfirm} disabled={confirming}
+            className="text-sm px-5 py-2 rounded-xl font-semibold text-white transition-colors disabled:opacity-60"
+            style={{ background: "#dc2626" }}>
+            {confirming ? "שולח..." : "הגש בקשה"}
+          </button>
+          <button onClick={onCancel} disabled={confirming} className="btn-ghost text-sm px-5 py-2">ביטול</button>
         </div>
       </div>
     </div>
@@ -785,7 +939,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
 
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
 
-  const canDelete = meUser && (meUser.role === "owner" || meUser.managers_can_delete);
+  const canDelete = meUser && !!meUser.can_delete_own_meetings;
 
   useEffect(() => { setSelectedHistBudget(null); }, [activeSubTab]);
 
@@ -1877,27 +2031,29 @@ function MeetingRow({ meeting, onSave, onRequestDelete, onOpenNotes, usersWithAc
           </div>
         </td>
         {/* Actions */}
-        <td className="py-2.5 px-2 text-center">
-          <div className="relative inline-block" ref={actionsMenuRef}>
-            <button type="button" onClick={() => setShowActionsMenu(o => !o)} aria-label="פעולות"
-              className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-slate-700 transition-all flex items-center justify-center w-6 h-6 rounded hover:bg-slate-100">
-              <svg width="14" height="14" viewBox="0 0 16 4" fill="currentColor" aria-hidden="true">
-                <circle cx="2" cy="2" r="1.5"/>
-                <circle cx="8" cy="2" r="1.5"/>
-                <circle cx="14" cy="2" r="1.5"/>
-              </svg>
-            </button>
-            {showActionsMenu && (
-              <div className="absolute left-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg py-1 z-30 min-w-[90px]">
-                <button type="button"
-                  onMouseDown={e => { e.preventDefault(); onRequestDelete(meeting.id); setShowActionsMenu(false); }}
-                  className="w-full text-right px-3 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors whitespace-nowrap">
-                  מחק
-                </button>
-              </div>
-            )}
-          </div>
-        </td>
+        {onRequestDelete && (
+          <td className="py-2.5 px-2 text-center">
+            <div className="relative inline-block" ref={actionsMenuRef}>
+              <button type="button" onClick={() => setShowActionsMenu(o => !o)} aria-label="פעולות"
+                className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-slate-700 transition-all flex items-center justify-center w-6 h-6 rounded hover:bg-slate-100">
+                <svg width="14" height="14" viewBox="0 0 16 4" fill="currentColor" aria-hidden="true">
+                  <circle cx="2" cy="2" r="1.5"/>
+                  <circle cx="8" cy="2" r="1.5"/>
+                  <circle cx="14" cy="2" r="1.5"/>
+                </svg>
+              </button>
+              {showActionsMenu && (
+                <div className="absolute left-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg py-1 z-30 min-w-[90px]">
+                  <button type="button"
+                    onMouseDown={e => { e.preventDefault(); onRequestDelete(meeting.id); setShowActionsMenu(false); }}
+                    className="w-full text-right px-3 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors whitespace-nowrap">
+                    מחק
+                  </button>
+                </div>
+              )}
+            </div>
+          </td>
+        )}
       </tr>
     </>
   );
@@ -1949,7 +2105,7 @@ function ReminderToast({ onClose }) {
 }
 
 // ─── Meetings: MeetingsTable ─────────────────────────────────────────────────
-function MeetingsTable({ meetings, usersWithAccess, usersWithoutAccess, contacts, onSave, onDelete, onOpenNotes, onRequestAccess }) {
+function MeetingsTable({ meetings, usersWithAccess, usersWithoutAccess, contacts, onSave, onDelete, onOpenNotes, onRequestAccess, canDeleteMeetings }) {
   const [sortField, setSortField] = useState(null); // null | "date" | "status" | "advisor" | "type"
   const [sortDir, setSortDir]   = useState("asc");
   const [pendingDeleteId, setPendingDeleteId] = useState(null);
@@ -2046,12 +2202,13 @@ function MeetingsTable({ meetings, usersWithAccess, usersWithoutAccess, contacts
                 <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500">
                   <ReminderHeaderTooltip />
                 </th>
-                <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500"></th>
+                {canDeleteMeetings && <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500"></th>}
               </tr>
             </thead>
             <tbody>
               {sortedMeetings.map(m => (
-                <MeetingRow key={m.id} meeting={m} onSave={onSave} onRequestDelete={setPendingDeleteId}
+                <MeetingRow key={m.id} meeting={m} onSave={onSave}
+                  onRequestDelete={canDeleteMeetings ? setPendingDeleteId : null}
                   onOpenNotes={onOpenNotes}
                   usersWithAccess={usersWithAccess} usersWithoutAccess={usersWithoutAccess}
                   contacts={contacts} onRequestAccess={onRequestAccess}
@@ -2686,6 +2843,19 @@ export default function SchoolPage() {
   const [isEditing, setIsEditing] = useState(false);
   const [originalForm, setOriginalForm] = useState(null);
   const [accessLinkedToAdvisors, setAccessLinkedToAdvisors] = useState(false);
+  const [canDeleteSchool, setCanDeleteSchool] = useState(false);
+  const [canDeleteMeetings, setCanDeleteMeetings] = useState(false);
+  const [canEditDirectly, setCanEditDirectly] = useState(false);
+  const [canRequestUpdate, setCanRequestUpdate] = useState(false);
+  const [requestSuccessData, setRequestSuccessData] = useState(null);
+  const [isRequestMode, setIsRequestMode] = useState(false);
+  const [showDeleteRequestConfirm, setShowDeleteRequestConfirm] = useState(false);
+  const [submittingDeleteRequest, setSubmittingDeleteRequest] = useState(false);
+  const [showEditDots, setShowEditDots] = useState(false);
+  const editDotsRef = useRef(null);
+  const [showSchoolDeleteConfirm, setShowSchoolDeleteConfirm] = useState(false);
+  const [deletingSchool, setDeletingSchool] = useState(false);
+  const [recycleInfoSchoolName, setRecycleInfoSchoolName] = useState(null);
   const [editForm, setEditForm] = useState({
     name: "", symbol: "", city: "", authority: "",
     stage: "",
@@ -2733,8 +2903,27 @@ export default function SchoolPage() {
           setSubscriptionStatus(meRes.data.org.subscription_status);
         }
         if (meRes.data?.role) setRole(meRes.data.role);
+        if (meRes.data?.can_delete_schools) setCanDeleteSchool(true);
+        setCanDeleteMeetings(!!meRes.data?.can_delete_own_meetings);
+        setCanEditDirectly(!!meRes.data?.can_edit_school_directly);
+        setCanRequestUpdate(meRes.data?.can_request_school_update !== false);
       } catch {
         // non-fatal
+      }
+
+      // When arriving via deeplink (e.g. from a notification) location.state.school is absent.
+      // Fetch the school record directly so the info tab isn't blank.
+      if (!location.state?.school) {
+        try {
+          const schoolRes = await axios.get(`/schools/${schoolId}`);
+          setSchool(schoolRes.data);
+          setAccounts(schoolRes.data?.gefen_accounts || []);
+          setSchoolAdvisors(
+            (schoolRes.data?.advisor_schools || []).map(as => as.profiles).filter(Boolean)
+          );
+        } catch {
+          // non-fatal — page still usable without info tab data
+        }
       }
 
       const [accountsResult, logsResult] = await Promise.allSettled([
@@ -2820,6 +3009,19 @@ export default function SchoolPage() {
     }
   }
 
+  function normalizeTime(t) {
+    if (!t) return null;
+    const digits = t.replace(/\D/g, "");
+    if (!digits) return null;
+    let hh, mm;
+    if (digits.length <= 2) { hh = digits.padStart(2, "0"); mm = "00"; }
+    else if (digits.length === 3) { hh = "0" + digits[0]; mm = digits.slice(1); }
+    else { hh = digits.slice(0, 2); mm = digits.slice(2, 4); }
+    if (parseInt(hh) > 23) hh = "23";
+    if (parseInt(mm) > 59) mm = "59";
+    return `${hh}:${mm}`;
+  }
+
   async function updateMeeting(draft) {
     if (!draft?.id) return;
     // Optimistic update: reflect changes immediately so summary row recalculates
@@ -2827,8 +3029,8 @@ export default function SchoolPage() {
     const payload = {
       meeting_date: draft.meeting_date || null,
       status: draft.status || "scheduled",
-      start_time: draft.start_time || null,
-      end_time: draft.end_time || null,
+      start_time: normalizeTime(draft.start_time),
+      end_time: normalizeTime(draft.end_time),
       advisor_ids: draft.advisor_ids || [],
       participants: draft.participants || [],
       meeting_type: draft.meeting_type || null,
@@ -2880,7 +3082,24 @@ export default function SchoolPage() {
     return false;
   }
 
-  function startEdit() {
+  useEffect(() => {
+    function handler(e) { if (editDotsRef.current && !editDotsRef.current.contains(e.target)) setShowEditDots(false); }
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  async function handleSchoolDelete() {
+    setDeletingSchool(true);
+    try {
+      await axios.delete(`/schools/${schoolId}`);
+      setShowSchoolDeleteConfirm(false);
+      setRecycleInfoSchoolName(school?.name || "");
+    } catch {
+      setDeletingSchool(false);
+    }
+  }
+
+  function startEdit(requestMode = false) {
     const formData = {
       name: school.name || "",
       symbol: school.symbol || "",
@@ -2907,9 +3126,55 @@ export default function SchoolPage() {
     setOriginalForm(formData);
     setTriedSave(false);
     setAccessLinkedToAdvisors(false);
-    axios.get(`/schools/${schoolId}/advisors`).then(res => setSchoolAdvisors(res.data || [])).catch(() => {});
-    loadUsers();
+    if (role === "owner" || role === "manager") {
+      axios.get(`/schools/${schoolId}/advisors`).then(res => setSchoolAdvisors(res.data || [])).catch(() => {});
+      loadUsers();
+    }
     setIsEditing(true);
+    setIsRequestMode(requestMode);
+  }
+
+  async function submitFullRequest() {
+    const changes = {};
+    Object.keys(editForm).forEach(f => {
+      if (JSON.stringify(editForm[f]) !== JSON.stringify(originalForm?.[f])) {
+        changes[f] = editForm[f];
+      }
+    });
+    if (Object.keys(changes).length === 0) {
+      setSaveError("לא בוצע שינוי כלשהו");
+      return;
+    }
+    setSaving(true);
+    try {
+      await axios.post(`/schools/${schoolId}/update-requests`, { proposed_changes: changes });
+      const snapshot = { changes, original: { ...originalForm } };
+      setIsEditing(false);
+      setIsRequestMode(false);
+      setOriginalForm(null);
+      setSaveError("");
+      setAccessLinkedToAdvisors(false);
+      setRequestSuccessData(snapshot);
+    } catch {
+      setSaveError("שגיאה בשליחת הבקשה — נסה שוב");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function submitDeleteRequest() {
+    setSubmittingDeleteRequest(true);
+    try {
+      await axios.post(`/schools/${schoolId}/update-requests`, { proposed_changes: { _action: "delete_school" } });
+      setShowDeleteRequestConfirm(false);
+      setIsEditing(false);
+      setIsRequestMode(false);
+      setOriginalForm(null);
+    } catch {
+      // non-fatal — modal stays open
+    } finally {
+      setSubmittingDeleteRequest(false);
+    }
   }
 
   async function addAdvisorToSchool(advisorId) {
@@ -3125,6 +3390,39 @@ export default function SchoolPage() {
         />
       )}
 
+      {showSchoolDeleteConfirm && (
+        <SchoolDeleteConfirmModal
+          schoolName={school?.name}
+          confirming={deletingSchool}
+          onConfirm={handleSchoolDelete}
+          onCancel={() => setShowSchoolDeleteConfirm(false)}
+        />
+      )}
+
+      {recycleInfoSchoolName && (
+        <RecycleBinInfoModal
+          schoolName={recycleInfoSchoolName}
+          onClose={() => navigate("/", { replace: true })}
+        />
+      )}
+
+      {showDeleteRequestConfirm && (
+        <SchoolDeleteRequestConfirmModal
+          schoolName={school?.name}
+          confirming={submittingDeleteRequest}
+          onConfirm={submitDeleteRequest}
+          onCancel={() => setShowDeleteRequestConfirm(false)}
+        />
+      )}
+
+      {requestSuccessData && (
+        <UpdateRequestSuccessModal
+          changes={requestSuccessData.changes}
+          originalValues={requestSuccessData.original}
+          onClose={() => setRequestSuccessData(null)}
+        />
+      )}
+
       <div style={{ marginRight: "var(--sidebar-w, 240px)", transition: "margin-right 0.25s cubic-bezier(0.4,0,0.2,1)" }}>
         <div className={`mx-auto px-6 py-10 ${activeTab === "checks" ? "max-w-6xl" : "max-w-4xl"}`}>
 
@@ -3186,12 +3484,36 @@ export default function SchoolPage() {
                   <div className="mb-4">
                     <div className="flex items-center justify-between">
                       <p className="text-sm font-semibold text-slate-700">פרטי מוסד</p>
-                      <div className="flex items-center gap-2">
-                        <button onClick={saveEdit} disabled={saving} className="btn-blue text-sm px-5 py-2">
-                          {saving ? "שומר..." : "שמור שינויים"}
-                        </button>
-                        <button onClick={() => { setIsEditing(false); setOriginalForm(null); setSaveError(""); setAccessLinkedToAdvisors(false); }} className="btn-ghost text-sm px-5 py-2">ביטול</button>
-                      </div>
+                      {(isRequestMode || canDeleteSchool) && (
+                        <div className="relative" ref={editDotsRef}>
+                          <button
+                            type="button"
+                            onClick={() => setShowEditDots(o => !o)}
+                            className="p-1.5 rounded-lg hover:bg-slate-100 transition-colors text-slate-400"
+                            aria-label="אפשרויות נוספות"
+                            aria-expanded={showEditDots}
+                          >
+                            <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                              <circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/>
+                            </svg>
+                          </button>
+                          {showEditDots && (
+                            <div className="absolute left-0 top-full mt-1 z-20 bg-white rounded-xl py-1 shadow-lg border border-slate-100" style={{ minWidth: 150 }} dir="rtl">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setShowEditDots(false);
+                                  if (isRequestMode) setShowDeleteRequestConfirm(true);
+                                  else setShowSchoolDeleteConfirm(true);
+                                }}
+                                className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-red-500 hover:bg-red-50 text-right transition-colors"
+                              >
+                                מחק בית ספר
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                     {saveError && (
                       <p role="alert" className="text-sm text-red-600 mt-2 text-right">{saveError}</p>
@@ -3378,8 +3700,8 @@ export default function SchoolPage() {
                     </table>
                   </div>
 
-                  {/* ליווי */}
-                  <div className="mt-6 pt-5 border-t border-slate-100">
+                  {/* ליווי — visible only to owner/manager */}
+                  {(role === "owner" || role === "manager") && <div className="mt-6 pt-5 border-t border-slate-100">
                     <p className="text-sm font-semibold text-slate-700 text-right mb-3">ליווי</p>
                     <div className="grid grid-cols-2 gap-x-8">
                       <div>
@@ -3407,6 +3729,14 @@ export default function SchoolPage() {
                         </div>
                       </div>
                     </div>
+                  </div>}
+
+                  {/* Bottom actions */}
+                  <div className="flex items-center justify-center gap-3 mt-6 pt-4 border-t border-slate-100">
+                    <button onClick={isRequestMode ? submitFullRequest : saveEdit} disabled={saving} className="btn-green-light text-sm px-5 py-2">
+                      {saving ? (isRequestMode ? "שולח..." : "שומר...") : (isRequestMode ? "הגש בקשה" : "שמור שינויים")}
+                    </button>
+                    <button onClick={() => { setIsEditing(false); setIsRequestMode(false); setOriginalForm(null); setSaveError(""); setAccessLinkedToAdvisors(false); }} disabled={saving} className="btn-ghost text-sm px-5 py-2">ביטול</button>
                   </div>
                 </div>
 
@@ -3417,11 +3747,11 @@ export default function SchoolPage() {
                   <div className="flex items-center justify-between mb-4">
                     <p className="text-sm font-semibold text-slate-700">פרטי מוסד</p>
                     <div className="flex items-center gap-2 flex-wrap">
-                      {(role === "owner" || role === "manager") && (
-                        <button onClick={startEdit} className="btn-ghost text-sm px-4 py-2">✏️ ערוך פרטים</button>
+                      {(role === "owner" || role === "manager" || (role === "advisor" && canEditDirectly)) && (
+                        <button onClick={() => startEdit(false)} className="btn-ghost text-sm px-4 py-2">✏️ ערוך פרטים</button>
                       )}
-                      {role === "advisor" && (
-                        <button onClick={startRequest} className="btn-ghost text-sm px-4 py-2">📝 בקש עדכון פרטים</button>
+                      {role === "advisor" && !canEditDirectly && canRequestUpdate && (
+                        <button onClick={() => startEdit(true)} className="btn-ghost text-sm px-4 py-2">📝 בקש עדכון פרטים</button>
                       )}
                     </div>
                   </div>
@@ -3556,17 +3886,18 @@ export default function SchoolPage() {
                         <InfoRow label="גישה" tooltip="בחר למי תהיה גישה לנתוני בית הספר.">
                           {accessIsAll ? (
                             <span className="text-xs font-medium px-2 py-0.5 rounded-full" style={{ background: "rgba(22,163,74,0.12)", color: "#15803d" }}>כולם</span>
-                          ) : (school?.restrict_access_to || []).filter(id => {
-                            const u = users.find(u => u.id === id);
-                            return !u || u.role !== "owner";
-                          }).map(id => {
-                            const u = users.find(u => u.id === id);
-                            return (
-                              <span key={id} className="text-xs font-medium px-2 py-0.5 rounded-full" style={{ background: "rgba(0,112,243,0.08)", color: "#1d4ed8" }}>
-                                {u ? (u.full_name || u.email) : id.slice(0, 8) + "..."}
+                          ) : (() => {
+                            const profiles = school?.restrict_access_profiles !== undefined
+                              ? (school.restrict_access_profiles || [])
+                              : (school?.restrict_access_to || []).map(id => users.find(u => u.id === id)).filter(Boolean);
+                            const visible = profiles.filter(u => u.role !== "owner");
+                            if (visible.length === 0 && loadingUsers) return <span className="text-xs text-slate-400">טוען...</span>;
+                            return visible.map(u => (
+                              <span key={u.id} className="text-xs font-medium px-2 py-0.5 rounded-full" style={{ background: "rgba(0,112,243,0.08)", color: "#1d4ed8" }}>
+                                {u.full_name || u.email}
                               </span>
-                            );
-                          })}
+                            ));
+                          })()}
                         </InfoRow>
                       </div>
                     </div>
@@ -3583,41 +3914,6 @@ export default function SchoolPage() {
                 </div>
               )}
 
-              {/* Advisor update request form */}
-              {isRequesting && (
-                <div className="glass-card rounded-2xl p-6 mb-6">
-                  <h2 className="font-bold text-slate-800 mb-4">בקשת עדכון פרטי בית הספר</h2>
-                  <p className="text-xs text-slate-400 mb-4">מלא רק את השדות שברצונך לעדכן. הבקשה תועבר לאישור הבעלים/מנהל.</p>
-                  <div className="grid grid-cols-2 gap-4">
-                    {[
-                      { id: "req-name", field: "name", label: "שם בית ספר" },
-                      { id: "req-city", field: "city", label: "עיר" },
-                      { id: "req-authority", field: "authority", label: "בעלות" },
-                      { id: "req-principal-name", field: "principal_name", label: "שם מנהל/ת" },
-                      { id: "req-principal-phone", field: "principal_phone", label: "טלפון מנהל/ת", dir: "ltr" },
-                      { id: "req-school-phone", field: "school_phone", label: "טלפון בית הספר", dir: "ltr" },
-                    ].map(({ id, field, label, dir }) => (
-                      <div key={field} className="flex flex-col gap-1.5">
-                        <label htmlFor={id} className="text-xs text-slate-800">{label}</label>
-                        <input id={id} className="input-field" value={requestForm[field] || ""}
-                          onChange={e => setRequestForm(p => ({ ...p, [field]: e.target.value }))}
-                          dir={dir} />
-                      </div>
-                    ))}
-                    <div className="flex flex-col gap-1.5 col-span-2">
-                      <label htmlFor="req-notes" className="text-xs text-slate-800">הערות</label>
-                      <input id="req-notes" className="input-field" value={requestForm.notes || ""}
-                        onChange={e => setRequestForm(p => ({ ...p, notes: e.target.value }))} />
-                    </div>
-                  </div>
-                  <div className="flex gap-3 mt-5">
-                    <button onClick={submitRequest} disabled={requestSubmitting} className="btn-blue text-sm px-5 py-2">
-                      {requestSubmitting ? "שולח..." : "שלח לאישור"}
-                    </button>
-                    <button onClick={() => setIsRequesting(false)} className="btn-ghost text-sm px-5 py-2">ביטול</button>
-                  </div>
-                </div>
-              )}
             </div>
           )}
 
@@ -3692,13 +3988,14 @@ export default function SchoolPage() {
               ) : (
                 <MeetingsTable
                   meetings={meetings}
-                  usersWithAccess={users.filter(u => u.role !== "owner" && advisorHasAccess(u.id))}
-                  usersWithoutAccess={users.filter(u => u.role !== "owner" && !advisorHasAccess(u.id))}
+                  usersWithAccess={users.filter(u => u.role === "owner" || u.role === "manager" || advisorHasAccess(u.id))}
+                  usersWithoutAccess={users.filter(u => u.role === "advisor" && !advisorHasAccess(u.id))}
                   contacts={getSchoolContacts()}
                   onSave={updateMeeting}
                   onDelete={deleteMeeting}
                   onOpenNotes={(meetingId, notes, onSave) => setNotesModal({ meetingId, notes, onSave })}
                   onRequestAccess={requestAdvisorAccess}
+                  canDeleteMeetings={canDeleteMeetings}
                 />
               )}
             </div>
