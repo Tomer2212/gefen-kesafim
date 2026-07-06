@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useParams, useLocation, useBlocker } from "react-router-dom";
+import { createPortal } from "react-dom";
+import { useNavigate, useParams, useLocation, useBlocker, useSearchParams } from "react-router-dom";
 import axios from "axios";
 import { supabase } from "../lib/supabase";
 import Sidebar from "../components/Sidebar";
@@ -7,7 +8,22 @@ import FileUpload from "../components/FileUpload";
 import LoadingScreen from "../components/LoadingScreen";
 import ResultsView from "../components/ResultsView";
 import ClassifyModal from "../components/ClassifyModal";
+import { GoalsTab } from "../components/GoalsTab";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { useCompareChecks } from "../context/CompareChecksContext";
+import { AdvisorSearch } from "../components/AdvisorSearch";
+import { AdvisorCell } from "../components/meetings/AdvisorCell";
+import { DatePickerPopover } from "../components/meetings/DatePickerPopover";
+import { DeleteMeetingModal } from "../components/meetings/DeleteMeetingModal";
+import { MeetingRow } from "../components/meetings/MeetingRow";
+import { MeetingsTable } from "../components/meetings/MeetingsTable";
+import { MeetingTypeSelect } from "../components/meetings/MeetingTypeSelect";
+import { NoParticipantsModal } from "../components/meetings/NoParticipantsModal";
+import { NotesModal } from "../components/meetings/NotesModal";
+import { ParticipantsSelector } from "../components/meetings/ParticipantsSelector";
+import { TimeInput } from "../components/meetings/TimeInput";
+import { AcademicYearSelector } from "../components/AcademicYearSelector";
+import { ACADEMIC_YEARS, DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
 
 const DIVISION_LABEL = {
   tikkon: "חטיבה עליונה",
@@ -140,6 +156,121 @@ const EMPTY_BORDER_STYLE = {
 function formatDate(iso) {
   if (!iso) return "—";
   return new Date(iso).toLocaleDateString("he-IL", { day: "2-digit", month: "2-digit", year: "numeric" });
+}
+
+function formatDateTime(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  const datePart = d.toLocaleDateString("he-IL", { day: "2-digit", month: "2-digit", year: "2-digit" });
+  const timePart = d.toLocaleTimeString("he-IL", { hour: "2-digit", minute: "2-digit", hour12: false });
+  return `${datePart} - ${timePart}`;
+}
+
+function fmtILS(v) {
+  try { return Math.round(Number(v)).toLocaleString("he-IL"); } catch { return String(v); }
+}
+
+// "תקציב" row — shown only when the budget amount changed between the two checks
+function budgetChangeLine(newerVal, olderVal) {
+  if (newerVal == null || olderVal == null || newerVal === olderVal) return null;
+  const diff = Math.abs(newerVal - olderVal);
+  return newerVal > olderVal
+    ? `תקציב - התקציב גדל מ-${fmtILS(olderVal)} ל-${fmtILS(newerVal)}, סה"כ עלייה של ${fmtILS(diff)} ש"ח.`
+    : `תקציב - התקציב קטן מ-${fmtILS(olderVal)} ל-${fmtILS(newerVal)}, סה"כ ירידה של ${fmtILS(diff)} ש"ח.`;
+}
+
+// "גובה התכנון" row — always shown
+function plannedChangeLine(newerVal, olderVal) {
+  if (newerVal == null || olderVal == null) {
+    return "לא ניתן לחשב את השינוי בתקציב שתוכנן — נתונים חסרים באחת הבדיקות.";
+  }
+  if (newerVal === olderVal) return "אין שינוי בגובה התקציב שתוכנן בין הבדיקות.";
+  const diff = Math.abs(newerVal - olderVal);
+  return newerVal > olderVal
+    ? `תקציב שתוכנן - הוספה של ${fmtILS(diff)} ש"ח לתקציב שתוכנן בבדיקה החדשה לעומת הבדיקה הישנה.`
+    : `תקציב שתוכנן - ירידה של ${fmtILS(diff)} ש"ח בתקציב שתוכנן בבדיקה החדשה לעומת הבדיקה הישנה.`;
+}
+
+// "אחוז דיווח כולל" / "אחוז דיווח למודל תמרוץ" rows — always shown, same idea as plannedChangeLine
+function pctChangeLine(label, newerFrac, olderFrac, decimals) {
+  if (newerFrac == null || olderFrac == null) {
+    return `לא ניתן לחשב את השינוי ב${label} — נתונים חסרים באחת הבדיקות.`;
+  }
+  const newerPct = Number((Number(newerFrac) * 100).toFixed(decimals));
+  const olderPct = Number((Number(olderFrac) * 100).toFixed(decimals));
+  if (newerPct === olderPct) return `אין שינוי ב${label} בין הבדיקות.`;
+  const diff = Math.abs(newerPct - olderPct);
+  return newerPct > olderPct
+    ? `${label} - עלייה של ${diff.toFixed(decimals)}% ב${label} בבדיקה החדשה לעומת הבדיקה הישנה.`
+    : `${label} - ירידה של ${diff.toFixed(decimals)}% ב${label} בבדיקה החדשה לעומת הבדיקה הישנה.`;
+}
+
+function isOlderThan24Months(iso) {
+  if (!iso) return false;
+  const cutoff = new Date();
+  cutoff.setMonth(cutoff.getMonth() - 24);
+  return new Date(iso) < cutoff;
+}
+
+function buildCompareData(newerLog, olderLog, schoolName) {
+  const newerBudgets = newerLog.summary?.tikhnun_result?.budgets || [];
+  const olderBudgets = olderLog.summary?.tikhnun_result?.budgets || [];
+  const names = [];
+  for (const b of [...newerBudgets, ...olderBudgets]) {
+    if (b.name && !names.includes(b.name)) names.push(b.name);
+  }
+
+  const budgets = names.map(name => {
+    const nb = newerBudgets.find(b => b.name === name);
+    const ob = olderBudgets.find(b => b.name === name);
+    if (!nb || !ob) {
+      return { name, missingSide: !nb ? "newer" : "older", general: [], mengonim: { status: "loading" } };
+    }
+    const nOv = nb.overview || {};
+    const oOv = ob.overview || {};
+    return {
+      name,
+      general: [
+        budgetChangeLine(nOv.budget, oOv.budget),
+        plannedChangeLine(nOv.planned, oOv.planned),
+        pctChangeLine("אחוז דיווח כולל", nOv.pct_divuach, oOv.pct_divuach, 0),
+        pctChangeLine("אחוז דיווח למודל תמרוץ", nOv.pct_tanuz, oOv.pct_tanuz, 2),
+      ],
+      mengonim: { status: "loading" },
+    };
+  });
+
+  return {
+    schoolName,
+    newerLabel: formatDateTime(newerLog.run_at),
+    olderLabel: formatDateTime(olderLog.run_at),
+    budgets,
+  };
+}
+
+// Merges the /analyze/compare-plans response into the existing budgets[] array
+// (matched by budget name), adding any budget the מענים endpoint found that
+// buildCompareData's summary-based budgets list didn't already have.
+function mergeMengonimIntoBudgets(budgets, mengonimResult) {
+  const missing = mengonimResult.missing || {};
+  const byName = new Map(budgets.map(b => [b.name, b]));
+  for (const mb of mengonimResult.budgets || []) {
+    const existing = byName.get(mb.name);
+    const mengonim = { status: "loaded", missing, added: mb.added, removed: mb.removed, updated: mb.updated };
+    if (existing) {
+      existing.mengonim = mengonim;
+    } else {
+      byName.set(mb.name, { name: mb.name, general: [], mengonim });
+    }
+  }
+  // Any budget that only ever existed in buildCompareData (not returned by
+  // compare-plans at all) still needs its loading state resolved.
+  for (const b of byName.values()) {
+    if (b.mengonim?.status === "loading") {
+      b.mengonim = { status: "loaded", missing, added: [], removed: [], updated: [] };
+    }
+  }
+  return Array.from(byName.values());
 }
 
 function validateSymbol(val) {
@@ -743,6 +874,123 @@ function NewCheckModal({ accounts, defaultAccountId, onClose, onConfirm, title, 
   );
 }
 
+// ─── CompareChecksModal ───────────────────────────────────────────────────────
+function CompareChecksModal({ logs, onClose, onCompare }) {
+  const { ref, handleKeyDown } = useFocusTrap(onClose);
+  const [newerId, setNewerId] = useState(logs[0]?.id ?? null);
+  const [olderId, setOlderId] = useState(null);
+  const [openSide, setOpenSide] = useState(null); // "newer" | "older" | null
+  const pickerRef = useRef(null);
+
+  useEffect(() => {
+    if (!openSide) return;
+    function h(e) {
+      if (pickerRef.current && !pickerRef.current.contains(e.target)) setOpenSide(null);
+    }
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, [openSide]);
+
+  const canCompare = !!newerId && !!olderId && newerId !== olderId;
+
+  function Picker({ side, selectedId, onSelect, label }) {
+    const selectedLog = logs.find(l => l.id === selectedId);
+    const otherId = side === "newer" ? olderId : newerId;
+    const isOpen = openSide === side;
+    return (
+      <div className="flex-1 flex flex-col gap-2">
+        <span className="text-sm font-semibold text-slate-700 text-center">{label}</span>
+        <div className="relative" ref={isOpen ? pickerRef : null}>
+          <button
+            type="button"
+            onClick={() => setOpenSide(o => (o === side ? null : side))}
+            aria-expanded={isOpen}
+            className="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm bg-white flex items-center justify-between gap-2 hover:border-blue-300 transition-colors"
+          >
+            <span className={selectedLog ? "text-slate-800 font-medium" : "text-slate-400"}>
+              {selectedLog ? formatDateTime(selectedLog.run_at) : "בחר בדיקה..."}
+            </span>
+            <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="6 9 12 15 18 9"/>
+            </svg>
+          </button>
+          {isOpen && (
+            <div className="absolute z-20 top-full mt-1.5 w-full glass-card rounded-xl py-1.5 shadow-lg max-h-64 overflow-auto" dir="rtl">
+              {logs.length === 0 && (
+                <p className="text-xs text-slate-400 px-4 py-2">אין בדיקות</p>
+              )}
+              {logs.map(log => {
+                const disabled = log.id === otherId;
+                const isOld = isOlderThan24Months(log.run_at);
+                return (
+                  <button
+                    key={log.id}
+                    type="button"
+                    disabled={disabled}
+                    title={isOld ? "בדיקה זו ישנה מ-24 חודשים — קובץ התכנון המקורי כבר אינו זמין, ולכן מקטע \"מענים\" לא יוצג עבורה (מקטע \"כללי\" עדיין יעבוד כרגיל)" : undefined}
+                    onClick={() => { onSelect(log.id); setOpenSide(null); }}
+                    className={`w-full text-right px-4 py-2 text-sm transition-colors flex items-center justify-between gap-2 ${
+                      disabled
+                        ? "text-slate-300 cursor-not-allowed"
+                        : log.id === selectedId
+                          ? "bg-blue-50 text-blue-700 font-semibold"
+                          : isOld
+                            ? "text-slate-400 hover:bg-slate-50"
+                            : "text-slate-700 hover:bg-slate-50"
+                    }`}
+                  >
+                    <span>{formatDateTime(log.run_at)}</span>
+                    {isOld && <span aria-hidden="true" className="text-amber-500 text-xs">⚠</span>}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center px-4"
+      style={{ background: "rgba(15,23,42,0.55)", backdropFilter: "blur(4px)" }}
+      onClick={e => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div
+        ref={ref}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="compare-checks-title"
+        onKeyDown={handleKeyDown}
+        dir="rtl"
+        className="glass-card rounded-3xl p-7 w-full max-w-lg flex flex-col gap-6"
+      >
+        <h2 id="compare-checks-title" className="text-base font-bold text-slate-900 text-center">השוואה בין בדיקות</h2>
+
+        <div className="flex items-start gap-4">
+          <Picker side="newer" selectedId={newerId} onSelect={setNewerId} label="בדיקה חדשה" />
+          <Picker side="older" selectedId={olderId} onSelect={setOlderId} label="בדיקה ישנה" />
+        </div>
+
+        <div className="flex items-center justify-center gap-3">
+          <button
+            type="button"
+            disabled={!canCompare}
+            onClick={() => canCompare && onCompare(newerId, olderId)}
+            className="btn-blue px-6 py-2.5 text-sm"
+          >
+            בצע השוואה
+          </button>
+          <button type="button" onClick={onClose} className="btn-ghost px-6 py-2 text-sm">
+            ביטול
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── LegacyAddFileModal ───────────────────────────────────────────────────────
 function LegacyAddFileModal({ log, onClose, onNewCheck }) {
   const { ref, handleKeyDown } = useFocusTrap(onClose);
@@ -819,6 +1067,94 @@ function DeleteCheckModal({ onConfirm, onCancel, deleting }) {
   );
 }
 
+// ─── RenameCheckModal ─────────────────────────────────────────────────────────
+function RenameCheckModal({ value, onChange, onSave, onCancel, saving, error }) {
+  const { ref, handleKeyDown } = useFocusTrap(onCancel);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" dir="rtl">
+      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="rename-check-title"
+        onKeyDown={handleKeyDown}
+        className="bg-white rounded-2xl shadow-2xl p-6 w-[340px] flex flex-col gap-4">
+        <h2 id="rename-check-title" className="text-base font-bold text-slate-800 text-center">עריכת שם בדיקה</h2>
+        <div className="flex flex-col gap-1.5">
+          <label htmlFor="rename-check-input" className="text-sm text-slate-600">שם הבדיקה</label>
+          <input
+            id="rename-check-input"
+            type="text"
+            value={value}
+            onChange={e => onChange(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); onSave(); } }}
+            placeholder="לדוגמה: בדיקת רבעון 2"
+            autoFocus
+            className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
+          />
+          {error && <p role="alert" className="text-xs text-red-600">{error}</p>}
+        </div>
+        <div className="flex gap-3 justify-center mt-1">
+          <button type="button" onClick={onSave} disabled={saving}
+            className="px-5 py-2 rounded-full bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold transition-colors disabled:opacity-60">
+            {saving ? "שומר..." : "שמור"}
+          </button>
+          <button type="button" onClick={onCancel} disabled={saving}
+            className="px-5 py-2 rounded-full border border-slate-300 hover:border-slate-400 text-slate-600 text-sm font-semibold transition-colors">
+            ביטול
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── CheckLinkTooltip ─────────────────────────────────────────────────────────
+function CheckLinkTooltip({ children }) {
+  const [pos, setPos] = useState(null); // { top, right } in viewport coords, or null when hidden
+  const anchorRef = useRef(null);
+
+  function show() {
+    const rect = anchorRef.current.getBoundingClientRect();
+    setPos({ top: rect.bottom + 6, right: window.innerWidth - rect.right });
+  }
+  function hide() {
+    setPos(null);
+  }
+
+  // Dismiss on any scroll (window or the table's own scroll container) so a
+  // stale tooltip never lingers detached from its anchor.
+  useEffect(() => {
+    if (!pos) return;
+    function onScroll() { hide(); }
+    document.addEventListener("scroll", onScroll, true);
+    return () => document.removeEventListener("scroll", onScroll, true);
+  }, [pos]);
+
+  return (
+    <span
+      ref={anchorRef}
+      className="inline-block"
+      onMouseEnter={show}
+      onMouseLeave={hide}
+    >
+      {children}
+      {pos && createPortal(
+        <span
+          role="tooltip"
+          className="fixed text-xs text-slate-800 whitespace-nowrap px-3 py-1.5 rounded-lg shadow-md"
+          style={{
+            background: "#FEF08A",
+            border: "1px solid #EAB308",
+            top: pos.top,
+            right: pos.right,
+            zIndex: 200,
+          }}
+        >
+          לחץ להצגת מפורטת של תוצאות הבדיקה.
+        </span>,
+        document.body
+      )}
+    </span>
+  );
+}
+
 // ─── DivisionMismatchModal ────────────────────────────────────────────────────
 function DivisionMismatchModal({ detectedDivision, activeSubTab, onSaveForOther, onDismiss }) {
   const { ref, handleKeyDown } = useFocusTrap(onDismiss);
@@ -886,10 +1222,11 @@ function StageMismatchModal({ detectedDivision, schoolStage, onConfirm, onCancel
 }
 
 // ─── ChecksTab ────────────────────────────────────────────────────────────────
-function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsError, onReloadLogs, activeSubTab, setActiveSubTab }) {
+function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsError, logsLoading, onReloadLogs, activeSubTab, setActiveSubTab, academicYear }) {
   const isSheshsSnati = schoolStage === "sheshshnati";
   const [view, setView] = useState("table");
   const [activeResult, setActiveResult] = useState(null);
+  const { openCompare, patchCompare } = useCompareChecks();
 
   const [colOrder, setColOrder] = useState(DEFAULT_CHECK_COL_ORDER);
   const [colVisible, setColVisible] = useState(
@@ -902,6 +1239,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
   const colPickerRef = useRef(null);
 
   const [showNewCheckModal, setShowNewCheckModal] = useState(false);
+  const [showCompareModal, setShowCompareModal] = useState(false);
   const [addFileModal, setAddFileModal] = useState(null); // { log }
   const [pendingRun, setPendingRun] = useState(null);
   const [classifyQueue, setClassifyQueue] = useState([]);
@@ -915,6 +1253,28 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
   const [divisionMismatch, setDivisionMismatch] = useState(null); // { runId, result, detectedDivision }
   const [stageMismatch, setStageMismatch]       = useState(null); // { runId, result, detectedDivision, savedLogId }
   const [selectedHistBudget, setSelectedHistBudget] = useState(null);
+  const [renameTarget, setRenameTarget] = useState(null); // { log }
+  const [renameValue, setRenameValue] = useState("");
+  const [savingRename, setSavingRename] = useState(false);
+  const [renameError, setRenameError] = useState("");
+  const historyScrollRef = useRef(null);
+
+  // Left/right arrow keys scroll the history table horizontally whenever the
+  // checks tab's table view is showing — no need to first click/focus the
+  // scroll container itself. Skipped while typing in a text field (e.g. the
+  // rename modal or the column-picker search box) so cursor movement there
+  // isn't hijacked.
+  useEffect(() => {
+    if (view !== "table") return;
+    function handleKeyDown(e) {
+      const tag = e.target.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || e.target.isContentEditable) return;
+      if (e.key === "ArrowRight") { e.preventDefault(); historyScrollRef.current?.scrollBy({ left: 60 }); }
+      else if (e.key === "ArrowLeft") { e.preventDefault(); historyScrollRef.current?.scrollBy({ left: -60 }); }
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [view]);
 
   useEffect(() => {
     axios.get("/schools/users/me").then(r => setMeUser(r.data)).catch(() => {});
@@ -1011,6 +1371,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
       files.forEach(f => form.append("files", f));
       form.append("school_id", schoolId);
       if (selectedAccountId) form.append("gefen_account_id", selectedAccountId);
+      form.append("academic_year", academicYear);
       const { data } = await axios.post("/analyze/upload", form);
       const runId = data.run_id;
       setPendingRun(prev => ({ ...prev, runId }));
@@ -1123,6 +1484,31 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
     }
   }
 
+  async function handleRenameSave() {
+    if (!renameTarget) return;
+    setSavingRename(true);
+    setRenameError("");
+    try {
+      await axios.patch(`/schools/${schoolId}/logs/${renameTarget.log.id}/name`, { custom_name: renameValue });
+      setRenameTarget(null);
+      onReloadLogs();
+    } catch (err) {
+      setRenameError(err.response?.data?.detail || "שגיאה בשמירת שם הבדיקה");
+    } finally {
+      setSavingRename(false);
+    }
+  }
+
+  async function handlePinToggle(log) {
+    setOpenMenuLogId(null);
+    try {
+      await axios.patch(`/schools/${schoolId}/logs/${log.id}/pin`, { pinned: !log.pinned_at });
+      onReloadLogs();
+    } catch {
+      // error silently — user can retry
+    }
+  }
+
   async function handleLogClick(log) {
     setLoadingLogId(log.id);
     try {
@@ -1171,6 +1557,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
       form.append("run_id", runId);
       form.append("school_id", schoolId);
       form.append("gefen_account_id", targetAcc.id);
+      form.append("academic_year", academicYear);
       await axios.post("/analyze/save-for-account", form);
       onReloadLogs();
     } catch {
@@ -1285,6 +1672,32 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
 
         {/* Action buttons */}
         <div className="flex items-center gap-2 pb-2">
+          <button
+            type="button"
+            onClick={() => setShowNewCheckModal(true)}
+            className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-xl transition-all font-medium btn-ghost"
+          >
+            <svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="12" y1="5" x2="12" y2="19"/>
+              <line x1="5" y1="12" x2="19" y2="12"/>
+            </svg>
+            בדיקה חדשה
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowCompareModal(true)}
+            className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-xl transition-all font-medium btn-ghost"
+          >
+            <svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="17 1 21 5 17 9"/>
+              <path d="M3 11V9a4 4 0 0 1 4-4h14"/>
+              <polyline points="7 23 3 19 7 15"/>
+              <path d="M21 13v2a4 4 0 0 1-4 4H3"/>
+            </svg>
+            השוואה בין בדיקות
+          </button>
+
           <div className="relative" ref={colPickerRef}>
             <button
               type="button"
@@ -1333,20 +1746,15 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
               </div>
             )}
           </div>
-
-          <button
-            type="button"
-            onClick={() => setShowNewCheckModal(true)}
-            className="btn-blue text-sm px-4 py-2 flex items-center gap-1.5"
-          >
-            <span aria-hidden="true">+</span> בדיקה חדשה
-          </button>
         </div>
       </div>
 
       {/* Table */}
-      <div className="glass-card rounded-2xl overflow-hidden flex-1 min-h-0">
-        <div className="overflow-auto h-full">
+      <div className="glass-card rounded-2xl overflow-hidden flex-1 min-h-0 relative">
+        <div
+          ref={historyScrollRef}
+          className="overflow-auto h-full hist-scroll-x"
+        >
           {logsError ? (
             <div role="alert" className="p-8 text-center">
               <p className="text-red-500 mb-3">{logsError}</p>
@@ -1357,7 +1765,10 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
               <thead style={{ position: "sticky", top: 0, zIndex: 10, backdropFilter: "blur(8px)" }}>
                 {/* Row 1: date (rowSpan 2), files-parent (colSpan 3), movable cols, actions (rowSpan 2) */}
                 <tr style={{ background: "rgba(241,245,249,0.97)" }}>
-                  <th scope="col" rowSpan={2} className={thBase}>תאריך</th>
+                  <th scope="col" rowSpan={2} className={thBase}
+                    style={{ position: "sticky", right: 0, zIndex: 20, background: "rgba(241,245,249,0.97)" }}>
+                    מועד הבדיקה
+                  </th>
                   <th scope="col" colSpan={3} className={`${thBase} text-center`}>קבצים שהועלו</th>
                   {visibleColOrder.map((key, i) => {
                     const col = CHECK_MOVABLE_COLS.find(c => c.key === key);
@@ -1421,25 +1832,27 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
               <tbody>
                 {pendingRun && (!pendingRun.updateLogId || pendingRun.status === "error") && (
                   <tr className="border-b border-slate-100">
-                    <td className="px-3 py-3" style={{ borderLeft: "1px solid black" }}>
+                    <td className="px-3 py-3" style={{ borderLeft: "1px solid black", position: "sticky", right: 0, zIndex: 5, background: "white", boxShadow: "-6px 0 6px -6px rgba(0,0,0,0.15)" }}>
                       {pendingRun.status === "loading" && (
                         <div className="flex items-center gap-2">
                           <div role="status" aria-label="בבדיקה">
                             <div aria-hidden="true" className="spinner w-4 h-4" />
                           </div>
-                          <span className="text-slate-400 text-xs">{formatDate(pendingRun.date)}</span>
+                          <span className="text-slate-400 text-xs">{formatDateTime(pendingRun.date)}</span>
                         </div>
                       )}
                       {pendingRun.status === "done" && (
-                        <button type="button"
-                          onClick={() => { setActiveResult({ result: pendingRun.result, runId: pendingRun.runId }); setView("result"); }}
-                          className="text-blue-600 hover:text-blue-800 font-medium underline text-sm transition-colors">
-                          {formatDate(pendingRun.date)}
-                        </button>
+                        <CheckLinkTooltip>
+                          <button type="button"
+                            onClick={() => { setActiveResult({ result: pendingRun.result, runId: pendingRun.runId }); setView("result"); }}
+                            className="text-blue-600 hover:text-blue-800 font-medium underline text-sm transition-colors">
+                            {formatDateTime(pendingRun.date)}
+                          </button>
+                        </CheckLinkTooltip>
                       )}
                       {pendingRun.status === "error" && (
                         <div>
-                          <span className="text-xs text-slate-500">{formatDate(pendingRun.date)}</span>
+                          <span className="text-xs text-slate-500">{formatDateTime(pendingRun.date)}</span>
                           <span role="alert" className="block text-xs text-red-500 mt-0.5">{pendingRun.error}</span>
                         </div>
                       )}
@@ -1511,18 +1924,31 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
                   }
                   return (
                     <tr key={log.id} className="border-b border-slate-100 hover:bg-slate-50 transition-colors">
-                      <td className="px-3 py-3 font-medium whitespace-nowrap" style={{ borderLeft: "1px solid black" }}>
+                      <td className="px-3 py-3 font-medium whitespace-nowrap" style={{ borderLeft: "1px solid black", position: "sticky", right: 0, zIndex: 5, background: "white", boxShadow: "-6px 0 6px -6px rgba(0,0,0,0.15)" }}>
                         {isLoadingThis ? (
                           <div className="flex items-center gap-1.5">
                             <div aria-hidden="true" className="spinner w-3 h-3" />
-                            <span className="text-slate-400 text-sm">{formatDate(log.run_at)}</span>
+                            <span className="text-slate-400 text-sm">{formatDateTime(log.run_at)}</span>
                           </div>
                         ) : (
-                          <button type="button"
-                            onClick={() => handleLogClick(log)}
-                            className="text-blue-600 hover:text-blue-800 font-medium underline text-sm transition-colors">
-                            {formatDate(log.run_at)}
-                          </button>
+                          <div className="flex items-center gap-1.5">
+                            <CheckLinkTooltip>
+                              <button type="button"
+                                onClick={() => handleLogClick(log)}
+                                className="text-blue-600 hover:text-blue-800 font-medium underline text-sm transition-colors flex flex-col items-start">
+                                {log.custom_name && <span>{log.custom_name}</span>}
+                                <span className={log.custom_name ? "text-xs font-normal text-slate-400 no-underline" : ""}>
+                                  {formatDateTime(log.run_at)}
+                                </span>
+                              </button>
+                            </CheckLinkTooltip>
+                            {log.pinned_at && (
+                              <svg role="img" aria-label="בדיקה נעוצה" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0 text-slate-800">
+                                <line x1="12" y1="17" x2="12" y2="22" />
+                                <path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z" />
+                              </svg>
+                            )}
+                          </div>
                         )}
                       </td>
 
@@ -1564,7 +1990,28 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
                           </button>
                           {openMenuLogId === log.id && (
                             <div data-log-menu
-                              className="absolute bottom-0 left-full ml-1 z-20 bg-white border border-slate-200 rounded-xl shadow-lg py-1 min-w-[100px]">
+                              className="absolute bottom-0 left-full ml-1 z-20 bg-white border border-slate-200 rounded-xl shadow-lg py-1 min-w-[140px]">
+                              <button type="button"
+                                data-log-menu
+                                onClick={() => handlePinToggle(log)}
+                                className="w-full flex items-center gap-2 text-right px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 transition-colors whitespace-nowrap">
+                                <svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill={log.pinned_at ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0">
+                                  <line x1="12" y1="17" x2="12" y2="22" />
+                                  <path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z" />
+                                </svg>
+                                {log.pinned_at ? "בטל נעיצה" : "נעץ"}
+                              </button>
+                              <button type="button"
+                                data-log-menu
+                                onClick={() => {
+                                  setRenameTarget({ log });
+                                  setRenameValue(log.custom_name || "");
+                                  setRenameError("");
+                                  setOpenMenuLogId(null);
+                                }}
+                                className="w-full text-right px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 transition-colors whitespace-nowrap">
+                                ערוך שם בדיקה
+                              </button>
                               <button type="button"
                                 data-log-menu
                                 onClick={() => { setDeleteTargetId(log.id); setOpenMenuLogId(null); }}
@@ -1582,7 +2029,14 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
                 {filteredLogs.length === 0 && !pendingRun && (
                   <tr>
                     <td colSpan={4 + visibleColOrder.length + (canDelete ? 1 : 0)} className="px-5 py-10 text-center text-slate-400">
-                      אין בדיקות קודמות
+                      {logsLoading ? (
+                        <div role="status" aria-label="טוען בדיקות קודמות" className="flex items-center justify-center gap-2">
+                          <div aria-hidden="true" className="spinner w-4 h-4" />
+                          <span>טוען בדיקות קודמות...</span>
+                        </div>
+                      ) : (
+                        "אין בדיקות קודמות"
+                      )}
                     </td>
                   </tr>
                 )}
@@ -1590,7 +2044,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
                 {/* Filler row: extends vertical column borders to the bottom of the container */}
                 {(filteredLogs.length > 0 || !!pendingRun) && (
                   <tr style={{ height: "100%" }}>
-                    <td style={{ borderLeft: "1px solid black" }} />
+                    <td style={{ borderLeft: "1px solid black", position: "sticky", right: 0, zIndex: 5, background: "white" }} />
                     <td /><td />
                     <td style={{ borderLeft: "1px solid black" }} />
                     {visibleColOrder.map(key => (
@@ -1603,6 +2057,28 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
             </table>
           )}
         </div>
+        {!logsError && (
+          <>
+            <button type="button"
+              aria-label="גלול ימינה"
+              onClick={() => historyScrollRef.current?.scrollBy({ left: 180, behavior: "smooth" })}
+              style={{ position: "absolute", bottom: 2, right: 2, height: 14, width: 18, zIndex: 25 }}
+              className="flex items-center justify-center rounded bg-white/80 text-slate-400 hover:text-slate-700 hover:bg-white transition-colors shadow-sm">
+              <svg aria-hidden="true" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="9 18 15 12 9 6" />
+              </svg>
+            </button>
+            <button type="button"
+              aria-label="גלול שמאלה"
+              onClick={() => historyScrollRef.current?.scrollBy({ left: -180, behavior: "smooth" })}
+              style={{ position: "absolute", bottom: 2, left: 2, height: 14, width: 18, zIndex: 25 }}
+              className="flex items-center justify-center rounded bg-white/80 text-slate-400 hover:text-slate-700 hover:bg-white transition-colors shadow-sm">
+              <svg aria-hidden="true" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="15 18 9 12 15 6" />
+              </svg>
+            </button>
+          </>
+        )}
       </div>
 
       {showNewCheckModal && (
@@ -1611,6 +2087,30 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
           defaultAccountId={getModalAccounts().length === 1 ? getModalAccounts()[0].id : ""}
           onClose={() => setShowNewCheckModal(false)}
           onConfirm={startCheck}
+        />
+      )}
+
+      {showCompareModal && (
+        <CompareChecksModal
+          logs={filteredLogs}
+          onClose={() => setShowCompareModal(false)}
+          onCompare={(newerId, olderId) => {
+            const newerLog = filteredLogs.find(l => l.id === newerId);
+            const olderLog = filteredLogs.find(l => l.id === olderId);
+            if (newerLog && olderLog) {
+              const token = openCompare(buildCompareData(newerLog, olderLog, schoolName));
+              axios.post("/analyze/compare-plans", { newer_log_id: newerId, older_log_id: olderId })
+                .then(({ data }) => {
+                  patchCompare(token, prev => ({ budgets: mergeMengonimIntoBudgets(prev.budgets, data) }));
+                })
+                .catch(() => {
+                  patchCompare(token, prev => ({
+                    budgets: prev.budgets.map(b => ({ ...b, mengonim: { status: "error" } })),
+                  }));
+                });
+            }
+            setShowCompareModal(false);
+          }}
         />
       )}
 
@@ -1644,6 +2144,17 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
           deleting={!!deletingId}
           onConfirm={handleDelete}
           onCancel={() => setDeleteTargetId(null)}
+        />
+      )}
+
+      {renameTarget && (
+        <RenameCheckModal
+          value={renameValue}
+          onChange={setRenameValue}
+          onSave={handleRenameSave}
+          onCancel={() => setRenameTarget(null)}
+          saving={savingRename}
+          error={renameError}
         />
       )}
 
@@ -1686,818 +2197,6 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
   );
 }
 
-// ─── Meetings: Status helpers ────────────────────────────────────────────────
-const MEETING_STATUS_OPTIONS = [
-  { value: "scheduled",  label: "נקבעה",   color: "#c2410c", bg: "#fff7ed", dot: "#f97316" },
-  { value: "completed",  label: "בוצעה",   color: "#15803d", bg: "#f0fdf4", dot: "#22c55e" },
-  { value: "cancelled",  label: "בוטלה",   color: "#b91c1c", bg: "#fef2f2", dot: "#ef4444" },
-  { value: "postponed",  label: "נדחתה",   color: "#1d4ed8", bg: "#eff6ff", dot: "#3b82f6" },
-  { value: "other",      label: "אחר",     color: "#475569", bg: "#f8fafc", dot: "#94a3b8" },
-];
-const STATUS_MAP = Object.fromEntries(MEETING_STATUS_OPTIONS.map(s => [s.value, s]));
-
-const MEETING_TYPE_OPTIONS = [
-  { value: "physical", label: "פיזי" },
-  { value: "remote",   label: "מרחוק" },
-];
-
-function formatMeetingDate(iso) {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  return d.toLocaleDateString("he-IL", { day: "2-digit", month: "2-digit", year: "numeric" });
-}
-
-// ─── Meetings: AdvisorCell (multi-select, checkboxes) ────────────────────────
-function AdvisorCell({ value, usersWithAccess, usersWithoutAccess, onChange, onRequestAccess }) {
-  const [open, setOpen] = useState(false);
-  const [showOthers, setShowOthers] = useState(false);
-  const containerRef = useRef(null);
-
-  useEffect(() => {
-    function h(e) { if (!containerRef.current?.contains(e.target)) { setOpen(false); setShowOthers(false); } }
-    document.addEventListener("mousedown", h);
-    return () => document.removeEventListener("mousedown", h);
-  }, []);
-
-  // value = array of profile objects [{id, full_name, email}]
-  const selected = value || [];
-
-  function toggle(user, hasAccess) {
-    const exists = selected.some(s => s.id === user.id);
-    const newSelected = exists
-      ? selected.filter(s => s.id !== user.id)
-      : [...selected, { id: user.id, full_name: user.full_name, email: user.email }];
-    if (!exists && !hasAccess) onRequestAccess(user.id, user.full_name || user.email);
-    onChange(newSelected);
-  }
-
-  return (
-    <div ref={containerRef} className="relative w-full">
-      <div className="w-full text-right text-sm px-1.5 py-0.5 rounded hover:ring-1 hover:ring-slate-300 transition-all cursor-pointer min-h-[24px]"
-        onClick={() => setOpen(o => !o)}>
-        {selected.length === 0
-          ? <span className="text-slate-400 text-lg font-light leading-none">+</span>
-          : <span className="text-slate-700">{selected.map(s => s.full_name || s.email).join(", ")}</span>}
-      </div>
-      {open && (
-        <div className="absolute z-30 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg py-1 min-w-[210px] max-h-60 overflow-y-auto">
-          <button type="button"
-            onMouseDown={e => { e.preventDefault(); onChange([]); }}
-            className="w-full text-right px-3 py-1.5 text-sm text-slate-400 hover:bg-slate-50">
-            בחר
-          </button>
-          {(usersWithAccess || []).map(u => (
-            <button key={u.id} type="button"
-              onMouseDown={e => { e.preventDefault(); toggle(u, true); }}
-              className="w-full text-right px-3 py-2 text-sm hover:bg-blue-50 flex items-center gap-2">
-              <span className={`w-3.5 h-3.5 rounded border flex-shrink-0 ${selected.some(s => s.id === u.id) ? "bg-blue-500 border-blue-500" : "border-slate-300"}`} aria-hidden="true" />
-              <span className="text-slate-700">{u.full_name || u.email}</span>
-            </button>
-          ))}
-          {(usersWithoutAccess || []).length > 0 && !showOthers && (
-            <button type="button"
-              onMouseDown={e => { e.preventDefault(); setShowOthers(true); }}
-              className="w-full text-right px-3 py-1.5 text-sm text-slate-400 hover:bg-slate-50 flex items-center justify-between border-t border-slate-100 mt-0.5 pt-2">
-              <span aria-hidden="true" className="text-xs opacity-60">›</span>
-              <span>אחר</span>
-            </button>
-          )}
-          {showOthers && (usersWithoutAccess || []).length > 0 && (
-            <>
-              <div className="border-t border-slate-100 mt-0.5 pt-1">
-                <p className="px-3 py-0.5 text-[11px] text-slate-400">ללא גישה לבית הספר:</p>
-              </div>
-              {(usersWithoutAccess || []).map(u => (
-                <div key={u.id} className="relative group/noAccess">
-                  <button type="button"
-                    onMouseDown={e => { e.preventDefault(); toggle(u, false); }}
-                    className="w-full text-right px-3 py-2 text-sm text-slate-400 hover:bg-orange-50 flex items-center gap-2">
-                    <span className={`w-3.5 h-3.5 rounded border flex-shrink-0 ${selected.some(s => s.id === u.id) ? "bg-orange-400 border-orange-400" : "border-slate-300"}`} aria-hidden="true" />
-                    {u.full_name || u.email}
-                  </button>
-                  <div className="hidden group-hover/noAccess:block absolute right-full top-0 mr-2 bg-slate-800 text-white text-xs rounded-lg p-2 w-52 z-50 leading-snug pointer-events-none" dir="rtl">
-                    ליועץ זה אין גישה לבית הספר. במידה ותבחרו בו, תישלח בקשה לגורם המאשר.
-                  </div>
-                </div>
-              ))}
-            </>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─── Meetings: DeleteMeetingModal ─────────────────────────────────────────────
-function DeleteMeetingModal({ onConfirm, onCancel }) {
-  const { ref, handleKeyDown } = useFocusTrap(onCancel);
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" dir="rtl">
-      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="del-meeting-title"
-        onKeyDown={handleKeyDown}
-        className="bg-white rounded-2xl shadow-2xl p-6 w-[340px] flex flex-col gap-4">
-        <h2 id="del-meeting-title" className="text-base font-bold text-slate-800 text-center">מחיקת פגישה</h2>
-        <p className="text-sm text-slate-600 text-center">האם למחוק את הפגישה לצמיתות? לא ניתן לשחזר פעולה זו.</p>
-        <div className="flex gap-3 justify-center mt-1">
-          <button type="button" onClick={onConfirm}
-            className="px-5 py-2 rounded-full bg-red-600 hover:bg-red-700 text-white text-sm font-semibold transition-colors">
-            מחק
-          </button>
-          <button type="button" onClick={onCancel}
-            className="px-5 py-2 rounded-full border border-slate-300 hover:border-slate-400 text-slate-600 text-sm font-semibold transition-colors">
-            ביטול
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── Meetings: MeetingTypeSelect ───────────────────────────────────────────────
-function MeetingTypeSelect({ value, onChange }) {
-  const [open, setOpen] = useState(false);
-  const containerRef = useRef(null);
-
-  useEffect(() => {
-    function h(e) { if (!containerRef.current?.contains(e.target)) setOpen(false); }
-    document.addEventListener("mousedown", h);
-    return () => document.removeEventListener("mousedown", h);
-  }, []);
-
-  const selected = MEETING_TYPE_OPTIONS.find(o => o.value === value);
-
-  return (
-    <div ref={containerRef} className="relative w-full">
-      <div className="w-full text-right text-sm px-0 py-0.5 rounded hover:ring-1 hover:ring-slate-300 transition-all cursor-pointer min-h-[24px]"
-        onClick={() => setOpen(o => !o)}>
-        {selected
-          ? <span className="text-slate-700">{selected.label}</span>
-          : <span className="text-slate-400 text-lg font-light leading-none">+</span>}
-      </div>
-      {open && (
-        <div className="absolute z-30 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg py-1 min-w-[100px]">
-          <button type="button"
-            onMouseDown={e => { e.preventDefault(); onChange(""); setOpen(false); }}
-            className="w-full text-right px-3 py-1.5 text-sm text-slate-400 hover:bg-slate-50">
-            בחר
-          </button>
-          {MEETING_TYPE_OPTIONS.map(o => (
-            <button key={o.value} type="button"
-              onMouseDown={e => { e.preventDefault(); onChange(o.value); setOpen(false); }}
-              className={`w-full text-right px-3 py-2 text-sm hover:bg-blue-50 transition-colors ${value === o.value ? "text-blue-600 font-semibold" : "text-slate-700"}`}>
-              {o.label}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─── Meetings: NoParticipantsModal ───────────────────────────────────────────
-function NoParticipantsModal({ onClose }) {
-  const { ref, handleKeyDown } = useFocusTrap(onClose);
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center" dir="rtl">
-      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="no-part-title"
-        onKeyDown={handleKeyDown}
-        className="bg-white rounded-2xl shadow-2xl p-6 w-[360px] flex flex-col gap-4">
-        <h2 id="no-part-title" className="text-base font-bold text-slate-800 text-center">לא נבחרו משתתפים</h2>
-        <p className="text-sm text-slate-600 text-center leading-relaxed">
-          טרם נבחרו משתתפים בפגישה. יש לבחור משתתפים ולנסות מחדש.
-        </p>
-        <div className="flex justify-center mt-1">
-          <button type="button" onClick={onClose}
-            className="px-6 py-2 rounded-full bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold transition-colors">
-            אישור
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── Meetings: MeetingRow (always inline-editable) ───────────────────────────
-function MeetingRow({ meeting, onSave, onRequestDelete, onOpenNotes, usersWithAccess, usersWithoutAccess, contacts, onRequestAccess, onReminderOn }) {
-  const [draft, setDraft] = useState({ ...meeting });
-  const [showDate, setShowDate] = useState(false);
-  const [showStatus, setShowStatus] = useState(false);
-  const [showReminderTip, setShowReminderTip] = useState(false);
-  const [showNoParticipantsModal, setShowNoParticipantsModal] = useState(false);
-  const [showActionsMenu, setShowActionsMenu] = useState(false);
-  const rowRef = useRef(null);
-  const actionsMenuRef = useRef(null);
-  // Track what was last sent so blur doesn't double-save after an immediate save
-  const lastSentRef = useRef(null);
-
-  useEffect(() => { setDraft({ ...meeting }); lastSentRef.current = null; }, [meeting.id]);
-
-  useEffect(() => {
-    function h(e) { if (!actionsMenuRef.current?.contains(e.target)) setShowActionsMenu(false); }
-    if (showActionsMenu) document.addEventListener("mousedown", h);
-    return () => document.removeEventListener("mousedown", h);
-  }, [showActionsMenu]);
-
-  function set(field, val) {
-    setDraft(p => ({ ...p, [field]: val }));
-  }
-
-  function saveDraft(draftToSave) {
-    lastSentRef.current = JSON.stringify(draftToSave);
-    onSave(draftToSave);
-  }
-
-  function handleRowBlur(e) {
-    if (rowRef.current?.contains(e.relatedTarget)) return;
-    if (showDate || showStatus) return;
-    const curr = JSON.stringify(draft);
-    const baseline = lastSentRef.current ?? JSON.stringify(meeting);
-    if (baseline !== curr) saveDraft(draft);
-  }
-
-  const status = STATUS_MAP[draft.status] || STATUS_MAP.other;
-  const cellInput = "w-full bg-transparent border-0 outline-none text-sm text-right text-slate-700 cursor-pointer rounded focus:bg-white focus:ring-1 focus:ring-blue-300 px-0 py-0 focus:px-1.5 focus:py-0.5 transition-all";
-
-  return (
-    <>
-      {showNoParticipantsModal && <NoParticipantsModal onClose={() => setShowNoParticipantsModal(false)} />}
-      <tr ref={rowRef} onBlur={handleRowBlur}
-        className="border-b border-slate-100 hover:bg-slate-50/50 transition-colors group">
-        {/* תאריך */}
-        <td className="py-2.5 px-2">
-          <div className="relative">
-            <button type="button"
-              onMouseDown={e => e.stopPropagation()}
-              onClick={() => setShowDate(o => !o)}
-              className="text-sm text-right w-full hover:text-blue-600 transition-colors cursor-pointer font-medium text-slate-700 whitespace-nowrap">
-              {draft.meeting_date ? formatMeetingDate(draft.meeting_date) : <span className="text-slate-300 font-normal">—</span>}
-            </button>
-            {showDate && <DatePickerPopover value={draft.meeting_date}
-              onChange={v => { const nd = { ...draft, meeting_date: v }; setDraft(nd); setShowDate(false); saveDraft(nd); }}
-              onClose={() => setShowDate(false)} />}
-          </div>
-        </td>
-        {/* סטטוס */}
-        <td className="py-2.5 px-2">
-          <div className="relative">
-            <button type="button" onClick={() => setShowStatus(o => !o)}
-              className="flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-full cursor-pointer hover:opacity-80 whitespace-nowrap transition-opacity"
-              style={{ background: status.bg, color: status.color }}>
-              <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: status.dot }} aria-hidden="true" />
-              {status.label}
-            </button>
-            {showStatus && (
-              <div className="absolute z-30 mt-1 right-0 bg-white border border-slate-200 rounded-xl shadow-lg py-1 min-w-[110px]" role="listbox">
-                {MEETING_STATUS_OPTIONS.map(o => {
-                  const s = STATUS_MAP[o.value];
-                  return (
-                    <button key={o.value} type="button" role="option"
-                      onMouseDown={e => { e.preventDefault(); const nd = { ...draft, status: o.value }; setDraft(nd); setShowStatus(false); saveDraft(nd); }}
-                      className="w-full text-right px-3 py-1.5 text-xs hover:bg-slate-50 flex items-center gap-2">
-                      <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: s.dot }} aria-hidden="true" />
-                      <span style={{ color: s.color }} className="font-medium">{s.label}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        </td>
-        {/* שעת התחלה */}
-        <td className="py-2.5 pr-2 pl-3">
-          <TimeInput id={`start-${meeting.id}`} value={draft.start_time || ""} onChange={v => set("start_time", v)} ariaLabel="שעת התחלה" />
-        </td>
-        {/* שעת סיום */}
-        <td className="py-2.5 px-1">
-          <TimeInput id={`end-${meeting.id}`} value={draft.end_time || ""} onChange={v => set("end_time", v)} ariaLabel="שעת סיום" />
-        </td>
-        {/* יועץ מבצע */}
-        <td className="py-2.5 px-2">
-          <AdvisorCell
-            value={draft.advisor_profiles || []}
-            usersWithAccess={usersWithAccess}
-            usersWithoutAccess={usersWithoutAccess}
-            onChange={profiles => { const nd = { ...draft, advisor_ids: profiles.map(x => x.id), advisor_profiles: profiles }; setDraft(nd); saveDraft(nd); }}
-            onRequestAccess={onRequestAccess}
-          />
-        </td>
-        {/* משתתפים */}
-        <td className="py-2.5 px-2">
-          <ParticipantsSelector contacts={contacts} selected={draft.participants || []}
-            onChange={v => {
-              const reminderOff = v.length === 0 && draft.reminder_enabled;
-              const nd = { ...draft, participants: v, ...(reminderOff ? { reminder_enabled: false } : {}) };
-              setDraft(nd);
-              saveDraft(nd);
-            }} />
-        </td>
-        {/* סוג */}
-        <td className="py-2.5 px-2">
-          <MeetingTypeSelect value={draft.meeting_type || ""} onChange={v => { const nd = { ...draft, meeting_type: v }; setDraft(nd); saveDraft(nd); }} />
-        </td>
-        {/* הערות */}
-        <td className="py-2.5 px-2 text-center">
-          <button type="button"
-            onMouseDown={e => { e.preventDefault(); onOpenNotes(meeting.id, draft.notes || "", val => { const nd = { ...draft, notes: val }; setDraft(nd); saveDraft(nd); }); }}
-            className="text-slate-400 hover:text-blue-600 transition-colors text-base leading-none" aria-label="פתח הערות">
-            {draft.notes ? "📝" : <span className="text-slate-400 text-lg font-light">+</span>}
-          </button>
-        </td>
-        {/* תזכורת */}
-        <td className="py-2.5 px-2 text-center">
-          <div className="relative inline-block">
-            <button type="button" onClick={() => {
-              const newVal = !draft.reminder_enabled;
-              if (newVal && (!draft.participants || draft.participants.length === 0)) {
-                setShowNoParticipantsModal(true);
-                return;
-              }
-              set("reminder_enabled", newVal);
-              if (newVal) onReminderOn?.();
-            }}
-              onMouseEnter={() => setShowReminderTip(true)}
-              onMouseLeave={() => setShowReminderTip(false)}
-              aria-label="תזכורת למשתתפים" aria-pressed={draft.reminder_enabled}
-              className={`text-xs font-semibold px-2 py-0.5 rounded-full border transition-colors ${draft.reminder_enabled ? "bg-green-100 border-green-400 text-green-700" : "bg-slate-100 border-slate-300 text-slate-400"}`}>
-              {draft.reminder_enabled ? "ON" : "OFF"}
-            </button>
-            {showReminderTip && !draft.reminder_enabled && (
-              <div role="tooltip"
-                className="absolute z-40 text-sm text-slate-800 leading-relaxed p-3 rounded-lg shadow-md pointer-events-none"
-                style={{ background: "#FEF08A", border: "1px solid #EAB308", top: "calc(100% + 4px)", left: 0, width: 265, whiteSpace: "normal" }}>
-                בהפעלת הכפתור תישלח למשתתפים תזכורת יום לפני קיום הפגישה.
-              </div>
-            )}
-          </div>
-        </td>
-        {/* Actions */}
-        {onRequestDelete && (
-          <td className="py-2.5 px-2 text-center">
-            <div className="relative inline-block" ref={actionsMenuRef}>
-              <button type="button" onClick={() => setShowActionsMenu(o => !o)} aria-label="פעולות"
-                className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-slate-700 transition-all flex items-center justify-center w-6 h-6 rounded hover:bg-slate-100">
-                <svg width="14" height="14" viewBox="0 0 16 4" fill="currentColor" aria-hidden="true">
-                  <circle cx="2" cy="2" r="1.5"/>
-                  <circle cx="8" cy="2" r="1.5"/>
-                  <circle cx="14" cy="2" r="1.5"/>
-                </svg>
-              </button>
-              {showActionsMenu && (
-                <div className="absolute left-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg py-1 z-30 min-w-[90px]">
-                  <button type="button"
-                    onMouseDown={e => { e.preventDefault(); onRequestDelete(meeting.id); setShowActionsMenu(false); }}
-                    className="w-full text-right px-3 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors whitespace-nowrap">
-                    מחק
-                  </button>
-                </div>
-              )}
-            </div>
-          </td>
-        )}
-      </tr>
-    </>
-  );
-}
-
-const STATUS_SORT_ORDER = { completed: 0, scheduled: 1, postponed: 2, other: 3 };
-
-// ─── Meetings: ReminderHeaderTooltip ─────────────────────────────────────────
-function ReminderHeaderTooltip() {
-  const [visible, setVisible] = useState(false);
-  return (
-    <div className="relative inline-flex">
-      <span className="cursor-help"
-        onMouseEnter={() => setVisible(true)} onMouseLeave={() => setVisible(false)}>
-        תזכורת
-      </span>
-      {visible && (
-        <div role="tooltip"
-          className="absolute z-40 text-sm text-slate-800 leading-relaxed p-3 rounded-lg shadow-md pointer-events-none"
-          style={{ background: "#FEF08A", border: "1px solid #EAB308", top: "calc(100% + 6px)", left: 0, width: 265, whiteSpace: "normal" }}>
-          בהפעלת הכפתור תישלח למשתתפים תזכורת יום לפני קיום הפגישה.
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─── Meetings: ReminderToast ──────────────────────────────────────────────────
-function ReminderToast({ onClose }) {
-  const [fading, setFading] = useState(false);
-  useEffect(() => {
-    const t1 = setTimeout(() => setFading(true), 2500);
-    const t2 = setTimeout(() => onClose(), 3000);
-    return () => { clearTimeout(t1); clearTimeout(t2); };
-  }, [onClose]);
-  return (
-    <div className="fixed bottom-6 left-6 z-50" dir="rtl"
-      style={{ opacity: fading ? 0 : 1, transition: "opacity 0.5s ease" }}>
-      <div className="bg-green-50 border border-green-400 rounded-xl shadow-xl p-4 flex items-start gap-3 max-w-xs">
-        <div className="flex-1">
-          <p className="text-sm text-green-800 font-semibold mb-0.5">תזכורת הופעלה ✓</p>
-          <p className="text-xs text-green-700 leading-snug">תישלח למשתתפים תזכורת יום לפני קיום הפגישה.</p>
-        </div>
-        <button type="button" onClick={onClose} aria-label="סגור התראה"
-          className="text-green-500 hover:text-green-800 text-lg leading-none mt-0.5 transition-colors">×</button>
-      </div>
-    </div>
-  );
-}
-
-// ─── Meetings: MeetingsTable ─────────────────────────────────────────────────
-function MeetingsTable({ meetings, usersWithAccess, usersWithoutAccess, contacts, onSave, onDelete, onOpenNotes, onRequestAccess, canDeleteMeetings }) {
-  const [sortField, setSortField] = useState(null); // null | "date" | "status" | "advisor" | "type"
-  const [sortDir, setSortDir]   = useState("asc");
-  const [pendingDeleteId, setPendingDeleteId] = useState(null);
-  const [reminderToast, setReminderToast] = useState(false);
-
-  function handleSort(field) {
-    if (sortField !== field) { setSortField(field); setSortDir("asc"); }
-    else if (sortDir === "asc") setSortDir("desc");
-    else { setSortField(null); setSortDir("asc"); }
-  }
-
-  function getSortIcon(field) {
-    if (sortField !== field) return <span className="text-slate-300 ml-0.5">⇅</span>;
-    return sortDir === "asc"
-      ? <span className="text-blue-500 ml-0.5">↑</span>
-      : <span className="text-blue-500 ml-0.5">↓</span>;
-  }
-
-  const sortedMeetings = [...meetings].sort((a, b) => {
-    if (!sortField) return 0;
-    let va, vb;
-    if (sortField === "date") {
-      va = a.meeting_date || ""; vb = b.meeting_date || "";
-    } else if (sortField === "status") {
-      va = STATUS_SORT_ORDER[a.status] ?? 3;
-      vb = STATUS_SORT_ORDER[b.status] ?? 3;
-    } else if (sortField === "advisor") {
-      const ap = a.advisor_profiles?.[0]; const bp = b.advisor_profiles?.[0];
-      va = (ap?.full_name || ap?.email || "ת"); vb = (bp?.full_name || bp?.email || "ת");
-    } else if (sortField === "type") {
-      va = a.meeting_type || ""; vb = b.meeting_type || "";
-    }
-    const cmp = typeof va === "number" ? va - vb : va.localeCompare(vb, "he");
-    return sortDir === "asc" ? cmp : -cmp;
-  });
-
-  const completedMeetings = meetings.filter(m => m.status === "completed");
-  const totalMinutes = completedMeetings.reduce((sum, m) => {
-    if (!m.start_time || !m.end_time) return sum;
-    const [sh, sm] = m.start_time.split(":").map(Number);
-    const [eh, em] = m.end_time.split(":").map(Number);
-    const diff = (eh * 60 + em) - (sh * 60 + sm);
-    return sum + (diff > 0 ? diff : 0);
-  }, 0);
-  const totalHoursText = totalMinutes === 0
-    ? "—"
-    : (() => {
-        const h = Math.floor(totalMinutes / 60);
-        const m = totalMinutes % 60;
-        if (h === 0) return `${m} דק'`;
-        if (m === 0) return `${h} שעות`;
-        return `${h}:${String(m).padStart(2, "0")} שעות`;
-      })();
-
-  function SortableHeader({ field, children }) {
-    return (
-      <button type="button" onClick={() => handleSort(field)}
-        className="flex items-center gap-0.5 text-xs font-semibold text-slate-500 hover:text-blue-600 transition-colors cursor-pointer">
-        {children}{getSortIcon(field)}
-      </button>
-    );
-  }
-
-  return (
-    <>
-      {reminderToast && <ReminderToast onClose={() => setReminderToast(false)} />}
-      {pendingDeleteId && (
-        <DeleteMeetingModal
-          onConfirm={() => { onDelete(pendingDeleteId); setPendingDeleteId(null); }}
-          onCancel={() => setPendingDeleteId(null)}
-        />
-      )}
-      <div className="glass-card rounded-2xl overflow-hidden border border-slate-200 flex flex-col" style={{ minHeight: "calc(100vh - 240px)" }}>
-        <div className="flex-1">
-          <table className="w-full text-right border-collapse">
-            <thead>
-              <tr className="border-b border-slate-200 bg-slate-50/80">
-                <th scope="col" className="py-3 px-2 pr-3 text-xs font-semibold text-slate-500">
-                  <SortableHeader field="date">תאריך</SortableHeader>
-                </th>
-                <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500">
-                  <SortableHeader field="status">סטטוס</SortableHeader>
-                </th>
-                <th scope="col" className="py-3 pr-2 pl-3 text-xs font-semibold text-slate-500 whitespace-nowrap" style={{ width: "100px" }}>התחלה</th>
-                <th scope="col" className="py-3 px-1 text-xs font-semibold text-slate-500 whitespace-nowrap" style={{ width: "52px" }}>סיום</th>
-                <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500">
-                  <SortableHeader field="advisor">יועץ מבצע</SortableHeader>
-                </th>
-                <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500">משתתפים</th>
-                <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500">
-                  <SortableHeader field="type">סוג</SortableHeader>
-                </th>
-                <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">הערות</th>
-                <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500">
-                  <ReminderHeaderTooltip />
-                </th>
-                {canDeleteMeetings && <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500"></th>}
-              </tr>
-            </thead>
-            <tbody>
-              {sortedMeetings.map(m => (
-                <MeetingRow key={m.id} meeting={m} onSave={onSave}
-                  onRequestDelete={canDeleteMeetings ? setPendingDeleteId : null}
-                  onOpenNotes={onOpenNotes}
-                  usersWithAccess={usersWithAccess} usersWithoutAccess={usersWithoutAccess}
-                  contacts={contacts} onRequestAccess={onRequestAccess}
-                  onReminderOn={() => setReminderToast(true)} />
-              ))}
-            </tbody>
-          </table>
-        </div>
-        {/* Summary footer */}
-        <div className="border-t border-slate-200 bg-slate-50/80 px-4 py-2.5 flex items-center gap-6 flex-shrink-0" dir="rtl">
-          <span className="text-sm text-slate-500">
-            סה"כ פגישות שבוצעו: <strong className="text-slate-800 font-semibold">{completedMeetings.length}</strong>
-          </span>
-          <span className="text-sm text-slate-500">
-            סה"כ שעות שבוצעו: <strong className="text-slate-800 font-semibold">{totalHoursText}</strong>
-          </span>
-        </div>
-      </div>
-    </>
-  );
-}
-
-// ─── Meetings: DatePicker ────────────────────────────────────────────────────
-const HEBREW_MONTHS = ["ינואר","פברואר","מרץ","אפריל","מאי","יוני","יולי","אוגוסט","ספטמבר","אוקטובר","נובמבר","דצמבר"];
-
-function DatePickerPopover({ value, onChange, onClose }) {
-  const today = new Date();
-  const initDate = value ? new Date(value) : today;
-  const [viewYear, setViewYear] = useState(initDate.getFullYear());
-  const [viewMonth, setViewMonth] = useState(initDate.getMonth());
-  const ref = useRef(null);
-
-  useEffect(() => {
-    function handler(e) { if (ref.current && !ref.current.contains(e.target)) onClose(); }
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [onClose]);
-
-  const firstDay = new Date(viewYear, viewMonth, 1).getDay();
-  const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
-  const blanks = (firstDay === 0 ? 6 : firstDay - 1);
-  const cells = [...Array(blanks).fill(null), ...Array(daysInMonth).fill(0).map((_, i) => i + 1)];
-
-  function select(day) {
-    const d = `${viewYear}-${String(viewMonth + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
-    onChange(d);
-    onClose();
-  }
-
-  const selected = value ? new Date(value) : null;
-
-  return (
-    <div ref={ref} className="absolute z-50 bg-white border border-slate-200 rounded-2xl shadow-xl p-3" style={{ top: "calc(100% + 4px)", right: 0, minWidth: 260 }} dir="rtl">
-      <div className="flex items-center justify-between mb-2 gap-1">
-        <button type="button" onClick={() => { if (viewMonth === 0) { setViewMonth(11); setViewYear(y => y - 1); } else setViewMonth(m => m - 1); }}
-          className="p-1 hover:bg-slate-100 rounded-lg text-slate-500 text-xs font-bold">→</button>
-        <span className="text-sm font-semibold text-slate-700">{HEBREW_MONTHS[viewMonth]} {viewYear}</span>
-        <button type="button" onClick={() => { if (viewMonth === 11) { setViewMonth(0); setViewYear(y => y + 1); } else setViewMonth(m => m + 1); }}
-          className="p-1 hover:bg-slate-100 rounded-lg text-slate-500 text-xs font-bold">←</button>
-      </div>
-      <div className="grid grid-cols-7 text-center text-[10px] text-slate-400 mb-1">
-        {["ב","ג","ד","ה","ו","ש","א"].map(d => <span key={d}>{d}</span>)}
-      </div>
-      <div className="grid grid-cols-7 gap-0.5">
-        {cells.map((day, i) => {
-          if (!day) return <span key={`b${i}`} />;
-          const isSelected = selected && selected.getDate() === day && selected.getMonth() === viewMonth && selected.getFullYear() === viewYear;
-          const isToday = today.getDate() === day && today.getMonth() === viewMonth && today.getFullYear() === viewYear;
-          return (
-            <button key={day} type="button" onClick={() => select(day)}
-              className={`w-7 h-7 rounded-lg text-xs font-medium transition-colors mx-auto
-                ${isSelected ? "bg-blue-600 text-white" : isToday ? "bg-blue-50 text-blue-700" : "hover:bg-slate-100 text-slate-700"}`}>
-              {day}
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-// ─── Meetings: NotesModal ────────────────────────────────────────────────────
-function NotesModal({ notes, onSave, onClose, users }) {
-  const [val, setVal] = useState(notes || "");
-  const [mentionQuery, setMentionQuery] = useState(null);
-  const [mentionStart, setMentionStart] = useState(null);
-  const [mentionIdx, setMentionIdx] = useState(0);
-  const [focused, setFocused] = useState(false);
-  const textareaRef = useRef(null);
-  const overlayRef = useRef(null);
-  const mentionListRef = useRef(null);
-  const { ref, handleKeyDown } = useFocusTrap(onClose);
-
-  // Shared typography — must be identical between overlay div and textarea
-  const editorStyle = {
-    fontFamily: "inherit",
-    fontSize: "0.875rem",
-    lineHeight: "1.5",
-    padding: "0.75rem 1rem",
-    textAlign: "right",
-    direction: "rtl",
-    boxSizing: "border-box",
-  };
-
-  function handleChange(e) {
-    const newVal = e.target.value;
-    setVal(newVal);
-    const cursor = e.target.selectionStart;
-    const textBefore = newVal.slice(0, cursor);
-    const atIdx = textBefore.lastIndexOf("@");
-    if (atIdx !== -1) {
-      const afterAt = textBefore.slice(atIdx + 1);
-      const query = afterAt.toLowerCase();
-      // Allow multi-word names: trigger if query is a prefix of any user name
-      const hasMatch = query === "" || (users || []).some(u =>
-        (u.full_name || u.email || "").toLowerCase().startsWith(query)
-      );
-      if (hasMatch) {
-        setMentionQuery(query);
-        setMentionStart(atIdx);
-        return;
-      }
-    }
-    setMentionQuery(null);
-    setMentionStart(null);
-  }
-
-  function selectMention(user) {
-    const cursor = textareaRef.current?.selectionStart ?? val.length;
-    const mention = `@${user.full_name || user.email}`;
-    const newVal = val.slice(0, mentionStart) + mention + " " + val.slice(cursor);
-    setVal(newVal);
-    setMentionQuery(null);
-    setMentionStart(null);
-    setTimeout(() => {
-      const pos = mentionStart + mention.length + 1;
-      textareaRef.current?.setSelectionRange(pos, pos);
-      textareaRef.current?.focus();
-    }, 0);
-  }
-
-  function extractMentionedIds(text) {
-    const ids = [];
-    for (const u of (users || [])) {
-      const name = u.full_name || u.email || "";
-      if (name && text.includes(`@${name}`)) ids.push(u.id);
-    }
-    return [...new Set(ids)];
-  }
-
-  function renderHighlightedText(text) {
-    const allNames = (users || [])
-      .map(u => u.full_name || u.email || "")
-      .filter(Boolean)
-      .sort((a, b) => b.length - a.length); // longest first → greedy match
-    if (!allNames.length) return <span>{text}</span>;
-    const escaped = allNames.map(n => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-    const regex = new RegExp(`@(${escaped.join("|")})`, "g");
-    const parts = [];
-    let lastIdx = 0;
-    let match;
-    while ((match = regex.exec(text)) !== null) {
-      if (match.index > lastIdx) parts.push(<span key={`t-${lastIdx}`}>{text.slice(lastIdx, match.index)}</span>);
-      parts.push(<span key={`m-${match.index}`} style={{ color: "#2563eb", fontWeight: 600 }}>{match[0]}</span>);
-      lastIdx = match.index + match[0].length;
-    }
-    if (lastIdx < text.length) parts.push(<span key={`t-${lastIdx}`}>{text.slice(lastIdx)}</span>);
-    return parts;
-  }
-
-  const filteredMentions = mentionQuery !== null
-    ? (users || []).filter(u => (u.full_name || u.email || "").toLowerCase().startsWith(mentionQuery)).slice(0, 8)
-    : [];
-
-  // Reset highlighted index when dropdown list changes
-  useEffect(() => { setMentionIdx(0); }, [filteredMentions.length, mentionQuery]);
-
-  // Scroll highlighted item into view
-  useEffect(() => {
-    const item = mentionListRef.current?.children[mentionIdx];
-    if (item) item.scrollIntoView({ block: "nearest" });
-  }, [mentionIdx]);
-
-  function handleTextareaKeyDown(e) {
-    if (filteredMentions.length === 0) return;
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      setMentionIdx(i => (i + 1) % filteredMentions.length);
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setMentionIdx(i => (i - 1 + filteredMentions.length) % filteredMentions.length);
-    } else if (e.key === "Enter") {
-      e.preventDefault();
-      selectMention(filteredMentions[mentionIdx]);
-    } else if (e.key === "Escape") {
-      e.stopPropagation(); // don't let this close the modal too
-      setMentionQuery(null);
-      setMentionStart(null);
-    }
-  }
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(15,23,42,0.55)" }}
-      onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
-      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="notes-modal-title"
-        onKeyDown={handleKeyDown} dir="rtl"
-        className="glass-card rounded-2xl p-6 w-full max-w-lg flex flex-col gap-4">
-        <h2 id="notes-modal-title" className="font-bold text-slate-900">הערות לפגישה</h2>
-        <div className="relative">
-          <label htmlFor="notes-textarea" className="sr-only">הערות</label>
-          {/* Wrapper provides the visual border + focus ring */}
-          <div style={{
-            position: "relative",
-            border: `1.5px solid ${focused ? "#0070F3" : "#e2e8f0"}`,
-            borderRadius: "0.75rem",
-            background: focused ? "white" : "rgba(255,255,255,0.8)",
-            boxShadow: focused ? "0 0 0 3px rgba(0,112,243,0.12)" : "none",
-            transition: "all 0.18s ease",
-          }}>
-            {/* Highlight overlay: renders @mentions in blue, sits behind the textarea */}
-            <div ref={overlayRef} aria-hidden="true" style={{
-              ...editorStyle,
-              position: "absolute",
-              inset: 0,
-              whiteSpace: "pre-wrap",
-              wordBreak: "break-words",
-              color: "#1e293b",
-              overflow: "hidden",
-              pointerEvents: "none",
-              borderRadius: "0.75rem",
-            }}>
-              {val
-                ? renderHighlightedText(val)
-                : <span style={{ color: "#94a3b8" }}>הכנס הערות כאן... השתמש ב-@ לתיוג משתמש</span>}
-            </div>
-            {/* Textarea: transparent text so overlay shows through; caret stays visible */}
-            <textarea
-              ref={textareaRef}
-              id="notes-textarea"
-              rows={6}
-              style={{
-                ...editorStyle,
-                display: "block",
-                width: "100%",
-                border: 0,
-                outline: "none",
-                resize: "none",
-                background: "transparent",
-                color: "transparent",
-                caretColor: "#1e293b",
-                borderRadius: "0.75rem",
-              }}
-              value={val}
-              onChange={handleChange}
-              onKeyDown={handleTextareaKeyDown}
-              onFocus={() => setFocused(true)}
-              onBlur={() => setFocused(false)}
-              onScroll={e => { if (overlayRef.current) overlayRef.current.scrollTop = e.target.scrollTop; }}
-              placeholder=""
-            />
-          </div>
-          {filteredMentions.length > 0 && (
-            <div ref={mentionListRef}
-              className="absolute bottom-full mb-1 right-0 left-0 bg-white border border-slate-200 rounded-xl shadow-lg py-1 z-50 max-h-44 overflow-y-auto" role="listbox">
-              {filteredMentions.map((u, i) => (
-                <button key={u.id} type="button" role="option"
-                  aria-selected={i === mentionIdx}
-                  onMouseDown={e => { e.preventDefault(); selectMention(u); }}
-                  onMouseEnter={() => setMentionIdx(i)}
-                  className={`w-full text-right px-3 py-2 text-sm text-slate-700 flex items-center gap-2 ${i === mentionIdx ? "bg-blue-50" : "hover:bg-blue-50"}`}>
-                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 text-xs flex items-center justify-center flex-shrink-0" aria-hidden="true">
-                    {(u.full_name || u.email || "?")[0].toUpperCase()}
-                  </span>
-                  {u.full_name || u.email}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-        <div className="flex gap-2 justify-end">
-          <button type="button" onClick={onClose} className="btn-ghost text-sm px-4 py-2">ביטול</button>
-          <button type="button" onClick={() => { onSave(val, extractMentionedIds(val)); }}
-            className="btn-blue text-sm px-4 py-2">שמור הערות</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ─── Meetings: AccessGrantModal ──────────────────────────────────────────────
 function AccessGrantModal({ advisorName, canGrant, onGrant, onRequest, onCancel }) {
   const { ref, handleKeyDown } = useFocusTrap(onCancel);
@@ -2526,160 +2225,6 @@ function AccessGrantModal({ advisorName, canGrant, onGrant, onRequest, onCancel 
   );
 }
 
-// ─── Meetings: TimeInput ─────────────────────────────────────────────────────
-function TimeInput({ id, value, onChange, ariaLabel }) {
-  function handleChange(e) {
-    const filtered = e.target.value.replace(/[^\d:]/g, "").slice(0, 5);
-    onChange(filtered);
-  }
-  function handleBlur() {
-    if (!value) return;
-    const digits = value.replace(/\D/g, "");
-    if (!digits) { onChange(""); return; }
-    let hh, mm;
-    if (digits.length <= 2) { hh = digits.padStart(2, "0"); mm = "00"; }
-    else if (digits.length === 3) { hh = "0" + digits[0]; mm = digits.slice(1); }
-    else { hh = digits.slice(0, 2); mm = digits.slice(2, 4); }
-    if (parseInt(hh) > 23) hh = "23";
-    if (parseInt(mm) > 59) mm = "59";
-    onChange(`${hh}:${mm}`);
-  }
-  return (
-    <input id={id} type="text" inputMode="numeric" maxLength={5}
-      className="w-full bg-transparent border-0 outline-none text-sm text-right text-slate-700 hover:bg-slate-100 hover:rounded focus:bg-white focus:ring-1 focus:ring-blue-300 focus:rounded py-0.5 px-0 focus:px-1 transition-all"
-      placeholder=""
-      value={value} onChange={handleChange} onBlur={handleBlur}
-      onKeyDown={e => { if (e.key === "Enter") e.currentTarget.blur(); }}
-      aria-label={ariaLabel} autoComplete="off" dir="ltr" />
-  );
-}
-
-// ─── Meetings: ParticipantsSelector ─────────────────────────────────────────
-function ParticipantsSelector({ contacts, selected, onChange }) {
-  const [open, setOpen] = useState(false);
-  const containerRef = useRef(null);
-
-  useEffect(() => {
-    function h(e) { if (!containerRef.current?.contains(e.target)) setOpen(false); }
-    document.addEventListener("mousedown", h);
-    return () => document.removeEventListener("mousedown", h);
-  }, []);
-
-  function toggle(c) {
-    const exists = selected.some(s => s.key === c.key);
-    onChange(exists ? selected.filter(s => s.key !== c.key) : [...selected, c]);
-  }
-
-  return (
-    <div ref={containerRef} className="relative">
-      <div className="w-full text-sm cursor-pointer px-1.5 py-0.5 rounded hover:ring-1 hover:ring-slate-300 min-h-[24px] transition-all"
-        onClick={() => setOpen(o => !o)}>
-        {selected.length === 0
-          ? <span className="text-slate-400 text-lg font-light leading-none">+</span>
-          : <span className="text-slate-700">{selected.map(s => s.name).join(", ")}</span>
-        }
-      </div>
-      {open && (
-        <div className="absolute z-30 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg py-1 min-w-[210px] max-h-60 overflow-y-auto">
-          {/* "בחר" header — clears all selection */}
-          <button type="button"
-            onMouseDown={e => { e.preventDefault(); onChange([]); }}
-            className="w-full text-right px-3 py-1.5 text-sm text-slate-400 hover:bg-slate-50">
-            בחר
-          </button>
-          {contacts.length === 0
-            ? <div className="px-4 py-3 text-xs text-slate-400 border-t border-slate-100">אין אנשי קשר מוגדרים</div>
-            : contacts.map(c => (
-              <button key={c.key} type="button"
-                className="w-full text-right px-3 py-2 text-sm hover:bg-blue-50 flex items-center gap-2"
-                onMouseDown={e => { e.preventDefault(); toggle(c); }}>
-                <span className={`w-3.5 h-3.5 rounded border flex-shrink-0 ${selected.some(s => s.key === c.key) ? "bg-blue-500 border-blue-500" : "border-slate-300"}`} aria-hidden="true" />
-                <span className="text-slate-700">{c.name}</span>
-                <span className="text-slate-400 text-xs mr-auto">{c.label}</span>
-              </button>
-            ))
-          }
-        </div>
-      )}
-    </div>
-  );
-}
-
-function AdvisorSearch({ schoolId, assigned, users, loadingUsers, onAdd, onRemove, onRetry }) {
-  const [query, setQuery] = useState("");
-  const [open, setOpen] = useState(false);
-  const containerRef = useRef(null);
-
-  const filtered = sortByRole(users).filter(u =>
-    !query.trim() || (u.full_name || u.email || "").toLowerCase().includes(query.toLowerCase())
-  );
-
-  return (
-    <div
-      ref={containerRef}
-      className="relative"
-      onBlur={e => { if (!containerRef.current?.contains(e.relatedTarget)) setOpen(false); }}
-    >
-      <label htmlFor={`advisor-search-${schoolId}`} className="sr-only">חיפוש יועץ</label>
-      <div
-        className="input-field flex flex-wrap items-center gap-1.5 min-h-[38px] cursor-text"
-        onClick={() => document.getElementById(`advisor-search-${schoolId}`)?.focus()}
-      >
-        {assigned.map(adv => (
-          <span key={adv.id} className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-0.5 rounded-full flex-shrink-0" style={{ background: "rgba(0,112,243,0.08)", color: "#1d4ed8" }}>
-            {adv.full_name || adv.email}
-            <button
-              type="button"
-              onMouseDown={e => { e.preventDefault(); e.stopPropagation(); onRemove(adv.id); }}
-              className="hover:text-red-500 transition-colors leading-none text-base"
-              aria-label={`הסר ${adv.full_name || adv.email}`}
-            >×</button>
-          </span>
-        ))}
-        <input
-          id={`advisor-search-${schoolId}`}
-          type="text"
-          className="flex-1 min-w-[100px] text-sm outline-none bg-transparent border-none p-0"
-          placeholder={loadingUsers ? "טוען..." : assigned.length === 0 ? "לחץ לפתיחת רשימה, או הקלד שם לסינון..." : "הוסף יועץ..."}
-          disabled={loadingUsers}
-          value={query}
-          onChange={e => setQuery(e.target.value)}
-          onFocus={() => setOpen(true)}
-          autoComplete="off"
-        />
-      </div>
-      {open && (
-        <div className="absolute z-20 right-0 left-0 mt-1 border border-slate-200 rounded-xl overflow-hidden bg-white max-h-52 overflow-y-auto shadow-lg">
-          {filtered.length === 0 ? (
-            <div className="px-4 py-3 text-sm text-slate-400">
-              {query.trim() ? "לא נמצאו יועצים" : users.length === 0 ? (
-                <button
-                  type="button"
-                  onMouseDown={e => { e.preventDefault(); if (onRetry) onRetry(); }}
-                  className="text-blue-500 hover:text-blue-700 underline"
-                >טעינה נכשלה — לחץ לניסיון חוזר</button>
-              ) : "לא נמצאו יועצים"}
-            </div>
-          ) : filtered.map(u => (
-            <button
-              key={u.id}
-              type="button"
-              onMouseDown={e => {
-                e.preventDefault();
-                onAdd(u.id);
-                setQuery("");
-              }}
-              className="w-full text-right px-4 py-2.5 text-sm text-slate-700 hover:bg-blue-50 transition-colors flex items-center justify-between"
-            >
-              <span>{u.full_name || u.email}</span>
-              <span className="text-xs text-slate-400">{ROLE_LABELS[u.role]}</span>
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
 
 function AccessSelector({ restrictTo, users, loadingUsers, onChange, schoolAdvisors, onSelectAdvisors }) {
   const [query, setQuery] = useState("");
@@ -2816,11 +2361,23 @@ export default function SchoolPage() {
   const { schoolId } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  const yearParam = searchParams.get("year");
+  const academicYear = ACADEMIC_YEARS.includes(yearParam) ? yearParam : DEFAULT_ACADEMIC_YEAR;
+  function setAcademicYear(year) {
+    setSearchParams(prev => {
+      const p = new URLSearchParams(prev);
+      p.set("year", year);
+      return p;
+    });
+  }
 
   const [school, setSchool] = useState(location.state?.school || null);
   const [accounts, setAccounts] = useState(location.state?.school?.gefen_accounts || []);
   const [logs, setLogs] = useState([]);
   const [logsError, setLogsError] = useState("");
+  const [logsLoading, setLogsLoading] = useState(true);
   const [meetingsError, setMeetingsError] = useState("");
   const [loading, setLoading] = useState(!location.state?.school);
   const [activeTab, setActiveTab] = useState("info");
@@ -2845,6 +2402,13 @@ export default function SchoolPage() {
   const [accessLinkedToAdvisors, setAccessLinkedToAdvisors] = useState(false);
   const [canDeleteSchool, setCanDeleteSchool] = useState(false);
   const [canDeleteMeetings, setCanDeleteMeetings] = useState(false);
+  const [meetingReminderToasts, setMeetingReminderToasts] = useState([]);
+  const [meetingAlreadySentModal, setMeetingAlreadySentModal] = useState(null);
+  function addMeetingReminderToast(msg) {
+    const id = Date.now();
+    setMeetingReminderToasts(prev => [...prev, { id, msg }]);
+    setTimeout(() => setMeetingReminderToasts(prev => prev.filter(t => t.id !== id)), 3000);
+  }
   const [canEditDirectly, setCanEditDirectly] = useState(false);
   const [canRequestUpdate, setCanRequestUpdate] = useState(false);
   const [requestSuccessData, setRequestSuccessData] = useState(null);
@@ -2893,6 +2457,7 @@ export default function SchoolPage() {
 
   useEffect(() => {
     async function load() {
+      setLogsLoading(true);
       const { data: { session } } = await supabase.auth.getSession();
       const userRole = session?.user.user_metadata?.role || "advisor";
       if (session) setRole(userRole);
@@ -2928,7 +2493,7 @@ export default function SchoolPage() {
 
       const [accountsResult, logsResult] = await Promise.allSettled([
         axios.get(`/schools/${schoolId}/accounts`),
-        axios.get(`/schools/${schoolId}/logs`),
+        axios.get(`/schools/${schoolId}/logs`, { params: { academic_year: academicYear } }),
       ]);
 
       if (accountsResult.status === "fulfilled") setAccounts(accountsResult.value.data || []);
@@ -2938,12 +2503,13 @@ export default function SchoolPage() {
       } else {
         try {
           await new Promise(r => setTimeout(r, 400));
-          const res = await axios.get(`/schools/${schoolId}/logs`);
+          const res = await axios.get(`/schools/${schoolId}/logs`, { params: { academic_year: academicYear } });
           setLogs(res.data || []);
         } catch {
           setLogsError("שגיאה בטעינת ההיסטוריה");
         }
       }
+      setLogsLoading(false);
       setLoading(false);
 
       // Defer user list after critical data renders — avoids competing with accounts/logs on mount
@@ -2952,13 +2518,13 @@ export default function SchoolPage() {
       }
     }
     load();
-  }, [schoolId]);
+  }, [schoolId, academicYear]);
 
   async function loadMeetings() {
     setMeetingsLoading(true);
     setMeetingsError("");
     try {
-      const res = await axios.get(`/schools/${schoolId}/meetings`);
+      const res = await axios.get(`/schools/${schoolId}/meetings`, { params: { academic_year: academicYear } });
       setMeetings(res.data || []);
     } catch {
       setMeetingsError("שגיאה בטעינת הפגישות — נסה לרענן");
@@ -2972,7 +2538,7 @@ export default function SchoolPage() {
       loadMeetings();
       if (users.length === 0 && (role === "owner" || role === "manager")) loadUsers();
     }
-  }, [activeTab, schoolId, role]);
+  }, [activeTab, schoolId, role, academicYear]);
 
   // When "היועצים המלווים שנבחרו" mode is active, keep restrict_access_to in sync
   useEffect(() => {
@@ -2989,6 +2555,7 @@ export default function SchoolPage() {
       advisor_ids: defaultAdvisor ? [defaultAdvisor.id] : [],
       participants: [],
       reminder_enabled: false,
+      academic_year: academicYear,
     };
     try {
       const res = await axios.post(`/schools/${schoolId}/meetings`, payload);
@@ -3052,6 +2619,21 @@ export default function SchoolPage() {
   async function deleteMeeting(meetingId) {
     await axios.delete(`/schools/${schoolId}/meetings/${meetingId}`);
     setMeetings(prev => prev.filter(m => m.id !== meetingId));
+  }
+
+  async function sendStatusReminderFromSchool(meeting, force = false) {
+    try {
+      const res = await axios.post(`/schools/meetings/${meeting.id}/send-status-reminder?force=${force}`);
+      if (res.data.already_sent && !force) {
+        setMeetingAlreadySentModal({ meeting, lastSentAt: res.data.last_sent_at, recipients: res.data.recipients });
+        return;
+      }
+      const names = (res.data.recipients || []).map(r => r.full_name || r.email || "").filter(Boolean).join(", ");
+      const d = meeting.meeting_date ? formatDate(meeting.meeting_date) : "";
+      addMeetingReminderToast(`נשלחה תזכורת ל-${names} עבור עדכון סטטוס פגישה (${d})`);
+    } catch (e) {
+      addMeetingReminderToast(e.response?.data?.detail || "שגיאה בשליחת התזכורת");
+    }
   }
 
   function getSchoolContacts() {
@@ -3276,12 +2858,15 @@ export default function SchoolPage() {
   }
 
   async function reloadLogs() {
+    setLogsLoading(true);
     try {
-      const res = await axios.get(`/schools/${schoolId}/logs`);
+      const res = await axios.get(`/schools/${schoolId}/logs`, { params: { academic_year: academicYear } });
       setLogs(res.data || []);
       setLogsError("");
     } catch {
       setLogsError("שגיאה בטעינת ההיסטוריה");
+    } finally {
+      setLogsLoading(false);
     }
   }
 
@@ -3427,8 +3012,18 @@ export default function SchoolPage() {
         <div className={`mx-auto px-6 py-10 ${activeTab === "checks" ? "max-w-6xl" : "max-w-4xl"}`}>
 
           {/* Page header */}
-          <div className="mb-5">
+          <div className="mb-5 flex items-center justify-between">
             <h1 className="text-2xl font-bold text-slate-900">{school?.name || "בית ספר"}</h1>
+            <button
+              type="button"
+              onClick={() => navigate(-1)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium text-slate-600 bg-white/70 hover:bg-slate-100 border border-slate-200 transition-colors"
+            >
+              <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M9 18l6-6-6-6" transform="rotate(180 12 12)" />
+              </svg>
+              חזרה
+            </button>
           </div>
 
           {/* Tab bar */}
@@ -3451,8 +3046,8 @@ export default function SchoolPage() {
                 {t.label}
               </button>
             ))}
-            {/* Division tabs — shown on far left when checks tab is active for שש-שנתי schools */}
-            {activeTab === "checks" && school?.stage === "sheshshnati" && (
+            {/* Division tabs — shown when checks/goals tab is active for שש-שנתי schools */}
+            {(activeTab === "checks" || activeTab === "goals") && school?.stage === "sheshshnati" && (
               <>
                 <div className="flex-1" />
                 {[{ id: "tikkon", label: "תיכון" }, { id: "beinayim", label: "חטיבת ביניים" }].map(t => (
@@ -3470,6 +3065,11 @@ export default function SchoolPage() {
                 ))}
               </>
             )}
+            {/* Academic year selector — far left; scopes פגישות/יעדים/בדיקות */}
+            {!((activeTab === "checks" || activeTab === "goals") && school?.stage === "sheshshnati") && <div className="flex-1" />}
+            <div className="pb-1.5">
+              <AcademicYearSelector value={academicYear} onChange={setAcademicYear} />
+            </div>
           </div>
 
           {/* ─── TAB: פרטי בית הספר ─── */}
@@ -3986,6 +3586,56 @@ export default function SchoolPage() {
                   <p className="text-slate-400 text-sm mb-4">לחץ על "הוסף פגישה" כדי להוסיף את הראשונה</p>
                 </div>
               ) : (
+                <>
+                {/* Status reminder toasts */}
+                {meetingReminderToasts.length > 0 && (
+                  <div className="fixed bottom-4 left-4 z-50 flex flex-col gap-2 items-start" dir="rtl">
+                    {meetingReminderToasts.map(t => (
+                      <div key={t.id} role="alert"
+                        className="flex items-start gap-3 bg-white border border-sky-200 rounded-xl shadow-lg px-4 py-3 w-80 max-w-[calc(100vw-2rem)]">
+                        <span className="text-xl mt-0.5 flex-shrink-0" aria-hidden="true">🔔</span>
+                        <p className="text-sm text-slate-800 leading-snug flex-1">{t.msg}</p>
+                        <button aria-label="סגור" onClick={() => setMeetingReminderToasts(prev => prev.filter(x => x.id !== t.id))}
+                          className="text-slate-400 hover:text-slate-600 flex-shrink-0 mt-0.5 p-0.5 rounded">
+                          <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" fill="currentColor">
+                            <path d="M10.5 1.5L1.5 10.5M1.5 1.5L10.5 10.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
+                          </svg>
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {meetingAlreadySentModal && (() => {
+                  const { meeting, lastSentAt, recipients } = meetingAlreadySentModal;
+                  const d = new Date(lastSentAt);
+                  const pad = n => String(n).padStart(2, "0");
+                  const dStr = `${pad(d.getDate())}.${pad(d.getMonth()+1)}.${String(d.getFullYear()).slice(-2)}`;
+                  const tStr = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+                  const names = (recipients || []).map(r => r.full_name || r.email || "").filter(Boolean).join(", ");
+                  return (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" dir="rtl">
+                      <div className="bg-white rounded-2xl shadow-2xl p-6 w-[360px] flex flex-col gap-4">
+                        <h2 className="text-base font-bold text-slate-800 text-center">תזכורת כבר נשלחה</h2>
+                        <p className="text-sm text-slate-600 text-center leading-relaxed">
+                          תזכורת כבר נשלחה ב-<strong>{dStr}</strong> בשעה <strong>{tStr}</strong>
+                          {names ? <> ל-<strong>{names}</strong></> : ""}.
+                          <br />האם לשלוח תזכורת חדשה בכל זאת?
+                        </p>
+                        <div className="flex gap-3 justify-center mt-1">
+                          <button type="button"
+                            onClick={() => { sendStatusReminderFromSchool(meeting, true); setMeetingAlreadySentModal(null); }}
+                            className="px-5 py-2 rounded-full bg-sky-600 hover:bg-sky-700 text-white text-sm font-semibold transition-colors">
+                            שלח תזכורת חדשה
+                          </button>
+                          <button type="button" onClick={() => setMeetingAlreadySentModal(null)}
+                            className="px-5 py-2 rounded-full border border-slate-300 hover:border-slate-400 text-slate-600 text-sm font-semibold transition-colors">
+                            ביטול
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
                 <MeetingsTable
                   meetings={meetings}
                   usersWithAccess={users.filter(u => u.role === "owner" || u.role === "manager" || advisorHasAccess(u.id))}
@@ -3996,18 +3646,23 @@ export default function SchoolPage() {
                   onOpenNotes={(meetingId, notes, onSave) => setNotesModal({ meetingId, notes, onSave })}
                   onRequestAccess={requestAdvisorAccess}
                   canDeleteMeetings={canDeleteMeetings}
+                  onSendStatusReminder={sendStatusReminderFromSchool}
                 />
+                </>
               )}
             </div>
           )}
 
           {/* ─── TAB: יעדים ─── */}
           {activeTab === "goals" && (
-            <div className="glass-card rounded-2xl p-12 text-center">
-              <p className="text-4xl mb-3">🎯</p>
-              <p className="font-semibold text-slate-700 mb-1">יעדים</p>
-              <p className="text-slate-400 text-sm">תכונה זו תהיה זמינה בקרוב</p>
-            </div>
+            <GoalsTab
+              accounts={accounts}
+              schoolId={schoolId}
+              schoolStage={school?.stage}
+              activeSubTab={activeSubTab}
+              academicYear={academicYear}
+              logs={logs}
+            />
           )}
 
           {activeTab === "checks" && (
@@ -4018,9 +3673,11 @@ export default function SchoolPage() {
               schoolStage={school?.stage}
               logs={logs}
               logsError={logsError}
+              logsLoading={logsLoading}
               onReloadLogs={reloadLogs}
               activeSubTab={activeSubTab}
               setActiveSubTab={setActiveSubTab}
+              academicYear={academicYear}
             />
           )}
         </div>

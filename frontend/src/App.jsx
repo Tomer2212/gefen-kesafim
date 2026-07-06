@@ -2,6 +2,8 @@ import { createContext, useContext, useEffect, useRef, useState } from "react";
 import { createBrowserRouter, Navigate, Outlet, RouterProvider } from "react-router-dom";
 import { MeetingRemindersProvider } from "./context/MeetingRemindersContext";
 import MeetingRemindersOverlay from "./components/MeetingRemindersOverlay";
+import { CompareChecksProvider } from "./context/CompareChecksContext";
+import CompareResultsWindow from "./components/CompareResultsWindow";
 import axios from "axios";
 import { supabase } from "./lib/supabase";
 import LoginPage from "./pages/LoginPage";
@@ -59,6 +61,7 @@ function AppLayout() {
     <>
       <Outlet />
       <MeetingRemindersOverlay />
+      <CompareResultsWindow />
     </>
   );
 }
@@ -119,7 +122,9 @@ export default function App() {
   return (
     <SessionContext.Provider value={session}>
       <MeetingRemindersProvider>
-        <RouterProvider router={router} />
+        <CompareChecksProvider>
+          <RouterProvider router={router} />
+        </CompareChecksProvider>
       </MeetingRemindersProvider>
     </SessionContext.Provider>
   );

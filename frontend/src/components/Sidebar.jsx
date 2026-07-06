@@ -410,6 +410,19 @@ export default function Sidebar({ dark = false }) {
             }
           }
         }
+
+        // Manual status reminders triggered by manager/owner
+        try {
+          const manualRes = await axios.get("/schools/meetings/pending-status-reminders");
+          const pending = manualRes.data || [];
+          for (const r of pending) {
+            addStatusReminder({ ...r });
+            // Mark shown in background (non-blocking)
+            axios.patch(`/schools/meetings/status-reminders/${r.reminder_id}/mark-shown`).catch(() => {});
+          }
+        } catch {
+          // non-fatal
+        }
       } catch (e) {
         console.error("[Reminders] error:", e);
       }

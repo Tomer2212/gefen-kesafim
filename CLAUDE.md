@@ -171,15 +171,20 @@ created_at TIMESTAMPTZ
 ```sql
 id UUID PRIMARY KEY
 name TEXT
-symbol TEXT          -- סמל מוסד (5-6 digits)
+symbol TEXT              -- סמל מוסד (5-6 digits)
 city TEXT
-authority TEXT       -- רשות מקומית / בעלות
-stage TEXT           -- 'yesodi' | 'beinayim' | 'tikkon' | 'sheshshnati' | 'other'
-finance_software TEXT -- 'kesafim2000' | 'payscool' | 'schoolcash'
+authority TEXT           -- בעלות (e.g. עירייה, ממלכתי)
+district TEXT            -- מחוז (e.g. תל אביב, ירושלים)
+stage TEXT               -- 'yesodi' | 'beinayim' | 'tikkon' | 'sheshshnati' | 'other'
+finance_software TEXT    -- 'kesafim2000' | 'payscool' | 'schoolcash'
 address TEXT
 school_phone TEXT
 notes TEXT
-restrict_access_to JSONB  -- null = all advisors; array of profile UUIDs = restricted
+restrict_access_to JSONB -- null = all advisors; array of profile UUIDs = restricted
+extra_contacts JSONB     -- additional contacts beyond the 3 standard roles
+org_id UUID              -- tenant identifier (FK → organisations or similar)
+status TEXT              -- 'active' | 'deleted' (soft-delete)
+deleted_at TIMESTAMPTZ   -- set when status = 'deleted'
 -- Contact: principal
 principal_name TEXT
 principal_phone TEXT
@@ -877,6 +882,14 @@ def get_notifications(user):
 ```
 
 Endpoints that require this pattern: `get_notifications`, any future stats/badge endpoint.
+
+---
+
+## Plan Presentation Rule (MANDATORY)
+
+Whenever a plan is presented to the user (plan mode, `ExitPlanMode`, or any "here's what I'm going to do" summary), it must be written **entirely in Hebrew** — no English.
+
+In addition, alongside the professional/technical explanation, include a **simplified version** of the plan written as if explaining it to a 5-year-old (שפה פשוטה כמו לילד בן 5) — short sentences, everyday words, no technical terms. Present both: the professional plan first, then a short "בפשטות:" section underneath.
 
 ---
 

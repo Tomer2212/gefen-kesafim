@@ -3,11 +3,14 @@ import { useNavigate } from "react-router-dom";
 import axios from "axios";
 import { supabase } from "../lib/supabase";
 import Sidebar from "../components/Sidebar";
+import PersonalMeetingsTab from "./PersonalMeetingsTab";
 
 export default function ProfilePage() {
   const navigate = useNavigate();
   const [userName, setUserName] = useState("");
   const [userEmail, setUserEmail] = useState("");
+  const [userId, setUserId] = useState(null);
+  const [userRole, setUserRole] = useState(null);
   const [loading, setLoading] = useState(true);
 
   const [editingName, setEditingName] = useState(false);
@@ -28,6 +31,8 @@ export default function ProfilePage() {
       try {
         const res = await axios.get("/schools/users/me");
         setUserName(res.data.full_name || session.user.email);
+        setUserId(res.data.id);
+        setUserRole(res.data.role);
       } catch {
         const metaName = session.user.user_metadata?.full_name;
         setUserName(metaName || session.user.email || "");
@@ -219,17 +224,21 @@ export default function ProfilePage() {
                 </div>
               </section>
 
-              {/* ─── Section 2: Meetings (placeholder) ─── */}
+              {/* ─── Section 2: Meetings ─── */}
               <section
                 aria-labelledby="section-meetings"
-                className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden"
+                className="bg-white rounded-2xl border border-slate-100 shadow-sm -mx-24"
                 style={{ boxShadow: "0 2px 16px rgba(0,112,243,0.06)" }}
               >
                 <div className="px-6 py-4 border-b border-slate-100">
                   <h2 id="section-meetings" className="text-base font-semibold text-slate-800">פגישות</h2>
                 </div>
-                <div className="px-6 py-10 flex items-center justify-center text-slate-400 text-sm">
-                  בקרוב
+                <div className="px-6 py-6">
+                  <PersonalMeetingsTab
+                    userId={userId}
+                    canDeleteMeetings={userRole === "owner" || userRole === "manager"}
+                    users={[]}
+                  />
                 </div>
               </section>
 

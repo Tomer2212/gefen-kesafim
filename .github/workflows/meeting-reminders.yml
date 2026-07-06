@@ -1,0 +1,19 @@
+name: Send Due Meeting Reminders
+
+on:
+  schedule:
+    # 03:00 UTC, Sunday-Thursday only (day-of-week: 0=Sunday ... 4=Thursday).
+    # The endpoint computes "today" using Asia/Jerusalem time itself, so the
+    # exact UTC firing time doesn't need to track DST.
+    - cron: '0 3 * * 0-4'
+  workflow_dispatch: {}
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call reminders endpoint
+        run: |
+          curl -sf -X POST "${{ secrets.BACKEND_URL }}/schools/meetings/send-due-reminders" \
+            -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
+            --max-time 60

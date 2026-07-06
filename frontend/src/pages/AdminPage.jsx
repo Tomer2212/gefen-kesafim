@@ -5,6 +5,7 @@ import * as XLSX from "xlsx";
 import Sidebar from "../components/Sidebar";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { supabase } from "../lib/supabase";
+import AdminMeetingsTab from "./AdminMeetingsTab";
 
 const DIVISION_OPTIONS = [
   { value: "tikkon", label: "חטיבה עליונה" },
@@ -632,6 +633,61 @@ function UserPermissionsModal({ user, permDefaults, overrides, loading, saving, 
   const { ref, handleKeyDown } = useFocusTrap(onClose);
   const roleLabel = { manager: "מנהל", advisor: "יועץ" }[user.role] ?? user.role;
 
+  // Local pending state — only sent to backend on "שמור שינויים"
+  const [localOverrides, setLocalOverrides] = useState(() => ({ ...overrides }));
+  const [isSavingAll, setIsSavingAll] = useState(false);
+  const prevLoadingRef = useRef(loading);
+
+  // Sync localOverrides once the initial load completes
+  useEffect(() => {
+    if (prevLoadingRef.current && !loading) {
+      setLocalOverrides({ ...overrides });
+    }
+    prevLoadingRef.current = loading;
+  }, [loading, overrides]);
+
+  function hasPendingChanges() {
+    const keys = new Set([...Object.keys(localOverrides), ...Object.keys(overrides)]);
+    for (const k of keys) {
+      if (localOverrides[k] !== overrides[k]) return true;
+    }
+    return false;
+  }
+  const dirty = hasPendingChanges();
+
+  function setLocalPerm(perm, value) {
+    setLocalOverrides(prev => {
+      if (value === null) {
+        const next = { ...prev };
+        delete next[perm];
+        return next;
+      }
+      return { ...prev, [perm]: value };
+    });
+  }
+
+  function resetAll() {
+    setLocalOverrides({});
+  }
+
+  async function handleSave() {
+    setIsSavingAll(true);
+    const keys = new Set([...Object.keys(localOverrides), ...Object.keys(overrides)]);
+    const promises = [];
+    for (const perm of keys) {
+      const newVal = localOverrides[perm];
+      const oldVal = overrides[perm];
+      if (newVal !== oldVal) {
+        promises.push(onSave(perm, newVal !== undefined ? newVal : null));
+      }
+    }
+    await Promise.all(promises);
+    setIsSavingAll(false);
+    onClose();
+  }
+
+  const hasLocalOverrides = Object.keys(localOverrides).length > 0;
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" dir="rtl">
       <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="uperm-title"
@@ -639,10 +695,7 @@ function UserPermissionsModal({ user, permDefaults, overrides, loading, saving, 
         className="bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 max-h-[90vh] flex flex-col">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
-          <div>
-            <h2 id="uperm-title" className="font-bold text-slate-800">הרשאות אישיות</h2>
-            <p className="text-xs text-slate-400 mt-0.5">{user.full_name || user.email} · {roleLabel}</p>
-          </div>
+          <h2 id="uperm-title" className="font-bold text-black">הרשאות אישיות — {user.full_name || user.email}</h2>
           <button onClick={onClose} aria-label="סגור" className="p-1.5 rounded-lg hover:bg-slate-100 transition-colors text-slate-400">
             <svg aria-hidden="true" className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -658,60 +711,71 @@ function UserPermissionsModal({ user, permDefaults, overrides, loading, saving, 
             </div>
           ) : (
             <>
-              <p className="text-xs text-slate-400 mb-4 leading-relaxed">
-                כאן ניתן להחריג משתמש זה מברירות המחדל של תפקידו.
-                "ברירת מחדל" משמעותה שהמשתמש ירש את ההרשאה מהגדרות תפקיד {roleLabel}.
+              <p className="text-xs text-slate-500 mb-4">
+                שורות המסומנות בכחול הוגדרו בהתאמה אישית ושונות מברירת המחדל של תפקיד {roleLabel}.
               </p>
               <div className="divide-y divide-slate-100">
-                {Object.entries(permDefaults).map(([perm, data]) => {
-                  const currentOverride = overrides[perm];   // true | false | undefined
-                  const isSaving = saving[perm];
-                  const roleDefault = data[user.role];
-                  const effectiveLabel = currentOverride !== undefined
-                    ? OVERRIDE_STATE_LABEL[String(currentOverride)]
-                    : `ברירת מחדל (${roleDefault ? "מורשה" : "חסום"})`;
+                {Object.entries(permDefaults)
+                  .filter(([perm]) => !(user.role === "advisor" && ADVISOR_NA_PERMS.has(perm)))
+                  .map(([perm, data]) => {
+                    const currentOverride = localOverrides[perm]; // true | false | undefined
+                    const isCustom = currentOverride !== undefined;
+                    const defaultVal = data[user.role];
 
-                  return (
-                    <div key={perm} className="py-4">
-                      <p className="text-sm font-medium text-slate-700 mb-2">{data.label}</p>
-                      <div className="flex gap-2 flex-wrap">
-                        {[
-                          { value: null,  label: `ברירת מחדל (${roleDefault ? "מורשה" : "חסום"})` },
-                          { value: true,  label: "מורשה תמיד" },
-                          { value: false, label: "חסום תמיד" },
-                        ].map(opt => {
-                          const isActive = opt.value === null
-                            ? currentOverride === undefined
-                            : currentOverride === opt.value;
-                          return (
-                            <button
-                              key={String(opt.value)}
-                              onClick={() => !isActive && onSave(perm, opt.value)}
-                              disabled={isSaving}
-                              className={`text-xs px-3 py-1.5 rounded-full border transition-all ${
-                                isSaving ? "opacity-50 cursor-wait" : ""
-                              } ${isActive
-                                ? opt.value === true  ? "bg-blue-600 text-white border-blue-600"
-                                : opt.value === false ? "bg-red-500 text-white border-red-500"
-                                :                       "bg-slate-700 text-white border-slate-700"
-                                : "bg-white text-slate-500 border-slate-200 hover:border-slate-400"
-                              }`}
-                            >
-                              {opt.label}
-                            </button>
-                          );
-                        })}
+                    const noClass = isCustom
+                      ? (currentOverride === false ? "bg-red-500 text-white" : "bg-white text-slate-400 hover:bg-slate-50")
+                      : (defaultVal === false ? "bg-red-50 text-red-300" : "bg-white text-slate-400 hover:bg-slate-50");
+
+                    const yesClass = isCustom
+                      ? (currentOverride === true ? "bg-green-500 text-white" : "bg-white text-slate-400 hover:bg-slate-50")
+                      : (defaultVal === true ? "bg-green-50 text-green-400" : "bg-white text-slate-400 hover:bg-slate-50");
+
+                    return (
+                      <div key={perm} className={`py-3 flex items-center justify-between gap-4 rounded-lg px-2 -mx-2 transition-colors ${isCustom ? "bg-blue-100" : ""}`}>
+                        <p className="text-sm font-medium text-black">{data.label}</p>
+                        <div
+                          role="group"
+                          aria-label={data.label}
+                          className={`inline-flex rounded-lg border border-slate-200 overflow-hidden text-xs font-semibold flex-shrink-0 ${isSavingAll ? "opacity-50 pointer-events-none" : ""}`}
+                          style={{ direction: "ltr" }}
+                        >
+                          <button
+                            onClick={() => setLocalPerm(perm, (currentOverride === false || defaultVal === false) ? null : false)}
+                            aria-pressed={currentOverride === false}
+                            className={`px-3 py-1.5 transition-colors focus:outline-none ${noClass}`}
+                          >לא</button>
+                          <button
+                            onClick={() => setLocalPerm(perm, (currentOverride === true || defaultVal === true) ? null : true)}
+                            aria-pressed={currentOverride === true}
+                            className={`px-3 py-1.5 border-r border-slate-200 transition-colors focus:outline-none ${yesClass}`}
+                          >כן</button>
+                        </div>
                       </div>
-                    </div>
-                  );
-                })}
+                    );
+                  })}
               </div>
             </>
           )}
         </div>
 
-        <div className="px-6 py-4 border-t border-slate-100 flex justify-end">
-          <button onClick={onClose} className="btn-ghost px-5 py-2 text-sm">סגור</button>
+        <div className="px-6 py-4 border-t border-slate-100 flex items-center justify-between">
+          {hasLocalOverrides ? (
+            <button onClick={resetAll} className="text-sm text-slate-500 hover:text-red-600 transition-colors">
+              איפוס הכל לברירת מחדל
+            </button>
+          ) : <span />}
+          <div className="flex items-center gap-3">
+            {dirty && (
+              <button
+                onClick={handleSave}
+                disabled={isSavingAll}
+                className="btn-primary px-5 py-2 text-sm disabled:opacity-50"
+              >
+                {isSavingAll ? "שומר..." : "שמור שינויים"}
+              </button>
+            )}
+            <button onClick={onClose} className="btn-ghost px-5 py-2 text-sm">ביטול</button>
+          </div>
         </div>
       </div>
     </div>
@@ -741,7 +805,11 @@ const ADVISOR_NA_PERMS = new Set(PERM_GROUPS.flatMap(g => [...(g.advisorNA || []
 export default function AdminPage() {
   const location = useLocation();
   const navigate  = useNavigate();
-  const [activeTab, setActiveTab] = useState("schools");
+  const [activeTab, setActiveTabState] = useState(() => new URLSearchParams(location.search).get("tab") || "schools");
+  const setActiveTab = (id) => {
+    setActiveTabState(id);
+    navigate(`/admin?tab=${id}`, { replace: true });
+  };
   const importRef = useRef(null);
   const userImportRef = useRef(null);
   const [myRole, setMyRole] = useState("");
@@ -750,6 +818,7 @@ export default function AdminPage() {
   const [canInviteUsers, setCanInviteUsers] = useState(false);
   const [canDeleteUsers, setCanDeleteUsers] = useState(false);
   const [canManagePermissions, setCanManagePermissions] = useState(false);
+  const [canDeleteMeetings, setCanDeleteMeetings] = useState(false);
 
   // Schools state
   const [schools, setSchools] = useState([]);
@@ -797,6 +866,8 @@ export default function AdminPage() {
   // Users state
   const [users, setUsers] = useState([]);
   const [loadingUsers, setLoadingUsers] = useState(false);
+  const [overrideCounts, setOverrideCounts] = useState({});  // { [userId]: count }
+  const [openActionsMenu, setOpenActionsMenu] = useState(null); // userId of open 3-dot menu
   const [roleError, setRoleError] = useState("");
   const [roleChangeConfirm, setRoleChangeConfirm] = useState(null); // { userId, userName, oldRole, newRole }
   const [inviteForm, setInviteForm] = useState({ email: "", full_name: "", role: "advisor" });
@@ -933,10 +1004,12 @@ export default function AdminPage() {
     setOverrideSaving(s => ({ ...s, [permission]: true }));
     try {
       await axios.put(`/schools/permissions/overrides/${overrideUser.id}`, { permission, allowed });
+      const userId = overrideUser.id;
       setOverrides(o => {
         const n = { ...o };
         if (allowed === null) delete n[permission];
         else n[permission] = allowed;
+        setOverrideCounts(c => ({ ...c, [userId]: Object.keys(n).length }));
         return n;
       });
     } catch {
@@ -945,6 +1018,13 @@ export default function AdminPage() {
       setOverrideSaving(s => { const n = { ...s }; delete n[permission]; return n; });
     }
   }
+
+  useEffect(() => {
+    if (!openActionsMenu) return;
+    const close = () => setOpenActionsMenu(null);
+    document.addEventListener("click", close);
+    return () => document.removeEventListener("click", close);
+  }, [openActionsMenu]);
 
   useEffect(() => {
     loadSchools();
@@ -961,6 +1041,7 @@ export default function AdminPage() {
         setCanInviteUsers(!!res.data?.can_invite_users);
         setCanDeleteUsers(!!res.data?.can_delete_users);
         setCanManagePermissions(!!res.data?.can_manage_user_permissions);
+        setCanDeleteMeetings(!!res.data?.can_delete_own_meetings);
       }).catch(() => {});
     });
   }, []);
@@ -1008,8 +1089,12 @@ export default function AdminPage() {
   async function loadUsers() {
     setLoadingUsers(true);
     try {
-      const res = await axios.get("/schools/users/all");
-      setUsers(Array.isArray(res.data) ? res.data : []);
+      const [usersRes, countsRes] = await Promise.all([
+        axios.get("/schools/users/all"),
+        axios.get("/schools/permissions/overrides/counts").catch(() => ({ data: {} })),
+      ]);
+      setUsers(Array.isArray(usersRes.data) ? usersRes.data : []);
+      setOverrideCounts(countsRes.data || {});
     } finally {
       setLoadingUsers(false);
     }
@@ -1449,6 +1534,7 @@ export default function AdminPage() {
   const tabs = [
     { id: "schools", label: "בתי ספר" },
     { id: "users", label: "משתמשים" },
+    { id: "meetings", label: "פגישות" },
     { id: "permissions", label: "הרשאות" },
     ...(showBillingTab ? [{ id: "billing", label: "חיובים" }] : []),
   ];
@@ -2257,16 +2343,38 @@ export default function AdminPage() {
                                 )}
                               </>
                             )}
-                            <button onClick={() => startEditUser(u)} disabled={editingUser?.id === u.id}
-                              className="text-xs px-3 py-1.5 rounded-lg text-blue-600 hover:bg-blue-50 transition-colors disabled:opacity-30">ערוך</button>
                             {u.role !== "owner" && (
                               <button onClick={() => openOverridePanel(u)}
                                 aria-label={`הרשאות אישיות: ${u.full_name || u.email}`}
-                                className="text-xs px-3 py-1.5 rounded-lg text-slate-500 hover:bg-slate-100 transition-colors">הרשאות</button>
+                                className="text-xs px-3 py-1.5 rounded-lg text-slate-500 hover:bg-slate-100 transition-colors inline-flex items-center gap-1.5">
+                                {overrideCounts[u.id] > 0 && (
+                                  <span className="inline-flex items-center justify-center w-4 h-4 text-[10px] font-bold bg-blue-500 text-white rounded-full leading-none">
+                                    {overrideCounts[u.id]}
+                                  </span>
+                                )}
+                                הרשאות בהתאמה אישית
+                              </button>
                             )}
                             {(myRole === "owner" || canDeleteUsers) && (
-                              <button onClick={() => setUserToDelete(u)}
-                                className="text-xs px-3 py-1.5 rounded-lg text-red-500 hover:bg-red-50 transition-colors">מחק</button>
+                              <div className="relative" onClick={e => e.stopPropagation()}>
+                                <button
+                                  onClick={() => setOpenActionsMenu(openActionsMenu === u.id ? null : u.id)}
+                                  aria-label="פעולות נוספות"
+                                  className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100 transition-colors"
+                                >
+                                  <svg aria-hidden="true" className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                                    <circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/>
+                                  </svg>
+                                </button>
+                                {openActionsMenu === u.id && (
+                                  <div className="absolute left-0 top-full mt-1 z-20 bg-white rounded-xl shadow-lg border border-slate-100 py-1 min-w-[80px]">
+                                    <button
+                                      onClick={() => { setUserToDelete(u); setOpenActionsMenu(null); }}
+                                      className="w-full text-right px-4 py-2 text-sm text-red-500 hover:bg-red-50 transition-colors"
+                                    >מחק</button>
+                                  </div>
+                                )}
+                              </div>
                             )}
                           </div>
                         </td>
@@ -2337,6 +2445,18 @@ export default function AdminPage() {
                   )}
                 </>
               )}
+            </div>
+          )}
+
+          {/* Meetings Tab — wider container to reduce dead space on both sides */}
+          {activeTab === "meetings" && (
+            <div className="-mx-24">
+              <AdminMeetingsTab
+                users={users}
+                loadingUsers={loadingUsers}
+                loadUsers={loadUsers}
+                canDeleteMeetings={canDeleteMeetings}
+              />
             </div>
           )}
 
