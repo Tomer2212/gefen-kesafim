@@ -14,12 +14,10 @@ jobs:
     steps:
       - name: Call reminders endpoint
         run: |
-          echo "URL length: ${#BACKEND_URL}"
-          curl -s -o response.txt -w "HTTP_STATUS:%{http_code}\n" -X POST "${BACKEND_URL}/schools/meetings/send-due-reminders" \
+          URL="${BACKEND_URL%/}"
+          curl -sf -X POST "${URL}/schools/meetings/send-due-reminders" \
             -H "X-Cron-Secret: ${CRON_SECRET}" \
             --max-time 60
-          echo "--- response body ---"
-          cat response.txt
         env:
           BACKEND_URL: ${{ secrets.BACKEND_URL }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
