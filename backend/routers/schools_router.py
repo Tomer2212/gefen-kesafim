@@ -1810,6 +1810,12 @@ def mark_status_reminder_shown(
 CRON_SECRET = os.getenv("CRON_SECRET", "")
 
 
+_HEBREW_WEEKDAY_NAMES = {
+    0: "יום שני", 1: "יום שלישי", 2: "יום רביעי", 3: "יום חמישי",
+    4: "יום שישי", 5: "יום שבת", 6: "יום ראשון",
+}
+
+
 def _due_meeting_dates(today):
     """Dates whose meetings should be reminded today. The daily trigger only
     runs Sun-Thu (Israeli business week); Thursday's run must also absorb
@@ -1822,8 +1828,35 @@ def _due_meeting_dates(today):
     return dates
 
 
-def _build_reminder_email_html(school_name: str, meeting_date: str, start_time: str | None, end_time: str | None) -> str:
-    time_str = f"{start_time or ''}" + (f" - {end_time}" if end_time else "")
+def _day_phrases(meeting_date: str, today: "date") -> tuple[str, str]:
+    """Returns (ל-form, ב-form) of the meeting day, e.g. ('למחר', 'מחר') or
+    ('ליום ראשון', 'ביום ראשון') — used when the reminder is sent more than
+    one day ahead (Thursday's run absorbing Saturday/Sunday meetings)."""
+    from datetime import date, timedelta
+    d = date.fromisoformat(meeting_date)
+    if d == today + timedelta(days=1):
+        return "למחר", "מחר"
+    day_name = _HEBREW_WEEKDAY_NAMES[d.weekday()]
+    return f"ל{day_name}", f"ב{day_name}"
+
+
+def _hebrew_join(names: list[str]) -> str:
+    names = [n for n in names if n]
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
+    return ", ".join(names[:-1]) + " ו" + names[-1]
+
+
+def _build_reminder_email_html(recipient_name: str, when_lamed: str, when_bet: str, meeting_date: str,
+                                start_time: str | None, advisor_name: str) -> str:
+    from datetime import date
+    first_name = (recipient_name or "").strip().split(" ")[0]
+    greeting = f"היי {first_name}," if first_name else "היי,"
+    date_fmt = date.fromisoformat(meeting_date).strftime("%d/%m/%y")
+    advisor_clause = f" עם {advisor_name}" if advisor_name else ""
+    time_clause = f", בשעה {start_time}" if start_time else ""
     return f"""
 <html>
 <body dir="rtl" style="font-family: Arial, sans-serif; font-size: 14px; color: #1e293b;
@@ -1835,10 +1868,12 @@ def _build_reminder_email_html(school_name: str, meeting_date: str, start_time: 
       <p style="margin: 4px 0 0 0; color: rgba(255,255,255,0.8); font-size: 12px;">תזכורת פגישה</p>
     </div>
     <div style="padding: 28px 24px;">
-      <p style="margin: 0 0 16px 0; font-size: 15px;">שלום,</p>
+      <p style="margin: 0 0 16px 0; font-size: 15px;">{greeting}</p>
+      <p style="margin: 0 0 16px 0; color: #334155; line-height: 1.8;">
+        רצינו להזכיר לך על הפגישה שמתוכננת {when_lamed}, בתאריך <b>{date_fmt}</b>{time_clause}{advisor_clause} על תקציב הגפ"ן.
+      </p>
       <p style="margin: 0; color: #334155; line-height: 1.8;">
-        זוהי תזכורת כי מחר, בתאריך <b>{meeting_date}</b>{f' בשעה <b>{time_str}</b>' if time_str.strip() else ''},
-        מתוכננת פגישה בבית הספר <b>{school_name}</b>.
+        נתראה {when_bet} :)
       </p>
     </div>
     <div style="background: #f1f5f9; padding: 12px 24px; text-align: center;">
@@ -1849,7 +1884,7 @@ def _build_reminder_email_html(school_name: str, meeting_date: str, start_time: 
 </html>"""
 
 
-def _send_reminder_email(to_email: str, html: str):
+def _send_reminder_email(to_email: str, subject: str, html: str):
     gmail_user = os.getenv("GMAIL_USER", "")
     gmail_password = os.getenv("GMAIL_APP_PASSWORD", "")
     if not gmail_user or not gmail_password:
@@ -1857,7 +1892,7 @@ def _send_reminder_email(to_email: str, html: str):
     msg = MIMEMultipart()
     msg["From"] = f"גפן AI <{gmail_user}>"
     msg["To"] = to_email
-    msg["Subject"] = "תזכורת: פגישה מתוכננת מחר"
+    msg["Subject"] = subject
     msg.attach(MIMEText(html, "html", "utf-8"))
     with smtplib.SMTP("smtp.gmail.com", 587, timeout=15) as server:
         server.ehlo()
@@ -1887,7 +1922,7 @@ def send_due_reminders(request: Request):
             db = get_admin_client()
             res = (
                 db.table("meetings")
-                .select("id, school_id, meeting_date, start_time, end_time, status, participants")
+                .select("id, school_id, meeting_date, start_time, end_time, status, participants, advisor_ids")
                 .eq("reminder_enabled", True)
                 .eq("status", "scheduled")
                 .in_("meeting_date", due_dates)
@@ -1916,6 +1951,16 @@ def send_due_reminders(request: Request):
     except Exception as exc:
         logger.warning("send_due_reminders: school name lookup failed (non-fatal): %s", exc)
 
+    advisor_ids = list({aid for m in meetings for aid in (m.get("advisor_ids") or [])})
+    advisor_names_map = {}
+    if advisor_ids:
+        try:
+            db = get_admin_client()
+            p_res = db.table("profiles").select("id, full_name").in_("id", advisor_ids).execute()
+            advisor_names_map = {p["id"]: p.get("full_name") for p in (p_res.data or [])}
+        except Exception as exc:
+            logger.warning("send_due_reminders: advisor name lookup failed (non-fatal): %s", exc)
+
     sent, failed, skipped_meetings = 0, 0, 0
     for m in meetings:
         try:
@@ -1929,17 +1974,23 @@ def send_due_reminders(request: Request):
                 skipped_meetings += 1
                 continue
 
-            html = _build_reminder_email_html(
-                school_name=schools_map.get(m["school_id"], ""),
-                meeting_date=m["meeting_date"],
-                start_time=m.get("start_time"),
-                end_time=m.get("end_time"),
-            )
+            when_lamed, when_bet = _day_phrases(m["meeting_date"], today_il)
+            advisor_name = _hebrew_join([advisor_names_map.get(aid) for aid in (m.get("advisor_ids") or [])])
+            subject = f"תזכורת: פגישה {when_bet}"
+
             for p in participants:
                 email_addr = p["email"].strip()
+                html = _build_reminder_email_html(
+                    recipient_name=p.get("name") or "",
+                    when_lamed=when_lamed,
+                    when_bet=when_bet,
+                    meeting_date=m["meeting_date"],
+                    start_time=m.get("start_time"),
+                    advisor_name=advisor_name,
+                )
                 status, error = "sent", None
                 try:
-                    _send_reminder_email(email_addr, html)
+                    _send_reminder_email(email_addr, subject, html)
                     sent += 1
                 except Exception as email_exc:
                     status, error = "failed", str(email_exc)
