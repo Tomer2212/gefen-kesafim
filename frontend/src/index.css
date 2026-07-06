@@ -237,6 +237,12 @@
 ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 99px; }
 ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
 
+/* ── Check-history table: thicker horizontal scrollbar ── */
+.hist-scroll-x::-webkit-scrollbar { height: 10px; }
+
+/* ── Dashboard main table: thicker horizontal scrollbar ── */
+.dash-scroll-x::-webkit-scrollbar { height: 10px; }
+
 /* ── File item slide-in ── */
 @keyframes slideInRight {
   from { opacity: 0; transform: translateX(12px); }

@@ -12,7 +12,7 @@ from typing import Annotated
 
 import httpx
 from bidi.algorithm import get_display
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from fastapi.responses import Response
 from openpyxl import load_workbook
 from pydantic import BaseModel
@@ -24,6 +24,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
+from academic_years import ACADEMIC_YEARS, DEFAULT_ACADEMIC_YEAR
 from auth import get_current_user, invalidate_profile_cache
 from supabase_client import get_admin_client, reset_admin_client
 
@@ -103,6 +104,59 @@ DIVISION_LABELS = {
     "other": "אחר",
 }
 
+# Fixed goal definitions set by the Ministry of Education — identical for every school,
+# every division ("all"), and evaluated separately per budget (תקציב) selected in the UI.
+# "kind" is "planning"/"reporting" (shown in the עמידה-tracked "יעדים" table, with goal_type/goal_number
+# stored per-school in school_goals) or "date" (shown read-only in "תאריכים חשובים", never saved/toggled).
+# Order here is chronological (target_date ascending) — keep it that way.
+GOAL_DEFINITIONS = [
+    {"key": "training_days_scholarships_deadline",  "division": "all", "kind": "date",      "goal_number": None, "label": "מועד אחרון לבקשת ימי הדרכה, בקשות לתוכניות משרדיות, פעימה ראשונה לבקשת שעות בודדות והמרת שכל\"מ. כמו כן, מועד אחרון לתכנון מלגות למסעות לפולין", "target_date": "2025-06-30"},
+    {"key": "menagim_activation_start",             "division": "all", "kind": "date",      "goal_number": None, "label": "תחילת הפעלה של מענים שנבחרו (כמו תוכן דיגיטלי, תוכנות ניהול והעסקת כוח אדם). בנוסף, ייפתח חלון נוסף להגשת בקשה להמרת שכל\"מ", "target_date": "2025-09-01"},
+    {"key": "planning_40_sep",                      "division": "all", "kind": "planning",  "goal_number": 40, "label": "יעד תכנון: לפחות 40% מהתקציב.",                         "target_date": "2025-09-15", "date_overrides": {"תשפ\"ז": "2026-09-01"}},
+    {"key": "bank_account_forms_nov",                "division": "all", "kind": "date",      "goal_number": None, "label": "מועד הגשת טפסים תקינים לפתיחת חשבון בנק בית ספרי (למוסדות חדשים), לצורך קבלת מקדמה ראשונה בחודש נובמבר", "target_date": "2025-09-15"},
+    {"key": "digital_content_cancel_deadline",       "division": "all", "kind": "date",      "goal_number": None, "label": "מועד אחרון לביטול רכישת ספקי תוכן דיגיטלי ללא צורך בתשלום קנס או חיוב", "target_date": "2025-09-20"},
+    {"key": "advance_payment_1_oct",                 "division": "all", "kind": "date",      "goal_number": None, "label": "פעימת תשלום מקדמה ראשונה (עד 40%), המותנית בהגשת 40% מהתכנון במועד שנקבע, ובכך שלבית הספר קיים חשבון בנק ורישיון בתוקף", "target_date": "2025-10-01"},
+    {"key": "bank_account_forms_dec",                "division": "all", "kind": "date",      "goal_number": None, "label": "מועד הגשת טפסים תקינים לפתיחת חשבון בנק בית ספרי (למוסדות חדשים), לצורך קבלת מקדמה ראשונה בחודש דצמבר", "target_date": "2025-10-15"},
+    {"key": "planning_70_oct",                      "division": "all", "kind": "planning",  "goal_number": 70, "label": "יעד תכנון: לפחות 70% מתקציב הגפ\"ן.",                    "target_date": "2025-10-31"},
+    {"key": "pedagogical_committee_deadline",        "division": "all", "kind": "date",      "goal_number": None, "label": "המועד אחרון לקיום הוועדה המלווה הפדגוגית ומילוי פרטיה במערכת", "target_date": "2025-10-31"},
+    {"key": "workplan_approval_supervision_deadline","division": "all", "kind": "date",      "goal_number": None, "label": "מועד אחרון לאישור תוכניות עבודה על ידי הפיקוח", "target_date": "2025-11-13"},
+    {"key": "workplan_approval_authority_deadline",  "division": "all", "kind": "date",      "goal_number": None, "label": "מועד אחרון לאישור תוכניות עבודה על ידי הרשות או הבעלות", "target_date": "2025-11-25"},
+    {"key": "workplan_changes_biweekly_start",       "division": "all", "kind": "date",      "goal_number": None, "label": "החל מחודש דצמבר, כל עדכון או שינוי בתוכנית העבודה \"יוקפץ\" אוטומטית לסבב אישורים (פיקוח ורשות) פעמיים בחודש – ב-1 וב-15 לחודש", "target_date": "2025-12-01"},
+    {"key": "reporting_valid_10_dec",                "division": "all", "kind": "reporting", "goal_number": 10, "label": "יעד דיווח: ביצוע תקין של לפחות 10% מהתקציב",             "target_date": "2025-12-31"},
+    {"key": "bank_account_final_deadline",           "division": "all", "kind": "date",      "goal_number": None, "label": "מועד אחרון מוחלט להסדרת חשבון בנק בית ספרי ורישיון. מוסד שלא יסדיר זאת עד לתאריך זה, לא יוכל להשתתף בתוכנית הגפ\"ן השנה", "target_date": "2025-12-31"},
+    {"key": "selections_lock_deadline",              "division": "all", "kind": "date",      "goal_number": None, "label": "נעילת בחירות: לא ניתן יותר לשנות בחירות שנעשו לגבי מרבית המענים המשרדיים. כמו כן, מועד אחרון למחיקת ימי הדרכה שלא אוישו", "target_date": "2025-12-31"},
+    {"key": "supplier_payments_deadline",            "division": "all", "kind": "date",      "goal_number": None, "label": "תשלומים לספקים: מועד אחרון לביטול רכישת פריט תוכן דיגיטלי (אחרת תחויבו ב-100% תשלום). כמו כן, חובה להעביר תשלום ראשון (או מלא, תלוי בתקציב) לתוכנות ניהול פדגוגי", "target_date": "2025-12-31"},
+    {"key": "second_payment_eligibility_check",      "division": "all", "kind": "date",      "goal_number": None, "label": "זכאות לתשלום: בדיקת זכאות לפעימת התשלום השנייה (מותנה בתכנון של 70% והגשת דוח מהשנה הקודמת)", "target_date": "2025-12-31"},
+    {"key": "planning_90_jan",                      "division": "all", "kind": "planning",  "goal_number": 90, "label": "יעד תכנון: 90% מהתקציב.",                               "target_date": "2026-01-31"},
+    {"key": "reporting_valid_25_feb",                "division": "all", "kind": "reporting", "goal_number": 25, "label": "יעד דיווח: ביצוע תקין של לפחות 25% מהתקציב",             "target_date": "2026-02-28"},
+    {"key": "scholarships_deadline_mar",             "division": "all", "kind": "date",      "goal_number": None, "label": "מועד אחרון להזנת מלגות בגפ\"ן",                          "target_date": "2026-03-31"},
+    {"key": "third_payment_apr",                     "division": "all", "kind": "date",      "goal_number": None, "label": "קבלת פעימת תשלום שלישית (השלמה ל-100% מהתקציב), בכפוף לעמידה ביעדי התכנון והדיווח", "target_date": "2026-04-01"},
+    {"key": "reporting_valid_70_may",                "division": "all", "kind": "reporting", "goal_number": 70, "label": "יעד דיווח: ביצוע תקין של לפחות 70% מהתקציב",             "target_date": "2026-05-31"},
+    {"key": "work_plan_changes_deadline_jun",        "division": "all", "kind": "date",      "goal_number": None, "label": "מועד אחרון לשינויים בתוכנית העבודה",                     "target_date": "2026-07-10"},
+    {"key": "feedback_deadline_jul",                 "division": "all", "kind": "date",      "goal_number": None, "label": "המועד האחרון להזנת משוב (פידבק) על תוכניות שצרכתם ממאגר התוכניות", "target_date": "2026-07-10"},
+    {"key": "final_changes_approval_supervision",    "division": "all", "kind": "date",      "goal_number": None, "label": "מועד אחרון לאישור סופי של השינויים שהוטמעו על ידי הפיקוח. לאחר מכן, תוכנית העבודה ננעלת סופית לשינויים", "target_date": "2026-07-13"},
+    {"key": "reporting_valid_85_jul",                "division": "all", "kind": "reporting", "goal_number": 85, "label": "יעד דיווח: ביצוע תקין של לפחות 85% מהתקציב",             "target_date": "2026-07-15"},
+    {"key": "final_changes_approval_authority",      "division": "all", "kind": "date",      "goal_number": None, "label": "מועד אחרון לאישור סופי של השינויים שהוטמעו על ידי הרשות. לאחר מכן, תוכנית העבודה ננעלת סופית לשינויים", "target_date": "2026-07-25"},
+    {"key": "receipts_deadline_aug",                 "division": "all", "kind": "date",      "goal_number": None, "label": "מועד אחרון להנפקת אסמכתאות עבור גפן תשפ\"ו",             "target_date": "2026-08-31"},
+    {"key": "year_close_critical_deadline",          "division": "all", "kind": "date",      "goal_number": None, "label": "מועד סגירת שנה קריטי: מועד אחרון להעלאת כל החשבוניות, כרטסות הנהלת החשבונות והגשת דו\"ח ביצוע שנתי מאושר וחתום ע\"י המנהל. אי הגשת הדוח כראוי תוביל לקיזוזי תקציב", "target_date": "2026-11-15"},
+    {"key": "final_ministry_reconciliation",         "division": "all", "kind": "date",      "goal_number": None, "label": "סיכום והתחשבנות סופית מטעם המשרד", "target_date": "2027-02-01"},
+]
+
+
+def _shift_goal_date(goal_def: dict, academic_year: str) -> str:
+    """target_date/label above are written for DEFAULT_ACADEMIC_YEAR — shift the year forward
+    (day/month unchanged) by however many academic years ahead `academic_year` is, unless an
+    explicit one-off override exists for that academic year in `date_overrides`."""
+    override = goal_def.get("date_overrides", {}).get(academic_year)
+    if override:
+        return override
+    iso_date = goal_def["target_date"]
+    offset = ACADEMIC_YEARS.index(academic_year) - ACADEMIC_YEARS.index(DEFAULT_ACADEMIC_YEAR)
+    if offset == 0:
+        return iso_date
+    y, m, d = iso_date.split("-")
+    return f"{int(y) + offset}-{m}-{d}"
+
 
 # ---------------------------------------------------------------------------
 # Request models
@@ -139,6 +193,14 @@ class GefenAccountIn(BaseModel):
     tmura_model: bool | None = None
 
 
+class GoalStatusIn(BaseModel):
+    division_type: str
+    budget_name: str
+    goal_key: str
+    academic_year: str
+    met: bool | None = None
+
+
 class AdvisorAssignIn(BaseModel):
     advisor_id: str
 
@@ -155,6 +217,7 @@ class MeetingIn(BaseModel):
     actual_duration: str | None = None
     notes: str | None = None
     reminder_enabled: bool | None = False
+    academic_year: str | None = None
 
 
 class MeetingStatusPatchIn(BaseModel):
@@ -228,6 +291,7 @@ class NotificationPreferencesIn(BaseModel):
 def list_schools(
     user: Annotated[dict, Depends(get_current_user)],
     include_deleted: bool = False,
+    academic_year: str = DEFAULT_ACADEMIC_YEAR,
 ):
     is_advisor = user["role"] not in ("owner", "manager")
     if include_deleted and is_advisor:
@@ -334,6 +398,47 @@ def list_schools(
         for row in (school.get("advisor_schools") or []):
             row["profiles"] = profiles_map.get(row["advisor_id"])
         school["meetings_stats"] = m_stats.get(school["id"])
+
+    # Enrich Q5 (check_metrics) and Q6 (school_goals) — used by the dashboard's advanced
+    # filter (checks/goals). Non-fatal: on failure the schools list still returns, the
+    # advanced filter fields simply find no matches.
+    metrics_by_school: dict = {}
+    goals_by_school: dict = {}
+    if school_ids:
+        try:
+            metrics_rows = (
+                db.table("check_metrics")
+                .select(
+                    "school_id, division_type, budget_name, pct_plan, pct_divuach, pct_tanuz, "
+                    "budget_amount, planned_amount, fixed_gap_abs, flexible_remaining, sum_chayav, sum_divuach, "
+                    "rejected_count, rejected_sum, no_pdf_count, no_pdf_sum, partial_count, partial_sum, "
+                    "finance_not_gefen_count, finance_not_gefen_sum, gefen_not_finance_count, gefen_not_finance_sum"
+                )
+                .eq("academic_year", academic_year)
+                .in_("school_id", school_ids)
+                .execute()
+            )
+            for r in (metrics_rows.data or []):
+                metrics_by_school.setdefault(r["school_id"], []).append(r)
+        except Exception as exc:
+            logger.warning("check_metrics enrichment failed (non-fatal): %s", exc)
+
+        try:
+            goal_rows = (
+                db.table("school_goals")
+                .select("school_id, division_type, budget_name, goal_key, met")
+                .eq("academic_year", academic_year)
+                .in_("school_id", school_ids)
+                .execute()
+            )
+            for r in (goal_rows.data or []):
+                goals_by_school.setdefault(r["school_id"], []).append(r)
+        except Exception as exc:
+            logger.warning("school_goals enrichment failed (non-fatal): %s", exc)
+
+    for school in schools:
+        school["check_metrics"] = metrics_by_school.get(school["id"], [])
+        school["goal_statuses"] = goals_by_school.get(school["id"], [])
 
     return schools
 
@@ -633,6 +738,113 @@ def delete_account(
     db = get_admin_client()
     db.table("gefen_accounts").delete().eq("id", account_id).eq("school_id", school_id).execute()
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Goals (יעדים)
+# ---------------------------------------------------------------------------
+
+@router.get("/goal-definitions")
+def list_goal_definitions(user: Annotated[dict, Depends(get_current_user)]):
+    """Ministry-wide goal list (key/kind/goal_number/label only) for the dashboard's
+    advanced-filter goal dropdown — a single source of truth instead of duplicating
+    GOAL_DEFINITIONS on the frontend."""
+    return [
+        {"key": d["key"], "kind": d["kind"], "goal_number": d["goal_number"], "label": d["label"]}
+        for d in GOAL_DEFINITIONS
+        if d["kind"] in ("planning", "reporting")
+    ]
+
+
+@router.get("/{school_id}/goals")
+def list_goals(
+    school_id: str,
+    division_type: str,
+    budget_name: str,
+    academic_year: str,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            defs = sorted(
+                (d for d in GOAL_DEFINITIONS if d["division"] in ("all", division_type)),
+                key=lambda d: d["target_date"],
+            )
+            tracked_defs = [d for d in defs if d["kind"] in ("planning", "reporting")]
+            date_defs = [d for d in defs if d["kind"] == "date"]
+
+            statuses = (
+                db.table("school_goals")
+                .select("goal_key, met")
+                .eq("school_id", school_id)
+                .eq("division_type", division_type)
+                .eq("budget_name", budget_name)
+                .eq("academic_year", academic_year)
+                .execute()
+            )
+            status_map = {r["goal_key"]: r["met"] for r in (statuses.data or [])}
+            goals = [
+                {
+                    "key": d["key"],
+                    "goal_type": d["kind"],
+                    "goal_number": d["goal_number"],
+                    "target_date": _shift_goal_date(d, academic_year),
+                    "current_status": None,
+                    "met": status_map.get(d["key"]),
+                }
+                for d in tracked_defs
+            ]
+            important_dates = [
+                {
+                    "label": d["label"].replace(DEFAULT_ACADEMIC_YEAR, academic_year),
+                    "target_date": _shift_goal_date(d, academic_year),
+                }
+                for d in date_defs
+            ]
+            return {"goals": goals, "important_dates": important_dates}
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("list_goals attempt 1 failed: %s — resetting client and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.error("list_goals failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+
+@router.patch("/{school_id}/goals")
+def set_goal_status(
+    school_id: str,
+    body: GoalStatusIn,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    from datetime import datetime, timezone
+
+    goal_def = next((d for d in GOAL_DEFINITIONS if d["key"] == body.goal_key), None)
+    if not goal_def or goal_def["kind"] not in ("planning", "reporting"):
+        raise HTTPException(status_code=400, detail="יעד לא נמצא")
+
+    db = get_admin_client()
+    row = (
+        db.table("school_goals")
+        .upsert(
+            {
+                "school_id": school_id,
+                "division_type": body.division_type,
+                "budget_name": body.budget_name,
+                "goal_key": body.goal_key,
+                "goal_type": goal_def["kind"],
+                "goal_number": goal_def["goal_number"],
+                "academic_year": body.academic_year,
+                "met": body.met,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            on_conflict="school_id,division_type,budget_name,goal_key,academic_year",
+        )
+        .execute()
+    )
+    return row.data[0]
 
 
 # ---------------------------------------------------------------------------
@@ -1247,6 +1459,537 @@ def get_meetings_stats(user: Annotated[dict, Depends(get_current_user)]):
     return stats
 
 
+@router.get("/meetings/all")
+def list_all_meetings(
+    user: Annotated[dict, Depends(get_current_user)],
+    status: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    advisor_id: str | None = None,
+    school_id: str | None = None,
+    search: str | None = None,
+    academic_year: str | None = None,
+):
+    """Org-wide meetings list for the admin 'פגישות' tab. Owner/manager only."""
+    _require_manager(user)
+    meetings: list = []
+    schools_map: dict = {}
+
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+
+            schools_q = (
+                db.table("schools")
+                .select("id, name, symbol, city, authority, district")
+                .eq("org_id", user["org_id"])
+                .eq("status", "active")
+            )
+            if school_id:
+                schools_q = schools_q.eq("id", school_id)
+            if search and search.strip():
+                s = search.strip().replace(",", "")
+                schools_q = schools_q.or_(f"name.ilike.%{s}%,symbol.ilike.%{s}%,city.ilike.%{s}%")
+            schools_rows = schools_q.execute().data or []
+            school_ids = [s["id"] for s in schools_rows]
+            schools_map = {s["id"]: s for s in schools_rows}
+
+            if not school_ids:
+                meetings = []
+                break
+
+            q = db.table("meetings").select("*").in_("school_id", school_ids)
+            if status:
+                q = q.eq("status", status)
+            if date_from:
+                q = q.gte("meeting_date", date_from)
+            if date_to:
+                q = q.lte("meeting_date", date_to)
+            if advisor_id:
+                q = q.filter("advisor_ids", "cs", json.dumps([advisor_id]))
+            if academic_year:
+                q = q.eq("academic_year", academic_year)
+            res = q.order("meeting_date", desc=True).execute()
+            meetings = res.data or []
+            break
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("list_all_meetings attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.error("list_all_meetings failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    for m in meetings:
+        sc = schools_map.get(m.get("school_id"), {})
+        m["school_name"] = sc.get("name", "")
+        m["school_symbol"] = sc.get("symbol", "")
+        m["school_city"] = sc.get("city", "")
+        m["school_authority"] = sc.get("authority", "")
+        m["school_district"] = sc.get("district", "")
+
+    all_ids: set[str] = set()
+    for m in meetings:
+        for uid in (m.get("advisor_ids") or []):
+            all_ids.add(uid)
+        if m.get("advisor_id"):
+            all_ids.add(m["advisor_id"])
+
+    if all_ids:
+        try:
+            db = get_admin_client()
+            profiles = db.table("profiles").select("id, full_name, email").in_("id", list(all_ids)).execute().data or []
+            profiles_map = {p["id"]: p for p in profiles}
+            for m in meetings:
+                ids = m.get("advisor_ids") or ([m["advisor_id"]] if m.get("advisor_id") else [])
+                m["advisor_profiles"] = [profiles_map[uid] for uid in ids if uid in profiles_map]
+        except Exception as exc:
+            logger.warning("list_all_meetings profile enrichment failed (non-fatal): %s", exc)
+            for m in meetings:
+                m["advisor_profiles"] = []
+    else:
+        for m in meetings:
+            m["advisor_profiles"] = []
+
+    return meetings
+
+
+# ---------------------------------------------------------------------------
+# Personal meetings (current user's own meetings — all roles)
+# ---------------------------------------------------------------------------
+
+@router.get("/meetings/my")
+def list_my_meetings(
+    user: Annotated[dict, Depends(get_current_user)],
+    status: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    academic_year: str | None = None,
+):
+    """Return meetings where the current user is listed as an advisor. Available to all roles."""
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+
+            # All school IDs in the org (needed to scope the query)
+            schools_res = db.table("schools").select("id, name, symbol, city, district") \
+                .eq("org_id", user["org_id"]).eq("status", "active").execute()
+            schools_map = {s["id"]: s for s in (schools_res.data or [])}
+            school_ids = list(schools_map.keys())
+
+            if not school_ids:
+                return []
+
+            q = db.table("meetings").select("*") \
+                .in_("school_id", school_ids) \
+                .filter("advisor_ids", "cs", json.dumps([user["id"]]))
+            if status:
+                q = q.eq("status", status)
+            if date_from:
+                q = q.gte("meeting_date", date_from)
+            if date_to:
+                q = q.lte("meeting_date", date_to)
+            if academic_year:
+                q = q.eq("academic_year", academic_year)
+            res = q.order("meeting_date", desc=True).execute()
+            meetings = res.data or []
+            break
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("list_my_meetings attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.error("list_my_meetings failed: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    for m in meetings:
+        sc = schools_map.get(m.get("school_id"), {})
+        m["school_name"] = sc.get("name", "")
+        m["school_symbol"] = sc.get("symbol", "")
+        m["school_city"] = sc.get("city", "")
+        m["school_district"] = sc.get("district", "")
+
+    if meetings:
+        try:
+            db = get_admin_client()
+            all_ids: set[str] = set()
+            for m in meetings:
+                for uid in (m.get("advisor_ids") or []):
+                    all_ids.add(uid)
+            if all_ids:
+                profiles = db.table("profiles").select("id, full_name, email") \
+                    .in_("id", list(all_ids)).execute().data or []
+                profiles_map = {p["id"]: p for p in profiles}
+                for m in meetings:
+                    ids = m.get("advisor_ids") or []
+                    m["advisor_profiles"] = [profiles_map[uid] for uid in ids if uid in profiles_map]
+        except Exception as exc:
+            logger.warning("list_my_meetings profile enrichment failed (non-fatal): %s", exc)
+            for m in meetings:
+                m.setdefault("advisor_profiles", [])
+    else:
+        pass
+
+    return meetings
+
+
+# ---------------------------------------------------------------------------
+# Meeting status reminders (manual trigger by manager/owner)
+# ---------------------------------------------------------------------------
+
+@router.post("/meetings/{meeting_id}/send-status-reminder")
+def send_status_reminder(
+    meeting_id: str,
+    user: Annotated[dict, Depends(get_current_user)],
+    force: bool = False,
+):
+    """Send a manual status-update reminder to the meeting's advisors."""
+    from datetime import datetime, timezone, timedelta
+    _require_manager(user)
+
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+
+            # Fetch meeting
+            m_res = db.table("meetings").select("*").eq("id", meeting_id).execute()
+            if not m_res.data:
+                raise HTTPException(status_code=404, detail="פגישה לא נמצאה")
+            meeting = m_res.data[0]
+
+            if meeting["status"] != "scheduled":
+                raise HTTPException(status_code=400, detail="הפגישה אינה במצב 'נקבעה'")
+
+            now = datetime.now(timezone.utc)
+            cutoff = (now - timedelta(hours=72)).isoformat()
+
+            # Check for existing recent reminder (within 72h)
+            existing_res = db.table("meeting_status_reminders").select("id, sent_at, recipient_id") \
+                .eq("meeting_id", meeting_id).gte("sent_at", cutoff).execute()
+
+            if existing_res.data and not force:
+                last = max(existing_res.data, key=lambda r: r["sent_at"])
+                recipient_ids = list({r["recipient_id"] for r in existing_res.data})
+                p_res = db.table("profiles").select("id, full_name, email") \
+                    .in_("id", recipient_ids).execute()
+                profiles_map = {p["id"]: p for p in (p_res.data or [])}
+                return {
+                    "already_sent": True,
+                    "last_sent_at": last["sent_at"],
+                    "recipients": [profiles_map.get(rid, {"id": rid}) for rid in recipient_ids],
+                }
+
+            # Determine recipients: meeting advisors, else school's assigned advisors
+            advisor_ids = meeting.get("advisor_ids") or []
+            if not advisor_ids and meeting.get("advisor_id"):
+                advisor_ids = [meeting["advisor_id"]]
+            if not advisor_ids:
+                school_advisors = db.table("advisor_schools").select("advisor_id") \
+                    .eq("school_id", meeting["school_id"]).execute()
+                advisor_ids = [r["advisor_id"] for r in (school_advisors.data or [])]
+
+            if not advisor_ids:
+                raise HTTPException(status_code=400, detail="לא נמצאו יועצים מוקצים לפגישה זו")
+
+            records = [{
+                "meeting_id": meeting_id,
+                "school_id": meeting["school_id"],
+                "recipient_id": aid,
+                "sent_by": user["id"],
+            } for aid in advisor_ids]
+            db.table("meeting_status_reminders").insert(records).execute()
+
+            p_res = db.table("profiles").select("id, full_name, email") \
+                .in_("id", advisor_ids).execute()
+            profiles_map = {p["id"]: p for p in (p_res.data or [])}
+            return {
+                "ok": True,
+                "already_sent": False,
+                "recipients": [profiles_map.get(aid, {"id": aid}) for aid in advisor_ids],
+                "sent_at": now.isoformat(),
+            }
+        except HTTPException:
+            raise
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("send_status_reminder attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("send_status_reminder failed: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת")
+
+
+@router.get("/meetings/pending-status-reminders")
+def get_pending_status_reminders(user: Annotated[dict, Depends(get_current_user)]):
+    """Return pending (unshown) manual status reminders for the current user."""
+    from datetime import datetime, timezone, timedelta
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            now = datetime.now(timezone.utc)
+            cutoff = (now - timedelta(hours=72)).isoformat()
+
+            rem_res = db.table("meeting_status_reminders").select("id, meeting_id, school_id, sent_at") \
+                .eq("recipient_id", user["id"]).is_("shown_at", "null").gte("sent_at", cutoff).execute()
+            reminders = rem_res.data or []
+            if not reminders:
+                return []
+
+            meeting_ids = list({r["meeting_id"] for r in reminders})
+            m_res = db.table("meetings").select(
+                "id, school_id, meeting_date, start_time, end_time, status, notes, advisor_ids"
+            ).in_("id", meeting_ids).execute()
+            meetings_map = {m["id"]: m for m in (m_res.data or [])}
+
+            school_ids = list({r["school_id"] for r in reminders})
+            s_res = db.table("schools").select("id, name").in_("id", school_ids).execute()
+            schools_map = {s["id"]: s["name"] for s in (s_res.data or [])}
+
+            result = []
+            for r in reminders:
+                m = meetings_map.get(r["meeting_id"])
+                if not m:
+                    continue
+                if m["status"] != "scheduled":
+                    try:
+                        db.table("meeting_status_reminders").update({"shown_at": now.isoformat()}).eq("id", r["id"]).execute()
+                    except Exception:
+                        pass
+                    continue
+                result.append({
+                    "reminder_id": r["id"],
+                    "id": m["id"],
+                    "school_id": m["school_id"],
+                    "school_name": schools_map.get(m["school_id"], ""),
+                    "meeting_date": m["meeting_date"],
+                    "start_time": m["start_time"],
+                    "end_time": m["end_time"],
+                    "status": m["status"],
+                    "notes": m.get("notes"),
+                    "advisor_ids": m.get("advisor_ids") or [],
+                })
+            return result
+        except Exception as exc:
+            if attempt == 0:
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.warning("get_pending_status_reminders failed (non-fatal): %s", exc)
+                return []
+
+
+@router.patch("/meetings/status-reminders/{reminder_id}/mark-shown")
+def mark_status_reminder_shown(
+    reminder_id: str,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    """Mark a manual status reminder as shown (called after popup is dismissed)."""
+    from datetime import datetime, timezone
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            db.table("meeting_status_reminders").update({"shown_at": datetime.now(timezone.utc).isoformat()}) \
+                .eq("id", reminder_id).eq("recipient_id", user["id"]).execute()
+            return {"ok": True}
+        except Exception as exc:
+            if attempt == 0:
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.warning("mark_status_reminder_shown failed (non-fatal): %s", exc)
+                return {"ok": False}
+
+
+# ---------------------------------------------------------------------------
+# Automated meeting reminder emails (daily cron-triggered, Phase 1)
+# ---------------------------------------------------------------------------
+
+CRON_SECRET = os.getenv("CRON_SECRET", "")
+
+
+def _due_meeting_dates(today):
+    """Dates whose meetings should be reminded today. The daily trigger only
+    runs Sun-Thu (Israeli business week); Thursday's run must also absorb
+    Saturday and Sunday meetings since there is no Fri/Sat run to catch them."""
+    from datetime import timedelta
+    tomorrow = today + timedelta(days=1)
+    dates = [tomorrow]
+    if today.weekday() == 3:  # Thursday
+        dates += [tomorrow + timedelta(days=1), tomorrow + timedelta(days=2)]  # Saturday, Sunday
+    return dates
+
+
+def _build_reminder_email_html(school_name: str, meeting_date: str, start_time: str | None, end_time: str | None) -> str:
+    time_str = f"{start_time or ''}" + (f" - {end_time}" if end_time else "")
+    return f"""
+<html>
+<body dir="rtl" style="font-family: Arial, sans-serif; font-size: 14px; color: #1e293b;
+                       background: #f8fafc; margin: 0; padding: 24px;">
+  <div style="max-width: 520px; margin: 0 auto; background: white;
+              border-radius: 12px; border: 1px solid #e2e8f0; overflow: hidden;">
+    <div style="background: #0070F3; padding: 20px 24px;">
+      <p style="margin: 0; color: white; font-size: 14px; font-weight: 700;">גפן AI</p>
+      <p style="margin: 4px 0 0 0; color: rgba(255,255,255,0.8); font-size: 12px;">תזכורת פגישה</p>
+    </div>
+    <div style="padding: 28px 24px;">
+      <p style="margin: 0 0 16px 0; font-size: 15px;">שלום,</p>
+      <p style="margin: 0; color: #334155; line-height: 1.8;">
+        זוהי תזכורת כי מחר, בתאריך <b>{meeting_date}</b>{f' בשעה <b>{time_str}</b>' if time_str.strip() else ''},
+        מתוכננת פגישה בבית הספר <b>{school_name}</b>.
+      </p>
+    </div>
+    <div style="background: #f1f5f9; padding: 12px 24px; text-align: center;">
+      <p style="margin: 0; font-size: 11px; color: #94a3b8;">נשלח אוטומטית מגפן AI</p>
+    </div>
+  </div>
+</body>
+</html>"""
+
+
+def _send_reminder_email(to_email: str, html: str):
+    gmail_user = os.getenv("GMAIL_USER", "")
+    gmail_password = os.getenv("GMAIL_APP_PASSWORD", "")
+    if not gmail_user or not gmail_password:
+        raise RuntimeError("Gmail not configured")
+    msg = MIMEMultipart()
+    msg["From"] = f"גפן AI <{gmail_user}>"
+    msg["To"] = to_email
+    msg["Subject"] = "תזכורת: פגישה מתוכננת מחר"
+    msg.attach(MIMEText(html, "html", "utf-8"))
+    with smtplib.SMTP("smtp.gmail.com", 587, timeout=15) as server:
+        server.ehlo()
+        server.starttls()
+        server.login(gmail_user, gmail_password)
+        server.send_message(msg)
+
+
+@router.post("/meetings/send-due-reminders")
+def send_due_reminders(request: Request):
+    """Cron-triggered (GitHub Actions, daily Sun-Thu). Sends a reminder email
+    to each participant of meetings scheduled for the relevant 'due' date(s),
+    per _due_meeting_dates(). Tracked per-recipient in meeting_reminders so a
+    meeting is only ever attempted once and per-recipient failures are visible."""
+    if not CRON_SECRET or request.headers.get("X-Cron-Secret") != CRON_SECRET:
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    today_il = datetime.now(ZoneInfo("Asia/Jerusalem")).date()
+    due_dates = [d.isoformat() for d in _due_meeting_dates(today_il)]
+
+    meetings = []
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            res = (
+                db.table("meetings")
+                .select("id, school_id, meeting_date, start_time, end_time, status, participants")
+                .eq("reminder_enabled", True)
+                .eq("status", "scheduled")
+                .in_("meeting_date", due_dates)
+                .execute()
+            )
+            meetings = res.data or []
+            break
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("send_due_reminders attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.error("send_due_reminders failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת")
+
+    if not meetings:
+        return {"ok": True, "sent": 0, "failed": 0, "skipped_meetings": 0}
+
+    school_ids = list({m["school_id"] for m in meetings})
+    schools_map = {}
+    try:
+        db = get_admin_client()
+        s_res = db.table("schools").select("id, name").in_("id", school_ids).execute()
+        schools_map = {s["id"]: s["name"] for s in (s_res.data or [])}
+    except Exception as exc:
+        logger.warning("send_due_reminders: school name lookup failed (non-fatal): %s", exc)
+
+    sent, failed, skipped_meetings = 0, 0, 0
+    for m in meetings:
+        try:
+            participants = [p for p in (m.get("participants") or []) if (p.get("email") or "").strip()]
+            if not participants:
+                continue
+
+            db = get_admin_client()
+            already = db.table("meeting_reminders").select("id").eq("meeting_id", m["id"]).execute()
+            if already.data:
+                skipped_meetings += 1
+                continue
+
+            html = _build_reminder_email_html(
+                school_name=schools_map.get(m["school_id"], ""),
+                meeting_date=m["meeting_date"],
+                start_time=m.get("start_time"),
+                end_time=m.get("end_time"),
+            )
+            for p in participants:
+                email_addr = p["email"].strip()
+                status, error = "sent", None
+                try:
+                    _send_reminder_email(email_addr, html)
+                    sent += 1
+                except Exception as email_exc:
+                    status, error = "failed", str(email_exc)
+                    failed += 1
+                    logger.warning("send_due_reminders: failed to email %s for meeting %s: %s",
+                                   email_addr, m["id"], email_exc)
+                try:
+                    db.table("meeting_reminders").insert({
+                        "meeting_id": m["id"],
+                        "school_id": m["school_id"],
+                        "recipient_email": email_addr,
+                        "recipient_name": p.get("name"),
+                        "status": status,
+                        "error_message": error,
+                    }).execute()
+                except Exception as log_exc:
+                    logger.error("send_due_reminders: failed to log reminder for meeting %s / %s: %s",
+                                 m["id"], email_addr, log_exc)
+        except Exception as exc:
+            logger.error("send_due_reminders: meeting %s failed: %s", m["id"], exc, exc_info=True)
+
+    return {"ok": True, "sent": sent, "failed": failed, "skipped_meetings": skipped_meetings, "total_due": len(meetings)}
+
+
+@router.get("/meetings/{meeting_id}/reminder-status")
+def get_meeting_reminder_status(
+    meeting_id: str,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    """Per-recipient reminder send status for a single meeting (for the UI)."""
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            res = (
+                db.table("meeting_reminders")
+                .select("recipient_email, recipient_name, status, error_message, sent_at")
+                .eq("meeting_id", meeting_id)
+                .order("sent_at")
+                .execute()
+            )
+            return {"reminders": res.data or []}
+        except Exception as exc:
+            if attempt == 0:
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.warning("get_meeting_reminder_status failed (non-fatal): %s", exc)
+                return {"reminders": []}
+
+
 # ---------------------------------------------------------------------------
 # Single school fetch (used when navigating via deeplink / notification)
 # ---------------------------------------------------------------------------
@@ -1752,18 +2495,20 @@ def delete_user(
 def list_logs(
     school_id: str,
     user: Annotated[dict, Depends(get_current_user)],
+    academic_year: str | None = None,
 ):
     logs = []
     for attempt in range(2):
         try:
             db = get_admin_client()
-            rows = (
+            q = (
                 db.table("check_logs")
                 .select("*")
                 .eq("school_id", school_id)
-                .order("run_at", desc=True)
-                .execute()
             )
+            if academic_year:
+                q = q.eq("academic_year", academic_year)
+            rows = q.order("run_at", desc=True).execute()
             logs = rows.data or []
             break  # success
         except Exception as exc:
@@ -1777,6 +2522,11 @@ def list_logs(
 
     if not logs:
         return []
+    # Pinned checks float to the top, most-recently-pinned first; unpinned checks
+    # keep the run_at-desc order the query already returned.
+    pinned = sorted((r for r in logs if r.get("pinned_at")), key=lambda r: r["pinned_at"], reverse=True)
+    unpinned = [r for r in logs if not r.get("pinned_at")]
+    logs = pinned + unpinned
     # Enrich with profile data (non-fatal — logs returned even if enrichment fails)
     user_ids = list({r["run_by"] for r in logs if r.get("run_by")})
     if user_ids:
@@ -1833,6 +2583,46 @@ def delete_log(
             except Exception as exc:
                 logger.warning("Storage cleanup failed for log %s: %s", log_id, exc)
     db.table("check_logs").delete().eq("id", log_id).eq("school_id", school_id).execute()
+    return {"ok": True}
+
+
+class LogNameIn(BaseModel):
+    custom_name: str
+
+
+@router.patch("/{school_id}/logs/{log_id}/name")
+def update_log_name(
+    school_id: str,
+    log_id: str,
+    body: LogNameIn,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    db = get_admin_client()
+    if not _can_delete_check_log(user, db):
+        raise HTTPException(status_code=403, detail="אין הרשאה לערוך שם בדיקה")
+    name = body.custom_name.strip()
+    db.table("check_logs").update({"custom_name": name or None}).eq("id", log_id).eq("school_id", school_id).execute()
+    return {"ok": True}
+
+
+class LogPinIn(BaseModel):
+    pinned: bool
+
+
+@router.patch("/{school_id}/logs/{log_id}/pin")
+def update_log_pin(
+    school_id: str,
+    log_id: str,
+    body: LogPinIn,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    from datetime import datetime, timezone
+
+    db = get_admin_client()
+    if not _can_delete_check_log(user, db):
+        raise HTTPException(status_code=403, detail="אין הרשאה לנעוץ בדיקה")
+    pinned_at = datetime.now(timezone.utc).isoformat() if body.pinned else None
+    db.table("check_logs").update({"pinned_at": pinned_at}).eq("id", log_id).eq("school_id", school_id).execute()
     return {"ok": True}
 
 
@@ -1920,12 +2710,15 @@ async def import_schools(
 # ---------------------------------------------------------------------------
 
 @router.get("/{school_id}/meetings")
-def list_meetings(school_id: str, user: Annotated[dict, Depends(get_current_user)]):
+def list_meetings(school_id: str, user: Annotated[dict, Depends(get_current_user)], academic_year: str | None = None):
     meetings = []
     for attempt in range(2):
         try:
             db = get_admin_client()
-            res = db.table("meetings").select("*").eq("school_id", school_id).order("created_at", desc=True).execute()
+            q = db.table("meetings").select("*").eq("school_id", school_id)
+            if academic_year:
+                q = q.eq("academic_year", academic_year)
+            res = q.order("created_at", desc=True).execute()
             meetings = res.data or []
             break
         except Exception as exc:
@@ -1975,6 +2768,7 @@ def create_meeting(school_id: str, body: MeetingIn, user: Annotated[dict, Depend
         "status": body.status or "scheduled",
         "reminder_enabled": body.reminder_enabled if body.reminder_enabled is not None else False,
         "participants": body.participants if body.participants is not None else [],
+        "academic_year": body.academic_year or DEFAULT_ACADEMIC_YEAR,
     }
     if body.meeting_date: data["meeting_date"] = body.meeting_date
     if body.start_time: data["start_time"] = body.start_time
@@ -2010,6 +2804,7 @@ def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annot
     if body.meeting_type: data["meeting_type"] = body.meeting_type
     if body.actual_duration: data["actual_duration"] = body.actual_duration
     if body.notes: data["notes"] = body.notes
+    if body.academic_year: data["academic_year"] = body.academic_year
     # advisor_ids takes precedence; fall back to legacy advisor_id
     if body.advisor_ids is not None:
         data["advisor_ids"] = body.advisor_ids
@@ -2051,6 +2846,34 @@ def delete_meeting(school_id: str, meeting_id: str, user: Annotated[dict, Depend
     return {"ok": True}
 
 
+class MeetingReassignSchoolIn(BaseModel):
+    new_school_id: str
+
+
+@router.patch("/meetings/{meeting_id}/reassign-school")
+def reassign_meeting_school(meeting_id: str, body: MeetingReassignSchoolIn, user: Annotated[dict, Depends(get_current_user)]):
+    """Move an existing meeting to a different school. Used by the admin 'פגישות' tab school-picker cell."""
+    _require_manager(user)
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            sch = db.table("schools").select("id").eq("id", body.new_school_id).eq("org_id", user["org_id"]).execute()
+            if not sch.data:
+                raise HTTPException(status_code=404, detail="בית ספר לא נמצא")
+            db.table("meetings").update({"school_id": body.new_school_id}).eq("id", meeting_id).execute()
+            return {"ok": True}
+        except HTTPException:
+            raise
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("reassign_meeting_school attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.error("reassign_meeting_school failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+
 class MentionIn(BaseModel):
     mentioned_user_ids: list[str]
     note_preview: str | None = None
@@ -2090,7 +2913,7 @@ def create_mentions(school_id: str, meeting_id: str, body: MentionIn, user: Anno
 
 # All supported permission keys with their role defaults
 PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
-    "can_approve_update_requests":  {"manager": True,  "advisor": False},
+    "can_approve_update_requests":  {"manager": False, "advisor": False},
     "can_invite_users":             {"manager": True,  "advisor": False},
     "can_delete_users":             {"manager": False, "advisor": False},
     "can_change_user_role":         {"manager": False, "advisor": False},
@@ -2243,6 +3066,29 @@ def set_permission_default(body: PermissionSettingIn, user: Annotated[dict, Depe
                 time.sleep(0.3)
             else:
                 logger.error("set_permission_default failed: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב")
+
+
+@router.get("/permissions/overrides/counts")
+def get_override_counts(user: Annotated[dict, Depends(get_current_user)]):
+    """Return override count per user_id for all users in the org (manager+ only)."""
+    _require_manager(user)
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            rows = db.table("user_permission_overrides").select("user_id").execute().data or []
+            counts: dict[str, int] = {}
+            for r in rows:
+                uid = r["user_id"]
+                counts[uid] = counts.get(uid, 0) + 1
+            return counts
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("get_override_counts attempt 1 failed: %s — retrying", exc)
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.error("get_override_counts failed: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב")
 
 

@@ -6,12 +6,45 @@ import { supabase } from "../lib/supabase";
 import Sidebar from "../components/Sidebar";
 import OnboardingToast from "../components/OnboardingToast";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { ACADEMIC_YEARS, DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
+
+// Fallback list so "סוג תקציב" has real options even before check_metrics has any rows
+// for the org (brand-new table, only populated going forward by new checks) — matches
+// normalize_budget_name's target names in backend/zihuy_core.py.
+const DEFAULT_BUDGET_TYPES = ["גפן", "דוקאטי", "תנופה", "גפן חירום", "פל\"ג", "כללי"];
+
+function matchesBudgetType(combo, budgetTypes) {
+  if (!budgetTypes.length) return true;
+  return budgetTypes.some(b => b.value === combo.budget_name);
+}
+
+// Evaluates a chain of goal conditions left-to-right with user-chosen AND/OR connectors
+// (no operator precedence — each connector combines the running result with the next condition).
+function evalGoalConditions(school, combo, conditions) {
+  if (!conditions.length) return true;
+  let result = null;
+  conditions.forEach((c, i) => {
+    const status = (school.goal_statuses || []).find(g =>
+      g.goal_key === c.goalKey &&
+      g.division_type === combo.division_type &&
+      g.budget_name === combo.budget_name
+    );
+    const met = status ? status.met : null;
+    let condResult = true;
+    if (c.met === "true") condResult = met === true;
+    else if (c.met === "false") condResult = met === false;
+    else if (c.met === "unset") condResult = met === null || met === undefined;
+    result = i === 0 ? condResult : (c.connector === "OR" ? (result || condResult) : (result && condResult));
+  });
+  return result;
+}
 
 const DIVISION_LABEL = {
   tikkon: "חטיבה עליונה",
   beinayim: "חטיבת ביניים",
   yesodi: "יסודי",
   other: "אחר",
+  sheshshnati: "שש שנתי",
 };
 
 const SCHOOL_STAGE_LABEL = {
@@ -258,6 +291,137 @@ function FilterField({ label, options, selected, onChange, query, onQueryChange,
   );
 }
 
+function AccordionSection({ title, isOpen, onToggle, badge, children }) {
+  return (
+    <div className="border border-slate-200 rounded-xl overflow-hidden bg-white">
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={isOpen}
+        className="w-full flex items-center justify-between px-4 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 transition-colors"
+      >
+        <span className="flex items-center gap-2">
+          {title}
+          {badge > 0 && (
+            <span className="inline-flex items-center justify-center w-4 h-4 text-xs font-bold rounded-full bg-blue-100 text-blue-700 leading-none">
+              {badge}
+            </span>
+          )}
+        </span>
+        <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+          style={{ transform: isOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}>
+          <polyline points="6 9 12 15 18 9"/>
+        </svg>
+      </button>
+      {isOpen && <div className="px-4 pb-4 pt-1 border-t border-slate-100">{children}</div>}
+    </div>
+  );
+}
+
+function GoalPicker({ goalDefinitions, addedKeys, onAdd }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const containerRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function handleOutside(e) {
+      if (containerRef.current && !containerRef.current.contains(e.target)) setOpen(false);
+    }
+    document.addEventListener("mousedown", handleOutside);
+    return () => document.removeEventListener("mousedown", handleOutside);
+  }, [open]);
+
+  const available = goalDefinitions.filter(g =>
+    !addedKeys.includes(g.key) && (!query.trim() || g.label.includes(query.trim()))
+  );
+
+  return (
+    <div ref={containerRef} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        className="input-field text-sm w-full text-right"
+        aria-expanded={open}
+        aria-haspopup="listbox"
+      >
+        + הוסף יעד לסינון
+      </button>
+      {open && (
+        <div className="absolute z-40 right-0 left-0 top-full mt-1 border border-slate-200 rounded-xl bg-white shadow-xl">
+          <div className="p-2 border-b border-slate-100">
+            <input
+              type="text"
+              autoFocus
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder="חיפוש..."
+              className="w-full text-sm border border-slate-200 rounded-lg px-3 py-1.5 outline-none focus:border-blue-400 bg-white"
+              aria-label="חיפוש יעד"
+            />
+          </div>
+          <div className="overflow-y-auto" style={{ maxHeight: 220 }} role="listbox">
+            {available.length === 0 ? (
+              <p className="text-xs text-slate-400 px-4 py-3 text-center">אין יעדים נוספים להוספה</p>
+            ) : (
+              available.map(g => (
+                <button
+                  key={g.key}
+                  type="button"
+                  onMouseDown={e => { e.preventDefault(); onAdd(g.key); setQuery(""); }}
+                  className="w-full text-right px-4 py-2 text-sm text-slate-700 hover:bg-blue-50 transition-colors"
+                >
+                  {g.label}
+                </button>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function GoalConditionRow({ condition, index, label, onChangeMet, onChangeConnector, onRemove }) {
+  return (
+    <div className="flex items-center gap-2 flex-wrap">
+      {index > 0 && (
+        <div className="inline-flex rounded-lg border border-slate-200 overflow-hidden text-xs font-semibold flex-shrink-0" style={{ direction: "ltr" }}>
+          <button
+            type="button"
+            onClick={() => onChangeConnector("AND")}
+            className={`px-2.5 py-1 transition-colors ${condition.connector === "AND" ? "bg-blue-600 text-white" : "bg-white text-slate-500 hover:bg-slate-50"}`}
+          >וגם</button>
+          <button
+            type="button"
+            onClick={() => onChangeConnector("OR")}
+            className={`px-2.5 py-1 border-r border-slate-200 transition-colors ${condition.connector === "OR" ? "bg-blue-600 text-white" : "bg-white text-slate-500 hover:bg-slate-50"}`}
+          >או</button>
+        </div>
+      )}
+      <span className="text-sm text-slate-700 flex-1" style={{ minWidth: 160 }}>{label}</span>
+      <select
+        value={condition.met}
+        onChange={e => onChangeMet(e.target.value)}
+        className="input-field text-sm"
+        style={{ maxWidth: 130 }}
+        aria-label={`מצב עמידה ביעד: ${label}`}
+      >
+        <option value="">הכל</option>
+        <option value="true">עומד</option>
+        <option value="false">לא עומד</option>
+        <option value="unset">לא סומן</option>
+      </select>
+      <button
+        type="button"
+        onClick={onRemove}
+        className="text-slate-400 hover:text-red-500 px-1 leading-none"
+        aria-label={`הסר תנאי ${label}`}
+      >×</button>
+    </div>
+  );
+}
+
 const MOVABLE_COLUMNS = [
   { key: "advisor",             label: "יועץ מלווה" },
   { key: "symbol",              label: "סמל מוסד" },
@@ -267,7 +431,69 @@ const MOVABLE_COLUMNS = [
   { key: "meetings_completed",  label: 'סה"כ פגישות שבוצעו' },
   { key: "meetings_hours",      label: 'סה"כ שעות שבוצעו' },
 ];
-const DEFAULT_COL_ORDER = MOVABLE_COLUMNS.map(c => c.key);
+
+// Optional columns showing summary data from the last real check run (check_metrics),
+// for the "active" budget (default "גפן", overridden when exactly one budget type is
+// selected in the advanced filter). Off by default — see colVisible init below.
+const SUMMARY_COLUMNS = [
+  { key: "summary_budget_amount",           label: "גובה תקציב",                     field: "budget_amount",           fmt: "money" },
+  { key: "summary_planned_amount",           label: "סכום שתוכנן",                    field: "planned_amount",          fmt: "money" },
+  { key: "summary_pct_plan",                 label: "אחוז תכנון",                     field: "pct_plan",                fmt: "pct"   },
+  { key: "summary_fixed_gap_abs",            label: "נותר לתכנון קבוע",                field: "fixed_gap_abs",           fmt: "money" },
+  { key: "summary_flexible_remaining",       label: "נותר לתכנון גמיש",                field: "flexible_remaining",      fmt: "money" },
+  { key: "summary_sum_chayav",               label: "סכום חייב בדיווח",                field: "sum_chayav",              fmt: "money" },
+  { key: "summary_sum_divuach",              label: "סכום שדווח",                     field: "sum_divuach",             fmt: "money" },
+  { key: "summary_pct_divuach",              label: "אחוז דיווח כללי",                 field: "pct_divuach",             fmt: "pct"   },
+  { key: "summary_pct_tanuz",                label: "אחוז דיווח למודל תמרוץ",          field: "pct_tanuz",               fmt: "pct"   },
+  { key: "summary_rejected_count",           label: "אסמכתאות שנדחו כמות",             field: "rejected_count",          fmt: "int"   },
+  { key: "summary_rejected_sum",             label: "אסמכתאות שנדחו סכום",             field: "rejected_sum",            fmt: "money" },
+  { key: "summary_no_pdf_count",             label: "ללא PDF כמות",                    field: "no_pdf_count",            fmt: "int"   },
+  { key: "summary_no_pdf_sum",               label: "ללא PDF סכום",                    field: "no_pdf_sum",              fmt: "money" },
+  { key: "summary_partial_count",            label: "דיווח חסר כמות תוכניות",          field: "partial_count",           fmt: "int"   },
+  { key: "summary_partial_sum",              label: "דיווח חסר סכום",                 field: "partial_sum",             fmt: "money" },
+  { key: "summary_finance_not_gefen_count",  label: "קיים בכספים לא בגפן כמות",        field: "finance_not_gefen_count", fmt: "int"   },
+  { key: "summary_finance_not_gefen_sum",    label: "קיים בכספים לא בגפן סכום",        field: "finance_not_gefen_sum",   fmt: "money" },
+  { key: "summary_gefen_not_finance_count",  label: "קיים בגפן לא בכספים כמות",        field: "gefen_not_finance_count", fmt: "int"   },
+  { key: "summary_gefen_not_finance_sum",    label: "קיים בגפן לא בכספים סכום",        field: "gefen_not_finance_sum",   fmt: "money" },
+];
+
+const ALL_COLUMNS = [...MOVABLE_COLUMNS, ...SUMMARY_COLUMNS];
+const DEFAULT_COL_ORDER = ALL_COLUMNS.map(c => c.key);
+
+function fmtMoney(v) {
+  if (v === null || v === undefined) return "—";
+  const n = Number(v);
+  if (Number.isNaN(n)) return "—";
+  return Math.round(n).toLocaleString("he-IL");
+}
+
+function fmtPct2(v) {
+  if (v === null || v === undefined) return "—";
+  const n = Number(v);
+  if (Number.isNaN(n)) return "—";
+  return `${(n * 100).toFixed(2)}%`;
+}
+
+function fmtInt(v) {
+  if (v === null || v === undefined) return "—";
+  return String(v);
+}
+
+// Resolves which check_metrics row backs a summary column for a given school row —
+// the combo itself when the row is already split by division/budget, otherwise the
+// entry matching the active budget (default "גפן", or the single selected filter budget).
+function getSummaryMetricsRow(school, combo, activeSummaryBudget) {
+  if (combo) return combo;
+  return (school.check_metrics || []).find(m => m.budget_name === activeSummaryBudget) || null;
+}
+
+function renderSummaryValue(school, colDef, combo, activeSummaryBudget, emptyValue) {
+  const row = getSummaryMetricsRow(school, combo, activeSummaryBudget);
+  const v = row ? row[colDef.field] : undefined;
+  if (colDef.fmt === "pct") return v === null || v === undefined ? emptyValue : fmtPct2(v);
+  if (colDef.fmt === "int") return v === null || v === undefined ? emptyValue : fmtInt(v);
+  return v === null || v === undefined ? emptyValue : fmtMoney(v);
+}
 
 function formatMeetingHours(totalMinutes) {
   if (!totalMinutes || totalMinutes === 0) return "—";
@@ -278,7 +504,9 @@ function formatMeetingHours(totalMinutes) {
   return `${h}:${String(m).padStart(2, "0")} שעות`;
 }
 
-function renderCell(school, key, meetingsStats = {}) {
+function renderCell(school, key, meetingsStats = {}, combo = null, activeSummaryBudget = "גפן") {
+  const summaryCol = SUMMARY_COLUMNS.find(c => c.key === key);
+  if (summaryCol) return renderSummaryValue(school, summaryCol, combo, activeSummaryBudget, "—");
   switch (key) {
     case "advisor":
       return (school.advisor_schools || []).map(as => as.profiles).filter(Boolean).map(p => p.full_name || p.email).join(", ") || "—";
@@ -303,7 +531,9 @@ function renderCell(school, key, meetingsStats = {}) {
   }
 }
 
-function renderCellText(school, key, meetingsStats = {}) {
+function renderCellText(school, key, meetingsStats = {}, combo = null, activeSummaryBudget = "גפן") {
+  const summaryCol = SUMMARY_COLUMNS.find(c => c.key === key);
+  if (summaryCol) return renderSummaryValue(school, summaryCol, combo, activeSummaryBudget, "");
   switch (key) {
     case "advisor":
       return (school.advisor_schools || []).map(as => as.profiles).filter(Boolean).map(p => p.full_name || p.email).join(", ") || "";
@@ -467,15 +697,27 @@ export default function DashboardPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [filters, setFilters] = useState(EMPTY_FILTERS);
   const [queries, setQueries] = useState(EMPTY_QUERIES);
+  const [academicYear, setAcademicYear] = useState(DEFAULT_ACADEMIC_YEAR);
+  const [budgetTypes, setBudgetTypes] = useState([]);
+  const [goalConditions, setGoalConditions] = useState([]);
+  const [goalDefinitions, setGoalDefinitions] = useState([]);
+  const [openSections, setOpenSections] = useState({
+    main: true, goals: false, pctPlan: false, pctDivuach: false, pctTanuz: false, missingReport: false, noPdf: false,
+  });
+  const didMountAcademicYearRef = useRef(false);
   const [showFilters, setShowFilters] = useState(false);
   const [filtersPersistKey, setFiltersPersistKey] = useState(null);
   const [colOrder, setColOrder] = useState(DEFAULT_COL_ORDER);
-  const [colVisible, setColVisible] = useState(Object.fromEntries(DEFAULT_COL_ORDER.map(k => [k, true])));
+  const [colVisible, setColVisible] = useState(() => ({
+    ...Object.fromEntries(MOVABLE_COLUMNS.map(c => [c.key, true])),
+    ...Object.fromEntries(SUMMARY_COLUMNS.map(c => [c.key, false])),
+  }));
   const [dragIndex, setDragIndex] = useState(null);
   const [dragOverIndex, setDragOverIndex] = useState(null);
   const [showColPicker, setShowColPicker] = useState(false);
   const [colPickerQuery, setColPickerQuery] = useState("");
   const colPickerRef = useRef(null);
+  const tableScrollRef = useRef(null);
   const loadAbortRef = useRef(null);
   const [userId, setUserId] = useState(null);
   const [canDelete, setCanDelete] = useState(false);
@@ -496,9 +738,26 @@ export default function DashboardPage() {
   useEffect(() => {
     if (!filtersPersistKey) return;
     try {
-      sessionStorage.setItem(filtersPersistKey, JSON.stringify({ searchQuery, filters, queries, showFilters }));
+      sessionStorage.setItem(filtersPersistKey, JSON.stringify({
+        searchQuery, filters, queries, showFilters,
+        academicYear, budgetTypes, goalConditions, openSections,
+      }));
     } catch {}
-  }, [filtersPersistKey, searchQuery, filters, queries, showFilters]);
+  }, [filtersPersistKey, searchQuery, filters, queries, showFilters, academicYear, budgetTypes, goalConditions, openSections]);
+
+  // Left/right arrow keys scroll the main schools table horizontally, without needing to
+  // first click/focus the scroll container — skipped while typing in a text field so cursor
+  // movement there isn't hijacked.
+  useEffect(() => {
+    function handleKeyDown(e) {
+      const tag = e.target.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || e.target.isContentEditable) return;
+      if (e.key === "ArrowRight") { e.preventDefault(); tableScrollRef.current?.scrollBy({ left: 60 }); }
+      else if (e.key === "ArrowLeft") { e.preventDefault(); tableScrollRef.current?.scrollBy({ left: -60 }); }
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, []);
 
   function saveColPrefs(order, visible) {
     if (!userId) return;
@@ -589,7 +848,7 @@ export default function DashboardPage() {
     const slowTimer = setTimeout(() => setSlowLoading(true), 8000);
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const res = await axios.get("/schools/", { signal: controller.signal });
+        const res = await axios.get("/schools/", { signal: controller.signal, params: { academic_year: academicYear } });
         clearTimeout(slowTimer);
         const schoolsData = Array.isArray(res.data) ? res.data : [];
         setSchools(schoolsData);
@@ -632,6 +891,17 @@ export default function DashboardPage() {
   }
 
   useEffect(() => {
+    if (!didMountAcademicYearRef.current) { didMountAcademicYearRef.current = true; return; }
+    loadSchools();
+  }, [academicYear]);
+
+  useEffect(() => {
+    axios.get("/schools/goal-definitions").then(r => {
+      setGoalDefinitions(Array.isArray(r.data) ? r.data : []);
+    }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
     async function init() {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) { navigate("/login"); return; }
@@ -652,6 +922,10 @@ export default function DashboardPage() {
           if (parsed.filters) setFilters(parsed.filters);
           if (parsed.queries) setQueries(parsed.queries);
           if (parsed.showFilters !== undefined) setShowFilters(parsed.showFilters);
+          if (parsed.academicYear && ACADEMIC_YEARS.includes(parsed.academicYear)) setAcademicYear(parsed.academicYear);
+          if (Array.isArray(parsed.budgetTypes)) setBudgetTypes(parsed.budgetTypes);
+          if (Array.isArray(parsed.goalConditions)) setGoalConditions(parsed.goalConditions);
+          if (parsed.openSections) setOpenSections(o => ({ ...o, ...parsed.openSections }));
         }
       } catch {}
 
@@ -739,9 +1013,21 @@ export default function DashboardPage() {
     ])
   );
 
+  const budgetTypeOptions = uniq([
+    ...DEFAULT_BUDGET_TYPES,
+    ...schools.flatMap(s => (s.check_metrics || []).map(m => m.budget_name)),
+  ]).map(v => ({ value: v, label: v }));
+
+  // Default budget for summary columns is "גפן", overridden only when the advanced
+  // filter narrows "סוג תקציב" down to exactly one selection.
+  const activeSummaryBudget = budgetTypes.length === 1 ? budgetTypes[0].value : "גפן";
+  const hasVisibleSummaryCol = SUMMARY_COLUMNS.some(c => colVisible[c.key]);
+  const advancedFilterActive = goalConditions.length > 0 || hasVisibleSummaryCol;
+
   const activeChipCount = Object.values(filters).reduce((sum, arr) => sum + arr.length, 0);
   const activeQueryCount = Object.values(queries).reduce((sum, q) => sum + (q.trim() ? 1 : 0), 0);
-  const activeFilterCount = activeChipCount + activeQueryCount;
+  const advancedActiveCount = (budgetTypes.length > 0 ? 1 : 0) + goalConditions.length;
+  const activeFilterCount = activeChipCount + activeQueryCount + advancedActiveCount;
   const hasAnyFilter = !!searchQuery.trim() || activeFilterCount > 0;
 
   const filteredSchools = schools.filter(school => {
@@ -757,6 +1043,37 @@ export default function DashboardPage() {
     return applyFilters(school, filters, queries);
   });
 
+  // When a checks/goals filter (or a visible summary column) is active, split each school
+  // into one row per division+budget combination that matches — otherwise keep one row per
+  // school. When only a summary column forced the split (no explicit single-budget filter),
+  // narrow combos down to the active summary budget so turning on a column alone doesn't
+  // explode a school into one row per unrelated budget — only per division (e.g. six-year
+  // schools running "גפן" separately for each division).
+  const displayRows = !advancedFilterActive
+    ? filteredSchools.map(school => ({ school, combo: null, rowKey: school.id }))
+    : filteredSchools.flatMap(school => {
+        let combos = (school.check_metrics && school.check_metrics.length
+          ? school.check_metrics
+          : [{ division_type: school.stage, budget_name: "כללי" }]
+        );
+        if (hasVisibleSummaryCol && budgetTypes.length !== 1) {
+          const narrowed = combos.filter(combo => combo.budget_name === activeSummaryBudget);
+          // No real goal filter is driving the split — a school without any "גפן" check
+          // yet must still show up (with "—" summary values), not disappear from the list.
+          combos = narrowed.length > 0
+            ? narrowed
+            : (goalConditions.length > 0 ? [] : [{ division_type: school.stage, budget_name: activeSummaryBudget }]);
+        }
+        combos = combos
+          .filter(combo => matchesBudgetType(combo, budgetTypes))
+          .filter(combo => evalGoalConditions(school, combo, goalConditions));
+        return combos.map(combo => ({
+          school,
+          combo,
+          rowKey: `${school.id}:${combo.division_type}:${combo.budget_name}`,
+        }));
+      });
+
   function setFilter(key, val) {
     setFilters(f => ({ ...f, [key]: val }));
   }
@@ -769,17 +1086,23 @@ export default function DashboardPage() {
     setSearchQuery("");
     setFilters(EMPTY_FILTERS);
     setQueries(EMPTY_QUERIES);
+    setBudgetTypes([]);
+    setGoalConditions([]);
+  }
+
+  function addGoalCondition(goalKey) {
+    setGoalConditions(prev => [...prev, { id: `${Date.now()}-${Math.random()}`, goalKey, met: "", connector: "AND" }]);
   }
 
   function exportSelectedToExcel() {
     const selected = filteredSchools.filter(s => selectedIds[s.id]);
     const colLabels = [
       "שם מוסד",
-      ...visibleColOrder.map(key => MOVABLE_COLUMNS.find(c => c.key === key)?.label || key),
+      ...visibleColOrder.map(key => ALL_COLUMNS.find(c => c.key === key)?.label || key),
     ];
     const rows = selected.map(school => [
       school.name || "",
-      ...visibleColOrder.map(key => renderCellText(school, key, meetingsStats)),
+      ...visibleColOrder.map(key => renderCellText(school, key, meetingsStats, null, activeSummaryBudget)),
     ]);
     const wsData = [colLabels, ...rows];
     const ws = XLSX.utils.aoa_to_sheet(wsData);
@@ -795,11 +1118,11 @@ export default function DashboardPage() {
     const selected = filteredSchools.filter(s => selectedIds[s.id]);
     const headers = [
       "שם מוסד",
-      ...visibleColOrder.map(key => MOVABLE_COLUMNS.find(c => c.key === key)?.label || key),
+      ...visibleColOrder.map(key => ALL_COLUMNS.find(c => c.key === key)?.label || key),
     ];
     const rows = selected.map(school => [
       school.name || "",
-      ...visibleColOrder.map(key => renderCellText(school, key, meetingsStats)),
+      ...visibleColOrder.map(key => renderCellText(school, key, meetingsStats, null, activeSummaryBudget)),
     ]);
     try {
       const res = await axios.post(
@@ -821,11 +1144,11 @@ export default function DashboardPage() {
   function exportToExcel() {
     const colLabels = [
       "שם מוסד",
-      ...visibleColOrder.map(key => MOVABLE_COLUMNS.find(c => c.key === key)?.label || key),
+      ...visibleColOrder.map(key => ALL_COLUMNS.find(c => c.key === key)?.label || key),
     ];
     const rows = filteredSchools.map(school => [
       school.name || "",
-      ...visibleColOrder.map(key => renderCellText(school, key, meetingsStats)),
+      ...visibleColOrder.map(key => renderCellText(school, key, meetingsStats, null, activeSummaryBudget)),
     ]);
     const wsData = [colLabels, ...rows];
     const ws = XLSX.utils.aoa_to_sheet(wsData);
@@ -926,7 +1249,7 @@ export default function DashboardPage() {
                       עמודות להצגה
                     </button>
                     {showColPicker && (
-                      <div className="absolute right-0 top-full mt-1.5 z-20 glass-card rounded-xl py-2 shadow-lg" style={{ minWidth: 190 }} dir="rtl">
+                      <div className="absolute top-full mt-1.5 z-20 glass-card rounded-xl py-2 shadow-lg" style={{ right: "50%", transform: "translateX(50%)", minWidth: 820, maxWidth: "95vw" }} dir="rtl">
                         <div className="px-3 pb-2">
                           <input
                             type="search"
@@ -938,24 +1261,50 @@ export default function DashboardPage() {
                             aria-label="חיפוש עמודה"
                           />
                         </div>
-                        {MOVABLE_COLUMNS.filter(col =>
-                          !colPickerQuery.trim() || col.label.includes(colPickerQuery.trim())
-                        ).map(col => (
-                          <label key={col.key} className="flex items-center gap-2.5 px-4 py-2 hover:bg-slate-50 cursor-pointer">
-                            <input
-                              type="checkbox"
-                              checked={colVisible[col.key]}
-                              onChange={() => toggleColVisible(col.key)}
-                              className="w-3.5 h-3.5 rounded accent-blue-600 flex-shrink-0"
-                            />
-                            <span className="text-sm text-slate-700">{col.label}</span>
-                          </label>
-                        ))}
-                        {MOVABLE_COLUMNS.filter(col =>
+                        <div className="grid grid-cols-3 gap-x-6 gap-y-0.5 px-2 max-h-[70vh] overflow-y-auto">
+                          {ALL_COLUMNS.filter(col =>
+                            !colPickerQuery.trim() || col.label.includes(colPickerQuery.trim())
+                          ).map(col => (
+                            <label key={col.key} className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-slate-50 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={colVisible[col.key]}
+                                onChange={() => toggleColVisible(col.key)}
+                                className="w-3.5 h-3.5 rounded accent-blue-600 flex-shrink-0"
+                              />
+                              <span className="text-sm text-slate-700 whitespace-nowrap">{col.label}</span>
+                            </label>
+                          ))}
+                        </div>
+                        {ALL_COLUMNS.filter(col =>
                           !colPickerQuery.trim() || col.label.includes(colPickerQuery.trim())
                         ).length === 0 && (
                           <p className="text-xs text-slate-400 px-4 py-2">לא נמצאו עמודות</p>
                         )}
+                        <div className="flex justify-end gap-1 px-3 pt-2 mt-1 border-t border-slate-100">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const next = Object.fromEntries(ALL_COLUMNS.map(c => [c.key, false]));
+                              setColVisible(next);
+                              saveColPrefs(colOrder, next);
+                            }}
+                            className="text-xs text-slate-400 hover:text-slate-600 transition-colors px-2 py-1"
+                          >
+                            נקה בחירה
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const next = Object.fromEntries(ALL_COLUMNS.map(c => [c.key, true]));
+                              setColVisible(next);
+                              saveColPrefs(colOrder, next);
+                            }}
+                            className="text-xs text-slate-400 hover:text-slate-600 transition-colors px-2 py-1"
+                          >
+                            בחר הכל
+                          </button>
+                        </div>
                       </div>
                     )}
                   </div>
@@ -963,7 +1312,7 @@ export default function DashboardPage() {
 
                 <div className="flex items-center gap-2">
                   {activeFilterCount > 0 && (
-                    <button onClick={() => { setFilters(EMPTY_FILTERS); setQueries(EMPTY_QUERIES); }} className="text-xs text-slate-400 hover:text-slate-600 transition-colors px-2 py-1">
+                    <button onClick={() => { setFilters(EMPTY_FILTERS); setQueries(EMPTY_QUERIES); setBudgetTypes([]); setGoalConditions([]); }} className="text-xs text-slate-400 hover:text-slate-600 transition-colors px-2 py-1">
                       נקה סינון
                     </button>
                   )}
@@ -1058,36 +1407,129 @@ export default function DashboardPage() {
 
               {/* Advanced filter panel */}
               {showFilters && (
-                <div className="glass-card rounded-2xl p-5 mt-2" style={{ background: "rgba(248,250,252,0.92)" }}>
-                  <div className="grid grid-cols-4 gap-4">
-                    {FILTER_CONFIG.map(cfg =>
-                      cfg.checkbox ? (
-                        <CheckboxFilterField
-                          key={cfg.key}
-                          label={cfg.label}
-                          options={filterOptions[cfg.key]}
-                          selected={filters[cfg.key]}
-                          onChange={val => setFilter(cfg.key, val)}
-                          showAllOption={cfg.showAllOption}
+                <div className="flex flex-col gap-3 mt-2">
+                  <AccordionSection
+                    title="ראשי"
+                    isOpen={openSections.main}
+                    onToggle={() => setOpenSections(o => ({ ...o, main: !o.main }))}
+                    badge={activeChipCount + activeQueryCount + (budgetTypes.length > 0 ? 1 : 0)}
+                  >
+                    <div className="grid grid-cols-4 gap-4">
+                      {FILTER_CONFIG.map(cfg =>
+                        cfg.checkbox ? (
+                          <CheckboxFilterField
+                            key={cfg.key}
+                            label={cfg.label}
+                            options={filterOptions[cfg.key]}
+                            selected={filters[cfg.key]}
+                            onChange={val => setFilter(cfg.key, val)}
+                            showAllOption={cfg.showAllOption}
+                          />
+                        ) : (
+                          <FilterField
+                            key={cfg.key}
+                            label={cfg.label}
+                            options={filterOptions[cfg.key]}
+                            selected={filters[cfg.key]}
+                            onChange={val => setFilter(cfg.key, val)}
+                            query={queries[cfg.key]}
+                            onQueryChange={val => setQuery(cfg.key, val)}
+                            openOnFocus={cfg.openOnFocus}
+                          />
+                        )
+                      )}
+
+                      <div className="flex flex-col gap-1.5">
+                        <label htmlFor="dashboard-academic-year" className="text-xs font-semibold text-slate-600">שנת לימודים</label>
+                        <select
+                          id="dashboard-academic-year"
+                          value={academicYear}
+                          onChange={e => setAcademicYear(e.target.value)}
+                          className="input-field text-sm w-full text-right"
+                        >
+                          {ACADEMIC_YEARS.map(y => <option key={y} value={y}>{y}</option>)}
+                        </select>
+                      </div>
+
+                      <CheckboxFilterField
+                        label="סוג תקציב"
+                        options={budgetTypeOptions}
+                        selected={budgetTypes}
+                        onChange={setBudgetTypes}
+                      />
+                    </div>
+                  </AccordionSection>
+
+                  <AccordionSection
+                    title="יעדים"
+                    isOpen={openSections.goals}
+                    onToggle={() => setOpenSections(o => ({ ...o, goals: !o.goals }))}
+                    badge={goalConditions.length}
+                  >
+                    <div className="flex flex-col gap-3">
+                      <GoalPicker
+                        goalDefinitions={goalDefinitions}
+                        addedKeys={goalConditions.map(c => c.goalKey)}
+                        onAdd={addGoalCondition}
+                      />
+                      {goalConditions.map((c, i) => (
+                        <GoalConditionRow
+                          key={c.id}
+                          condition={c}
+                          index={i}
+                          label={goalDefinitions.find(g => g.key === c.goalKey)?.label || c.goalKey}
+                          onChangeMet={met => setGoalConditions(prev => prev.map(x => x.id === c.id ? { ...x, met } : x))}
+                          onChangeConnector={connector => setGoalConditions(prev => prev.map(x => x.id === c.id ? { ...x, connector } : x))}
+                          onRemove={() => setGoalConditions(prev => prev.filter(x => x.id !== c.id))}
                         />
-                      ) : (
-                        <FilterField
-                          key={cfg.key}
-                          label={cfg.label}
-                          options={filterOptions[cfg.key]}
-                          selected={filters[cfg.key]}
-                          onChange={val => setFilter(cfg.key, val)}
-                          query={queries[cfg.key]}
-                          onQueryChange={val => setQuery(cfg.key, val)}
-                          openOnFocus={cfg.openOnFocus}
-                        />
-                      )
-                    )}
-                  </div>
-                  <div className="flex justify-end mt-4 pt-3 border-t border-slate-200">
+                      ))}
+                    </div>
+                  </AccordionSection>
+
+                  <AccordionSection
+                    title="אחוז תכנון"
+                    isOpen={openSections.pctPlan}
+                    onToggle={() => setOpenSections(o => ({ ...o, pctPlan: !o.pctPlan }))}
+                  >
+                    <p className="text-sm text-slate-400">אפשרויות סינון לפי אחוז תכנון יתווספו בהמשך.</p>
+                  </AccordionSection>
+
+                  <AccordionSection
+                    title="אחוז דיווח כללי"
+                    isOpen={openSections.pctDivuach}
+                    onToggle={() => setOpenSections(o => ({ ...o, pctDivuach: !o.pctDivuach }))}
+                  >
+                    <p className="text-sm text-slate-400">אפשרויות סינון לפי אחוז דיווח כללי יתווספו בהמשך.</p>
+                  </AccordionSection>
+
+                  <AccordionSection
+                    title="אחוז דיווח למודל תמרוץ"
+                    isOpen={openSections.pctTanuz}
+                    onToggle={() => setOpenSections(o => ({ ...o, pctTanuz: !o.pctTanuz }))}
+                  >
+                    <p className="text-sm text-slate-400">אפשרויות סינון לפי אחוז דיווח למודל תמרוץ יתווספו בהמשך.</p>
+                  </AccordionSection>
+
+                  <AccordionSection
+                    title="דיווח חסר"
+                    isOpen={openSections.missingReport}
+                    onToggle={() => setOpenSections(o => ({ ...o, missingReport: !o.missingReport }))}
+                  >
+                    <p className="text-sm text-slate-400">אפשרויות סינון לפי דיווח חסר יתווספו בהמשך.</p>
+                  </AccordionSection>
+
+                  <AccordionSection
+                    title="ללא PDF"
+                    isOpen={openSections.noPdf}
+                    onToggle={() => setOpenSections(o => ({ ...o, noPdf: !o.noPdf }))}
+                  >
+                    <p className="text-sm text-slate-400">אפשרויות סינון לפי אסמכתאות ללא PDF יתווספו בהמשך.</p>
+                  </AccordionSection>
+
+                  <div className="flex justify-end">
                     <button
                       type="button"
-                      onClick={() => { setFilters(EMPTY_FILTERS); setQueries(EMPTY_QUERIES); setSearchQuery(""); }}
+                      onClick={() => { setFilters(EMPTY_FILTERS); setQueries(EMPTY_QUERIES); setSearchQuery(""); setBudgetTypes([]); setGoalConditions([]); }}
                       className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 transition-colors px-2 py-1 rounded-lg hover:bg-slate-100"
                     >
                       <svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
@@ -1135,12 +1577,14 @@ export default function DashboardPage() {
           {!loading && !error && schools.length > 0 && (
             <>
               <p className="text-sm text-slate-500 mb-2">
-                {hasAnyFilter
+                {advancedFilterActive
+                  ? `סה"כ ${displayRows.length} שורות (${filteredSchools.length} בתי ספר) מתוך ${schools.length}`
+                  : hasAnyFilter
                   ? `סה"כ ${filteredSchools.length} בתי ספר מתוך ${schools.length}`
                   : `סה"כ ${schools.length} בתי ספר`}
               </p>
-              <div className="glass-card rounded-2xl overflow-hidden">
-                {filteredSchools.length === 0 ? (
+              <div className="glass-card rounded-2xl overflow-hidden relative">
+                {displayRows.length === 0 ? (
                   <div className="p-8 text-center">
                     <p className="text-slate-500">
                       {hasAnyFilter ? "לא נמצאו בתי ספר התואמים לסינון" : "לא נמצאו בתי ספר"}
@@ -1150,17 +1594,24 @@ export default function DashboardPage() {
                     )}
                   </div>
                 ) : (
-                  <div className="overflow-x-auto">
+                  <div ref={tableScrollRef} className="overflow-x-auto dash-scroll-x">
                     <table className="w-full text-sm border-collapse">
                       <thead>
                         <tr
                           className="border-b border-slate-200"
                           style={{ position: "sticky", top: 0, background: "rgba(241,245,249,0.97)", zIndex: 10, backdropFilter: "blur(8px)" }}
                         >
-                          {selectMode && <th scope="col" className="w-10 px-3 py-3 border-l border-slate-200" />}
-                          <th scope="col" className="text-right px-5 py-3 text-slate-900 font-semibold border-l border-slate-200">שם מוסד</th>
+                          {selectMode && (
+                            <th scope="col" className="w-10 px-3 py-3 border-l border-slate-200"
+                              style={{ position: "sticky", right: 0, zIndex: 11, background: "rgba(241,245,249,0.97)" }} />
+                          )}
+                          <th scope="col" className="text-right px-5 py-3 text-slate-900 font-semibold border-l border-slate-200"
+                            style={{ position: "sticky", right: selectMode ? "2.5rem" : 0, zIndex: 11, background: "rgba(241,245,249,0.97)" }}>שם מוסד</th>
+                          {advancedFilterActive && (
+                            <th scope="col" className="text-right px-4 py-3 text-slate-900 font-semibold border-l border-slate-200">סוג תקציב</th>
+                          )}
                           {visibleColOrder.map((key, i) => {
-                            const col = MOVABLE_COLUMNS.find(c => c.key === key);
+                            const col = ALL_COLUMNS.find(c => c.key === key);
                             const isLast = i === visibleColOrder.length - 1 && !selectMode;
                             const origIndex = colOrder.indexOf(key);
                             const isDragging = dragIndex === origIndex;
@@ -1187,12 +1638,12 @@ export default function DashboardPage() {
                         </tr>
                       </thead>
                       <tbody>
-                        {filteredSchools.map((school) => {
+                        {displayRows.map(({ school, combo, rowKey }) => {
                           const isSelected = !!selectedIds[school.id];
                           return (
                             <tr
-                              key={school.id}
-                              className={`border-b border-slate-100 transition-colors ${isSelected ? "bg-blue-50" : "hover:bg-slate-50"} ${selectMode ? "cursor-default" : "cursor-pointer"}`}
+                              key={rowKey}
+                              className={`group border-b border-slate-100 transition-colors ${isSelected ? "bg-blue-50" : "hover:bg-slate-50"} ${selectMode ? "cursor-default" : "cursor-pointer"}`}
                               onClick={() => { if (!selectMode) navigate(`/school/${school.id}`, { state: { school } }); }}
                               role={selectMode ? undefined : "button"}
                               tabIndex={selectMode ? undefined : 0}
@@ -1200,7 +1651,8 @@ export default function DashboardPage() {
                               onKeyDown={e => !selectMode && e.key === "Enter" && navigate(`/school/${school.id}`, { state: { school } })}
                             >
                               {selectMode && (
-                                <td className="px-3 py-3 border-l border-slate-100 text-center">
+                                <td className={`px-3 py-3 border-l border-slate-100 text-center ${isSelected ? "bg-blue-50" : "bg-white group-hover:bg-slate-50"}`}
+                                  style={{ position: "sticky", right: 0, zIndex: 5 }}>
                                   <input
                                     type="checkbox"
                                     checked={isSelected}
@@ -1211,13 +1663,23 @@ export default function DashboardPage() {
                                   />
                                 </td>
                               )}
-                              <td className="px-5 py-3 border-l border-slate-100">
+                              <td className={`px-5 py-3 border-l border-slate-100 ${isSelected ? "bg-blue-50" : "bg-white group-hover:bg-slate-50"}`}
+                                style={{ position: "sticky", right: selectMode ? "2.5rem" : 0, zIndex: 5 }}>
                                 <span className="font-semibold text-slate-900">{school.name}</span>
                               </td>
+                              {advancedFilterActive && (
+                                <td className="px-4 py-3 border-l border-slate-100 text-slate-600">
+                                  <div className="flex flex-col gap-0.5 text-xs">
+                                    <span className="font-medium text-slate-700">
+                                      {combo.budget_name} · {DIVISION_LABEL[combo.division_type] || combo.division_type}
+                                    </span>
+                                  </div>
+                                </td>
+                              )}
                               {visibleColOrder.map((key, i) => (
                                 <td key={key}
                                   className={`px-5 py-3 text-slate-600${(i < visibleColOrder.length - 1 || selectMode) ? " border-l border-slate-100" : ""}`}>
-                                  {renderCell(school, key, meetingsStats)}
+                                  {renderCell(school, key, meetingsStats, combo, activeSummaryBudget)}
                                 </td>
                               ))}
                             </tr>
@@ -1226,6 +1688,28 @@ export default function DashboardPage() {
                       </tbody>
                     </table>
                   </div>
+                )}
+                {displayRows.length > 0 && (
+                  <>
+                    <button type="button"
+                      aria-label="גלול ימינה"
+                      onClick={() => tableScrollRef.current?.scrollBy({ left: 180, behavior: "smooth" })}
+                      style={{ position: "absolute", bottom: 2, right: 2, height: 14, width: 18, zIndex: 25 }}
+                      className="flex items-center justify-center rounded bg-white/80 text-slate-400 hover:text-slate-700 hover:bg-white transition-colors shadow-sm">
+                      <svg aria-hidden="true" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="9 18 15 12 9 6" />
+                      </svg>
+                    </button>
+                    <button type="button"
+                      aria-label="גלול שמאלה"
+                      onClick={() => tableScrollRef.current?.scrollBy({ left: -180, behavior: "smooth" })}
+                      style={{ position: "absolute", bottom: 2, left: 2, height: 14, width: 18, zIndex: 25 }}
+                      className="flex items-center justify-center rounded bg-white/80 text-slate-400 hover:text-slate-700 hover:bg-white transition-colors shadow-sm">
+                      <svg aria-hidden="true" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="15 18 9 12 15 6" />
+                      </svg>
+                    </button>
+                  </>
                 )}
               </div>
             </>

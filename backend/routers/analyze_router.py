@@ -15,11 +15,13 @@ import pandas as pd
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 
+from academic_years import DEFAULT_ACADEMIC_YEAR
 from auth import get_current_user
 from supabase_client import get_admin_client
 from logic.excel_exporter import export
 from logic.pdf_exporter import export_pdf
 from logic.file_identifier import identify_file
+from plan_roster import extract_plan_roster
 from logic.gefen_processor import load_gefen, normalize_amount
 from logic.kesafim_processor import load_kesafim
 from logic.payscool_processor import load_payscool
@@ -226,6 +228,7 @@ async def upload(
     school_id: str | None = Form(None),
     gefen_account_id: str | None = Form(None),
     update_log_id: str | None = Form(None),
+    academic_year: str | None = Form(None),
     user: dict = Depends(get_current_user),
 ):
     run_id = str(uuid.uuid4())
@@ -238,7 +241,7 @@ async def upload(
         saved.append(dest)
 
     _update_run(run_id, {"status": "processing"})
-    background_tasks.add_task(_process, run_id, saved, run_dir, user["id"], school_id, gefen_account_id, update_log_id)
+    background_tasks.add_task(_process, run_id, saved, run_dir, user["id"], school_id, gefen_account_id, update_log_id, academic_year)
     return {"run_id": run_id}
 
 
@@ -247,13 +250,14 @@ async def save_for_account(
     run_id: str = Form(...),
     school_id: str = Form(...),
     gefen_account_id: str | None = Form(None),
+    academic_year: str | None = Form(None),
     user: dict = Depends(get_current_user),
 ):
     """Save a completed run under a different gefen account (used when division mismatch is detected)."""
     run = _get_run(run_id)
     if not run or run.get("status") != "done":
         raise HTTPException(status_code=404, detail="הריצה לא נמצאה או טרם הושלמה")
-    _save_check_log(run_id, user["id"], school_id, gefen_account_id, run_data=run)
+    _save_check_log(run_id, user["id"], school_id, gefen_account_id, run_data=run, academic_year=academic_year)
     return {"ok": True}
 
 
@@ -303,9 +307,100 @@ async def add_file_to_check(
     _update_run(run_id, {"status": "processing"})
     background_tasks.add_task(
         _process, run_id, all_paths, run_dir,
-        user["id"], log["school_id"], log.get("gefen_account_id"), log_id,
+        user["id"], log["school_id"], log.get("gefen_account_id"), log_id, log.get("academic_year"),
     )
     return {"run_id": run_id}
+
+
+class ComparePlansRequest(BaseModel):
+    newer_log_id: str
+    older_log_id: str
+
+
+def _download_plan_rosters(db, log: dict) -> dict | None:
+    """Download this check's stored files, identify + parse any planning
+    file(s) among them, and return a merged {budget_norm: [plans]} roster.
+    Returns None if no stored files / no tikhnun file could be found.
+    Isolated from the /add-file + _process pipeline — read-only, no reconciliation.
+    """
+    stored_paths = (log.get("summary") or {}).get("stored_file_paths") or []
+    if not stored_paths:
+        return None
+
+    run_dir = Path(tempfile.mkdtemp(prefix=f"compareplans_{log['id']}_"))
+    try:
+        roster: dict = {}
+        found_tikhnun = False
+        for sp in stored_paths:
+            if isinstance(sp, dict):
+                storage_key = sp["path"]
+                fname = sp["name"]
+            else:
+                storage_key = sp
+                fname = Path(sp).name
+            dest = run_dir / fname
+            try:
+                dest.write_bytes(db.storage.from_("check-files").download(storage_key))
+            except Exception as exc:
+                logger.warning("compare-plans: failed to download %s: %s", fname, exc)
+                continue
+            if identify_file(str(dest)) != "tikhnun":
+                continue
+            found_tikhnun = True
+            try:
+                file_roster = extract_plan_roster(str(dest))
+            except Exception as exc:
+                logger.warning("compare-plans: failed to parse %s: %s", fname, exc)
+                continue
+            for budget_norm, plans in file_roster.items():
+                roster.setdefault(budget_norm, []).extend(plans)
+
+        return roster if found_tikhnun else None
+    finally:
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+
+@router.post("/compare-plans")
+def compare_plans(body: ComparePlansRequest, _user: dict = Depends(get_current_user)):
+    """Compare the full plan roster (מענים) of two checks' planning files.
+    Independent from "דיווח חסר" — includes fully-reported plans too."""
+    db = get_admin_client()
+
+    newer_log = db.table("check_logs").select("*").eq("id", body.newer_log_id).single().execute().data
+    older_log = db.table("check_logs").select("*").eq("id", body.older_log_id).single().execute().data
+    if not newer_log or not older_log:
+        raise HTTPException(status_code=404, detail="אחת הבדיקות לא נמצאה")
+
+    newer_roster = _download_plan_rosters(db, newer_log)
+    older_roster = _download_plan_rosters(db, older_log)
+
+    missing = {"newer": newer_roster is None, "older": older_roster is None}
+    newer_roster = newer_roster or {}
+    older_roster = older_roster or {}
+
+    budget_names = sorted(set(newer_roster) | set(older_roster))
+    budgets = []
+    for name in budget_names:
+        newer_plans = {p["key"]: p for p in newer_roster.get(name, [])}
+        older_plans = {p["key"]: p for p in older_roster.get(name, [])}
+
+        added = [p for k, p in newer_plans.items() if k not in older_plans]
+        removed = [p for k, p in older_plans.items() if k not in newer_plans]
+        updated = []
+        for k, new_p in newer_plans.items():
+            old_p = older_plans.get(k)
+            if old_p is None:
+                continue
+            if round(new_p["tikhnun"], 2) != round(old_p["tikhnun"], 2):
+                updated.append({
+                    "key": k, "mispnum": new_p["mispnum"], "rcode": new_p["rcode"], "name": new_p["name"],
+                    "oldAmount": old_p["tikhnun"], "newAmount": new_p["tikhnun"],
+                    "diff": new_p["tikhnun"] - old_p["tikhnun"],
+                })
+
+        budgets.append({"name": name, "added": added, "removed": removed, "updated": updated})
+
+    return {"missing": missing, "budgets": budgets}
 
 
 @router.get("/result/{run_id}")
@@ -559,6 +654,7 @@ async def classify_rows(
             school_ctx.get("gefen_account_id"),
             saved_log_id or school_ctx.get("update_log_id"),
             run_data=run,
+            academic_year=school_ctx.get("academic_year"),
         )
 
     _update_run(run_id, run)
@@ -695,6 +791,7 @@ async def retry_finance(
                     school_ctx.get("gefen_account_id"),
                     run.get("saved_log_id") or school_ctx.get("update_log_id"),
                     run_data=run,
+                    academic_year=school_ctx.get("academic_year"),
                 )
             _update_run(run_id, run)
             return {"pending": False, "tikhnun": tikhnun, "per_combo_results": run.get("per_combo_results")}
@@ -734,7 +831,7 @@ async def retry_finance(
 # Background processing pipeline
 # ---------------------------------------------------------------------------
 
-def _save_check_log(run_id: str, user_id: str, school_id: str, gefen_account_id: str | None, update_log_id: str | None = None, run_data: dict | None = None) -> None:
+def _save_check_log(run_id: str, user_id: str, school_id: str, gefen_account_id: str | None, update_log_id: str | None = None, run_data: dict | None = None, academic_year: str | None = None) -> None:
     run = run_data if run_data is not None else (_get_run(run_id) or {})
     if run.get("status") not in ("done", "saving") or run.get("tikhnun_only"):
         return
@@ -814,13 +911,199 @@ def _save_check_log(run_id: str, user_id: str, school_id: str, gefen_account_id:
                 "school_id": school_id,
                 "gefen_account_id": gefen_account_id,
                 "run_by": user_id,
+                "academic_year": academic_year or DEFAULT_ACADEMIC_YEAR,
                 **log_fields,
             }).execute()
             if result.data:
                 run["saved_log_id"] = result.data[0]["id"]
                 _update_run(run_id, run)
+
+        _save_check_metrics(db, school_id, gefen_account_id, academic_year or DEFAULT_ACADEMIC_YEAR, run)
     except Exception as exc:
         logger.error("Failed to save check_log for run %s: %s", run_id, exc)
+
+
+_STAGE_TO_DIVISION_TYPE = {"תיכון": "tikkon", "חטיבת ביניים": "beinayim", "יסודי": "yesodi"}
+
+
+def _parse_amount_str(s) -> float:
+    """Mirrors the frontend's sumRowsAmount() (ResultsView.jsx) — parses a Hebrew-formatted
+    'סכום' display string (e.g. '1,234.56') into a float, defaulting to 0 on any failure."""
+    try:
+        return float(str(s or "0").replace(",", "")) or 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _find_combo_for_budget(per_combo_results: dict, budget_name: str, division_type: str) -> dict | None:
+    """Finds the reconciliation combo matching (budget_name, division_type). Combos are keyed
+    by normalized budget + Hebrew stage label, not by division_type directly, so we map stage
+    to division_type first; if that's ambiguous, fall back to the sole budget-name match."""
+    if not per_combo_results:
+        return None
+    candidates = [c for c in per_combo_results.values() if c.get("budget") == budget_name]
+    if not candidates:
+        return None
+    for c in candidates:
+        if _STAGE_TO_DIVISION_TYPE.get(c.get("stage")) == division_type:
+            return c
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _compute_check_metrics_rows(school_id: str, gefen_account_id: str | None, academic_year: str, run: dict, db=None) -> list[dict]:
+    """Pure computation of check_metrics rows (one per division+budget) from a run/summary-like
+    dict — shared by the live save path (_save_check_metrics) and the one-time backfill script,
+    so both stay perfectly consistent. `db` is only needed to resolve a single-division school's
+    division_type from gefen_accounts (or, failing that, run["summary"]["division"] / school.stage)
+    when not already known via tikhnun_tikkon/tikhnun_beinayim."""
+    division_results = []
+    tikkon = run.get("tikhnun_tikkon")
+    beinayim = run.get("tikhnun_beinayim")
+    if tikkon or beinayim:
+        if tikkon:
+            division_results.append(("tikkon", tikkon))
+        if beinayim:
+            division_results.append(("beinayim", beinayim))
+    else:
+        tikhnun = run.get("tikhnun")
+        if tikhnun and isinstance(tikhnun, dict) and not tikhnun.get("error"):
+            division_type = run.get("division_type")
+            if not division_type and db is not None and gefen_account_id:
+                acc = db.table("gefen_accounts").select("division_type").eq("id", gefen_account_id).single().execute()
+                division_type = (acc.data or {}).get("division_type")
+
+            school_stage = None
+            if not division_type and db is not None and school_id:
+                sch = db.table("schools").select("stage").eq("id", school_id).single().execute()
+                school_stage = (sch.data or {}).get("stage")
+
+            # Some checks (saved before a school had a gefen_accounts row, or run through the
+            # older single-division-at-a-time flow) carry no gefen_account_id at all — but the
+            # gefen file's own division was still detected and stored in summary.division
+            # ("tikkon"/"beinayim"). That detector has no concept of "יסודי" at all (יסודי
+            # schools reuse ביניים's report codes and get bucketed there by convention), so for
+            # a school whose stage is genuinely yesodi this signal would be actively wrong —
+            # only trust it when the school isn't declared single-division-יסודי.
+            if not division_type and school_stage != "yesodi":
+                run_division = (run.get("summary") or {}).get("division")
+                if run_division in ("tikkon", "beinayim"):
+                    division_type = run_division
+
+            # Last resort: only safe when the school has at most one real gefen_account — with
+            # 2+ accounts we can't tell which division an orphaned check belongs to, so we skip
+            # it rather than misattribute it to an arbitrary one (school.stage isn't even a valid
+            # single division for "sheshshnati" schools).
+            if not division_type and db is not None and school_id:
+                accs = db.table("gefen_accounts").select("division_type").eq("school_id", school_id).execute()
+                acc_rows = accs.data or []
+                if len(acc_rows) == 1:
+                    division_type = acc_rows[0].get("division_type")
+                elif len(acc_rows) == 0 and school_stage in ("tikkon", "beinayim", "yesodi", "other"):
+                    division_type = school_stage
+
+            if division_type:
+                division_results.append((division_type, tikhnun))
+
+    per_combo_results = run.get("per_combo_results") or {}
+
+    rows_to_save = []
+    for division_type, tikhnun_result in division_results:
+        if not isinstance(tikhnun_result, dict) or tikhnun_result.get("error"):
+            continue
+        budgets = tikhnun_result.get("budgets")
+        overview = tikhnun_result.get("overview") or {}
+        per_budget_rejected = tikhnun_result.get("per_budget_rejected") or {}
+        per_budget_no_pdf = tikhnun_result.get("per_budget_no_pdf") or {}
+        partial_rows = tikhnun_result.get("partial_rows") or []
+
+        def _extra_metrics(budget_name: str) -> dict:
+            rejected = per_budget_rejected.get(budget_name, [])
+            no_pdf = per_budget_no_pdf.get(budget_name, [])
+            partial = [r for r in partial_rows if r.get("budget") == budget_name]
+            combo = _find_combo_for_budget(per_combo_results, budget_name, division_type)
+            fin_not_gefen = combo.get("in_finance_not_gefen", []) if combo else []
+            gefen_not_fin = combo.get("in_gefen_not_finance", []) if combo else []
+            return {
+                "rejected_count": len(rejected),
+                "rejected_sum": sum(_parse_amount_str(r.get("סכום")) for r in rejected),
+                "no_pdf_count": len(no_pdf),
+                "no_pdf_sum": sum(_parse_amount_str(r.get("סכום")) for r in no_pdf),
+                "partial_count": len(partial),
+                "partial_sum": sum(r.get("hefresh") or 0 for r in partial),
+                "finance_not_gefen_count": len(fin_not_gefen),
+                "finance_not_gefen_sum": sum(_parse_amount_str(r.get("סכום")) for r in fin_not_gefen),
+                "gefen_not_finance_count": len(gefen_not_fin),
+                "gefen_not_finance_sum": sum(_parse_amount_str(r.get("סכום")) for r in gefen_not_fin),
+            }
+
+        if budgets:
+            for bud in budgets:
+                bud_overview = bud.get("overview") or {}
+                budget_name = bud.get("name") or "כללי"
+                row = {
+                    "school_id": school_id,
+                    "gefen_account_id": gefen_account_id,
+                    "division_type": division_type,
+                    "budget_name": budget_name,
+                    "academic_year": academic_year,
+                    # Plan-file-derived — safe to always update, regardless of whether this
+                    # run's doch/finance files happened to cover this specific budget.
+                    "pct_plan": bud_overview.get("pct_plan"),
+                    "pct_divuach": bud_overview.get("pct_divuach"),
+                    "budget_amount": bud_overview.get("budget"),
+                    "planned_amount": bud_overview.get("planned"),
+                    "fixed_gap_abs": bud_overview.get("fixed_gap_abs"),
+                    "flexible_remaining": bud_overview.get("flexible_remaining"),
+                    "sum_chayav": bud_overview.get("sum_chayav"),
+                    "sum_divuach": bud_overview.get("sum_divuach"),
+                }
+                # Doch/finance-run-scoped fields — only include (and thus only overwrite in
+                # the upsert) when THIS run actually analyzed this budget; otherwise omit them
+                # entirely so the previous good values already in check_metrics are preserved
+                # instead of being silently zeroed out.
+                if bud_overview.get("doch_analyzed", True):
+                    row["pct_tanuz"] = bud_overview.get("pct_tanuz")
+                    row.update(_extra_metrics(budget_name))
+                rows_to_save.append(row)
+        elif overview:
+            budget_amt = overview.get("budget") or 0
+            planned_amt = overview.get("planned") or 0
+            budget_name = "כללי"
+            row = {
+                "school_id": school_id,
+                "gefen_account_id": gefen_account_id,
+                "division_type": division_type,
+                "budget_name": budget_name,
+                "academic_year": academic_year,
+                "pct_plan": (planned_amt / budget_amt) if budget_amt else None,
+                "pct_divuach": overview.get("pct_divuach"),
+                "budget_amount": overview.get("budget"),
+                "planned_amount": overview.get("planned"),
+                "fixed_gap_abs": overview.get("fixed_gap_abs"),
+                "flexible_remaining": overview.get("flexible_remaining"),
+                "sum_chayav": overview.get("sum_chayav"),
+                "sum_divuach": overview.get("sum_divuach"),
+            }
+            if overview.get("doch_analyzed", True):
+                row["pct_tanuz"] = overview.get("pct_tanuz")
+                row.update(_extra_metrics(budget_name))
+            rows_to_save.append(row)
+
+    return rows_to_save
+
+
+def _save_check_metrics(db, school_id: str, gefen_account_id: str | None, academic_year: str, run: dict) -> None:
+    """Upsert flattened planning/reporting/reconciliation metrics into check_metrics, one row
+    per division+budget, so the dashboard can query them directly instead of parsing
+    check_logs.summary JSON. Non-fatal: must never break check_log saving."""
+    try:
+        rows_to_save = _compute_check_metrics_rows(school_id, gefen_account_id, academic_year, run, db=db)
+        for row in rows_to_save:
+            db.table("check_metrics").upsert(
+                row, on_conflict="school_id,division_type,budget_name,academic_year"
+            ).execute()
+    except Exception as exc:
+        logger.warning("check_metrics enrichment failed (non-fatal) for school %s: %s", school_id, exc)
 
 
 def _any_tikhnun_pending(run_dict: dict) -> bool:
@@ -1064,6 +1347,11 @@ def _finalize_tikhnun_metrics(
             sc = bud["sum_chayav"]
             bud["nikuy"]     = nikuy
             bud["pct_tanuz"] = (bud["S"] - nikuy) / sc if sc > 0 else None
+            # Explicit marker for callers (e.g. check_metrics) that need to know whether
+            # THIS run actually analyzed this budget's doch/finance files — pct_tanuz alone
+            # isn't a reliable signal, since it computes a real (non-null) ratio here even
+            # for budgets with zero matching rows this run.
+            bud["doch_analyzed"] = norm in doch_budget_norms
 
     # Update overview for doch-relevant budgets
     if doch_budget_norms and "overview" in tikhnun_result:
@@ -1076,6 +1364,8 @@ def _finalize_tikhnun_metrics(
             tikhnun_result["overview"]["pct_tanuz"]  = (
                 (total_s - total_nikuy) / total_sc if total_sc > 0 else None
             )
+    if "overview" in tikhnun_result:
+        tikhnun_result["overview"]["doch_analyzed"] = bool(doch_budget_norms)
 
     # Rebuild partial_rows
     if doch_budget_norms and results_clean and "partial_rows" in tikhnun_result:
@@ -1195,6 +1485,7 @@ def _finalize_tikhnun_metrics(
                 "pct_tanuz":          bud.get("pct_tanuz"),
                 # Approximate: H - L (kvua correction per-budget is computed separately when available)
                 "flexible_remaining": max(bud["H"] - bud["L"], 0.0),
+                "doch_analyzed":      bud.get("doch_analyzed", False),
             },
         })
 
@@ -2200,7 +2491,7 @@ def _upload_files_to_storage(paths: list[Path], run_id: str) -> list[dict]:
     return stored
 
 
-def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", school_id: str | None = None, gefen_account_id: str | None = None, update_log_id: str | None = None) -> None:
+def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", school_id: str | None = None, gefen_account_id: str | None = None, update_log_id: str | None = None, academic_year: str | None = None) -> None:
     run_data: dict = {"status": "processing"}
     try:
         # Upload source files to Supabase Storage for future "add file" retrieval
@@ -2237,7 +2528,7 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
                     "tikhnun_tikkon": tikkon_result,
                     "tikhnun_beinayim": beinayim_result,
                     "stored_file_paths": stored_file_paths or None,
-                    "_school_ctx": {"user_id": user_id, "school_id": school_id, "gefen_account_id": gefen_account_id, "update_log_id": update_log_id},
+                    "_school_ctx": {"user_id": user_id, "school_id": school_id, "gefen_account_id": gefen_account_id, "update_log_id": update_log_id, "academic_year": academic_year},
                 }
             else:
                 tikhnun_data = load_tikhnun(str(tikhnun_paths[0]))
@@ -2249,7 +2540,7 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
                     "tikhnun_only": True,
                     "tikhnun": tikhnun_result_only,
                     "stored_file_paths": stored_file_paths or None,
-                    "_school_ctx": {"user_id": user_id, "school_id": school_id, "gefen_account_id": gefen_account_id, "update_log_id": update_log_id},
+                    "_school_ctx": {"user_id": user_id, "school_id": school_id, "gefen_account_id": gefen_account_id, "update_log_id": update_log_id, "academic_year": academic_year},
                 }
             _update_run(run_id, run_data)
             return
@@ -2349,10 +2640,10 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
                 },
                 "rows_gefen_rejected": _build_display_records(in_gefen_rejected, _GEFEN_REJECTED_COL_MAP),
                 "rows_gefen_no_pdf": _build_display_records(in_gefen_no_pdf, _GEFEN_COL_MAP),
-                "_school_ctx": {"user_id": user_id, "school_id": school_id, "gefen_account_id": gefen_account_id, "update_log_id": update_log_id},
+                "_school_ctx": {"user_id": user_id, "school_id": school_id, "gefen_account_id": gefen_account_id, "update_log_id": update_log_id, "academic_year": academic_year},
             }
             if school_id and not _any_tikhnun_pending(run_data):
-                _save_check_log(run_id, user_id, school_id, gefen_account_id, update_log_id, run_data=run_data)
+                _save_check_log(run_id, user_id, school_id, gefen_account_id, update_log_id, run_data=run_data, academic_year=academic_year)
             run_data["status"] = "done"
             _update_run(run_id, run_data)
             return
@@ -2434,10 +2725,10 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
             "rows_gefen_rejected": _build_display_records(in_gefen_rejected, _GEFEN_REJECTED_COL_MAP),
             "rows_gefen_no_pdf": _build_display_records(in_gefen_no_pdf, _GEFEN_COL_MAP),
             "per_combo_results": per_combo_results,
-            "_school_ctx": {"user_id": user_id, "school_id": school_id, "gefen_account_id": gefen_account_id, "update_log_id": update_log_id},
+            "_school_ctx": {"user_id": user_id, "school_id": school_id, "gefen_account_id": gefen_account_id, "update_log_id": update_log_id, "academic_year": academic_year},
         }
         if school_id and not _any_tikhnun_pending(run_data):
-            _save_check_log(run_id, user_id, school_id, gefen_account_id, update_log_id, run_data=run_data)
+            _save_check_log(run_id, user_id, school_id, gefen_account_id, update_log_id, run_data=run_data, academic_year=academic_year)
         run_data["status"] = "done"
         _update_run(run_id, run_data)
 

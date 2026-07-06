@@ -1,0 +1,23 @@
+export const MEETING_STATUS_OPTIONS = [
+  { value: "scheduled",  label: "נקבעה",   color: "#c2410c", bg: "#fff7ed", dot: "#f97316" },
+  { value: "completed",  label: "בוצעה",   color: "#15803d", bg: "#f0fdf4", dot: "#22c55e" },
+  { value: "cancelled",  label: "בוטלה",   color: "#b91c1c", bg: "#fef2f2", dot: "#ef4444" },
+  { value: "postponed",  label: "נדחתה",   color: "#1d4ed8", bg: "#eff6ff", dot: "#3b82f6" },
+  { value: "other",      label: "אחר",     color: "#475569", bg: "#f8fafc", dot: "#94a3b8" },
+];
+export const STATUS_MAP = Object.fromEntries(MEETING_STATUS_OPTIONS.map(s => [s.value, s]));
+
+export const MEETING_TYPE_OPTIONS = [
+  { value: "physical", label: "פיזי" },
+  { value: "remote",   label: "מרחוק" },
+];
+
+export const STATUS_SORT_ORDER = { completed: 0, scheduled: 1, postponed: 2, other: 3 };
+
+export const HEBREW_MONTHS = ["ינואר","פברואר","מרץ","אפריל","מאי","יוני","יולי","אוגוסט","ספטמבר","אוקטובר","נובמבר","דצמבר"];
+
+export function formatMeetingDate(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return d.toLocaleDateString("he-IL", { day: "2-digit", month: "2-digit", year: "numeric" });
+}
