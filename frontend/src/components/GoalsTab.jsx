@@ -50,7 +50,12 @@ export function GoalsTab({ accounts, schoolId, schoolStage, activeSubTab, academ
     return result;
   }, [filteredLogs]);
 
-  const [selectedBudget, setSelectedBudget] = useState("");
+  // Defaults to "גפן" (the same app-wide default used everywhere else — DashboardPage's
+  // activeSummaryBudget, DEFAULT_BUDGET_TYPES) instead of "" — an empty budget_name here
+  // silently diverged from what every other screen assumes for a school with no real
+  // check/budget history yet, which made the dashboard's goal columns unable to find a
+  // status saved from this tab for such schools.
+  const [selectedBudget, setSelectedBudget] = useState("גפן");
   const [goals, setGoals] = useState([]);
   const [importantDates, setImportantDates] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -71,8 +76,8 @@ export function GoalsTab({ accounts, schoolId, schoolStage, activeSubTab, academ
   useEffect(() => {
     if (budgets.length > 0 && !budgets.includes(selectedBudget)) {
       setSelectedBudget(budgets[0]);
-    } else if (budgets.length === 0 && selectedBudget !== "") {
-      setSelectedBudget("");
+    } else if (budgets.length === 0 && selectedBudget !== "גפן") {
+      setSelectedBudget("גפן");
     }
   }, [budgets, selectedBudget]);
 

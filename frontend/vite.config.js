@@ -8,6 +8,7 @@ export default defineConfig({
     proxy: {
       "/auth": { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/analyze": { target: "http://127.0.0.1:8000", changeOrigin: true },
+      "/chatbot": { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/contact/send": { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/schools": { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/signup":  { target: "http://127.0.0.1:8000", changeOrigin: true },

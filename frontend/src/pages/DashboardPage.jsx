@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
 import axios from "axios";
 import * as XLSX from "xlsx";
@@ -24,11 +25,15 @@ function evalGoalConditions(school, combo, conditions) {
   if (!conditions.length) return true;
   let result = null;
   conditions.forEach((c, i) => {
-    const status = (school.goal_statuses || []).find(g =>
+    const findStatus = budgetName => (school.goal_statuses || []).find(g =>
       g.goal_key === c.goalKey &&
       g.division_type === combo.division_type &&
-      g.budget_name === combo.budget_name
+      g.budget_name === budgetName
     );
+    // Schools with no check/budget history yet used to have their goal saved under an empty
+    // budget_name (a GoalsTab bug, now fixed to default to "גפן" like everywhere else) — fall
+    // back to that legacy blank value so goals saved before the fix still match here too.
+    const status = findStatus(combo.budget_name) || findStatus("");
     const met = status ? status.met : null;
     let condResult = true;
     if (c.met === "true") condResult = met === true;
@@ -460,6 +465,33 @@ const SUMMARY_COLUMNS = [
 const ALL_COLUMNS = [...MOVABLE_COLUMNS, ...SUMMARY_COLUMNS];
 const DEFAULT_COL_ORDER = ALL_COLUMNS.map(c => c.key);
 
+// Goal columns ("goal_<goalKey>") are built dynamically from an async-loaded endpoint, so
+// they can never be part of the static DEFAULT_COL_ORDER — saved col_order/col_visible
+// validation accepts them by prefix instead of requiring an exact DEFAULT_COL_ORDER match.
+function isKnownColumnKey(k) {
+  return DEFAULT_COL_ORDER.includes(k) || (typeof k === "string" && k.startsWith("goal_"));
+}
+
+// Columns that get the Excel-style header filter/sort icon — every SUMMARY_COLUMNS entry
+// plus the two numeric MOVABLE_COLUMNS ("hours" is a distinct fmt: raw value is minutes,
+// user-facing input/comparisons are done in decimal hours).
+const FILTER_COLUMN_META = [
+  { key: "meetings_completed", label: 'סה"כ פגישות שבוצעו', fmt: "int" },
+  { key: "meetings_hours", label: 'סה"כ שעות שבוצעו', fmt: "hours" },
+  ...SUMMARY_COLUMNS,
+];
+const FILTER_COLUMN_KEYS = new Set(FILTER_COLUMN_META.map(c => c.key));
+
+const NUMBER_FILTER_OPERATORS = [
+  { op: "eq", label: "שווה ל..." },
+  { op: "ne", label: "לא שווה ל..." },
+  { op: "gt", label: "גדול מ..." },
+  { op: "gte", label: "גדול או שווה ל..." },
+  { op: "lt", label: "קטן מ..." },
+  { op: "lte", label: "קטן או שווה ל..." },
+];
+const OPERATOR_LABEL = Object.fromEntries(NUMBER_FILTER_OPERATORS.map(o => [o.op, o.label]));
+
 function fmtMoney(v) {
   if (v === null || v === undefined) return "—";
   const n = Number(v);
@@ -504,9 +536,463 @@ function formatMeetingHours(totalMinutes) {
   return `${h}:${String(m).padStart(2, "0")} שעות`;
 }
 
-function renderCell(school, key, meetingsStats = {}, combo = null, activeSummaryBudget = "גפן") {
+function formatFilterValueLabel(raw, fmt) {
+  if (fmt === "goal") return raw === 2 ? "כן" : raw === 1 ? "לא" : "טרם הוגדר";
+  if (fmt === "hours") return formatMeetingHours(raw);
+  if (fmt === "pct") return fmtPct2(raw);
+  if (fmt === "int") return fmtInt(raw);
+  return fmtMoney(raw);
+}
+
+// Resolves a goal's met/not-met/unset status for a school row — same lookup evalGoalConditions
+// already uses (school.goal_statuses is a flat array scoped by division_type+budget_name),
+// so goal columns stay consistent with the existing "סינון לפי יעד" advanced-filter behavior
+// and with the manually-toggled "כן"/"לא" values from the school's "יעדים" tab.
+function getGoalStatus(school, combo, goalKey, activeSummaryBudget) {
+  const budgetName = combo ? combo.budget_name : activeSummaryBudget;
+  const divisionType = combo ? combo.division_type : null;
+  const statuses = school.goal_statuses || [];
+  const findWithBudget = want => statuses.find(g =>
+    g.goal_key === goalKey &&
+    g.budget_name === want &&
+    (divisionType === null || g.division_type === divisionType)
+  );
+  // Schools with no check/budget history yet used to have their goal saved under an empty
+  // budget_name (a GoalsTab bug, now fixed to default to "גפן" like everywhere else) — fall
+  // back to that legacy blank value so goals saved before the fix still display correctly.
+  const entry = findWithBudget(budgetName) || findWithBudget("");
+  return entry ? entry.met : null;
+}
+
+// One raw numeric value per filterable column, uniformly (school.check_metrics/combo
+// for the 19 SUMMARY_COLUMNS, meetingsStats for the 2 movable ones, goal_statuses for the
+// dynamic goal columns) — computed once per row so filtering/sorting/value-list logic never
+// needs to know where a value comes from. Goal columns are ordinally encoded (0=טרם הוגדר,
+// 1=לא, 2=כן) for sort — never null, since "not yet set" is itself a valid distinct state.
+function computeFilterValues(school, combo, meetingsStats, activeSummaryBudget, goalColumns = []) {
+  const out = {};
+  const stats = meetingsStats[school.id];
+  out.meetings_completed = stats ? stats.completed ?? null : null;
+  out.meetings_hours = stats ? stats.total_minutes ?? null : null;
+  const metricsRow = getSummaryMetricsRow(school, combo, activeSummaryBudget);
+  for (const col of SUMMARY_COLUMNS) {
+    const v = metricsRow ? metricsRow[col.field] : undefined;
+    out[col.key] = v === undefined ? null : v;
+  }
+  for (const gc of goalColumns) {
+    const met = getGoalStatus(school, combo, gc.goalKey, activeSummaryBudget);
+    out[gc.key] = met === true ? 2 : met === false ? 1 : 0;
+  }
+  return out;
+}
+
+// Converts what the user typed in a filter-value input into the raw unit the column is
+// stored in: "pct" columns store a 0-1 fraction (user types a percent, e.g. 75 → 0.75),
+// "hours" columns store raw minutes (user types decimal hours, e.g. 5.5 → 330).
+function parseFilterInput(rawInput, fmt) {
+  if (rawInput === "" || rawInput === null || rawInput === undefined) return null;
+  const n = Number(String(rawInput).replace(/,/g, "").trim());
+  if (Number.isNaN(n)) return null;
+  if (fmt === "pct") return n / 100;
+  if (fmt === "hours") return n * 60;
+  return n;
+}
+
+function evalCond(numericValue, cond, fmt) {
+  if (!cond || !cond.op) return true;
+  const target = parseFilterInput(cond.value, fmt);
+  if (target === null) return true; // empty/invalid condition = no-op
+  const eps = fmt === "money" || fmt === "pct" ? 1e-6 : 0;
+  switch (cond.op) {
+    case "eq": return Math.abs(numericValue - target) <= eps;
+    case "ne": return Math.abs(numericValue - target) > eps;
+    case "gt": return numericValue > target;
+    case "gte": return numericValue >= target;
+    case "lt": return numericValue < target;
+    case "lte": return numericValue <= target;
+    default: return true;
+  }
+}
+
+function passesOneColumnFilter(rawValue, spec, fmt) {
+  if (!spec) return true;
+  const isBlank = rawValue === null || rawValue === undefined;
+  if (spec.mode === "values") {
+    if (isBlank) return spec.selected.includes("__BLANK__");
+    return spec.selected.includes(String(rawValue));
+  }
+  // mode === "custom" — blanks never satisfy a numeric operator
+  if (isBlank) return false;
+  const r1 = evalCond(rawValue, spec.cond1, fmt);
+  const r2 = evalCond(rawValue, spec.cond2, fmt);
+  return spec.joiner === "OR" ? (r1 || r2) : (r1 && r2);
+}
+
+function passesAllColumnFilters(row, columnFilters, metaList, excludeKey = null) {
+  for (const [key, spec] of Object.entries(columnFilters)) {
+    if (!spec || key === excludeKey) continue;
+    const fmt = metaList.find(c => c.key === key)?.fmt;
+    if (!passesOneColumnFilter(row.filterValues[key], spec, fmt)) return false;
+  }
+  return true;
+}
+
+// Stacked multi-column sort: sortSpecs[0] is the most-recently-clicked (primary) column,
+// later entries are older clicks kept on as tie-breakers. Blank values always sort last,
+// regardless of direction, matching Excel.
+function buildRowComparator(sortSpecs) {
+  return (a, b) => {
+    for (const { key, dir } of sortSpecs) {
+      const va = a.filterValues[key];
+      const vb = b.filterValues[key];
+      const aBlank = va === null || va === undefined;
+      const bBlank = vb === null || vb === undefined;
+      if (aBlank && bBlank) continue;
+      if (aBlank) return 1;
+      if (bBlank) return -1;
+      if (va === vb) continue;
+      const cmp = va < vb ? -1 : 1;
+      return dir === "asc" ? cmp : -cmp;
+    }
+    return 0;
+  };
+}
+
+// Excel-style header filter/sort icon + dropdown menu for one numeric column. Owns its
+// own transient UI state (search text, custom-filter dialog draft) but reads/writes the
+// shared columnFilters/sortSpecs state passed down from DashboardPage so multiple columns
+// combine correctly (AND across filters, stacked multi-column sort).
+function ColumnHeaderFilter({ colDef, columnFilters, setColumnFilters, sortSpecs, setSortSpecs, openKey, setOpenKey, baseDisplayRows, allFilterMeta }) {
+  const { key, label, fmt } = colDef;
+  const isOpen = openKey === key;
+  const spec = columnFilters[key] || null;
+  const sortIndex = sortSpecs.findIndex(s => s.key === key);
+  const isSorted = sortIndex !== -1;
+  const isFiltered = !!spec;
+
+  const containerRef = useRef(null);
+  const menuRef = useRef(null);
+  const [menuPos, setMenuPos] = useState(null); // { top, left } in viewport coords, set only while open
+  const [subview, setSubview] = useState("main"); // "main" | "custom"
+  const [searchQuery, setSearchQuery] = useState("");
+  const [draftSelected, setDraftSelected] = useState([]);
+  const [numberFiltersOpen, setNumberFiltersOpen] = useState(false);
+  const [customCond1, setCustomCond1] = useState({ op: "eq", value: "" });
+  const [customJoiner, setCustomJoiner] = useState("AND");
+  const [customCond2, setCustomCond2] = useState({ op: "eq", value: "" });
+
+  // The menu is portaled to document.body (fixed positioning) so it always floats above the
+  // table regardless of how few rows are visible — an ancestor (the table's glass-card) has
+  // overflow-hidden, which was clipping the dropdown when rendered as a normal in-flow child.
+  useEffect(() => {
+    if (!isOpen) return;
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (rect) setMenuPos({ top: rect.bottom + 4, left: Math.max(8, Math.min(rect.left, window.innerWidth - 290)) });
+  }, [isOpen]);
+
+  // Outside-click check now spans two disjoint DOM subtrees (the button in place, the menu
+  // portaled to document.body) since a plain containerRef.contains(...) can no longer see it.
+  useEffect(() => {
+    if (!isOpen) return;
+    function handleOutside(e) {
+      const insideButton = containerRef.current?.contains(e.target);
+      const insideMenu = menuRef.current?.contains(e.target);
+      if (!insideButton && !insideMenu) setOpenKey(null);
+    }
+    document.addEventListener("mousedown", handleOutside);
+    return () => document.removeEventListener("mousedown", handleOutside);
+  }, [isOpen, setOpenKey]);
+
+  // A stale menu detached from its anchor is worse than a closed one — dismiss on any scroll
+  // (page or the table's own horizontal/vertical scroll container).
+  useEffect(() => {
+    if (!isOpen) return;
+    function handleScroll() { setOpenKey(null); }
+    document.addEventListener("scroll", handleScroll, true);
+    return () => document.removeEventListener("scroll", handleScroll, true);
+  }, [isOpen, setOpenKey]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    setSubview("main");
+    setSearchQuery("");
+    setNumberFiltersOpen(false);
+    if (spec?.mode === "custom") {
+      setCustomCond1(spec.cond1);
+      setCustomJoiner(spec.joiner);
+      setCustomCond2(spec.cond2);
+    } else {
+      setCustomCond1({ op: "eq", value: "" });
+      setCustomJoiner("AND");
+      setCustomCond2({ op: "eq", value: "" });
+    }
+    // Only re-run when the menu freshly opens, not on every spec/state change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
+
+  const distinctValues = useMemo(() => {
+    if (!isOpen) return [];
+    const rowsPassingOthers = baseDisplayRows.filter(row => passesAllColumnFilters(row, columnFilters, allFilterMeta, key));
+    const seen = new Map();
+    let hasBlank = false;
+    for (const row of rowsPassingOthers) {
+      const raw = row.filterValues[key];
+      if (raw === null || raw === undefined) { hasBlank = true; continue; }
+      const k = String(raw);
+      if (!seen.has(k)) seen.set(k, { value: k, raw, label: formatFilterValueLabel(raw, fmt) });
+    }
+    const list = [...seen.values()].sort((a, b) => a.raw - b.raw);
+    if (hasBlank) list.push({ value: "__BLANK__", raw: null, label: "(ריקים)" });
+    return list;
+  }, [isOpen, baseDisplayRows, columnFilters, allFilterMeta, key, fmt]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    if (spec?.mode === "values") setDraftSelected(spec.selected);
+    else setDraftSelected(distinctValues.map(v => v.value));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, distinctValues]);
+
+  function applySort(dir) {
+    setSortSpecs(prev => [{ key, dir }, ...prev.filter(s => s.key !== key)]);
+    setOpenKey(null);
+  }
+
+  function removeSort() {
+    setSortSpecs(prev => prev.filter(s => s.key !== key));
+  }
+
+  function clearFilter() {
+    setColumnFilters(prev => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+    // Reset the menu's own drafts too, in case the user keeps the menu open afterward.
+    setDraftSelected(distinctValues.map(v => v.value));
+    setCustomCond1({ op: "eq", value: "" });
+    setCustomJoiner("AND");
+    setCustomCond2({ op: "eq", value: "" });
+  }
+
+  function toggleValue(v) {
+    setDraftSelected(prev => (prev.includes(v) ? prev.filter(x => x !== v) : [...prev, v]));
+  }
+
+  const filteredDistinctValues = distinctValues.filter(v =>
+    v.value === "__BLANK__" || !searchQuery.trim() || v.label.includes(searchQuery.trim())
+  );
+
+  function toggleSelectAll() {
+    setDraftSelected(prev =>
+      filteredDistinctValues.every(v => prev.includes(v.value))
+        ? prev.filter(v => !filteredDistinctValues.some(fv => fv.value === v))
+        : [...new Set([...prev, ...filteredDistinctValues.map(v => v.value)])]
+    );
+  }
+
+  function confirmValues() {
+    setColumnFilters(prev => {
+      const next = { ...prev };
+      if (draftSelected.length === distinctValues.length) delete next[key];
+      else next[key] = { mode: "values", selected: draftSelected };
+      return next;
+    });
+    setOpenKey(null);
+  }
+
+  function openCustomDialog(presetOp) {
+    if (presetOp === "between") {
+      setCustomCond1({ op: "gte", value: "" });
+      setCustomJoiner("AND");
+      setCustomCond2({ op: "lte", value: "" });
+    } else if (presetOp) {
+      setCustomCond1(c => ({ ...c, op: presetOp }));
+    }
+    setSubview("custom");
+  }
+
+  function applyCustom() {
+    const bothEmpty = !String(customCond1.value ?? "").trim() && !String(customCond2.value ?? "").trim();
+    setColumnFilters(prev => {
+      const next = { ...prev };
+      if (bothEmpty) delete next[key];
+      else next[key] = { mode: "custom", cond1: customCond1, joiner: customJoiner, cond2: customCond2 };
+      return next;
+    });
+    setOpenKey(null);
+  }
+
+  const valuePlaceholder = fmt === "pct" ? "%" : fmt === "hours" ? "שעות" : "ערך";
+
+  return (
+    <div ref={containerRef} className="relative inline-flex">
+      <button
+        type="button"
+        draggable={false}
+        onMouseDown={e => e.stopPropagation()}
+        onClick={e => { e.stopPropagation(); setOpenKey(isOpen ? null : key); }}
+        aria-label={`סינון ומיון: ${label}`}
+        aria-haspopup="true"
+        aria-expanded={isOpen}
+        className={`relative flex items-center justify-center w-5 h-5 rounded transition-colors flex-shrink-0 ${
+          isFiltered || isSorted ? "text-blue-600 bg-blue-50" : "text-slate-400 hover:text-slate-600 hover:bg-slate-100"
+        }`}
+      >
+        <svg aria-hidden="true" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+          <polygon points="4 4 20 4 14 13 14 20 10 22 10 13 4 4" />
+        </svg>
+        {isSorted && (
+          <span className="absolute -top-1.5 -left-1.5 text-[9px] font-bold leading-none w-3 h-3 rounded-full bg-blue-600 text-white flex items-center justify-center">
+            {sortIndex + 1}
+          </span>
+        )}
+      </button>
+      {isOpen && menuPos && createPortal(
+        <div
+          ref={menuRef}
+          className="fixed z-50 border border-slate-200 rounded-xl bg-white shadow-xl text-right"
+          style={{ top: menuPos.top, left: menuPos.left, minWidth: 230, maxWidth: 280 }}
+          dir="rtl"
+          onMouseDown={e => e.stopPropagation()}
+          onClick={e => e.stopPropagation()}
+        >
+          {subview === "main" ? (
+            <>
+              <div className="py-1 border-b border-slate-100">
+                <button type="button" onClick={() => applySort("asc")} className="w-full flex items-center gap-2 text-right px-3 py-1.5 text-sm text-slate-700 hover:bg-blue-50">
+                  <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                  מיין מהקטן לגדול
+                </button>
+                <button type="button" onClick={() => applySort("desc")} className="w-full flex items-center gap-2 text-right px-3 py-1.5 text-sm text-slate-700 hover:bg-blue-50">
+                  <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="18 15 12 9 6 15"/></svg>
+                  מיין מהגדול לקטן
+                </button>
+                {isSorted && (
+                  <button type="button" onClick={removeSort} className="w-full text-right px-3 py-1.5 text-xs text-slate-400 hover:text-red-500 hover:bg-slate-50">
+                    בטל מיון בעמודה זו
+                  </button>
+                )}
+                {isFiltered && (
+                  <button type="button" onClick={clearFilter} className="w-full text-right px-3 py-1.5 text-xs text-slate-400 hover:text-red-500 hover:bg-slate-50">
+                    בטל סינון בעמודה זו
+                  </button>
+                )}
+              </div>
+
+              {fmt !== "goal" && (
+                <div className="border-b border-slate-100">
+                  <button
+                    type="button"
+                    onClick={() => setNumberFiltersOpen(o => !o)}
+                    aria-expanded={numberFiltersOpen}
+                    className="w-full flex items-center justify-between px-3 py-1.5 text-sm text-slate-700 hover:bg-blue-50"
+                  >
+                    מסנני מספרים
+                    <svg aria-hidden="true" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"
+                      style={{ transform: numberFiltersOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s" }}>
+                      <polyline points="9 18 15 12 9 6" />
+                    </svg>
+                  </button>
+                  {numberFiltersOpen && (
+                    <div className="pb-1">
+                      {NUMBER_FILTER_OPERATORS.map(o => (
+                        <button key={o.op} type="button" onClick={() => openCustomDialog(o.op)} className="w-full text-right px-5 py-1.5 text-sm text-slate-600 hover:bg-blue-50">
+                          {o.label}
+                        </button>
+                      ))}
+                      <button type="button" onClick={() => openCustomDialog("between")} className="w-full text-right px-5 py-1.5 text-sm text-slate-600 hover:bg-blue-50">
+                        בין...
+                      </button>
+                      <button type="button" onClick={() => openCustomDialog(null)} className="w-full text-right px-5 py-1.5 text-sm text-slate-600 hover:bg-blue-50">
+                        מסנן מותאם אישית...
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="p-2 border-b border-slate-100">
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={e => setSearchQuery(e.target.value)}
+                  placeholder="חיפוש..."
+                  className="w-full text-sm border border-slate-200 rounded-lg px-3 py-1.5 outline-none focus:border-blue-400 bg-white"
+                  aria-label={`חיפוש ערכים בעמודה ${label}`}
+                />
+              </div>
+              <label className="flex items-center gap-2.5 px-4 py-1.5 border-b border-slate-100 hover:bg-blue-50 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={filteredDistinctValues.length > 0 && filteredDistinctValues.every(v => draftSelected.includes(v.value))}
+                  onChange={toggleSelectAll}
+                  className="w-3.5 h-3.5 rounded accent-blue-600 flex-shrink-0"
+                />
+                <span className="text-sm font-medium text-slate-700">בחר הכל</span>
+              </label>
+              <div className="overflow-y-auto" style={{ maxHeight: 160 }} role="listbox" aria-multiselectable="true">
+                {filteredDistinctValues.length === 0 ? (
+                  <p className="text-xs text-slate-400 px-4 py-3 text-center">אין ערכים להצגה</p>
+                ) : (
+                  filteredDistinctValues.map(v => (
+                    <label key={v.value} className="flex items-center gap-2.5 px-4 py-1.5 hover:bg-blue-50 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={draftSelected.includes(v.value)}
+                        onChange={() => toggleValue(v.value)}
+                        className="w-3.5 h-3.5 rounded accent-blue-600 flex-shrink-0"
+                      />
+                      <span className="text-sm text-slate-700">{v.label}</span>
+                    </label>
+                  ))
+                )}
+              </div>
+              <div className="p-2 flex items-center gap-2">
+                <button type="button" onClick={confirmValues} className="btn-blue text-xs px-4 py-1.5 rounded-lg">אישור</button>
+                <button type="button" onClick={() => setOpenKey(null)} className="text-xs text-slate-400 hover:text-slate-600 transition-colors px-2 py-1.5">ביטול</button>
+              </div>
+            </>
+          ) : (
+            <div className="p-3 flex flex-col gap-2">
+              <div className="flex items-center gap-1.5">
+                <select value={customCond1.op} onChange={e => setCustomCond1(c => ({ ...c, op: e.target.value }))} className="input-field text-xs flex-shrink-0" style={{ width: 120 }} aria-label="אופרטור תנאי 1">
+                  {NUMBER_FILTER_OPERATORS.map(o => <option key={o.op} value={o.op}>{o.label}</option>)}
+                </select>
+                <input type="text" value={customCond1.value} onChange={e => setCustomCond1(c => ({ ...c, value: e.target.value }))} className="input-field text-xs flex-1" placeholder={valuePlaceholder} aria-label="ערך תנאי 1" />
+              </div>
+              <div className="inline-flex self-center rounded-lg border border-slate-200 overflow-hidden text-xs font-semibold" style={{ direction: "ltr" }}>
+                <button type="button" onClick={() => setCustomJoiner("AND")} className={`px-3 py-1 transition-colors ${customJoiner === "AND" ? "bg-blue-600 text-white" : "bg-white text-slate-500 hover:bg-slate-50"}`}>וגם</button>
+                <button type="button" onClick={() => setCustomJoiner("OR")} className={`px-3 py-1 border-r border-slate-200 transition-colors ${customJoiner === "OR" ? "bg-blue-600 text-white" : "bg-white text-slate-500 hover:bg-slate-50"}`}>או</button>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <select value={customCond2.op} onChange={e => setCustomCond2(c => ({ ...c, op: e.target.value }))} className="input-field text-xs flex-shrink-0" style={{ width: 120 }} aria-label="אופרטור תנאי 2">
+                  {NUMBER_FILTER_OPERATORS.map(o => <option key={o.op} value={o.op}>{o.label}</option>)}
+                </select>
+                <input type="text" value={customCond2.value} onChange={e => setCustomCond2(c => ({ ...c, value: e.target.value }))} className="input-field text-xs flex-1" placeholder={valuePlaceholder} aria-label="ערך תנאי 2" />
+              </div>
+              {fmt === "hours" && <p className="text-xs text-slate-400">לדוגמה: 5.5 (5 שעות ו-30 דק')</p>}
+              {fmt === "pct" && <p className="text-xs text-slate-400">הזן אחוז, לדוגמה: 75</p>}
+              <div className="flex items-center gap-2 pt-1">
+                <button type="button" onClick={applyCustom} className="btn-blue text-xs px-4 py-1.5 rounded-lg">החל</button>
+                <button type="button" onClick={() => setSubview("main")} className="text-xs text-slate-400 hover:text-slate-600 transition-colors px-2 py-1.5">ביטול</button>
+              </div>
+            </div>
+          )}
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+}
+
+function renderCell(school, key, meetingsStats = {}, combo = null, activeSummaryBudget = "גפן", goalColumnsByKey = {}) {
   const summaryCol = SUMMARY_COLUMNS.find(c => c.key === key);
   if (summaryCol) return renderSummaryValue(school, summaryCol, combo, activeSummaryBudget, "—");
+  if (goalColumnsByKey[key]) {
+    const met = getGoalStatus(school, combo, goalColumnsByKey[key], activeSummaryBudget);
+    return met === true ? "כן" : met === false ? "לא" : "טרם הוגדר";
+  }
   switch (key) {
     case "advisor":
       return (school.advisor_schools || []).map(as => as.profiles).filter(Boolean).map(p => p.full_name || p.email).join(", ") || "—";
@@ -531,9 +1017,13 @@ function renderCell(school, key, meetingsStats = {}, combo = null, activeSummary
   }
 }
 
-function renderCellText(school, key, meetingsStats = {}, combo = null, activeSummaryBudget = "גפן") {
+function renderCellText(school, key, meetingsStats = {}, combo = null, activeSummaryBudget = "גפן", goalColumnsByKey = {}) {
   const summaryCol = SUMMARY_COLUMNS.find(c => c.key === key);
   if (summaryCol) return renderSummaryValue(school, summaryCol, combo, activeSummaryBudget, "");
+  if (goalColumnsByKey[key]) {
+    const met = getGoalStatus(school, combo, goalColumnsByKey[key], activeSummaryBudget);
+    return met === true ? "כן" : met === false ? "לא" : "טרם הוגדר";
+  }
   switch (key) {
     case "advisor":
       return (school.advisor_schools || []).map(as => as.profiles).filter(Boolean).map(p => p.full_name || p.email).join(", ") || "";
@@ -684,6 +1174,208 @@ function DeleteConfirmModal({ title, subtitle, message, onConfirm, onCancel, con
   );
 }
 
+const ROLE_LABELS = { owner: "בעלים", manager: "מנהל", advisor: "יועץ" };
+const ROLE_SORT_ORDER = { owner: 0, manager: 1, advisor: 2 };
+function sortByRole(arr) { return [...arr].sort((a, b) => (ROLE_SORT_ORDER[a.role] ?? 3) - (ROLE_SORT_ORDER[b.role] ?? 3)); }
+
+function AccessSelector({ restrictTo, users, loadingUsers, onChange }) {
+  const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef(null);
+
+  // Owners always have full access — exclude them from the selector
+  const nonOwnerUsers = users.filter(u => u.role !== "owner");
+
+  const isAll = restrictTo === null || restrictTo === undefined;
+  // Also strip any owner IDs that may exist in stored data
+  const selected = (restrictTo || []).filter(id => nonOwnerUsers.some(u => u.id === id));
+
+  return (
+    <div
+      ref={containerRef}
+      className="relative"
+      onFocus={() => setOpen(true)}
+      onBlur={e => { if (!containerRef.current?.contains(e.relatedTarget)) setOpen(false); }}
+    >
+      <div
+        className="input-field flex flex-wrap items-center gap-1.5 min-h-[38px] cursor-pointer"
+        role="button"
+        tabIndex={0}
+        onClick={() => setOpen(o => !o)}
+        onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setOpen(o => !o); } }}
+        aria-expanded={open}
+        aria-haspopup="listbox"
+      >
+        {isAll ? (
+          <span className="text-xs font-medium px-2.5 py-0.5 rounded-full" style={{ background: "rgba(22,163,74,0.12)", color: "#15803d" }}>
+            כולם
+          </span>
+        ) : selected.map(id => {
+          const u = nonOwnerUsers.find(u => u.id === id);
+          return u ? (
+            <span key={id} className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full" style={{ background: "rgba(0,112,243,0.08)", color: "#1d4ed8" }}>
+              {u.full_name || u.email}
+              <button
+                type="button"
+                onMouseDown={e => { e.stopPropagation(); e.preventDefault(); const n = selected.filter(i => i !== id); onChange(n.length === 0 ? null : n); }}
+                className="hover:text-red-500 leading-none"
+                aria-label={`הסר ${u.full_name || u.email} מרשימת הגישה`}
+              >×</button>
+            </span>
+          ) : null;
+        })}
+        {!isAll && (
+          <button
+            type="button"
+            onMouseDown={e => { e.stopPropagation(); e.preventDefault(); onChange(null); }}
+            className="text-xs text-slate-400 hover:text-slate-600 mr-auto px-1"
+            aria-label="אפס לכולם"
+          >↺ כולם</button>
+        )}
+      </div>
+
+      {open && (
+        <div className="absolute z-30 right-0 left-0 mt-1 border border-slate-200 rounded-xl bg-white shadow-lg">
+          <div className="p-2 border-b border-slate-100">
+            <label htmlFor="access-selector-search-dash" className="sr-only">חיפוש</label>
+            <input
+              id="access-selector-search-dash"
+              type="search"
+              className="input-field text-sm"
+              placeholder="חפש יועץ..."
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              autoComplete="off"
+            />
+          </div>
+          <div className="max-h-44 overflow-y-auto divide-y divide-slate-50" role="listbox">
+            <button
+              type="button"
+              role="option"
+              aria-selected={isAll}
+              onMouseDown={e => { e.preventDefault(); onChange(null); setOpen(false); }}
+              className="w-full text-right px-4 py-2.5 text-sm hover:bg-green-50 flex items-center gap-2"
+            >
+              <span className={`w-4 h-4 rounded border flex-shrink-0 ${isAll ? "bg-green-500 border-green-500" : "border-slate-300"}`} aria-hidden="true" />
+              <span className="font-medium">כולם</span>
+              <span className="text-xs text-slate-400 mr-auto">ללא הגבלה</span>
+            </button>
+            {sortByRole(loadingUsers ? [] : nonOwnerUsers)
+              .filter(u => !query.trim() || (u.full_name || u.email || "").toLowerCase().includes(query.toLowerCase()))
+              .map(u => (
+                <button
+                  key={u.id}
+                  type="button"
+                  role="option"
+                  aria-selected={selected.includes(u.id)}
+                  onMouseDown={e => {
+                    e.preventDefault();
+                    const newSel = selected.includes(u.id) ? selected.filter(i => i !== u.id) : [...selected, u.id];
+                    onChange(newSel.length === 0 ? null : newSel);
+                  }}
+                  className="w-full text-right px-4 py-2.5 text-sm hover:bg-blue-50 flex items-center gap-2"
+                >
+                  <span className={`w-4 h-4 rounded border flex-shrink-0 ${selected.includes(u.id) ? "bg-blue-500 border-blue-500" : "border-slate-300"}`} aria-hidden="true" />
+                  {u.full_name || u.email}
+                  <span className="text-xs text-slate-400 mr-auto">{ROLE_LABELS[u.role]}</span>
+                </button>
+              ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BulkAccessModal({ schools, users, loadingUsers, onClose, onSaved }) {
+  const { ref, handleKeyDown } = useFocusTrap(onClose);
+
+  // If every selected school currently shares the exact same restrict_access_to, prefill it.
+  // Otherwise default to "כולם" (null) rather than an arbitrary value.
+  const initialValue = useMemo(() => {
+    if (schools.length === 0) return null;
+    const normalize = v => (v === null || v === undefined ? null : [...v].sort());
+    const first = normalize(schools[0].restrict_access_to);
+    const allSame = schools.every(s => JSON.stringify(normalize(s.restrict_access_to)) === JSON.stringify(first));
+    return allSame ? first : null;
+  }, [schools]);
+
+  const [value, setValue] = useState(initialValue);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  async function handleSave() {
+    setSaving(true);
+    setError("");
+    // Sent sequentially, not via Promise.all/allSettled — the backend shares a single
+    // Supabase httpx client singleton per process (see CLAUDE.md Architecture Invariant #8),
+    // and firing many PUTs at once against it caused every single one to fail together.
+    let failed = 0;
+    for (const s of schools) {
+      try {
+        await axios.put(`/schools/${s.id}`, { name: s.name, restrict_access_to: value });
+      } catch {
+        failed += 1;
+      }
+    }
+    if (failed > 0) {
+      setError(`העדכון נכשל עבור ${failed} מתוך ${schools.length} בתי ספר. נסה שוב.`);
+      setSaving(false);
+      return;
+    }
+    await onSaved();
+    setSaving(false);
+    onClose();
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ background: "rgba(15,23,42,0.55)" }}
+      onClick={e => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div
+        ref={ref}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="bulk-access-modal-title"
+        onKeyDown={handleKeyDown}
+        dir="rtl"
+        className="glass-card rounded-2xl p-6 w-full max-w-sm flex flex-col gap-4"
+      >
+        <div>
+          <h2 id="bulk-access-modal-title" className="font-bold text-slate-900 text-lg">עריכת גישה</h2>
+          <p className="text-sm text-slate-500 mt-0.5">
+            {schools.length === 1 ? "1 בית ספר מסומן" : `${schools.length} בתי ספר מסומנים`}
+          </p>
+        </div>
+        <p className="text-xs text-slate-500 leading-relaxed">
+          הבחירה למטה תחליף את הגדרת הגישה הקיימת בכל בתי הספר המסומנים.
+        </p>
+        <AccessSelector restrictTo={value} users={users} loadingUsers={loadingUsers} onChange={setValue} />
+        {error && (
+          <p role="alert" className="text-sm text-red-600">{error}</p>
+        )}
+        <div className="flex gap-3">
+          <button
+            onClick={handleSave}
+            disabled={saving}
+            className="btn-blue text-sm px-5 py-2 disabled:opacity-60"
+          >
+            {saving ? "שומר..." : "שמור שינויים"}
+          </button>
+          <button onClick={onClose} disabled={saving} className="btn-ghost text-sm px-5 py-2">
+            ביטול
+          </button>
+        </div>
+        {saving && (
+          <span role="status" aria-label="שומר שינויי גישה" className="sr-only">שומר שינויים</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function DashboardPage() {
   const navigate = useNavigate();
   const [schools, setSchools] = useState([]);
@@ -701,9 +1393,10 @@ export default function DashboardPage() {
   const [budgetTypes, setBudgetTypes] = useState([]);
   const [goalConditions, setGoalConditions] = useState([]);
   const [goalDefinitions, setGoalDefinitions] = useState([]);
-  const [openSections, setOpenSections] = useState({
-    main: true, goals: false, pctPlan: false, pctDivuach: false, pctTanuz: false, missingReport: false, noPdf: false,
-  });
+  const [openSections, setOpenSections] = useState({ main: true, goals: false });
+  const [columnFilters, setColumnFilters] = useState({}); // {[colKey]: FilterSpec}
+  const [sortSpecs, setSortSpecs] = useState([]); // [{key,dir}], index 0 = primary (most-recently clicked)
+  const [openColFilterKey, setOpenColFilterKey] = useState(null); // only one column's filter menu open at a time
   const didMountAcademicYearRef = useRef(false);
   const [showFilters, setShowFilters] = useState(false);
   const [filtersPersistKey, setFiltersPersistKey] = useState(null);
@@ -714,13 +1407,18 @@ export default function DashboardPage() {
   }));
   const [dragIndex, setDragIndex] = useState(null);
   const [dragOverIndex, setDragOverIndex] = useState(null);
+  const [dragOverSide, setDragOverSide] = useState(null); // "left" | "right" — which half of the hovered column the cursor is over
   const [showColPicker, setShowColPicker] = useState(false);
   const [colPickerQuery, setColPickerQuery] = useState("");
+  const [colPickerPos, setColPickerPos] = useState(null); // { top, right } in viewport coords
   const colPickerRef = useRef(null);
+  const colPickerMenuRef = useRef(null);
   const tableScrollRef = useRef(null);
   const loadAbortRef = useRef(null);
   const [userId, setUserId] = useState(null);
   const [canDelete, setCanDelete] = useState(false);
+  const [canEditSchools, setCanEditSchools] = useState(false);
+  const [showBulkAccessModal, setShowBulkAccessModal] = useState(false);
   const [showTableMenu, setShowTableMenu] = useState(false);
   const tableMenuRef = useRef(null);
   const [selectMode, setSelectMode] = useState(false);
@@ -741,9 +1439,10 @@ export default function DashboardPage() {
       sessionStorage.setItem(filtersPersistKey, JSON.stringify({
         searchQuery, filters, queries, showFilters,
         academicYear, budgetTypes, goalConditions, openSections,
+        columnFilters, sortSpecs,
       }));
     } catch {}
-  }, [filtersPersistKey, searchQuery, filters, queries, showFilters, academicYear, budgetTypes, goalConditions, openSections]);
+  }, [filtersPersistKey, searchQuery, filters, queries, showFilters, academicYear, budgetTypes, goalConditions, openSections, columnFilters, sortSpecs]);
 
   // Left/right arrow keys scroll the main schools table horizontally, without needing to
   // first click/focus the scroll container — skipped while typing in a text field so cursor
@@ -766,10 +1465,14 @@ export default function DashboardPage() {
     supabase.from("profiles").update({ col_order: order, col_visible: visible }).eq("id", userId).then(() => {});
   }
 
-  function handleColDrop(toIndex) {
+  function handleColDrop(toIndex, side) {
     if (dragIndex === null || dragIndex === toIndex) return;
     const next = [...colOrder];
-    [next[dragIndex], next[toIndex]] = [next[toIndex], next[dragIndex]];
+    const [moved] = next.splice(dragIndex, 1);
+    const targetKey = colOrder[toIndex];
+    const targetPos = next.indexOf(targetKey);
+    const insertAt = side === "left" ? targetPos + 1 : targetPos;
+    next.splice(insertAt, 0, moved);
     setColOrder(next);
     saveColPrefs(next, colVisible);
   }
@@ -782,10 +1485,24 @@ export default function DashboardPage() {
     });
   }
 
+  // "עמודות להצגה" panel is portaled to document.body (fixed positioning, right edge
+  // aligned with the schools table's own right edge — not centered under the toggle button)
+  // so it's never covered by the sidebar (aside has z-40) and its width is always predictable
+  // regardless of where the button happens to sit in the toolbar.
+  useEffect(() => {
+    if (!showColPicker) return;
+    const buttonRect = colPickerRef.current?.getBoundingClientRect();
+    if (!buttonRect) return;
+    const tableRight = tableScrollRef.current?.getBoundingClientRect().right ?? buttonRect.right;
+    setColPickerPos({ top: buttonRect.bottom + 6, right: window.innerWidth - tableRight });
+  }, [showColPicker]);
+
   useEffect(() => {
     if (!showColPicker) return;
     function handleOutside(e) {
-      if (colPickerRef.current && !colPickerRef.current.contains(e.target)) setShowColPicker(false);
+      const insideButton = colPickerRef.current?.contains(e.target);
+      const insideMenu = colPickerMenuRef.current?.contains(e.target);
+      if (!insideButton && !insideMenu) setShowColPicker(false);
     }
     document.addEventListener("mousedown", handleOutside);
     return () => document.removeEventListener("mousedown", handleOutside);
@@ -821,20 +1538,29 @@ export default function DashboardPage() {
 
   async function handleBulkDeleteConfirmed() {
     const ids = Object.entries(selectedIds).filter(([, v]) => v).map(([id]) => id);
-    const deletedCount = ids.length;
     setBulkDeleting(true);
-    try {
-      await Promise.all(ids.map(id => axios.delete(`/schools/${id}`)));
-      setShowBulkDeleteConfirm(false);
-      setSelectedIds({});
-      setSelectMode(false);
-      await loadSchools();
-      setRecycleInfoCount(deletedCount);
-    } catch {
-      // silently ignore
-    } finally {
-      setBulkDeleting(false);
+    // Sent sequentially, not via Promise.all — the backend shares a single Supabase httpx
+    // client singleton per process, and firing many deletes at once made them all fail
+    // together (same root cause found and fixed for the bulk access-edit modal).
+    const failedIds = [];
+    for (const id of ids) {
+      try {
+        await axios.delete(`/schools/${id}`);
+      } catch {
+        failedIds.push(id);
+      }
     }
+    setShowBulkDeleteConfirm(false);
+    setSelectedIds(prev => {
+      const next = { ...prev };
+      ids.forEach(id => { if (!failedIds.includes(id)) delete next[id]; });
+      return next;
+    });
+    if (failedIds.length === 0) setSelectMode(false);
+    await loadSchools();
+    const succeeded = ids.length - failedIds.length;
+    if (succeeded > 0) setRecycleInfoCount(succeeded);
+    setBulkDeleting(false);
   }
 
   async function loadSchools() {
@@ -901,6 +1627,44 @@ export default function DashboardPage() {
     }).catch(() => {});
   }, []);
 
+  // One dashboard column per planning/reporting goal ("תכנון 40%", "דיווח 25%"...), built
+  // dynamically from goalDefinitions (loaded async above) rather than duplicating
+  // GOAL_DEFINITIONS on the frontend — matches the existing goal-filter dropdown's approach.
+  const goalColumns = useMemo(() => goalDefinitions.map(g => ({
+    key: `goal_${g.key}`,
+    label: `${g.kind === "planning" ? "תכנון" : "דיווח"} ${g.goal_number}%`,
+    goalKey: g.key,
+    fmt: "goal",
+  })), [goalDefinitions]);
+  const goalColumnsByKey = useMemo(() => Object.fromEntries(goalColumns.map(c => [c.key, c.goalKey])), [goalColumns]);
+  const dynamicAllColumns = useMemo(() => [...ALL_COLUMNS, ...goalColumns], [goalColumns]);
+  const allFilterColumnMeta = useMemo(() => [...FILTER_COLUMN_META, ...goalColumns], [goalColumns]);
+  const allFilterColumnKeys = useMemo(() => new Set(allFilterColumnMeta.map(c => c.key)), [allFilterColumnMeta]);
+  const columnCategories = useMemo(() => [
+    { title: "כללי", cols: MOVABLE_COLUMNS },
+    { title: "בדיקות", cols: SUMMARY_COLUMNS },
+    { title: "יעדים", cols: goalColumns },
+  ], [goalColumns]);
+
+  // Goal columns only become known once goalDefinitions loads (after mount) — back-fill any
+  // missing keys into colOrder/colVisible (hidden by default, like SUMMARY_COLUMNS) so they
+  // show up in "עמודות להצגה" without disturbing already-restored user preferences.
+  useEffect(() => {
+    if (goalColumns.length === 0) return;
+    const missingOrder = goalColumns.map(c => c.key).filter(k => !colOrder.includes(k));
+    const missingVisible = goalColumns.filter(c => !(c.key in colVisible));
+    if (missingOrder.length === 0 && missingVisible.length === 0) return;
+    const nextOrder = missingOrder.length ? [...colOrder, ...missingOrder] : colOrder;
+    const nextVisible = missingVisible.length
+      ? { ...colVisible, ...Object.fromEntries(missingVisible.map(c => [c.key, false])) }
+      : colVisible;
+    setColOrder(nextOrder);
+    setColVisible(nextVisible);
+    saveColPrefs(nextOrder, nextVisible);
+    // Only re-run when the known goal columns change, not on every colOrder/colVisible tweak.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [goalColumns]);
+
   useEffect(() => {
     async function init() {
       const { data: { session } } = await supabase.auth.getSession();
@@ -926,15 +1690,26 @@ export default function DashboardPage() {
           if (Array.isArray(parsed.budgetTypes)) setBudgetTypes(parsed.budgetTypes);
           if (Array.isArray(parsed.goalConditions)) setGoalConditions(parsed.goalConditions);
           if (parsed.openSections) setOpenSections(o => ({ ...o, ...parsed.openSections }));
+          if (parsed.columnFilters && typeof parsed.columnFilters === "object") {
+            const cleaned = Object.fromEntries(
+              Object.entries(parsed.columnFilters).filter(([k]) => FILTER_COLUMN_KEYS.has(k) || k.startsWith("goal_"))
+            );
+            setColumnFilters(cleaned);
+          }
+          if (Array.isArray(parsed.sortSpecs)) {
+            setSortSpecs(parsed.sortSpecs.filter(s =>
+              s && (FILTER_COLUMN_KEYS.has(s.key) || String(s.key).startsWith("goal_")) && (s.dir === "asc" || s.dir === "desc")
+            ));
+          }
         }
       } catch {}
 
       // Load localStorage prefs immediately (synchronous, no wait)
       const savedOrder = JSON.parse(localStorage.getItem(`dashboard-col-order-${uid}`) || "null");
-      if (Array.isArray(savedOrder) && savedOrder.length === DEFAULT_COL_ORDER.length && savedOrder.every(k => DEFAULT_COL_ORDER.includes(k)))
+      if (Array.isArray(savedOrder) && savedOrder.length > 0 && savedOrder.every(isKnownColumnKey))
         setColOrder(savedOrder);
       const savedVisible = JSON.parse(localStorage.getItem(`dashboard-col-visible-${uid}`) || "null");
-      if (savedVisible && typeof savedVisible === "object" && DEFAULT_COL_ORDER.every(k => k in savedVisible))
+      if (savedVisible && typeof savedVisible === "object" && Object.keys(savedVisible).every(isKnownColumnKey))
         setColVisible(savedVisible);
 
       // Start schools loading immediately
@@ -949,6 +1724,7 @@ export default function DashboardPage() {
         const confirmedRole = meRes.data?.role || roleValue;
         setRole(confirmedRole);
         setCanDelete(!!meRes.data?.can_delete_schools);
+        setCanEditSchools(!!meRes.data?.can_edit_school_directly);
         confirmedIsManager = confirmedRole === "owner" || confirmedRole === "manager";
         if (confirmedRole === "owner" && meRes.data?.org?.subscription_status === "trial") {
           setTrialInfo(meRes.data.org);
@@ -983,13 +1759,12 @@ export default function DashboardPage() {
       if (prefsResult.status === "fulfilled") {
         const prefs = prefsResult.value.data;
         if (prefs?.col_order && Array.isArray(prefs.col_order) &&
-            prefs.col_order.length === DEFAULT_COL_ORDER.length &&
-            prefs.col_order.every(k => DEFAULT_COL_ORDER.includes(k))) {
+            prefs.col_order.length > 0 && prefs.col_order.every(isKnownColumnKey)) {
           setColOrder(prefs.col_order);
           localStorage.setItem(`dashboard-col-order-${uid}`, JSON.stringify(prefs.col_order));
         }
         if (prefs?.col_visible && typeof prefs.col_visible === "object" &&
-            DEFAULT_COL_ORDER.every(k => k in prefs.col_visible)) {
+            Object.keys(prefs.col_visible).every(isKnownColumnKey)) {
           setColVisible(prefs.col_visible);
           localStorage.setItem(`dashboard-col-visible-${uid}`, JSON.stringify(prefs.col_visible));
         }
@@ -1000,7 +1775,7 @@ export default function DashboardPage() {
     init();
   }, [navigate]);
 
-  const visibleColOrder = colOrder.filter(k => colVisible[k]);
+  const visibleColOrder = colOrder.filter(k => colVisible[k] && dynamicAllColumns.some(c => c.key === k));
   const hiddenColCount = Object.values(colVisible).filter(v => !v).length;
 
   const orgUserOptions = allOrgUsers.map(u => ({ value: u.id, label: u.full_name || u.email }));
@@ -1021,13 +1796,14 @@ export default function DashboardPage() {
   // Default budget for summary columns is "גפן", overridden only when the advanced
   // filter narrows "סוג תקציב" down to exactly one selection.
   const activeSummaryBudget = budgetTypes.length === 1 ? budgetTypes[0].value : "גפן";
-  const hasVisibleSummaryCol = SUMMARY_COLUMNS.some(c => colVisible[c.key]);
+  const hasVisibleSummaryCol = SUMMARY_COLUMNS.some(c => colVisible[c.key]) || goalColumns.some(c => colVisible[c.key]);
   const advancedFilterActive = goalConditions.length > 0 || hasVisibleSummaryCol;
 
   const activeChipCount = Object.values(filters).reduce((sum, arr) => sum + arr.length, 0);
   const activeQueryCount = Object.values(queries).reduce((sum, q) => sum + (q.trim() ? 1 : 0), 0);
   const advancedActiveCount = (budgetTypes.length > 0 ? 1 : 0) + goalConditions.length;
-  const activeFilterCount = activeChipCount + activeQueryCount + advancedActiveCount;
+  const columnFilterActiveCount = Object.keys(columnFilters).length + sortSpecs.length;
+  const activeFilterCount = activeChipCount + activeQueryCount + advancedActiveCount + columnFilterActiveCount;
   const hasAnyFilter = !!searchQuery.trim() || activeFilterCount > 0;
 
   const filteredSchools = schools.filter(school => {
@@ -1049,8 +1825,11 @@ export default function DashboardPage() {
   // narrow combos down to the active summary budget so turning on a column alone doesn't
   // explode a school into one row per unrelated budget — only per division (e.g. six-year
   // schools running "גפן" separately for each division).
-  const displayRows = !advancedFilterActive
-    ? filteredSchools.map(school => ({ school, combo: null, rowKey: school.id }))
+  const baseDisplayRows = !advancedFilterActive
+    ? filteredSchools.map(school => ({
+        school, combo: null, rowKey: school.id,
+        filterValues: computeFilterValues(school, null, meetingsStats, activeSummaryBudget, goalColumns),
+      }))
     : filteredSchools.flatMap(school => {
         let combos = (school.check_metrics && school.check_metrics.length
           ? school.check_metrics
@@ -1071,8 +1850,38 @@ export default function DashboardPage() {
           school,
           combo,
           rowKey: `${school.id}:${combo.division_type}:${combo.budget_name}`,
+          filterValues: computeFilterValues(school, combo, meetingsStats, activeSummaryBudget, goalColumns),
         }));
       });
+
+  // Excel-style per-column header filters/sort, layered on top of baseDisplayRows — all
+  // active column filters combine with AND (order-independent), then the stacked
+  // multi-column sort (sortSpecs[0] = primary) is applied.
+  const finalDisplayRows = useMemo(() => {
+    const filtered = baseDisplayRows.filter(row => passesAllColumnFilters(row, columnFilters, allFilterColumnMeta));
+    if (sortSpecs.length === 0) return filtered;
+    return [...filtered].sort(buildRowComparator(sortSpecs));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [baseDisplayRows, columnFilters, sortSpecs, allFilterColumnMeta]);
+
+  const visibleSchoolIds = useMemo(
+    () => [...new Set(finalDisplayRows.map(r => r.school.id))],
+    [finalDisplayRows]
+  );
+  const allVisibleSelected = visibleSchoolIds.length > 0 && visibleSchoolIds.every(id => selectedIds[id]);
+  const someVisibleSelected = visibleSchoolIds.some(id => selectedIds[id]);
+
+  function toggleSelectAllVisible() {
+    setSelectedIds(prev => {
+      const next = { ...prev };
+      if (allVisibleSelected) {
+        visibleSchoolIds.forEach(id => { delete next[id]; });
+      } else {
+        visibleSchoolIds.forEach(id => { next[id] = true; });
+      }
+      return next;
+    });
+  }
 
   function setFilter(key, val) {
     setFilters(f => ({ ...f, [key]: val }));
@@ -1088,6 +1897,8 @@ export default function DashboardPage() {
     setQueries(EMPTY_QUERIES);
     setBudgetTypes([]);
     setGoalConditions([]);
+    setColumnFilters({});
+    setSortSpecs([]);
   }
 
   function addGoalCondition(goalKey) {
@@ -1098,11 +1909,11 @@ export default function DashboardPage() {
     const selected = filteredSchools.filter(s => selectedIds[s.id]);
     const colLabels = [
       "שם מוסד",
-      ...visibleColOrder.map(key => ALL_COLUMNS.find(c => c.key === key)?.label || key),
+      ...visibleColOrder.map(key => dynamicAllColumns.find(c => c.key === key)?.label || key),
     ];
     const rows = selected.map(school => [
       school.name || "",
-      ...visibleColOrder.map(key => renderCellText(school, key, meetingsStats, null, activeSummaryBudget)),
+      ...visibleColOrder.map(key => renderCellText(school, key, meetingsStats, null, activeSummaryBudget, goalColumnsByKey)),
     ]);
     const wsData = [colLabels, ...rows];
     const ws = XLSX.utils.aoa_to_sheet(wsData);
@@ -1118,11 +1929,11 @@ export default function DashboardPage() {
     const selected = filteredSchools.filter(s => selectedIds[s.id]);
     const headers = [
       "שם מוסד",
-      ...visibleColOrder.map(key => ALL_COLUMNS.find(c => c.key === key)?.label || key),
+      ...visibleColOrder.map(key => dynamicAllColumns.find(c => c.key === key)?.label || key),
     ];
     const rows = selected.map(school => [
       school.name || "",
-      ...visibleColOrder.map(key => renderCellText(school, key, meetingsStats, null, activeSummaryBudget)),
+      ...visibleColOrder.map(key => renderCellText(school, key, meetingsStats, null, activeSummaryBudget, goalColumnsByKey)),
     ]);
     try {
       const res = await axios.post(
@@ -1144,11 +1955,11 @@ export default function DashboardPage() {
   function exportToExcel() {
     const colLabels = [
       "שם מוסד",
-      ...visibleColOrder.map(key => ALL_COLUMNS.find(c => c.key === key)?.label || key),
+      ...visibleColOrder.map(key => dynamicAllColumns.find(c => c.key === key)?.label || key),
     ];
     const rows = filteredSchools.map(school => [
       school.name || "",
-      ...visibleColOrder.map(key => renderCellText(school, key, meetingsStats, null, activeSummaryBudget)),
+      ...visibleColOrder.map(key => renderCellText(school, key, meetingsStats, null, activeSummaryBudget, goalColumnsByKey)),
     ]);
     const wsData = [colLabels, ...rows];
     const ws = XLSX.utils.aoa_to_sheet(wsData);
@@ -1248,8 +2059,13 @@ export default function DashboardPage() {
                       </svg>
                       עמודות להצגה
                     </button>
-                    {showColPicker && (
-                      <div className="absolute top-full mt-1.5 z-20 glass-card rounded-xl py-2 shadow-lg" style={{ right: "50%", transform: "translateX(50%)", minWidth: 820, maxWidth: "95vw" }} dir="rtl">
+                    {showColPicker && colPickerPos && createPortal(
+                      <div
+                        ref={colPickerMenuRef}
+                        className="fixed z-50 glass-card rounded-xl py-2 shadow-lg"
+                        style={{ top: colPickerPos.top, right: colPickerPos.right, minWidth: 820, maxWidth: "95vw" }}
+                        dir="rtl"
+                      >
                         <div className="px-3 pb-2">
                           <input
                             type="search"
@@ -1261,31 +2077,42 @@ export default function DashboardPage() {
                             aria-label="חיפוש עמודה"
                           />
                         </div>
-                        <div className="grid grid-cols-3 gap-x-6 gap-y-0.5 px-2 max-h-[70vh] overflow-y-auto">
-                          {ALL_COLUMNS.filter(col =>
-                            !colPickerQuery.trim() || col.label.includes(colPickerQuery.trim())
-                          ).map(col => (
-                            <label key={col.key} className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-slate-50 cursor-pointer">
-                              <input
-                                type="checkbox"
-                                checked={colVisible[col.key]}
-                                onChange={() => toggleColVisible(col.key)}
-                                className="w-3.5 h-3.5 rounded accent-blue-600 flex-shrink-0"
-                              />
-                              <span className="text-sm text-slate-700 whitespace-nowrap">{col.label}</span>
-                            </label>
-                          ))}
+                        <div className="px-2 max-h-[70vh] overflow-y-auto">
+                          {columnCategories.map(cat => {
+                            const matches = cat.cols.filter(col =>
+                              !colPickerQuery.trim() || col.label.includes(colPickerQuery.trim())
+                            );
+                            if (matches.length === 0) return null;
+                            return (
+                              <div key={cat.title} className="mb-2">
+                                <p className="text-xs font-semibold text-black px-2 pt-2 pb-1 text-center">{cat.title}</p>
+                                <div className="grid grid-cols-3 gap-x-6 gap-y-0.5">
+                                  {matches.map(col => (
+                                    <label key={col.key} className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-slate-50 cursor-pointer">
+                                      <input
+                                        type="checkbox"
+                                        checked={!!colVisible[col.key]}
+                                        onChange={() => toggleColVisible(col.key)}
+                                        className="w-3.5 h-3.5 rounded accent-blue-600 flex-shrink-0"
+                                      />
+                                      <span className="text-sm text-slate-700 whitespace-nowrap">{col.label}</span>
+                                    </label>
+                                  ))}
+                                </div>
+                              </div>
+                            );
+                          })}
                         </div>
-                        {ALL_COLUMNS.filter(col =>
-                          !colPickerQuery.trim() || col.label.includes(colPickerQuery.trim())
-                        ).length === 0 && (
+                        {columnCategories.every(cat =>
+                          cat.cols.filter(col => !colPickerQuery.trim() || col.label.includes(colPickerQuery.trim())).length === 0
+                        ) && (
                           <p className="text-xs text-slate-400 px-4 py-2">לא נמצאו עמודות</p>
                         )}
                         <div className="flex justify-end gap-1 px-3 pt-2 mt-1 border-t border-slate-100">
                           <button
                             type="button"
                             onClick={() => {
-                              const next = Object.fromEntries(ALL_COLUMNS.map(c => [c.key, false]));
+                              const next = Object.fromEntries(dynamicAllColumns.map(c => [c.key, false]));
                               setColVisible(next);
                               saveColPrefs(colOrder, next);
                             }}
@@ -1296,7 +2123,7 @@ export default function DashboardPage() {
                           <button
                             type="button"
                             onClick={() => {
-                              const next = Object.fromEntries(ALL_COLUMNS.map(c => [c.key, true]));
+                              const next = Object.fromEntries(dynamicAllColumns.map(c => [c.key, true]));
                               setColVisible(next);
                               saveColPrefs(colOrder, next);
                             }}
@@ -1305,20 +2132,35 @@ export default function DashboardPage() {
                             בחר הכל
                           </button>
                         </div>
-                      </div>
+                      </div>,
+                      document.body
                     )}
                   </div>
                 </div>
 
                 <div className="flex items-center gap-2">
                   {activeFilterCount > 0 && (
-                    <button onClick={() => { setFilters(EMPTY_FILTERS); setQueries(EMPTY_QUERIES); setBudgetTypes([]); setGoalConditions([]); }} className="text-xs text-slate-400 hover:text-slate-600 transition-colors px-2 py-1">
+                    <button onClick={() => { setFilters(EMPTY_FILTERS); setQueries(EMPTY_QUERIES); setBudgetTypes([]); setGoalConditions([]); setColumnFilters({}); setSortSpecs([]); }} className="text-xs text-slate-400 hover:text-slate-600 transition-colors px-2 py-1">
                       נקה סינון
                     </button>
                   )}
 
                   {selectMode && Object.values(selectedIds).some(Boolean) && (
                     <>
+                      {(role === "owner" || (role === "manager" && canEditSchools)) && (
+                        <button
+                          onClick={() => setShowBulkAccessModal(true)}
+                          className="text-xs px-3 py-1.5 rounded-xl font-semibold text-white transition-colors flex items-center gap-1.5"
+                          style={{ background: "#1d4ed8" }}
+                          aria-label="עריכת גישה לבתי ספר מסומנים"
+                        >
+                          <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/>
+                            <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/>
+                          </svg>
+                          גישה
+                        </button>
+                      )}
                       <button
                         onClick={exportSelectedToPdf}
                         className="text-xs px-3 py-1.5 rounded-xl font-semibold text-white transition-colors flex items-center gap-1.5"
@@ -1486,50 +2328,10 @@ export default function DashboardPage() {
                     </div>
                   </AccordionSection>
 
-                  <AccordionSection
-                    title="אחוז תכנון"
-                    isOpen={openSections.pctPlan}
-                    onToggle={() => setOpenSections(o => ({ ...o, pctPlan: !o.pctPlan }))}
-                  >
-                    <p className="text-sm text-slate-400">אפשרויות סינון לפי אחוז תכנון יתווספו בהמשך.</p>
-                  </AccordionSection>
-
-                  <AccordionSection
-                    title="אחוז דיווח כללי"
-                    isOpen={openSections.pctDivuach}
-                    onToggle={() => setOpenSections(o => ({ ...o, pctDivuach: !o.pctDivuach }))}
-                  >
-                    <p className="text-sm text-slate-400">אפשרויות סינון לפי אחוז דיווח כללי יתווספו בהמשך.</p>
-                  </AccordionSection>
-
-                  <AccordionSection
-                    title="אחוז דיווח למודל תמרוץ"
-                    isOpen={openSections.pctTanuz}
-                    onToggle={() => setOpenSections(o => ({ ...o, pctTanuz: !o.pctTanuz }))}
-                  >
-                    <p className="text-sm text-slate-400">אפשרויות סינון לפי אחוז דיווח למודל תמרוץ יתווספו בהמשך.</p>
-                  </AccordionSection>
-
-                  <AccordionSection
-                    title="דיווח חסר"
-                    isOpen={openSections.missingReport}
-                    onToggle={() => setOpenSections(o => ({ ...o, missingReport: !o.missingReport }))}
-                  >
-                    <p className="text-sm text-slate-400">אפשרויות סינון לפי דיווח חסר יתווספו בהמשך.</p>
-                  </AccordionSection>
-
-                  <AccordionSection
-                    title="ללא PDF"
-                    isOpen={openSections.noPdf}
-                    onToggle={() => setOpenSections(o => ({ ...o, noPdf: !o.noPdf }))}
-                  >
-                    <p className="text-sm text-slate-400">אפשרויות סינון לפי אסמכתאות ללא PDF יתווספו בהמשך.</p>
-                  </AccordionSection>
-
                   <div className="flex justify-end">
                     <button
                       type="button"
-                      onClick={() => { setFilters(EMPTY_FILTERS); setQueries(EMPTY_QUERIES); setSearchQuery(""); setBudgetTypes([]); setGoalConditions([]); }}
+                      onClick={() => { setFilters(EMPTY_FILTERS); setQueries(EMPTY_QUERIES); setSearchQuery(""); setBudgetTypes([]); setGoalConditions([]); setColumnFilters({}); setSortSpecs([]); }}
                       className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 transition-colors px-2 py-1 rounded-lg hover:bg-slate-100"
                     >
                       <svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
@@ -1578,13 +2380,13 @@ export default function DashboardPage() {
             <>
               <p className="text-sm text-slate-500 mb-2">
                 {advancedFilterActive
-                  ? `סה"כ ${displayRows.length} שורות (${filteredSchools.length} בתי ספר) מתוך ${schools.length}`
+                  ? `סה"כ ${finalDisplayRows.length} שורות (${filteredSchools.length} בתי ספר) מתוך ${schools.length}`
                   : hasAnyFilter
                   ? `סה"כ ${filteredSchools.length} בתי ספר מתוך ${schools.length}`
                   : `סה"כ ${schools.length} בתי ספר`}
               </p>
               <div className="glass-card rounded-2xl overflow-hidden relative">
-                {displayRows.length === 0 ? (
+                {finalDisplayRows.length === 0 ? (
                   <div className="p-8 text-center">
                     <p className="text-slate-500">
                       {hasAnyFilter ? "לא נמצאו בתי ספר התואמים לסינון" : "לא נמצאו בתי ספר"}
@@ -1594,7 +2396,7 @@ export default function DashboardPage() {
                     )}
                   </div>
                 ) : (
-                  <div ref={tableScrollRef} className="overflow-x-auto dash-scroll-x">
+                  <div ref={tableScrollRef} className="overflow-auto dash-scroll-x max-h-[70vh]">
                     <table className="w-full text-sm border-collapse">
                       <thead>
                         <tr
@@ -1602,8 +2404,17 @@ export default function DashboardPage() {
                           style={{ position: "sticky", top: 0, background: "rgba(241,245,249,0.97)", zIndex: 10, backdropFilter: "blur(8px)" }}
                         >
                           {selectMode && (
-                            <th scope="col" className="w-10 px-3 py-3 border-l border-slate-200"
-                              style={{ position: "sticky", right: 0, zIndex: 11, background: "rgba(241,245,249,0.97)" }} />
+                            <th scope="col" className="w-10 px-3 py-3 border-l border-slate-200 text-center"
+                              style={{ position: "sticky", right: 0, zIndex: 11, background: "rgba(241,245,249,0.97)" }}>
+                              <input
+                                type="checkbox"
+                                checked={allVisibleSelected}
+                                ref={el => { if (el) el.indeterminate = !allVisibleSelected && someVisibleSelected; }}
+                                onChange={toggleSelectAllVisible}
+                                className="w-4 h-4 rounded accent-blue-600"
+                                aria-label={allVisibleSelected ? "בטל בחירת כל בתי הספר המוצגים" : "בחר את כל בתי הספר המוצגים"}
+                              />
+                            </th>
                           )}
                           <th scope="col" className="text-right px-5 py-3 text-slate-900 font-semibold border-l border-slate-200"
                             style={{ position: "sticky", right: selectMode ? "2.5rem" : 0, zIndex: 11, background: "rgba(241,245,249,0.97)" }}>שם מוסד</th>
@@ -1611,7 +2422,7 @@ export default function DashboardPage() {
                             <th scope="col" className="text-right px-4 py-3 text-slate-900 font-semibold border-l border-slate-200">סוג תקציב</th>
                           )}
                           {visibleColOrder.map((key, i) => {
-                            const col = ALL_COLUMNS.find(c => c.key === key);
+                            const col = dynamicAllColumns.find(c => c.key === key);
                             const isLast = i === visibleColOrder.length - 1 && !selectMode;
                             const origIndex = colOrder.indexOf(key);
                             const isDragging = dragIndex === origIndex;
@@ -1621,24 +2432,48 @@ export default function DashboardPage() {
                                 draggable
                                 title="גרור לשינוי סדר"
                                 onDragStart={e => { e.dataTransfer.effectAllowed = "move"; setDragIndex(origIndex); }}
-                                onDragOver={e => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; setDragOverIndex(origIndex); }}
-                                onDrop={e => { e.preventDefault(); handleColDrop(origIndex); setDragIndex(null); setDragOverIndex(null); }}
-                                onDragEnd={() => { setDragIndex(null); setDragOverIndex(null); }}
+                                onDragOver={e => {
+                                  e.preventDefault();
+                                  e.dataTransfer.dropEffect = "move";
+                                  const rect = e.currentTarget.getBoundingClientRect();
+                                  const side = (e.clientX - rect.left) < rect.width / 2 ? "left" : "right";
+                                  setDragOverIndex(origIndex);
+                                  setDragOverSide(side);
+                                }}
+                                onDrop={e => { e.preventDefault(); handleColDrop(origIndex, dragOverSide); setDragIndex(null); setDragOverIndex(null); setDragOverSide(null); }}
+                                onDragEnd={() => { setDragIndex(null); setDragOverIndex(null); setDragOverSide(null); }}
                                 className={[
                                   "text-right px-4 py-3 font-semibold select-none transition-all cursor-grab active:cursor-grabbing",
                                   isLast ? "" : "border-l border-slate-200",
                                   isDragging ? "opacity-30 bg-slate-100" : "",
-                                  isOver ? "bg-blue-50 text-blue-600 border-b-2 border-blue-400" : "text-slate-900",
+                                  isOver ? "bg-blue-50 text-blue-600" : "text-slate-900",
+                                  isOver && dragOverSide === "left" ? "border-l-4 border-l-blue-500" : "",
+                                  isOver && dragOverSide === "right" ? "border-r-4 border-r-blue-500" : "",
                                 ].filter(Boolean).join(" ")}
                               >
-                                {col.label}
+                                <div className="flex items-center justify-between gap-1">
+                                  <span>{col.label}</span>
+                                  {allFilterColumnKeys.has(key) && (
+                                    <ColumnHeaderFilter
+                                      colDef={allFilterColumnMeta.find(c => c.key === key)}
+                                      columnFilters={columnFilters}
+                                      setColumnFilters={setColumnFilters}
+                                      sortSpecs={sortSpecs}
+                                      setSortSpecs={setSortSpecs}
+                                      openKey={openColFilterKey}
+                                      setOpenKey={setOpenColFilterKey}
+                                      baseDisplayRows={baseDisplayRows}
+                                      allFilterMeta={allFilterColumnMeta}
+                                    />
+                                  )}
+                                </div>
                               </th>
                             );
                           })}
                         </tr>
                       </thead>
                       <tbody>
-                        {displayRows.map(({ school, combo, rowKey }) => {
+                        {finalDisplayRows.map(({ school, combo, rowKey }) => {
                           const isSelected = !!selectedIds[school.id];
                           return (
                             <tr
@@ -1679,7 +2514,7 @@ export default function DashboardPage() {
                               {visibleColOrder.map((key, i) => (
                                 <td key={key}
                                   className={`px-5 py-3 text-slate-600${(i < visibleColOrder.length - 1 || selectMode) ? " border-l border-slate-100" : ""}`}>
-                                  {renderCell(school, key, meetingsStats, combo, activeSummaryBudget)}
+                                  {renderCell(school, key, meetingsStats, combo, activeSummaryBudget, goalColumnsByKey)}
                                 </td>
                               ))}
                             </tr>
@@ -1689,7 +2524,7 @@ export default function DashboardPage() {
                     </table>
                   </div>
                 )}
-                {displayRows.length > 0 && (
+                {finalDisplayRows.length > 0 && (
                   <>
                     <button type="button"
                       aria-label="גלול ימינה"
@@ -1743,6 +2578,16 @@ export default function DashboardPage() {
         <RecycleBinInfoModal
           count={recycleInfoCount}
           onClose={() => setRecycleInfoCount(0)}
+        />
+      )}
+
+      {showBulkAccessModal && (
+        <BulkAccessModal
+          schools={filteredSchools.filter(s => selectedIds[s.id])}
+          users={allOrgUsers}
+          loadingUsers={false}
+          onClose={() => setShowBulkAccessModal(false)}
+          onSaved={loadSchools}
         />
       )}
 

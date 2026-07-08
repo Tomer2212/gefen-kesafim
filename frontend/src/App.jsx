@@ -4,6 +4,7 @@ import { MeetingRemindersProvider } from "./context/MeetingRemindersContext";
 import MeetingRemindersOverlay from "./components/MeetingRemindersOverlay";
 import { CompareChecksProvider } from "./context/CompareChecksContext";
 import CompareResultsWindow from "./components/CompareResultsWindow";
+import ChatWidget from "./components/ChatWidget";
 import axios from "axios";
 import { supabase } from "./lib/supabase";
 import LoginPage from "./pages/LoginPage";
@@ -62,6 +63,7 @@ function AppLayout() {
       <Outlet />
       <MeetingRemindersOverlay />
       <CompareResultsWindow />
+      <ChatWidget />
     </>
   );
 }
