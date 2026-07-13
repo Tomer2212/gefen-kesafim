@@ -7,6 +7,11 @@ import logoIcon from "../assets/logo-icon.png";
 
 const API_BASE = import.meta.env.VITE_API_URL || "";
 
+const MIN_WIDTH = 300;
+const MIN_HEIGHT = 360;
+const DEFAULT_WIDTH = 340;
+const DEFAULT_HEIGHT = 460;
+
 export default function ChatWidget() {
   const session = useContext(SessionContext);
   const { messages, setMessages } = useChatPersistence();
@@ -14,7 +19,37 @@ export default function ChatWidget() {
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState("");
+  const [size, setSize] = useState({ width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT });
   const listRef = useRef(null);
+  const resizeRef = useRef(null);
+
+  function startResize(e) {
+    e.preventDefault();
+    resizeRef.current = { startX: e.clientX, startY: e.clientY, origW: size.width, origH: size.height };
+    document.addEventListener("mousemove", onResize);
+    document.addEventListener("mouseup", stopResize);
+  }
+  function onResize(e) {
+    const r = resizeRef.current;
+    if (!r) return;
+    setSize({
+      // Panel is anchored bottom-left (left/bottom CSS), so it grows rightward with
+      // the drag's X delta and upward with the drag's inverted Y delta.
+      width: Math.max(MIN_WIDTH, r.origW + (e.clientX - r.startX)),
+      height: Math.max(MIN_HEIGHT, r.origH + (r.startY - e.clientY)),
+    });
+  }
+  function stopResize() {
+    resizeRef.current = null;
+    document.removeEventListener("mousemove", onResize);
+    document.removeEventListener("mouseup", stopResize);
+  }
+  useEffect(() => {
+    return () => {
+      document.removeEventListener("mousemove", onResize);
+      document.removeEventListener("mouseup", stopResize);
+    };
+  }, []);
 
   useEffect(() => {
     if (listRef.current) {
@@ -45,6 +80,23 @@ export default function ChatWidget() {
         },
         body: JSON.stringify({ history, message: text }),
       });
+
+      if (resp.status === 429) {
+        let reason = "";
+        try {
+          const body = await resp.json();
+          reason = body?.detail?.reason || "";
+        } catch {
+          // ignore — fall through to generic quota message
+        }
+        setError(
+          reason === "global_limit"
+            ? "העוזר עמוס כרגע עקב שימוש כבד במערכת. נסו שוב מאוחר יותר."
+            : "הגעת למכסת השאלות היומית לעוזר ה-AI. נסה שוב מחר."
+        );
+        setMessages((prev) => prev.slice(0, -1));
+        return;
+      }
 
       if (!resp.ok || !resp.body) {
         throw new Error("request failed");
@@ -125,12 +177,12 @@ export default function ChatWidget() {
       role="region"
       aria-label="חלון צ'אט עם עוזר AI"
       dir="rtl"
-      style={{ position: "fixed", left: 16, bottom: 88, width: 340, height: 460, zIndex: 60 }}
-      className="glass-card rounded-2xl shadow-2xl flex flex-col overflow-hidden"
+      style={{ position: "fixed", left: 16, bottom: 88, width: size.width, height: size.height, zIndex: 60, background: "#ffffff" }}
+      className="rounded-2xl shadow-2xl border border-slate-200 flex flex-col overflow-hidden"
     >
       <div
         className="flex items-center justify-between px-4 py-3 border-b border-slate-200 flex-shrink-0"
-        style={{ background: "rgba(241,245,249,0.97)" }}
+        style={{ background: "#f1f5f9" }}
       >
         <div className="text-sm font-bold text-slate-800">מדריך גפן - עוזר AI</div>
         <button
@@ -191,6 +243,18 @@ export default function ChatWidget() {
             <polyline points="5 12 12 5 19 12" />
           </svg>
         </button>
+      </div>
+
+      {/* Resize handle — panel is anchored bottom-left, so this sits at the opposite (top-right) corner */}
+      <div
+        onMouseDown={startResize}
+        aria-hidden="true"
+        className="absolute top-0 right-0 w-4 h-4 cursor-nesw-resize"
+        style={{ touchAction: "none" }}
+      >
+        <svg width="14" height="14" viewBox="0 0 14 14" style={{ position: "absolute", top: 2, right: 2 }}>
+          <path d="M2 12 L12 2 M7 12 L12 7" stroke="#94a3b8" strokeWidth="1.5" strokeLinecap="round" />
+        </svg>
       </div>
     </div>
   );

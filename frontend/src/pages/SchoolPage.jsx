@@ -19,6 +19,7 @@ import { MeetingRow } from "../components/meetings/MeetingRow";
 import { MeetingsTable } from "../components/meetings/MeetingsTable";
 import { MeetingTypeSelect } from "../components/meetings/MeetingTypeSelect";
 import { NoParticipantsModal } from "../components/meetings/NoParticipantsModal";
+import MeetingUploadComparisonModal from "../components/meetings/MeetingUploadComparisonModal";
 import { NotesModal } from "../components/meetings/NotesModal";
 import { ParticipantsSelector } from "../components/meetings/ParticipantsSelector";
 import { TimeInput } from "../components/meetings/TimeInput";
@@ -1642,6 +1643,8 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
           result={activeResult.result}
           runId={activeResult.runId}
           onNewRun={() => { setView("table"); setActiveResult(null); setShowNewCheckModal(true); }}
+          schoolId={schoolId}
+          currentUser={meUser}
         />
       </div>
     );
@@ -2382,6 +2385,15 @@ export default function SchoolPage() {
   const [loading, setLoading] = useState(!location.state?.school);
   const [activeTab, setActiveTab] = useState("info");
   const [activeSubTab, setActiveSubTab] = useState("tikkon");
+  const [uploadComparisonMeetingId, setUploadComparisonMeetingId] = useState(null);
+
+  useEffect(() => {
+    const meetingParam = searchParams.get("meeting");
+    if (meetingParam) {
+      setActiveTab("meetings");
+      setUploadComparisonMeetingId(meetingParam);
+    }
+  }, []);
   const [role, setRole] = useState("advisor");
   const [subscriptionStatus, setSubscriptionStatus] = useState(null);
 
@@ -2988,6 +3000,20 @@ export default function SchoolPage() {
         <RecycleBinInfoModal
           schoolName={recycleInfoSchoolName}
           onClose={() => navigate("/", { replace: true })}
+        />
+      )}
+
+      {uploadComparisonMeetingId && (
+        <MeetingUploadComparisonModal
+          meetingId={uploadComparisonMeetingId}
+          onClose={() => {
+            setUploadComparisonMeetingId(null);
+            setSearchParams(prev => {
+              const p = new URLSearchParams(prev);
+              p.delete("meeting");
+              return p;
+            });
+          }}
         />
       )}
 

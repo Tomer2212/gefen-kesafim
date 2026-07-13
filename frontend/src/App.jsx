@@ -24,6 +24,7 @@ import SuperAdminPage from "./pages/SuperAdminPage";
 import UnsubscribePage from "./pages/UnsubscribePage";
 import ProfilePage from "./pages/ProfilePage";
 import AddSchoolPage from "./pages/AddSchoolPage";
+import MeetingUploadPage from "./pages/MeetingUploadPage";
 
 export const SessionContext = createContext(undefined);
 
@@ -89,6 +90,7 @@ const router = createBrowserRouter([
       { path: "/super-admin", element: <PrivateRoute><SuperAdminPage /></PrivateRoute> },
       { path: "/set-password", element: <SetPasswordPage /> },
       { path: "/unsubscribe", element: <UnsubscribePage /> },
+      { path: "/upload/:token", element: <MeetingUploadPage /> },
       { path: "*", element: <Navigate to="/" replace /> },
     ],
   },

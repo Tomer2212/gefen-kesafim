@@ -893,6 +893,18 @@ In addition, alongside the professional/technical explanation, include a **simpl
 
 ---
 
+## Local Dev Troubleshooting (Windows) — Orphaned `uvicorn --reload` Worker
+
+**Symptom:** Backend code changes (new endpoints, edited logic) don't take effect in the browser even after the user closes and reopens the terminal running `uvicorn main:app --reload`. Requests to genuinely new routes return `404 Not Found` instead of hitting the route (e.g. instead of `403 Not authenticated`, which is what a real auth-protected route returns when hit without a token).
+
+**Cause:** `uvicorn --reload` on Windows spawns a separate child worker process (via `multiprocessing`) that actually holds the listening socket and serves requests. Force-closing the parent/terminal (or `Stop-Process` on the parent PID) does **not** kill this child — it becomes orphaned, keeps the port bound, and keeps serving whatever code was loaded into its memory at the time it forked (i.e. stale code, from before the edit). A new `uvicorn` instance started afterward on the same port may appear to start successfully, but the old orphaned worker can still be the one actually answering requests. This can stack up silently across multiple restarts over days.
+
+**How to detect it:** `Get-CimInstance Win32_Process -Filter "Name='python.exe'"` (PowerShell) and look for **more than one** python process, especially ones with `-c "from multiprocessing.spawn import spawn_main; spawn_main(parent_pid=...)"` in the command line whose `parent_pid` no longer corresponds to a running process.
+
+**Fix:** Kill *all* `python.exe` processes related to the backend (both the reloader and any orphaned `--multiprocessing-fork` children), confirm the port is free (`Get-NetTCPConnection -LocalPort 8000 -State Listen`), then start a single fresh `uvicorn` instance. Verify with a direct `curl` to a known new route — a `403`/expected-auth response confirms the route is registered; a `404` means you're still hitting a stale process.
+
+---
+
 ## Development Rules
 
 1. **Always use plan mode** before implementing any new feature

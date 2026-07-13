@@ -312,6 +312,46 @@ async def add_file_to_check(
     return {"run_id": run_id}
 
 
+@router.post("/meetings/{meeting_id}/run-check-from-uploads")
+async def run_check_from_uploads(
+    meeting_id: str,
+    background_tasks: BackgroundTasks,
+    user: dict = Depends(get_current_user),
+):
+    """Run the real reconciliation using files already uploaded via the
+    meeting-upload portal (Phase 2) — no re-upload needed. Mirrors
+    add_file_to_check's storage-download pattern exactly."""
+    db = get_admin_client()
+    meeting_res = db.table("meetings").select("id, school_id, academic_year").eq("id", meeting_id).execute()
+    if not meeting_res.data:
+        raise HTTPException(status_code=404, detail="הפגישה לא נמצאה")
+    meeting = meeting_res.data[0]
+
+    files_res = db.table("meeting_upload_files").select("storage_key, original_filename").eq("meeting_id", meeting_id).execute()
+    stored_files = files_res.data or []
+    if not stored_files:
+        raise HTTPException(status_code=400, detail="לא נמצאו קבצים שהועלו עבור פגישה זו")
+
+    run_id = str(uuid.uuid4())
+    run_dir = Path(tempfile.mkdtemp(prefix=f"gefen_{run_id}_"))
+    all_paths: list[Path] = []
+    for f in stored_files:
+        fname = f.get("original_filename") or Path(f["storage_key"]).name
+        dest = run_dir / fname
+        try:
+            dest.write_bytes(db.storage.from_("check-files").download(f["storage_key"]))
+            all_paths.append(dest)
+        except Exception:
+            raise HTTPException(status_code=500, detail=f"שגיאה בהורדת הקובץ: {fname}")
+
+    _update_run(run_id, {"status": "processing"})
+    background_tasks.add_task(
+        _process, run_id, all_paths, run_dir,
+        user["id"], meeting["school_id"], None, None, meeting.get("academic_year"),
+    )
+    return {"run_id": run_id}
+
+
 class ComparePlansRequest(BaseModel):
     newer_log_id: str
     older_log_id: str

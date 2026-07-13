@@ -1,6 +1,7 @@
-import { useState, Fragment } from "react";
+import { useState, useEffect, Fragment } from "react";
 import axios from "axios";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { PartialRowUpdatesModal } from "./PartialRowUpdatesModal";
 
 // ---------------------------------------------------------------------------
 // Column definitions
@@ -841,15 +842,39 @@ function KvuaTab({ tikhnun }) {
   );
 }
 
-function PartialTab({ tikhnun, activeBudgetIdx = 0, setActiveBudgetIdx }) {
-  if (!tikhnun) return <NoTikhnunNotice />;
-  const allRows = tikhnun.partial_rows ?? [];
-  const budgets = tikhnun.budgets;
+function PartialTab({ tikhnun, activeBudgetIdx: propBudgetIdx, setActiveBudgetIdx: propSetBudgetIdx, schoolId, division = "main", currentUser }) {
+  const [updatesByRowKey, setUpdatesByRowKey] = useState({});
+  const [openRowKey, setOpenRowKey] = useState(null);
+  const [localBudgetIdx, setLocalBudgetIdx] = useState(0);
+  const activeBudgetIdx = propBudgetIdx !== undefined ? propBudgetIdx : localBudgetIdx;
+  const setActiveBudgetIdx = propSetBudgetIdx !== undefined ? propSetBudgetIdx : setLocalBudgetIdx;
+
+  const allRows = tikhnun?.partial_rows ?? [];
+  const budgets = tikhnun?.budgets;
   const isMultiBudget = budgets && budgets.length > 1;
   const safeIdx = isMultiBudget ? Math.min(activeBudgetIdx, budgets.length - 1) : 0;
   const selectedBudget = isMultiBudget ? budgets[safeIdx]?.name : null;
   const rows = selectedBudget ? allRows.filter(r => r.budget === selectedBudget) : allRows;
   const totalHefresh = rows.reduce((s, r) => s + (r.hefresh ?? 0), 0);
+
+  useEffect(() => {
+    if (!schoolId || rows.length === 0) { setUpdatesByRowKey({}); return; }
+    const rowKeys = rows.map(r => r.key).filter(Boolean);
+    if (!rowKeys.length) return;
+    let cancelled = false;
+    axios.post(`/schools/${schoolId}/partial-updates/batch`, {
+      division, budget_name: selectedBudget || null, row_keys: rowKeys,
+    }).then(({ data }) => { if (!cancelled) setUpdatesByRowKey(data || {}); })
+      .catch(() => { if (!cancelled) setUpdatesByRowKey({}); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [schoolId, division, selectedBudget, rows.length]);
+
+  function handleUpdatesChange(rowKey, newGroups) {
+    setUpdatesByRowKey(prev => ({ ...prev, [rowKey]: newGroups }));
+  }
+
+  if (!tikhnun) return <NoTikhnunNotice />;
 
   const pillsEl = isMultiBudget && setActiveBudgetIdx ? (
     <div className="flex gap-2 flex-wrap" dir="rtl">
@@ -929,7 +954,7 @@ function PartialTab({ tikhnun, activeBudgetIdx = 0, setActiveBudgetIdx }) {
         <table className="w-full text-sm border-collapse" dir="rtl">
           <thead>
             <tr>
-              {["קוד", "שם מענה", "מספר מענה", "תכנון", "דיווח", "הפרש", "אחוז דיווח"].map((h, hi) => (
+              {["קוד", "שם מענה", "מספר מענה", "תכנון", "דיווח", "הפרש", "אחוז דיווח", "עדכונים"].map((h, hi) => (
                 <th key={h} scope="col" className="text-right text-white text-xs font-700 whitespace-nowrap sticky top-0 z-10"
                   style={{
                     fontWeight: 700,
@@ -942,8 +967,11 @@ function PartialTab({ tikhnun, activeBudgetIdx = 0, setActiveBudgetIdx }) {
             </tr>
           </thead>
           <tbody>
-            {rows.map((row, i) => (
-              <tr key={i} className="border-t border-slate-100" style={{ background: i % 2 === 0 ? "white" : "rgba(248,250,252,0.7)" }}>
+            {rows.map((row, i) => {
+              const rowGroups = (row.key && updatesByRowKey[row.key]) || [];
+              const latest = latestSegmentOf(rowGroups);
+              return (
+              <tr key={row.key || i} className="border-t border-slate-100" style={{ background: i % 2 === 0 ? "white" : "rgba(248,250,252,0.7)" }}>
                 <td className="text-right text-slate-700 text-xs"
                   style={{ ...CODE_COL_STYLE, padding: "10px 6px" }}>{row.rcode}</td>
                 <td className="px-4 py-2.5 text-right text-slate-700 text-xs">
@@ -959,21 +987,78 @@ function PartialTab({ tikhnun, activeBudgetIdx = 0, setActiveBudgetIdx }) {
                 <td className="px-4 py-2.5 text-right text-slate-700 text-xs tabular-nums">
                   {fmtPct(row.pct, 2)}
                 </td>
+                <td className="px-4 py-2.5 text-right text-xs" style={{ maxWidth: "180px" }}>
+                  {row.key && schoolId ? (
+                    latest ? (
+                      <button type="button" onClick={() => setOpenRowKey(row.key)}
+                        className="text-right w-full text-slate-600 hover:text-blue-600"
+                        style={{ background: "none", border: "none", cursor: "pointer", padding: 0 }}>
+                        <span className="block" style={{
+                          overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box",
+                          WebkitLineClamp: 2, WebkitBoxOrient: "vertical", whiteSpace: "normal", wordBreak: "break-word",
+                        }}>
+                          {latest.content}
+                        </span>
+                        <span className="block text-slate-400" style={{ fontSize: "10px" }}>{formatShortDate(latest.created_at)}</span>
+                      </button>
+                    ) : (
+                      <button type="button" onClick={() => setOpenRowKey(row.key)}
+                        className="text-blue-600 hover:underline" style={{ background: "none", border: "none", cursor: "pointer", padding: 0 }}>
+                        + הוסף עדכון
+                      </button>
+                    )
+                  ) : null}
+                </td>
               </tr>
-            ))}
+              );
+            })}
             <tr style={{ background: "#E8EDF5" }}>
               <td className="px-4 py-2.5 text-right text-sm font-700" style={{ fontWeight: 700 }} colSpan={5}>סה"כ הפרש לטיפול</td>
               <td className="px-4 py-2.5 text-right text-sm font-700 tabular-nums" style={{ fontWeight: 700 }}>
                 {fmtNum(totalHefresh)}
               </td>
               <td />
+              <td />
             </tr>
           </tbody>
         </table>
       </div>
     </div>
+    {openRowKey && (() => {
+      const openRow = rows.find(r => r.key === openRowKey);
+      if (!openRow) return null;
+      return (
+        <PartialRowUpdatesModal
+          schoolId={schoolId}
+          division={division}
+          budgetName={selectedBudget || null}
+          rowKey={openRowKey}
+          rowLabel={`${openRow.rcode} — ${openRow.name}`}
+          currentUser={currentUser}
+          groups={updatesByRowKey[openRowKey] || []}
+          onChange={handleUpdatesChange}
+          onClose={() => setOpenRowKey(null)}
+        />
+      );
+    })()}
     </div>
   );
+}
+
+function latestSegmentOf(groups) {
+  let latest = null;
+  for (const g of (groups || [])) {
+    for (const seg of g.segments) {
+      if (!latest || new Date(seg.created_at) > new Date(latest.created_at)) latest = seg;
+    }
+  }
+  return latest;
+}
+
+function formatShortDate(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return d.toLocaleDateString("he-IL", { day: "2-digit", month: "2-digit", year: "2-digit" });
 }
 
 function YozmaSupplierBreakdown({ breakdown, title = "פירוט ספקים שדווחו — לפי יוזמה" }) {
@@ -1662,7 +1747,7 @@ function TikhnunOnlyBanner() {
 // Main export
 // ---------------------------------------------------------------------------
 
-export default function ResultsView({ result, runId, onNewRun, onTikhnunUpdate = () => {} }) {
+export default function ResultsView({ result, runId, onNewRun, onTikhnunUpdate = () => {}, schoolId, currentUser }) {
   const [activeTab, setActiveTab]       = useState("hashva");
   const [activeBudgetIdx, setActiveBudgetIdx] = useState(0);
   const [yozmaDialogShown, setYozmaDialogShown]             = useState(false);
@@ -2001,11 +2086,14 @@ export default function ResultsView({ result, runId, onNewRun, onTikhnunUpdate =
             {tikhnunBeinayim && <DualTikhnunSection label={tikhnunBeinayim.school_stage}><KvuaTab tikhnun={tikhnunBeinayim} /></DualTikhnunSection>}
           </div>
         )}
-        {activeTab === "partial" && !isDualTikhnun && <PartialTab tikhnun={hasTikhnun ? tikhnun : null} activeBudgetIdx={activeBudgetIdx} setActiveBudgetIdx={setActiveBudgetIdx} />}
+        {activeTab === "partial" && !isDualTikhnun && (
+          <PartialTab tikhnun={hasTikhnun ? tikhnun : null} activeBudgetIdx={activeBudgetIdx} setActiveBudgetIdx={setActiveBudgetIdx}
+            schoolId={schoolId} division="main" currentUser={currentUser} />
+        )}
         {activeTab === "partial" && isDualTikhnun && (
           <div className="flex flex-col gap-24">
-            {tikhnunTikkon   && <DualTikhnunSection label={tikhnunTikkon.school_stage}><PartialTab tikhnun={tikhnunTikkon} /></DualTikhnunSection>}
-            {tikhnunBeinayim && <DualTikhnunSection label={tikhnunBeinayim.school_stage}><PartialTab tikhnun={tikhnunBeinayim} /></DualTikhnunSection>}
+            {tikhnunTikkon   && <DualTikhnunSection label={tikhnunTikkon.school_stage}><PartialTab tikhnun={tikhnunTikkon} schoolId={schoolId} division="tikkon" currentUser={currentUser} /></DualTikhnunSection>}
+            {tikhnunBeinayim && <DualTikhnunSection label={tikhnunBeinayim.school_stage}><PartialTab tikhnun={tikhnunBeinayim} schoolId={schoolId} division="beinayim" currentUser={currentUser} /></DualTikhnunSection>}
           </div>
         )}
         <div style={{ display: activeTab === "yozma" && !isDualTikhnun ? undefined : "none" }}>
