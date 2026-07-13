@@ -46,7 +46,6 @@ export function PartialRowUpdatesModal({
   const { ref, handleKeyDown } = useFocusTrap(onClose);
   const [groups, setGroups] = useState(initialGroups || []);
   const [newRecordText, setNewRecordText] = useState(null); // null = closed, string = open+editing
-  const [appendDraft, setAppendDraft] = useState(null); // { groupId, text }
   const [editDraft, setEditDraft] = useState(null); // { segmentId, groupId, text }
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -88,25 +87,6 @@ export function PartialRowUpdatesModal({
       pushChange([{ group_id: data.group_id, segments: [segment] }, ...groups]);
     } catch {
       setError("שמירת העדכון נכשלה — נסה שוב");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function saveAppend(groupId, text) {
-    const content = (text || "").trim();
-    setAppendDraft(null);
-    if (!content) return;
-    setSaving(true); setError("");
-    try {
-      const { data } = await axios.post(`/schools/${schoolId}/partial-updates/${groupId}/segments`, { content });
-      const segment = {
-        id: data.id, author_id: data.author_id, author_name: currentUser?.full_name, author_role: currentUser?.role,
-        content: data.content, created_at: data.created_at, updated_at: data.updated_at,
-      };
-      pushChange(groups.map(g => g.group_id === groupId ? { ...g, segments: [...g.segments, segment] } : g));
-    } catch {
-      setError("שמירת ההוספה נכשלה — נסה שוב");
     } finally {
       setSaving(false);
     }
@@ -194,8 +174,7 @@ export function PartialRowUpdatesModal({
                 </tr>
               )}
               {groups.map(group => (
-                <tr key={group.group_id} className="border-t border-slate-100 cursor-pointer"
-                  onClick={() => { if (appendDraft?.groupId !== group.group_id) setAppendDraft({ groupId: group.group_id, text: "" }); }}>
+                <tr key={group.group_id} className="border-t border-slate-100">
                   <td className="px-3 py-2 align-top">
                     {group.segments.map(seg => (
                       <div key={seg.id} className="text-xs px-1.5 py-1 rounded mb-1"
@@ -203,9 +182,6 @@ export function PartialRowUpdatesModal({
                         {formatUpdateDate(seg.created_at)}
                       </div>
                     ))}
-                    {appendDraft?.groupId === group.group_id && (
-                      <div className="text-xs px-1.5 py-1 text-slate-400">עכשיו</div>
-                    )}
                   </td>
                   <td className="px-3 py-2 align-top">
                     {group.segments.map(seg => (
@@ -214,9 +190,6 @@ export function PartialRowUpdatesModal({
                         {seg.author_name || "—"}
                       </div>
                     ))}
-                    {appendDraft?.groupId === group.group_id && (
-                      <div className="text-xs px-1.5 py-1 text-slate-700">{currentUser?.full_name}</div>
-                    )}
                   </td>
                   <td className="px-3 py-2 align-top">
                     {group.segments.map(seg => {
@@ -227,9 +200,8 @@ export function PartialRowUpdatesModal({
                         <div key={seg.id}
                           className="text-xs px-1.5 py-1 rounded mb-1 flex items-start justify-between gap-2"
                           style={{ background: color?.bg, color: color?.text }}
-                          onClick={e => {
+                          onClick={() => {
                             if (!editable) return;
-                            e.stopPropagation();
                             setEditDraft({ segmentId: seg.id, groupId: group.group_id, text: seg.content });
                           }}>
                           {isEditing ? (
@@ -253,16 +225,6 @@ export function PartialRowUpdatesModal({
                         </div>
                       );
                     })}
-                    {appendDraft?.groupId === group.group_id && (
-                      <div onClick={e => e.stopPropagation()}>
-                        <label htmlFor={`append-${group.group_id}`} className="sr-only">הוספת תוכן לרשומה</label>
-                        <textarea id={`append-${group.group_id}`} rows={2} autoFocus
-                          className="w-full text-xs border border-slate-200 rounded-lg p-2" dir="rtl"
-                          value={appendDraft.text}
-                          onChange={e => setAppendDraft(d => ({ ...d, text: e.target.value }))}
-                          onBlur={() => saveAppend(group.group_id, appendDraft.text)} />
-                      </div>
-                    )}
                   </td>
                 </tr>
               ))}

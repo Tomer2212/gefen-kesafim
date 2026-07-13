@@ -8,7 +8,7 @@ export default function MeetingUploadPage() {
   const [status, setStatus] = useState("loading"); // loading | invalid | expired | ready
   const [data, setData] = useState(null);
   const [uploading, setUploading] = useState(false);
-  const [uploadMsg, setUploadMsg] = useState("");
+  const [uploadResult, setUploadResult] = useState(null); // { allReceived, missing } | "error" | null
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef(null);
 
@@ -26,17 +26,18 @@ export default function MeetingUploadPage() {
     const files = Array.from(fileList || []);
     if (!files.length) return;
     setUploading(true);
-    setUploadMsg("");
+    setUploadResult(null);
     try {
       const form = new FormData();
       files.forEach(f => form.append("files", f));
-      await axios.post(`/public/meeting-upload/${token}/files`, form, {
+      const res = await axios.post(`/public/meeting-upload/${token}/files`, form, {
         headers: { "Content-Type": "multipart/form-data" },
       });
-      setUploadMsg("success");
+      const missing = (res.data.items || []).filter(i => !i.received).map(i => i.label);
+      setUploadResult({ allReceived: res.data.all_received, missing });
       load();
     } catch {
-      setUploadMsg("error");
+      setUploadResult("error");
     } finally {
       setUploading(false);
     }
@@ -83,8 +84,15 @@ export default function MeetingUploadPage() {
 
               <div className="mb-4">
                 <h2 className="text-sm font-semibold text-slate-700 mb-2">קבצים נדרשים:</h2>
-                <ul className="text-sm text-slate-600 list-disc pr-5 space-y-1">
-                  {data.checklist_items.map((item, i) => <li key={i}>{item}</li>)}
+                <ul className="text-sm space-y-1.5">
+                  {data.items.map((item, i) => (
+                    <li key={i} className="flex items-center gap-2">
+                      <span aria-hidden="true" className={item.received ? "text-green-600" : "text-slate-400"}>
+                        {item.received ? "✓" : "○"}
+                      </span>
+                      <span className={item.received ? "text-slate-500 line-through" : "text-slate-700"}>{item.label}</span>
+                    </li>
+                  ))}
                 </ul>
               </div>
 
@@ -115,12 +123,17 @@ export default function MeetingUploadPage() {
                 </p>
               </div>
 
-              {uploadMsg === "success" && (
+              {uploadResult && uploadResult !== "error" && uploadResult.allReceived && (
                 <p className="text-sm text-green-700 bg-green-50 border border-green-200 rounded-lg px-4 py-2 mb-4" role="status">
-                  הקבצים התקבלו בהצלחה, תודה!
+                  תודה רבה! כל הקבצים הנדרשים התקבלו בהצלחה.
                 </p>
               )}
-              {uploadMsg === "error" && (
+              {uploadResult && uploadResult !== "error" && !uploadResult.allReceived && (
+                <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-4 py-2 mb-4" role="status">
+                  תודה על המאמץ שלך, אבל אנחנו צריכים שתעלי גם את {uploadResult.missing.join(", ")} כדי שהמאמץ שלך לא יהיה לשווא.
+                </p>
+              )}
+              {uploadResult === "error" && (
                 <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-4 py-2 mb-4" role="alert">
                   אירעה שגיאה בהעלאה. נסו שוב או פנו ליועץ.
                 </p>

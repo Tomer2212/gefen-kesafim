@@ -95,6 +95,27 @@ def build_upload_checklist(db, school: dict, academic_year: str | None = None) -
     return {"items": items, "no_baseline_this_year": False, "divisions": divisions}
 
 
+FINANCE_SOFTWARE_LABELS = {
+    "kesafim2000": "כספים2000",
+    "payscool": "פייסקול",
+    "schoolcash": "סקולקאש",
+}
+
+
+def file_type_label(identified_type: str | None, division_type: str | None, budgets: list[str] | None) -> str:
+    """Human-readable Hebrew label for an uploaded file's classification, used
+    in the advisor-facing uploaded-files table."""
+    if identified_type == "gefen":
+        div_label = DIVISION_LABELS.get(division_type, "") if division_type else ""
+        return f"דיווח ביצוע{' - ' + div_label if div_label else ''}"
+    if identified_type == "tikhnun":
+        b = ", ".join(budgets) if budgets else ""
+        return f"תכנון{' (' + b + ')' if b else ''}"
+    if identified_type in FINANCE_SOFTWARE_ONLY_KINDS:
+        return f"קובץ כספים ({FINANCE_SOFTWARE_LABELS.get(identified_type, identified_type)})"
+    return "לא זוהה"
+
+
 def compute_upload_comparison(checklist: dict, received_files: list[dict]) -> dict:
     """received_files: rows from meeting_upload_files (identified_type,
     division_type, budgets). Purely a lightweight expected-vs-received diff —
