@@ -4,6 +4,12 @@ import axios from "axios";
 import logoImg from "../assets/logo.png";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 
+function formatDateDDMMYYYY(iso) {
+  if (!iso) return "";
+  const [y, m, d] = iso.split("-");
+  return `${d}/${m}/${y}`;
+}
+
 function UploadResultModal({ mode, missing, onClose }) {
   const { ref, handleKeyDown } = useFocusTrap(onClose);
   const isError = mode === "error";
@@ -118,7 +124,7 @@ export default function MeetingUploadPage() {
                 העלאת קבצים לקראת הפגישה
               </h1>
               <p className="text-sm text-slate-500 mb-6 text-center">
-                {data.school_name} · {data.meeting_date}
+                {data.school_name} · {formatDateDDMMYYYY(data.meeting_date)}
               </p>
 
               {data.no_baseline_this_year && (

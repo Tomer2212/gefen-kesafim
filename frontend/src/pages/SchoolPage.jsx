@@ -2389,9 +2389,12 @@ export default function SchoolPage() {
 
   useEffect(() => {
     const meetingParam = searchParams.get("meeting");
+    const tabParam = searchParams.get("tab");
     if (meetingParam) {
       setActiveTab("meetings");
       setUploadComparisonMeetingId(meetingParam);
+    } else if (["info", "meetings", "goals", "checks"].includes(tabParam)) {
+      setActiveTab(tabParam);
     }
   }, []);
   const [role, setRole] = useState("advisor");
