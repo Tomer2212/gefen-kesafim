@@ -311,7 +311,7 @@ function SettingsModal({ onClose, role }) {
 // Meeting-files-arrived expandable detail
 // ---------------------------------------------------------------------------
 
-function MeetingFilesArrivedDetail({ meetingId }) {
+function MeetingFilesArrivedDetail({ meetingId, schoolId }) {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
   const [comparison, setComparison] = useState(null);
@@ -358,8 +358,8 @@ function MeetingFilesArrivedDetail({ meetingId }) {
   async function handleRunCheck() {
     setActionState("working");
     try {
-      const res = await axios.post(`/analyze/meetings/${meetingId}/run-check-from-uploads`);
-      navigate(`/check?run_id=${res.data.run_id}`);
+      await axios.post(`/analyze/meetings/${meetingId}/run-check-from-uploads`);
+      navigate(`/school/${schoolId}?tab=checks`);
     } catch {
       setActionState("failed");
     }
@@ -424,16 +424,16 @@ function MeetingFilesArrivedDetail({ meetingId }) {
       )}
 
       <div className="flex gap-2">
+        <button type="button" onClick={handleRunCheck} disabled={actionState === "working" || files.length === 0}
+          className="flex-1 text-sm py-2.5 rounded-xl font-medium text-white bg-green-700 hover:bg-green-800 transition-colors disabled:opacity-50">
+          {actionState === "working" ? "מריץ..." : "בצע בדיקה עם הקבצים שהתקבלו"}
+        </button>
         {!comparison.all_received && (
           <button type="button" onClick={handleRequestMissing} disabled={actionState === "working" || actionState === "sent"}
             className="flex-1 text-sm py-2.5 rounded-xl font-medium text-white bg-amber-500 hover:bg-amber-600 transition-colors disabled:opacity-50">
-            {actionState === "working" ? "שולח..." : "שלח בקשה למנהלנית"}
+            {actionState === "working" ? "שולח..." : "שלח בקשה מחודשת למנהלנית"}
           </button>
         )}
-        <button type="button" onClick={handleRunCheck} disabled={actionState === "working" || files.length === 0}
-          className="flex-1 text-sm py-2.5 rounded-xl font-medium text-white bg-blue-600 hover:bg-blue-700 transition-colors disabled:opacity-50">
-          {actionState === "working" ? "מריץ..." : "בצע בדיקה עם הקבצים שהתקבלו"}
-        </button>
       </div>
     </div>
   );
@@ -549,7 +549,7 @@ function NotificationRow({ notif, isExpanded, onToggle, onRead, onReload, onDele
       {/* Expanded: uploaded-files comparison + actions (meeting_files_arrived) */}
       {isExpanded && isFilesArrived && (
         <div className="px-4 pb-4 border-t border-slate-100">
-          <MeetingFilesArrivedDetail meetingId={notif.ref_id} />
+          <MeetingFilesArrivedDetail meetingId={notif.ref_id} schoolId={notif.school_id} />
         </div>
       )}
 
