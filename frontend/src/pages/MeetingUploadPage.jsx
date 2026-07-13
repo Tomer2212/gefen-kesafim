@@ -2,13 +2,45 @@ import { useEffect, useRef, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import axios from "axios";
 import logoImg from "../assets/logo.png";
+import { useFocusTrap } from "../hooks/useFocusTrap";
+
+function UploadResultModal({ mode, missing, onClose }) {
+  const { ref, handleKeyDown } = useFocusTrap(onClose);
+  const isError = mode === "error";
+  const allReceived = mode === "complete";
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" dir="rtl">
+      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="upload-result-title"
+        onKeyDown={handleKeyDown}
+        className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-sm flex flex-col gap-3 text-center">
+        <span className="text-3xl" aria-hidden="true">{isError ? "❌" : allReceived ? "🎉" : "⚠️"}</span>
+        <h2 id="upload-result-title" className="text-base font-bold text-slate-800">
+          {isError ? "אירעה שגיאה בהעלאה" : allReceived ? "תודה רבה! כל הקבצים הנדרשים התקבלו" : "עדיין חסרים קבצים"}
+        </h2>
+        {isError && (
+          <p className="text-sm text-slate-600 leading-relaxed">נסו שוב, או פנו ליועץ שלכם אם השגיאה חוזרת.</p>
+        )}
+        {!isError && !allReceived && (
+          <p className="text-sm text-slate-600 leading-relaxed">
+            תודה על המאמץ שלך, אבל אנחנו צריכים שתעלי גם את <b>{missing.join(", ")}</b> כדי שהמאמץ שלך לא יהיה לשווא.
+          </p>
+        )}
+        <button type="button" onClick={onClose}
+          className="mt-2 px-6 py-2.5 rounded-full bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold transition-colors self-center">
+          הבנתי
+        </button>
+      </div>
+    </div>
+  );
+}
 
 export default function MeetingUploadPage() {
   const { token } = useParams();
   const [status, setStatus] = useState("loading"); // loading | invalid | expired | ready
   const [data, setData] = useState(null);
+  const [pendingFiles, setPendingFiles] = useState([]);
   const [uploading, setUploading] = useState(false);
-  const [uploadResult, setUploadResult] = useState(null); // { allReceived, missing } | "error" | null
+  const [resultModal, setResultModal] = useState(null); // { allReceived, missing } | "error" | null
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef(null);
 
@@ -22,22 +54,35 @@ export default function MeetingUploadPage() {
 
   useEffect(() => { load(); }, [token]);
 
-  async function handleFiles(fileList) {
+  function addFiles(fileList) {
     const files = Array.from(fileList || []);
     if (!files.length) return;
+    setPendingFiles(prev => {
+      const existingKeys = new Set(prev.map(f => `${f.name}-${f.size}-${f.lastModified}`));
+      const newOnes = files.filter(f => !existingKeys.has(`${f.name}-${f.size}-${f.lastModified}`));
+      return [...prev, ...newOnes];
+    });
+  }
+
+  function removePendingFile(index) {
+    setPendingFiles(prev => prev.filter((_, i) => i !== index));
+  }
+
+  async function handleSubmit() {
+    if (!pendingFiles.length || uploading) return;
     setUploading(true);
-    setUploadResult(null);
     try {
       const form = new FormData();
-      files.forEach(f => form.append("files", f));
+      pendingFiles.forEach(f => form.append("files", f));
       const res = await axios.post(`/public/meeting-upload/${token}/files`, form, {
         headers: { "Content-Type": "multipart/form-data" },
       });
       const missing = (res.data.items || []).filter(i => !i.received).map(i => i.label);
-      setUploadResult({ allReceived: res.data.all_received, missing });
+      setResultModal({ mode: res.data.all_received ? "complete" : "partial", missing });
+      setPendingFiles([]);
       load();
     } catch {
-      setUploadResult("error");
+      setResultModal({ mode: "error", missing: [] });
     } finally {
       setUploading(false);
     }
@@ -70,10 +115,10 @@ export default function MeetingUploadPage() {
           {status === "ready" && data && (
             <>
               <h1 className="text-lg font-bold text-slate-800 mb-1 text-center">
-                העלאת קבצים לפגישה בבית הספר {data.school_name}
+                העלאת קבצים לקראת הפגישה
               </h1>
               <p className="text-sm text-slate-500 mb-6 text-center">
-                תאריך הפגישה: {data.meeting_date}
+                {data.school_name} · {data.meeting_date}
               </p>
 
               {data.no_baseline_this_year && (
@@ -105,8 +150,8 @@ export default function MeetingUploadPage() {
                 onKeyDown={e => { if (e.key === "Enter" || e.key === " ") fileInputRef.current?.click(); }}
                 onDragOver={e => { e.preventDefault(); setDragOver(true); }}
                 onDragLeave={() => setDragOver(false)}
-                onDrop={e => { e.preventDefault(); setDragOver(false); handleFiles(e.dataTransfer.files); }}
-                className={`border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition-colors mb-4 ${
+                onDrop={e => { e.preventDefault(); setDragOver(false); addFiles(e.dataTransfer.files); }}
+                className={`border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition-colors mb-3 ${
                   dragOver ? "border-blue-500 bg-blue-50" : "border-slate-300 bg-slate-50"
                 }`}
               >
@@ -116,27 +161,33 @@ export default function MeetingUploadPage() {
                   multiple
                   aria-label="בחירת קבצים להעלאה"
                   className="hidden"
-                  onChange={e => handleFiles(e.target.files)}
+                  onChange={e => { addFiles(e.target.files); e.target.value = ""; }}
                 />
                 <p className="text-sm text-slate-500">
-                  {uploading ? "מעלה..." : "גררו לכאן את כל הקבצים, או לחצו לבחירה"}
+                  גררו לכאן קבצים, או לחצו לבחירה
                 </p>
               </div>
 
-              {uploadResult && uploadResult !== "error" && uploadResult.allReceived && (
-                <p className="text-sm text-green-700 bg-green-50 border border-green-200 rounded-lg px-4 py-2 mb-4" role="status">
-                  תודה רבה! כל הקבצים הנדרשים התקבלו בהצלחה.
-                </p>
-              )}
-              {uploadResult && uploadResult !== "error" && !uploadResult.allReceived && (
-                <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-4 py-2 mb-4" role="status">
-                  תודה על המאמץ שלך, אבל אנחנו צריכים שתעלי גם את {uploadResult.missing.join(", ")} כדי שהמאמץ שלך לא יהיה לשווא.
-                </p>
-              )}
-              {uploadResult === "error" && (
-                <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-4 py-2 mb-4" role="alert">
-                  אירעה שגיאה בהעלאה. נסו שוב או פנו ליועץ.
-                </p>
+              {pendingFiles.length > 0 && (
+                <div className="mb-4">
+                  <h2 className="text-sm font-semibold text-slate-700 mb-2">קבצים לשליחה:</h2>
+                  <ul className="text-sm space-y-1.5 mb-3">
+                    {pendingFiles.map((f, i) => (
+                      <li key={i} className="flex items-center justify-between gap-2 bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5">
+                        <span className="text-slate-700 truncate">{f.name}</span>
+                        <button type="button" onClick={() => removePendingFile(i)}
+                          aria-label={`הסרת ${f.name} מרשימת השליחה`}
+                          className="text-slate-400 hover:text-red-600 transition-colors flex-shrink-0 text-base leading-none">
+                          ✕
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                  <button type="button" onClick={handleSubmit} disabled={uploading}
+                    className="w-full py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold transition-colors disabled:opacity-50">
+                    {uploading ? "שולח..." : "שליחת קבצים"}
+                  </button>
+                </div>
               )}
 
               {data.already_uploaded?.length > 0 && (
@@ -157,6 +208,14 @@ export default function MeetingUploadPage() {
           )}
         </div>
       </div>
+
+      {resultModal && (
+        <UploadResultModal
+          mode={resultModal.mode}
+          missing={resultModal.missing}
+          onClose={() => setResultModal(null)}
+        />
+      )}
     </div>
   );
 }

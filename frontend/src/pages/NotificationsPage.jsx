@@ -423,17 +423,18 @@ function MeetingFilesArrivedDetail({ meetingId }) {
         </p>
       )}
 
-      {comparison.all_received ? (
-        <button type="button" onClick={handleRunCheck} disabled={actionState === "working"}
-          className="btn-green-light text-sm w-full py-2 disabled:opacity-50">
-          {actionState === "working" ? "מריץ..." : "בצע בדיקה"}
+      <div className="flex gap-2">
+        {!comparison.all_received && (
+          <button type="button" onClick={handleRequestMissing} disabled={actionState === "working" || actionState === "sent"}
+            className="flex-1 text-sm py-2.5 rounded-xl font-medium text-white bg-amber-500 hover:bg-amber-600 transition-colors disabled:opacity-50">
+            {actionState === "working" ? "שולח..." : "שלח בקשה למנהלנית"}
+          </button>
+        )}
+        <button type="button" onClick={handleRunCheck} disabled={actionState === "working" || files.length === 0}
+          className="flex-1 text-sm py-2.5 rounded-xl font-medium text-white bg-blue-600 hover:bg-blue-700 transition-colors disabled:opacity-50">
+          {actionState === "working" ? "מריץ..." : "בצע בדיקה עם הקבצים שהתקבלו"}
         </button>
-      ) : (
-        <button type="button" onClick={handleRequestMissing} disabled={actionState === "working" || actionState === "sent"}
-          className="text-sm w-full py-2 rounded-xl font-medium text-white bg-amber-500 hover:bg-amber-600 transition-colors disabled:opacity-50">
-          {actionState === "working" ? "שולח..." : "שלח למנהלנית בקשה לקבצים חסרים"}
-        </button>
-      )}
+      </div>
     </div>
   );
 }
