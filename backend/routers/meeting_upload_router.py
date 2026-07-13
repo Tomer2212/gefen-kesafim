@@ -248,10 +248,17 @@ def download_uploaded_file(meeting_id: str, file_id: str, user: Annotated[dict, 
         content = db.storage.from_("check-files").download(row["storage_key"])
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"שגיאה בהורדת הקובץ: {exc}")
+    # HTTP headers must be ASCII — a raw Hebrew filename in Content-Disposition
+    # breaks the response entirely. RFC 5987's filename* handles non-ASCII names
+    # correctly (with an ASCII fallback for older clients).
+    import urllib.parse
+    ext = Path(row["original_filename"]).suffix or ".xlsx"
+    ascii_fallback = f"file{ext}"
+    encoded_name = urllib.parse.quote(row["original_filename"])
     return Response(
         content=content,
         media_type="application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{row["original_filename"]}"'},
+        headers={"Content-Disposition": f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{encoded_name}"},
     )
 
 
