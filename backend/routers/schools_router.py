@@ -1886,10 +1886,15 @@ def _build_reminder_email_html(recipient_name: str, when_lamed: str, when_bet: s
 </html>"""
 
 
-def _build_secretary_upload_email_html(recipient_name: str, when_lamed: str, school_name: str,
-                                        checklist_items: list[str], upload_url: str, no_baseline: bool) -> str:
+def _build_secretary_upload_email_html(recipient_name: str, when_bet: str, school_name: str,
+                                        checklist_items: list[str], upload_url: str, no_baseline: bool,
+                                        meeting_date: str, start_time: str | None, advisor_name: str) -> str:
+    from datetime import date
     first_name = (recipient_name or "").strip().split(" ")[0]
     greeting = f"היי {first_name}," if first_name else "היי,"
+    date_fmt = date.fromisoformat(meeting_date).strftime("%d/%m/%y")
+    time_clause = f", בשעה {start_time}" if start_time else ""
+    advisor_clause = f" עם {advisor_name}" if advisor_name else ""
     items_html = "".join(f"<li style='margin-bottom:4px'>{item}</li>" for item in checklist_items)
     baseline_note = (
         "<p style='margin:0 0 16px 0; color:#b45309; background:#fffbeb; border:1px solid #fde68a; "
@@ -1909,8 +1914,8 @@ def _build_secretary_upload_email_html(recipient_name: str, when_lamed: str, sch
     <div style="padding: 28px 24px;">
       <p style="margin: 0 0 16px 0; font-size: 15px;">{greeting}</p>
       <p style="margin: 0 0 16px 0; color: #334155; line-height: 1.8;">
-        מתוכננת {when_lamed} פגישה בבית הספר <b>{school_name}</b>. כדי שנוכל למקסם את הזמן,
-        נשמח שתעלו עד אז את הקבצים הבאים בקישור המצורף:
+        לקראת הפגישה שתתקיים {when_bet}, <b>{date_fmt}</b>{time_clause}{advisor_clause} על תקציב הגפ"ן,
+        נשמח <b>שתעלי עוד היום</b> את הקבצים הבאים בקישור המצורף כדי שנוכל להיערך בהתאם:
       </p>
       {baseline_note}
       <ul style="margin: 0 0 20px 0; padding-inline-start: 20px; color: #334155;">{items_html}</ul>
@@ -2037,11 +2042,14 @@ def send_due_reminders(request: Request):
                         upload_url = f"{os.getenv('APP_URL', '')}/upload/{token}"
                         html = _build_secretary_upload_email_html(
                             recipient_name=p.get("name") or "",
-                            when_lamed=when_lamed,
+                            when_bet=when_bet,
                             school_name=school.get("name", ""),
                             checklist_items=[i["label"] for i in checklist["items"]],
                             upload_url=upload_url,
                             no_baseline=checklist["no_baseline_this_year"],
+                            meeting_date=m["meeting_date"],
+                            start_time=m.get("start_time"),
+                            advisor_name=advisor_name,
                         )
                         status, error = "sent", None
                         try:
@@ -2870,37 +2878,6 @@ def create_partial_update(
 
 class PartialUpdateSegmentIn(BaseModel):
     content: str
-
-
-@router.post("/{school_id}/partial-updates/{group_id}/segments")
-def add_partial_update_segment(
-    school_id: str,
-    group_id: str,
-    body: PartialUpdateSegmentIn,
-    user: Annotated[dict, Depends(get_current_user)],
-):
-    content = body.content.strip()
-    if not content:
-        raise HTTPException(status_code=400, detail="לא ניתן לשמור עדכון ריק")
-    db = get_admin_client()
-    existing = (
-        db.table("partial_row_updates")
-        .select("division, budget_name, row_key")
-        .eq("group_id", group_id).eq("school_id", school_id).limit(1).execute()
-    )
-    if not existing.data:
-        raise HTTPException(status_code=404, detail="הרשומה לא נמצאה")
-    base = existing.data[0]
-    row = db.table("partial_row_updates").insert({
-        "school_id": school_id,
-        "division": base["division"],
-        "budget_name": base["budget_name"],
-        "row_key": base["row_key"],
-        "group_id": group_id,
-        "author_id": user["id"],
-        "content": content,
-    }).execute()
-    return row.data[0]
 
 
 # Role hierarchy for cross-user edit/delete of another author's segment: a user

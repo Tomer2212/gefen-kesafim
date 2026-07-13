@@ -8,11 +8,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Response, UploadFile, File
 
 from auth import get_current_user
 from supabase_client import get_admin_client, reset_admin_client
-from meeting_upload_logic import build_upload_checklist, compute_upload_comparison
+from meeting_upload_logic import build_upload_checklist, compute_upload_comparison, file_type_label
 from email_resend import send_resend_email
 from logic.file_identifier import identify_file
 from logic.gefen_processor import load_gefen
@@ -80,14 +80,19 @@ def get_meeting_upload_checklist(token: str):
 
     checklist = build_upload_checklist(db, school, meeting.get("academic_year"))
 
-    files_res = db.table("meeting_upload_files").select("original_filename, identified_type, uploaded_at").eq("meeting_id", meeting_id).order("uploaded_at").execute()
+    files_res = db.table("meeting_upload_files").select(
+        "original_filename, identified_type, division_type, budgets, uploaded_at"
+    ).eq("meeting_id", meeting_id).order("uploaded_at").execute()
+    uploaded_files = files_res.data or []
+    comparison = compute_upload_comparison(checklist, uploaded_files)
 
     return {
         "school_name": school["name"],
         "meeting_date": meeting["meeting_date"],
-        "checklist_items": [i["label"] for i in checklist["items"]],
+        "items": [{"label": i["label"], "received": i["received"]} for i in comparison["items"]],
+        "all_received": comparison["all_received"],
         "no_baseline_this_year": checklist["no_baseline_this_year"],
-        "already_uploaded": files_res.data or [],
+        "already_uploaded": [{"original_filename": f["original_filename"]} for f in uploaded_files],
     }
 
 
@@ -97,9 +102,10 @@ async def upload_meeting_files(token: str, files: list[UploadFile] = File(...)):
     token_row = _get_valid_token(db, token)
     meeting_id = token_row["meeting_id"]
 
-    meeting_res = db.table("meetings").select("id, school_id").eq("id", meeting_id).execute()
+    meeting_res = db.table("meetings").select("id, school_id, meeting_date, academic_year, participants").eq("id", meeting_id).execute()
     if not meeting_res.data:
         raise HTTPException(status_code=404, detail="הפגישה לא נמצאה")
+    meeting = meeting_res.data[0]
 
     run_dir = Path(tempfile.mkdtemp(prefix=f"meetingupload_{meeting_id}_"))
     saved_rows = []
@@ -126,15 +132,35 @@ async def upload_meeting_files(token: str, files: list[UploadFile] = File(...)):
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)
 
+    school_res = db.table("schools").select("id, name, stage, finance_software").eq("id", meeting["school_id"]).execute()
+    school = school_res.data[0] if school_res.data else {"id": meeting["school_id"], "name": ""}
+    checklist = build_upload_checklist(db, school, meeting.get("academic_year"))
+    all_files_res = db.table("meeting_upload_files").select(
+        "identified_type, division_type, budgets"
+    ).eq("meeting_id", meeting_id).execute()
+    comparison = compute_upload_comparison(checklist, all_files_res.data or [])
+
     try:
-        _notify_advisors_files_arrived(db, meeting_id, meeting_res.data[0]["school_id"])
+        secretary = next((p for p in (meeting.get("participants") or []) if p.get("key") in ("secretary", "finance")), None)
+        _notify_advisors_files_arrived(
+            db, meeting_id, meeting["school_id"],
+            secretary_name=(secretary or {}).get("name") or "המנהלנית",
+            school_name=school.get("name", ""),
+            meeting_date=meeting["meeting_date"],
+        )
     except Exception as exc:
         logger.warning("meeting-upload: advisor notification failed (non-fatal): %s", exc)
 
-    return {"ok": True, "received": len(saved_rows)}
+    return {
+        "ok": True,
+        "received": len(saved_rows),
+        "items": [{"label": i["label"], "received": i["received"]} for i in comparison["items"]],
+        "all_received": comparison["all_received"],
+    }
 
 
-def _notify_advisors_files_arrived(db, meeting_id: str, school_id: str):
+def _notify_advisors_files_arrived(db, meeting_id: str, school_id: str, secretary_name: str, school_name: str, meeting_date: str):
+    from datetime import date
     meeting_res = db.table("meetings").select("advisor_ids, advisor_id").eq("id", meeting_id).execute()
     meeting = meeting_res.data[0] if meeting_res.data else {}
     advisor_ids = meeting.get("advisor_ids") or ([meeting["advisor_id"]] if meeting.get("advisor_id") else [])
@@ -143,14 +169,14 @@ def _notify_advisors_files_arrived(db, meeting_id: str, school_id: str):
         advisor_ids = [r["advisor_id"] for r in (school_advisors.data or [])]
     if not advisor_ids:
         return
+    date_fmt = date.fromisoformat(meeting_date).strftime("%d/%m/%y")
+    title = f"התקבלו קבצים מ{secretary_name} לקראת הפגישה עם בית הספר {school_name} ב{date_fmt}"
     notif_rows = [{
         "recipient_id": aid,
         "type": "meeting_files_arrived",
         "school_id": school_id,
-        "data": {
-            "title": "התקבלו קבצים לפגישה",
-            "deeplink": f"/school/{school_id}?meeting={meeting_id}",
-        },
+        "ref_id": meeting_id,
+        "data": {"title": title},
     } for aid in advisor_ids]
     _create_notifications(db, notif_rows, pref_key="notify_meeting_files_arrived")
 
@@ -186,6 +212,47 @@ def get_upload_comparison(meeting_id: str, user: Annotated[dict, Depends(get_cur
             else:
                 logger.error("get_upload_comparison failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת")
+
+
+@router.get("/schools/meetings/{meeting_id}/uploaded-files")
+def get_uploaded_files(meeting_id: str, user: Annotated[dict, Depends(get_current_user)]):
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            files_res = db.table("meeting_upload_files").select(
+                "id, original_filename, identified_type, division_type, budgets, uploaded_at"
+            ).eq("meeting_id", meeting_id).order("uploaded_at").execute()
+            return [{
+                "id": f["id"],
+                "filename": f["original_filename"],
+                "type_label": file_type_label(f.get("identified_type"), f.get("division_type"), f.get("budgets")),
+                "uploaded_at": f["uploaded_at"],
+            } for f in (files_res.data or [])]
+        except Exception as exc:
+            if attempt == 0:
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.warning("get_uploaded_files failed (non-fatal): %s", exc)
+                return []
+
+
+@router.get("/schools/meetings/{meeting_id}/uploaded-files/{file_id}/download")
+def download_uploaded_file(meeting_id: str, file_id: str, user: Annotated[dict, Depends(get_current_user)]):
+    db = get_admin_client()
+    file_res = db.table("meeting_upload_files").select("storage_key, original_filename").eq("id", file_id).eq("meeting_id", meeting_id).execute()
+    if not file_res.data:
+        raise HTTPException(status_code=404, detail="הקובץ לא נמצא")
+    row = file_res.data[0]
+    try:
+        content = db.storage.from_("check-files").download(row["storage_key"])
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"שגיאה בהורדת הקובץ: {exc}")
+    return Response(
+        content=content,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{row["original_filename"]}"'},
+    )
 
 
 @router.post("/schools/meetings/{meeting_id}/request-missing-files")

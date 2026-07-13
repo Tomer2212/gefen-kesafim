@@ -30,6 +30,7 @@ const TYPE_ICON = {
   advisor_removed:          "🚪",
   school_deleted:           "🗑️",
   meeting_reminder:         "🗓️",
+  meeting_files_arrived:    "📎",
 };
 
 const FIELD_LABEL = {
@@ -307,6 +308,137 @@ function SettingsModal({ onClose, role }) {
 }
 
 // ---------------------------------------------------------------------------
+// Meeting-files-arrived expandable detail
+// ---------------------------------------------------------------------------
+
+function MeetingFilesArrivedDetail({ meetingId }) {
+  const navigate = useNavigate();
+  const [loading, setLoading] = useState(true);
+  const [comparison, setComparison] = useState(null);
+  const [files, setFiles] = useState([]);
+  const [error, setError] = useState("");
+  const [actionState, setActionState] = useState("idle"); // idle | working | sent | failed
+
+  useEffect(() => {
+    Promise.all([
+      axios.get(`/schools/meetings/${meetingId}/upload-comparison`),
+      axios.get(`/schools/meetings/${meetingId}/uploaded-files`),
+    ])
+      .then(([cmpRes, filesRes]) => { setComparison(cmpRes.data); setFiles(filesRes.data || []); })
+      .catch(() => setError("שגיאה בטעינת פרטי הקבצים"))
+      .finally(() => setLoading(false));
+  }, [meetingId]);
+
+  async function handleDownload(fileId, filename) {
+    try {
+      const res = await axios.get(`/schools/meetings/${meetingId}/uploaded-files/${fileId}/download`, {
+        responseType: "blob",
+      });
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      // silently ignore
+    }
+  }
+
+  async function handleRequestMissing() {
+    setActionState("working");
+    try {
+      await axios.post(`/schools/meetings/${meetingId}/request-missing-files`);
+      setActionState("sent");
+    } catch {
+      setActionState("failed");
+    }
+  }
+
+  async function handleRunCheck() {
+    setActionState("working");
+    try {
+      const res = await axios.post(`/analyze/meetings/${meetingId}/run-check-from-uploads`);
+      navigate(`/check?run_id=${res.data.run_id}`);
+    } catch {
+      setActionState("failed");
+    }
+  }
+
+  if (loading) return <p className="text-sm text-slate-500 py-3" role="status">טוען...</p>;
+  if (error) return <p className="text-sm text-red-600 py-3" role="alert">{error}</p>;
+  if (!comparison) return null;
+
+  return (
+    <div className="pt-2">
+      {comparison.no_baseline_this_year && (
+        <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">
+          טרם בוצעה בדיקה עבור בית הספר בשנת הלימודים הנוכחית — לא ניתן לקבוע בוודאות שכל מה שנדרש התקבל.
+        </p>
+      )}
+
+      {files.length > 0 && (
+        <table className="w-full text-sm mb-3">
+          <thead>
+            <tr className="text-xs text-slate-400 border-b border-slate-100">
+              <th scope="col" className="text-right font-medium pb-1.5">שם הקובץ</th>
+              <th scope="col" className="text-right font-medium pb-1.5">סוג הקובץ</th>
+            </tr>
+          </thead>
+          <tbody>
+            {files.map(f => (
+              <tr key={f.id} className="border-b border-slate-50 last:border-0">
+                <td className="py-1.5">
+                  <button type="button" onClick={() => handleDownload(f.id, f.filename)}
+                    className="text-blue-600 hover:underline text-right">
+                    {f.filename}
+                  </button>
+                </td>
+                <td className="py-1.5 text-slate-600">{f.type_label}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      <ul className="space-y-1 mb-3">
+        {comparison.items.map((item, i) => (
+          <li key={i} className="flex items-center gap-2 text-sm">
+            <span aria-hidden="true" className={item.received ? "text-green-600" : "text-red-500"}>
+              {item.received ? "✓" : "✗"}
+            </span>
+            <span className={item.received ? "text-slate-500" : "text-slate-700"}>{item.label}</span>
+          </li>
+        ))}
+      </ul>
+
+      {actionState === "sent" && (
+        <p className="text-sm text-green-700 bg-green-50 border border-green-200 rounded-lg px-3 py-2 mb-2" role="status">
+          נשלחה בקשה למנהלנית עם פירוט הקבצים החסרים.
+        </p>
+      )}
+      {actionState === "failed" && (
+        <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mb-2" role="alert">
+          אירעה שגיאה. נסה שוב.
+        </p>
+      )}
+
+      {comparison.all_received ? (
+        <button type="button" onClick={handleRunCheck} disabled={actionState === "working"}
+          className="btn-green-light text-sm w-full py-2 disabled:opacity-50">
+          {actionState === "working" ? "מריץ..." : "בצע בדיקה"}
+        </button>
+      ) : (
+        <button type="button" onClick={handleRequestMissing} disabled={actionState === "working" || actionState === "sent"}
+          className="text-sm w-full py-2 rounded-xl font-medium text-white bg-amber-500 hover:bg-amber-600 transition-colors disabled:opacity-50">
+          {actionState === "working" ? "שולח..." : "שלח למנהלנית בקשה לקבצים חסרים"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Single notification row
 // ---------------------------------------------------------------------------
 
@@ -322,6 +454,7 @@ function NotificationRow({ notif, isExpanded, onToggle, onRead, onReload, onDele
     notif.type === "update_request_rejected" ||
     notif.type === "update_request_result"
   ) && !!data.proposed_changes;
+  const isFilesArrived = notif.type === "meeting_files_arrived" && !!notif.ref_id;
 
   const [reviewNote, setReviewNote] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -345,7 +478,7 @@ function NotificationRow({ notif, isExpanded, onToggle, onRead, onReload, onDele
     // Actionable notifications (approve/reject) only get marked read after the review action,
     // not on simple expand — otherwise the buttons disappear before the user can act.
     if (isUnread && !isActionable) onRead(notif.id);
-    if (isActionable || isResultExpandable) {
+    if (isActionable || isResultExpandable || isFilesArrived) {
       onToggle(notif.id);
     } else if (data.deeplink) {
       navigate(data.deeplink);
@@ -407,10 +540,17 @@ function NotificationRow({ notif, isExpanded, onToggle, onRead, onReload, onDele
 
         <span className="text-xs text-slate-400 flex-shrink-0 whitespace-nowrap">{timeAgo(notif.created_at)}</span>
 
-        {(isActionable || isResultExpandable) && (
+        {(isActionable || isResultExpandable || isFilesArrived) && (
           <span aria-hidden="true" className={`text-slate-400 transition-transform ${isExpanded ? "rotate-90" : ""}`}>›</span>
         )}
       </button>
+
+      {/* Expanded: uploaded-files comparison + actions (meeting_files_arrived) */}
+      {isExpanded && isFilesArrived && (
+        <div className="px-4 pb-4 border-t border-slate-100">
+          <MeetingFilesArrivedDetail meetingId={notif.ref_id} />
+        </div>
+      )}
 
       {/* Expanded: result diff for advisor (approved/rejected notification) */}
       {isExpanded && isResultExpandable && (
