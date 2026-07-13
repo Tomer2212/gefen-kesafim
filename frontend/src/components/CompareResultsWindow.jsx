@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import html2canvas from "html2canvas-pro";
+import jsPDF from "jspdf";
 import { useCompareChecks } from "../context/CompareChecksContext";
 
 const MIN_WIDTH = 460;
@@ -133,8 +135,66 @@ function CompareWindowItem({ id, data, minimized, minimizedOrder }) {
   const [pos, setPos] = useState(null); // { x, y }
   const [size, setSize] = useState({ width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT });
   const [activeBudgetIdx, setActiveBudgetIdx] = useState(0);
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
+  const [pdfError, setPdfError] = useState(false);
   const dragRef = useRef(null);
   const resizeRef = useRef(null);
+  const windowRef = useRef(null);
+  const captureRef = useRef(null);
+  const bodyRef = useRef(null);
+
+  async function handleDownloadPdf() {
+    if (downloadingPdf || !windowRef.current || !captureRef.current || !bodyRef.current) return;
+    setDownloadingPdf(true);
+    setPdfError(false);
+
+    // The window itself is fixed-height with overflow-hidden (resizable box), and the
+    // body is separately overflow-auto for its own scroll — both clip content beyond
+    // what's currently visible. Temporarily unclip both so html2canvas captures the
+    // full comparison, not just the currently-scrolled viewport.
+    const win = windowRef.current;
+    const body = bodyRef.current;
+    const prevWinHeight = win.style.height;
+    const prevWinOverflow = win.style.overflow;
+    const prevBodyOverflow = body.style.overflow;
+    const prevBodyHeight = body.style.height;
+    const prevBodyMaxHeight = body.style.maxHeight;
+    win.style.height = "auto";
+    win.style.overflow = "visible";
+    body.style.overflow = "visible";
+    body.style.height = "auto";
+    body.style.maxHeight = "none";
+    // Let the browser apply the new layout before html2canvas reads it.
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+
+    try {
+      const canvas = await html2canvas(captureRef.current, {
+        scale: 2,
+        backgroundColor: "#ffffff",
+        useCORS: true,
+      });
+      const imgData = canvas.toDataURL("image/png");
+      const pdf = new jsPDF({
+        orientation: canvas.width >= canvas.height ? "landscape" : "portrait",
+        unit: "px",
+        format: [canvas.width, canvas.height],
+      });
+      pdf.addImage(imgData, "PNG", 0, 0, canvas.width, canvas.height);
+      const safeName = (data.schoolName || "השוואה").replace(/[\\/:*?"<>|]/g, "");
+      pdf.save(`השוואה-${safeName}.pdf`);
+    } catch (err) {
+      console.error("PDF export failed:", err);
+      setPdfError(true);
+      setTimeout(() => setPdfError(false), 3000);
+    } finally {
+      win.style.height = prevWinHeight;
+      win.style.overflow = prevWinOverflow;
+      body.style.overflow = prevBodyOverflow;
+      body.style.height = prevBodyHeight;
+      body.style.maxHeight = prevBodyMaxHeight;
+      setDownloadingPdf(false);
+    }
+  }
 
   // Center the window once, the first time it's opened — cascaded by `id` (a
   // stable, ever-increasing counter) so multiple simultaneously-open windows
@@ -235,6 +295,7 @@ function CompareWindowItem({ id, data, minimized, minimizedOrder }) {
 
   return (
     <div
+      ref={windowRef}
       role="region"
       aria-label="חלון השוואה בין בדיקות"
       dir="rtl"
@@ -251,10 +312,10 @@ function CompareWindowItem({ id, data, minimized, minimizedOrder }) {
       {/* Header — draggable */}
       <div
         onMouseDown={startDrag}
-        className="flex items-center justify-between px-4 py-3 border-b border-slate-200 cursor-move select-none flex-shrink-0"
-        style={{ background: "rgba(241,245,249,0.97)" }}
+        className="grid items-center px-4 py-3 border-b border-slate-200 cursor-move select-none flex-shrink-0"
+        style={{ background: "rgba(241,245,249,0.97)", gridTemplateColumns: "1fr auto 1fr" }}
       >
-        <div className="flex items-center gap-2.5">
+        <div className="flex items-center gap-2.5" data-html2canvas-ignore="true">
           <button
             type="button"
             onClick={() => closeCompare(id)}
@@ -278,37 +339,78 @@ function CompareWindowItem({ id, data, minimized, minimizedOrder }) {
             </svg>
           </button>
         </div>
-        <div className="text-sm font-bold text-slate-800 truncate">
+        <div className="text-sm font-bold text-slate-800 truncate text-center">
           השוואה בין בדיקות
           {data.schoolName && <span className="font-normal text-slate-500"> — {data.schoolName}</span>}
         </div>
+        <div aria-hidden="true" />
       </div>
 
-      {/* Sub-header: which two checks are being compared */}
-      <div className="px-4 py-2 border-b border-slate-100 flex items-center justify-center gap-3 text-xs text-slate-500 flex-shrink-0">
-        <span className="font-semibold text-slate-700">{data.newerLabel}</span>
-        <span aria-hidden="true">↔</span>
-        <span className="font-semibold text-slate-700">{data.olderLabel}</span>
-      </div>
-
-      {/* Budget pills */}
-      {isMultiBudget && (
-        <div className="flex gap-2 flex-wrap px-4 pt-3 flex-shrink-0">
-          {budgets.map((b, i) => (
-            <button
-              key={b.name}
-              type="button"
-              onClick={() => setActiveBudgetIdx(i)}
-              style={PILL_STYLE(safeIdx === i)}
-            >
-              {b.name}
-            </button>
-          ))}
+      <div ref={captureRef} className="flex flex-col flex-1 min-h-0">
+        {/* Sub-header: which two checks are being compared */}
+        <div className="relative px-4 py-2 border-b border-slate-100 flex items-center justify-center gap-3 text-xs text-slate-500 flex-shrink-0">
+          <button
+            type="button"
+            onClick={handleDownloadPdf}
+            disabled={downloadingPdf}
+            aria-label="הורד PDF"
+            data-html2canvas-ignore="true"
+            className="absolute left-4 text-xs px-3 py-1.5 rounded-xl font-semibold border border-slate-200 transition-colors flex items-center gap-1.5"
+            style={{
+              background: pdfError ? "#fee2e2" : "rgba(241,245,249,0.97)",
+              color: pdfError ? "#dc2626" : "#1e293b",
+              opacity: downloadingPdf ? 0.7 : 1,
+            }}
+          >
+            {downloadingPdf ? (
+              <span
+                aria-hidden="true"
+                style={{
+                  display: "inline-block",
+                  width: 11,
+                  height: 11,
+                  borderRadius: "50%",
+                  border: "2px solid rgba(30,41,59,0.25)",
+                  borderTopColor: "#1e293b",
+                  animation: "spin-smooth 0.7s linear infinite",
+                }}
+              />
+            ) : pdfError ? (
+              <span>שגיאה, נסה שוב</span>
+            ) : (
+              <>
+                <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                  <polyline points="7 10 12 15 17 10"/>
+                  <line x1="12" y1="15" x2="12" y2="3"/>
+                </svg>
+                הורד PDF
+              </>
+            )}
+          </button>
+          <span className="font-semibold text-slate-700">{data.newerLabel}</span>
+          <span aria-hidden="true">↔</span>
+          <span className="font-semibold text-slate-700">{data.olderLabel}</span>
         </div>
-      )}
 
-      {/* Body */}
-      <div className="flex-1 overflow-auto px-5 py-4">
+        {/* Budget pills */}
+        {isMultiBudget && (
+          <div className="flex gap-2 flex-wrap px-4 pt-3 flex-shrink-0">
+            {budgets.map((b, i) => (
+              <button
+                key={b.name}
+                type="button"
+                onClick={() => setActiveBudgetIdx(i)}
+                style={PILL_STYLE(safeIdx === i)}
+              >
+                {b.name}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Body */}
+        <div ref={bodyRef} className="flex-1 overflow-auto px-5 py-4">
         {!activeBudget ? (
           <p className="text-sm text-slate-400 text-center">אין נתונים להשוואה</p>
         ) : (
@@ -336,6 +438,7 @@ function CompareWindowItem({ id, data, minimized, minimizedOrder }) {
             </section>
           </div>
         )}
+        </div>
       </div>
 
       {/* Resize handle */}

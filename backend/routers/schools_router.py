@@ -26,6 +26,8 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 
 from academic_years import ACADEMIC_YEARS, DEFAULT_ACADEMIC_YEAR
 from auth import get_current_user, invalidate_profile_cache
+from email_resend import send_resend_email
+from meeting_upload_logic import build_upload_checklist, get_or_create_upload_token
 from supabase_client import get_admin_client, reset_admin_client
 
 logger = logging.getLogger(__name__)
@@ -1884,6 +1886,51 @@ def _build_reminder_email_html(recipient_name: str, when_lamed: str, when_bet: s
 </html>"""
 
 
+def _build_secretary_upload_email_html(recipient_name: str, when_lamed: str, school_name: str,
+                                        checklist_items: list[str], upload_url: str, no_baseline: bool) -> str:
+    first_name = (recipient_name or "").strip().split(" ")[0]
+    greeting = f"היי {first_name}," if first_name else "היי,"
+    items_html = "".join(f"<li style='margin-bottom:4px'>{item}</li>" for item in checklist_items)
+    baseline_note = (
+        "<p style='margin:0 0 16px 0; color:#b45309; background:#fffbeb; border:1px solid #fde68a; "
+        "border-radius:8px; padding:10px 14px; font-size:13px;'>"
+        "טרם בוצעה בדיקה עבור בית הספר בשנת הלימודים הנוכחית — הרשימה למטה כללית.</p>"
+    ) if no_baseline else ""
+    return f"""
+<html>
+<body dir="rtl" style="font-family: Arial, sans-serif; font-size: 14px; color: #1e293b;
+                       background: #f8fafc; margin: 0; padding: 24px;">
+  <div style="max-width: 560px; margin: 0 auto; background: white;
+              border-radius: 12px; border: 1px solid #e2e8f0; overflow: hidden;">
+    <div style="background: #0070F3; padding: 20px 24px;">
+      <p style="margin: 0; color: white; font-size: 14px; font-weight: 700;">גפן AI</p>
+      <p style="margin: 4px 0 0 0; color: rgba(255,255,255,0.8); font-size: 12px;">בקשת קבצים לפגישה</p>
+    </div>
+    <div style="padding: 28px 24px;">
+      <p style="margin: 0 0 16px 0; font-size: 15px;">{greeting}</p>
+      <p style="margin: 0 0 16px 0; color: #334155; line-height: 1.8;">
+        מתוכננת {when_lamed} פגישה בבית הספר <b>{school_name}</b>. כדי שנוכל למקסם את הזמן,
+        נשמח שתעלו עד אז את הקבצים הבאים בקישור המצורף:
+      </p>
+      {baseline_note}
+      <ul style="margin: 0 0 20px 0; padding-inline-start: 20px; color: #334155;">{items_html}</ul>
+      <div style="text-align: center; margin-bottom: 8px;">
+        <a href="{upload_url}"
+           style="display: inline-block; background: #0070F3; color: white;
+                  font-size: 14px; font-weight: 700; padding: 12px 28px;
+                  border-radius: 8px; text-decoration: none;">
+          העלאת קבצים
+        </a>
+      </div>
+    </div>
+    <div style="background: #f1f5f9; padding: 12px 24px; text-align: center;">
+      <p style="margin: 0; font-size: 11px; color: #94a3b8;">נשלח אוטומטית מגפן AI</p>
+    </div>
+  </div>
+</body>
+</html>"""
+
+
 def _send_reminder_email(to_email: str, subject: str, html: str):
     gmail_user = os.getenv("GMAIL_USER", "")
     gmail_password = os.getenv("GMAIL_APP_PASSWORD", "")
@@ -1946,8 +1993,8 @@ def send_due_reminders(request: Request):
     schools_map = {}
     try:
         db = get_admin_client()
-        s_res = db.table("schools").select("id, name").in_("id", school_ids).execute()
-        schools_map = {s["id"]: s["name"] for s in (s_res.data or [])}
+        s_res = db.table("schools").select("id, name, stage, finance_software").in_("id", school_ids).execute()
+        schools_map = {s["id"]: s for s in (s_res.data or [])}
     except Exception as exc:
         logger.warning("send_due_reminders: school name lookup failed (non-fatal): %s", exc)
 
@@ -1977,26 +2024,57 @@ def send_due_reminders(request: Request):
             when_lamed, when_bet = _day_phrases(m["meeting_date"], today_il)
             advisor_name = _hebrew_join([advisor_names_map.get(aid) for aid in (m.get("advisor_ids") or [])])
             subject = f"תזכורת: פגישה {when_bet}"
+            school = schools_map.get(m["school_id"], {})
 
             for p in participants:
                 email_addr = p["email"].strip()
-                html = _build_reminder_email_html(
-                    recipient_name=p.get("name") or "",
-                    when_lamed=when_lamed,
-                    when_bet=when_bet,
-                    meeting_date=m["meeting_date"],
-                    start_time=m.get("start_time"),
-                    advisor_name=advisor_name,
-                )
-                status, error = "sent", None
-                try:
-                    _send_reminder_email(email_addr, subject, html)
-                    sent += 1
-                except Exception as email_exc:
-                    status, error = "failed", str(email_exc)
-                    failed += 1
-                    logger.warning("send_due_reminders: failed to email %s for meeting %s: %s",
-                                   email_addr, m["id"], email_exc)
+                is_upload_contact = p.get("key") in ("secretary", "finance")
+
+                if is_upload_contact:
+                    try:
+                        token = get_or_create_upload_token(db, m["id"], m["meeting_date"])
+                        checklist = build_upload_checklist(db, school, m.get("academic_year"))
+                        upload_url = f"{os.getenv('APP_URL', '')}/upload/{token}"
+                        html = _build_secretary_upload_email_html(
+                            recipient_name=p.get("name") or "",
+                            when_lamed=when_lamed,
+                            school_name=school.get("name", ""),
+                            checklist_items=[i["label"] for i in checklist["items"]],
+                            upload_url=upload_url,
+                            no_baseline=checklist["no_baseline_this_year"],
+                        )
+                        status, error = "sent", None
+                        try:
+                            send_resend_email(email_addr, f"בקשת קבצים לפגישה {when_bet}", html)
+                            sent += 1
+                        except Exception as email_exc:
+                            status, error = "failed", str(email_exc)
+                            failed += 1
+                            logger.warning("send_due_reminders: failed to send upload-request email to %s for meeting %s: %s",
+                                           email_addr, m["id"], email_exc)
+                    except Exception as exc:
+                        status, error = "failed", str(exc)
+                        failed += 1
+                        logger.warning("send_due_reminders: upload-request setup failed for %s / meeting %s: %s",
+                                       email_addr, m["id"], exc)
+                else:
+                    html = _build_reminder_email_html(
+                        recipient_name=p.get("name") or "",
+                        when_lamed=when_lamed,
+                        when_bet=when_bet,
+                        meeting_date=m["meeting_date"],
+                        start_time=m.get("start_time"),
+                        advisor_name=advisor_name,
+                    )
+                    status, error = "sent", None
+                    try:
+                        _send_reminder_email(email_addr, subject, html)
+                        sent += 1
+                    except Exception as email_exc:
+                        status, error = "failed", str(email_exc)
+                        failed += 1
+                        logger.warning("send_due_reminders: failed to email %s for meeting %s: %s",
+                                       email_addr, m["id"], email_exc)
                 try:
                     db.table("meeting_reminders").insert({
                         "meeting_id": m["id"],
@@ -2674,6 +2752,231 @@ def update_log_pin(
         raise HTTPException(status_code=403, detail="אין הרשאה לנעוץ בדיקה")
     pinned_at = datetime.now(timezone.utc).isoformat() if body.pinned else None
     db.table("check_logs").update({"pinned_at": pinned_at}).eq("id", log_id).eq("school_id", school_id).execute()
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Partial-report row updates ("דיווח חסר" — per-plan comment threads)
+#
+# Notes follow the plan (row_key) itself, not a specific check run, so they
+# stay visible across future checks on the same division/budget/plan.
+# ---------------------------------------------------------------------------
+
+class PartialUpdatesBatchIn(BaseModel):
+    division: str = "main"
+    budget_name: str | None = None
+    row_keys: list[str]
+
+
+@router.post("/{school_id}/partial-updates/batch")
+def batch_get_partial_updates(
+    school_id: str,
+    body: PartialUpdatesBatchIn,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    if not body.row_keys:
+        return {}
+    rows = []
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            q = (
+                db.table("partial_row_updates")
+                .select("*")
+                .eq("school_id", school_id)
+                .eq("division", body.division)
+                .in_("row_key", body.row_keys)
+            )
+            q = q.eq("budget_name", body.budget_name) if body.budget_name else q.is_("budget_name", "null")
+            rows = q.order("created_at").execute().data or []
+            break
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("batch_get_partial_updates attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.error("batch_get_partial_updates failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    # Enrich with author names + roles (non-fatal) — role is needed by the frontend
+    # to decide edit/delete permissions per segment (role-hierarchy rules)
+    author_ids = list({r["author_id"] for r in rows if r.get("author_id")})
+    profiles_map = {}
+    if author_ids:
+        try:
+            db = get_admin_client()
+            p_rows = db.table("profiles").select("id, full_name, role").in_("id", author_ids).execute()
+            profiles_map = {p["id"]: p for p in (p_rows.data or [])}
+        except Exception as exc:
+            logger.warning("batch_get_partial_updates profile enrichment failed (non-fatal): %s", exc)
+
+    # Group segments by row_key, then by group_id (visual "record")
+    by_row_key: dict = {}
+    for r in rows:
+        author_profile = profiles_map.get(r["author_id"]) or {}
+        segment = {
+            "id": r["id"],
+            "author_id": r["author_id"],
+            "author_name": author_profile.get("full_name"),
+            "author_role": author_profile.get("role"),
+            "content": r["content"],
+            "created_at": r["created_at"],
+            "updated_at": r["updated_at"],
+        }
+        by_row_key.setdefault(r["row_key"], {}).setdefault(r["group_id"], []).append(segment)
+
+    result = {}
+    for row_key, groups in by_row_key.items():
+        group_list = []
+        for group_id, segments in groups.items():
+            segments.sort(key=lambda s: s["created_at"])  # oldest segment first within a record
+            group_list.append({"group_id": group_id, "segments": segments})
+        group_list.sort(key=lambda g: g["segments"][0]["created_at"], reverse=True)  # newest record first
+        result[row_key] = group_list
+    return result
+
+
+class PartialUpdateCreateIn(BaseModel):
+    division: str = "main"
+    budget_name: str | None = None
+    row_key: str
+    content: str
+
+
+@router.post("/{school_id}/partial-updates")
+def create_partial_update(
+    school_id: str,
+    body: PartialUpdateCreateIn,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    import uuid
+
+    content = body.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="לא ניתן לשמור עדכון ריק")
+    db = get_admin_client()
+    row = db.table("partial_row_updates").insert({
+        "school_id": school_id,
+        "division": body.division,
+        "budget_name": body.budget_name,
+        "row_key": body.row_key,
+        "group_id": str(uuid.uuid4()),
+        "author_id": user["id"],
+        "content": content,
+    }).execute()
+    return row.data[0]
+
+
+class PartialUpdateSegmentIn(BaseModel):
+    content: str
+
+
+@router.post("/{school_id}/partial-updates/{group_id}/segments")
+def add_partial_update_segment(
+    school_id: str,
+    group_id: str,
+    body: PartialUpdateSegmentIn,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    content = body.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="לא ניתן לשמור עדכון ריק")
+    db = get_admin_client()
+    existing = (
+        db.table("partial_row_updates")
+        .select("division, budget_name, row_key")
+        .eq("group_id", group_id).eq("school_id", school_id).limit(1).execute()
+    )
+    if not existing.data:
+        raise HTTPException(status_code=404, detail="הרשומה לא נמצאה")
+    base = existing.data[0]
+    row = db.table("partial_row_updates").insert({
+        "school_id": school_id,
+        "division": base["division"],
+        "budget_name": base["budget_name"],
+        "row_key": base["row_key"],
+        "group_id": group_id,
+        "author_id": user["id"],
+        "content": content,
+    }).execute()
+    return row.data[0]
+
+
+# Role hierarchy for cross-user edit/delete of another author's segment: a user
+# may only act on a segment written by someone with a STRICTLY lower rank than
+# their own (e.g. manager can act on advisor's segments but not on owner's).
+# Acting on your own segment is always allowed regardless of rank.
+_PARTIAL_UPDATE_ROLE_RANK = {"owner": 3, "manager": 2, "advisor": 1}
+
+
+def _get_partial_segment_author(db, school_id: str, segment_id: str) -> tuple[str, str | None]:
+    existing = db.table("partial_row_updates").select("author_id").eq("id", segment_id).eq("school_id", school_id).execute()
+    if not existing.data:
+        raise HTTPException(status_code=404, detail="העדכון לא נמצא")
+    author_id = existing.data[0]["author_id"]
+    author_role = None
+    try:
+        prof = db.table("profiles").select("role").eq("id", author_id).execute()
+        if prof.data:
+            author_role = prof.data[0].get("role")
+    except Exception as exc:
+        logger.warning("partial-updates author role lookup failed (fails closed on cross-user actions): %s", exc)
+    return author_id, author_role
+
+
+def _can_edit_partial_segment(user: dict, author_id: str, author_role: str | None) -> bool:
+    if user["id"] == author_id:
+        return True
+    if not author_role:
+        return False  # unknown role — fail closed, only self-edit allowed
+    return _PARTIAL_UPDATE_ROLE_RANK.get(user["role"], 0) > _PARTIAL_UPDATE_ROLE_RANK.get(author_role, 0)
+
+
+def _can_delete_partial_segment(user: dict, author_id: str, author_role: str | None) -> bool:
+    if user["role"] not in ("owner", "manager"):
+        return False
+    if user["id"] == author_id:
+        return True
+    if not author_role:
+        return False
+    return _PARTIAL_UPDATE_ROLE_RANK.get(user["role"], 0) > _PARTIAL_UPDATE_ROLE_RANK.get(author_role, 0)
+
+
+@router.patch("/{school_id}/partial-updates/segments/{segment_id}")
+def edit_partial_update_segment(
+    school_id: str,
+    segment_id: str,
+    body: PartialUpdateSegmentIn,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    content = body.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="לא ניתן לשמור עדכון ריק")
+    db = get_admin_client()
+    author_id, author_role = _get_partial_segment_author(db, school_id, segment_id)
+    if not _can_edit_partial_segment(user, author_id, author_role):
+        raise HTTPException(status_code=403, detail="אין הרשאה לערוך עדכון זה")
+    from datetime import datetime, timezone
+
+    db.table("partial_row_updates").update({
+        "content": content,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", segment_id).execute()
+    return {"ok": True}
+
+
+@router.delete("/{school_id}/partial-updates/segments/{segment_id}")
+def delete_partial_update_segment(
+    school_id: str,
+    segment_id: str,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    db = get_admin_client()
+    author_id, author_role = _get_partial_segment_author(db, school_id, segment_id)
+    if not _can_delete_partial_segment(user, author_id, author_role):
+        raise HTTPException(status_code=403, detail="אין הרשאה למחוק עדכון זה")
+    db.table("partial_row_updates").delete().eq("id", segment_id).eq("school_id", school_id).execute()
     return {"ok": True}
 
 

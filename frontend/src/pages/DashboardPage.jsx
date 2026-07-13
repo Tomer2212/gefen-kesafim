@@ -2302,32 +2302,6 @@ export default function DashboardPage() {
                     </div>
                   </AccordionSection>
 
-                  <AccordionSection
-                    title="יעדים"
-                    isOpen={openSections.goals}
-                    onToggle={() => setOpenSections(o => ({ ...o, goals: !o.goals }))}
-                    badge={goalConditions.length}
-                  >
-                    <div className="flex flex-col gap-3">
-                      <GoalPicker
-                        goalDefinitions={goalDefinitions}
-                        addedKeys={goalConditions.map(c => c.goalKey)}
-                        onAdd={addGoalCondition}
-                      />
-                      {goalConditions.map((c, i) => (
-                        <GoalConditionRow
-                          key={c.id}
-                          condition={c}
-                          index={i}
-                          label={goalDefinitions.find(g => g.key === c.goalKey)?.label || c.goalKey}
-                          onChangeMet={met => setGoalConditions(prev => prev.map(x => x.id === c.id ? { ...x, met } : x))}
-                          onChangeConnector={connector => setGoalConditions(prev => prev.map(x => x.id === c.id ? { ...x, connector } : x))}
-                          onRemove={() => setGoalConditions(prev => prev.filter(x => x.id !== c.id))}
-                        />
-                      ))}
-                    </div>
-                  </AccordionSection>
-
                   <div className="flex justify-end">
                     <button
                       type="button"

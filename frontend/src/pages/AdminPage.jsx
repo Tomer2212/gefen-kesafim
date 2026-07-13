@@ -866,6 +866,8 @@ export default function AdminPage() {
   // Users state
   const [users, setUsers] = useState([]);
   const [loadingUsers, setLoadingUsers] = useState(false);
+  const [chatbotUsage, setChatbotUsage] = useState(null);
+  const [loadingChatbotUsage, setLoadingChatbotUsage] = useState(false);
   const [overrideCounts, setOverrideCounts] = useState({});  // { [userId]: count }
   const [openActionsMenu, setOpenActionsMenu] = useState(null); // userId of open 3-dot menu
   const [roleError, setRoleError] = useState("");
@@ -1046,6 +1048,9 @@ export default function AdminPage() {
     });
   }, []);
   useEffect(() => { if ((activeTab === "users" || activeTab === "billing") && users.length === 0) loadUsers(); }, [activeTab]);
+  useEffect(() => {
+    if (activeTab === "users" && chatbotUsage === null && (myRole === "owner" || myRole === "manager")) loadChatbotUsage();
+  }, [activeTab, myRole]);
   useEffect(() => { if (activeTab === "permissions" && !permDefaults && !permLoading) loadPermDefaults(); }, [activeTab]);
   // Advisors must not access the admin area — redirect immediately once role is confirmed
   useEffect(() => { if (myRole === "advisor") navigate("/", { replace: true }); }, [myRole]);
@@ -1097,6 +1102,18 @@ export default function AdminPage() {
       setOverrideCounts(countsRes.data || {});
     } finally {
       setLoadingUsers(false);
+    }
+  }
+
+  async function loadChatbotUsage() {
+    setLoadingChatbotUsage(true);
+    try {
+      const res = await axios.get("/chatbot/usage-today");
+      setChatbotUsage(res.data);
+    } catch {
+      setChatbotUsage({ users: [], global_count: 0, per_user_limit: null, global_limit: null });
+    } finally {
+      setLoadingChatbotUsage(false);
     }
   }
 
@@ -2383,6 +2400,43 @@ export default function AdminPage() {
                   </tbody>
                 </table>
               </div>
+
+              {(myRole === "owner" || myRole === "manager") && (
+                <div className="glass-card rounded-2xl p-6 mt-6">
+                  <h3 className="font-bold text-slate-800 mb-4">שימוש בעוזר ה-AI היום</h3>
+                  {loadingChatbotUsage ? (
+                    <div role="status" aria-label="טוען נתוני שימוש" className="flex justify-center py-6">
+                      <div aria-hidden="true" className="spinner w-6 h-6" />
+                    </div>
+                  ) : chatbotUsage && chatbotUsage.users.length > 0 ? (
+                    <>
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b border-slate-100">
+                            <th scope="col" className="text-right px-3 py-2 text-slate-500 font-medium">משתמש</th>
+                            <th scope="col" className="text-right px-3 py-2 text-slate-500 font-medium">הודעות היום</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {chatbotUsage.users.map(u => (
+                            <tr key={u.user_id} className="border-b border-slate-50">
+                              <td className="px-3 py-2 text-slate-700">{u.name}</td>
+                              <td className="px-3 py-2 text-slate-700">
+                                {u.message_count} / {chatbotUsage.per_user_limit}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      <p className="text-xs text-slate-500 mt-3">
+                        סה"כ היום: {chatbotUsage.global_count} / {chatbotUsage.global_limit}
+                      </p>
+                    </>
+                  ) : (
+                    <p className="text-sm text-slate-400">אין עדיין שימוש בעוזר ה-AI היום.</p>
+                  )}
+                </div>
+              )}
             </div>
           )}
 

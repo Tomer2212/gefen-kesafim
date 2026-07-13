@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from routers.analyze_router import router as analyze_router
 from routers.chatbot_router import router as chatbot_router
 from routers.contact_router import router as contact_router
+from routers.meeting_upload_router import router as meeting_upload_router
 from routers.schools_router import router as schools_router
 from routers.signup_router import router as signup_router
 
@@ -124,6 +125,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 app.include_router(analyze_router, prefix="/analyze")
 app.include_router(chatbot_router, prefix="/chatbot")
 app.include_router(contact_router, prefix="/contact")
+app.include_router(meeting_upload_router)
 app.include_router(schools_router, prefix="/schools")
 app.include_router(signup_router, prefix="/signup")
 
