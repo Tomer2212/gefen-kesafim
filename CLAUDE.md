@@ -572,6 +572,17 @@ Fields currently requiring this pattern (all fixed):
 
 If you add a new interactive element to `MeetingRow` that uses `onMouseDown` + `e.preventDefault()`, always call `saveDraft(nd)` directly — never assume blur will handle it.
 
+### Meetings Feature — Changes Apply Across All Three Scheduling Surfaces (MANDATORY)
+
+Meetings can be scheduled/edited from **three separate places** in the app, all built on the shared `MeetingsTable.jsx` / `MeetingRow.jsx` components:
+1. **כרטיס בית ספר** — `SchoolPage.jsx` (meetings tab; school is implicit, advisor defaults to first linked advisor but is still editable)
+2. **אזור אישי** — `PersonalMeetingsTab.jsx` (rendered inside `ProfilePage.jsx`; advisor is implicit — always the current user; school is picked via `SchoolPickerModal`)
+3. **ניהול** — `AdminMeetingsTab.jsx` (rendered inside `AdminPage.jsx`; neither school nor advisor is implicit)
+
+**Rule:** whenever the user requests *any* change related to meetings (בקשה שקשורה לפגישות) — a bug fix, a new field, new validation, a new button/action, a UI tweak — treat it as applying to **all three surfaces above**, not just the one mentioned or the one currently open, unless the user explicitly says otherwise.
+
+**Exception — field/context mismatches:** some fields or behaviors are only relevant/visible in some of the three surfaces (e.g. the advisor picker doesn't exist in אזור אישי since the advisor is always the current user; the school column doesn't exist on כרטיס בית ספר since the school is implicit). If a requested change doesn't map cleanly onto one or more of the three surfaces because of a mismatch like this, **stop and ask the user** what to do there instead of guessing or silently skipping it.
+
 ---
 
 ## Deployment

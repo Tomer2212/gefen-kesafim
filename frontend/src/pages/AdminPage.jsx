@@ -5,7 +5,10 @@ import * as XLSX from "xlsx";
 import Sidebar from "../components/Sidebar";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { supabase } from "../lib/supabase";
+import AdminIntegrationsTab from "./AdminIntegrationsTab";
 import AdminMeetingsTab from "./AdminMeetingsTab";
+import UserMeetingsConflictModal from "./UserMeetingsConflictModal";
+import MeetingNavigationGuardModal from "../components/meetings/MeetingNavigationGuardModal";
 
 const DIVISION_OPTIONS = [
   { value: "tikkon", label: "חטיבה עליונה" },
@@ -887,6 +890,7 @@ export default function AdminPage() {
   const [editingUserName, setEditingUserName] = useState("");
   const [savingUser, setSavingUser] = useState(false);
   const [userToDelete, setUserToDelete] = useState(null);
+  const [userMeetingsConflict, setUserMeetingsConflict] = useState(null);
   const [confirmingUserDelete, setConfirmingUserDelete] = useState(false);
   const [userDeleteError, setUserDeleteError] = useState("");
 
@@ -894,7 +898,11 @@ export default function AdminPage() {
     editingSchool !== null ||
     !!(schoolForm.name || schoolForm.symbol || schoolStage || selectedAdvisors.length > 0)
   );
-  const isDirty = schoolFormDirty || editingUser !== null || !!(inviteForm.email || inviteForm.full_name);
+  const adminMeetingsRef = useRef(null);
+  const [meetingsGuardActive, setMeetingsGuardActive] = useState(false);
+  const [meetingGuardBusy, setMeetingGuardBusy] = useState(false);
+
+  const isDirty = schoolFormDirty || editingUser !== null || !!(inviteForm.email || inviteForm.full_name) || meetingsGuardActive;
   const blocker = useBlocker(isDirty);
   const blockSaving = savingSchool || savingUser || inviting;
 
@@ -1327,6 +1335,20 @@ export default function AdminPage() {
     }
   }
 
+  async function handleDeleteButtonClick(u) {
+    setOpenActionsMenu(null);
+    try {
+      const res = await axios.get(`/schools/users/${u.id}/future-meetings`);
+      if (res.data && res.data.length > 0) {
+        setUserMeetingsConflict({ user: u, meetings: res.data });
+        return;
+      }
+    } catch {
+      // fall through to the normal delete-confirmation flow if the check itself fails
+    }
+    setUserToDelete(u);
+  }
+
   async function handleDeleteUser() {
     if (!userToDelete) return;
     setConfirmingUserDelete(true);
@@ -1534,6 +1556,7 @@ export default function AdminPage() {
     : (billingMonths[0]?.key ?? null);
 
   const showBillingTab = myRole === "owner" || (myRole === "manager" && permDefaults?.can_view_billing?.manager === true);
+  const showIntegrationsTab = myRole === "owner" || myRole === "manager";
   // null=loading, true=allowed, false=denied
   // owner → always true; manager → depends on permDefaults (null while loading → treat as not-yet-known)
   const canAddSchool = myRole === "owner"
@@ -1553,6 +1576,7 @@ export default function AdminPage() {
     { id: "users", label: "משתמשים" },
     { id: "meetings", label: "פגישות" },
     { id: "permissions", label: "הרשאות" },
+    ...(showIntegrationsTab ? [{ id: "integrations", label: "אינטגרציות" }] : []),
     ...(showBillingTab ? [{ id: "billing", label: "חיובים" }] : []),
   ];
 
@@ -2386,7 +2410,7 @@ export default function AdminPage() {
                                 {openActionsMenu === u.id && (
                                   <div className="absolute left-0 top-full mt-1 z-20 bg-white rounded-xl shadow-lg border border-slate-100 py-1 min-w-[80px]">
                                     <button
-                                      onClick={() => { setUserToDelete(u); setOpenActionsMenu(null); }}
+                                      onClick={() => handleDeleteButtonClick(u)}
                                       className="w-full text-right px-4 py-2 text-sm text-red-500 hover:bg-red-50 transition-colors"
                                     >מחק</button>
                                   </div>
@@ -2506,12 +2530,19 @@ export default function AdminPage() {
           {activeTab === "meetings" && (
             <div className="-mx-24">
               <AdminMeetingsTab
+                ref={adminMeetingsRef}
                 users={users}
                 loadingUsers={loadingUsers}
                 loadUsers={loadUsers}
                 canDeleteMeetings={canDeleteMeetings}
+                onIncompleteChange={setMeetingsGuardActive}
               />
             </div>
+          )}
+
+          {/* Integrations Tab */}
+          {activeTab === "integrations" && showIntegrationsTab && (
+            <AdminIntegrationsTab />
           )}
 
           {/* Permissions Tab */}
@@ -2667,7 +2698,34 @@ export default function AdminPage() {
           confirming={confirmingUserDelete}
         />
       )}
-      {blocker.state === "blocked" && (
+      {userMeetingsConflict && (
+        <UserMeetingsConflictModal
+          targetUser={userMeetingsConflict.user}
+          meetings={userMeetingsConflict.meetings}
+          otherUsers={users.filter(u => u.id !== userMeetingsConflict.user.id)}
+          onClose={() => setUserMeetingsConflict(null)}
+          onResolved={() => {
+            const u = userMeetingsConflict.user;
+            setUserMeetingsConflict(null);
+            setUserToDelete(u);
+          }}
+        />
+      )}
+      {blocker.state === "blocked" && meetingsGuardActive && (
+        <MeetingNavigationGuardModal
+          missingFields={adminMeetingsRef.current?.getMissingFields?.() || []}
+          busy={meetingGuardBusy}
+          onStay={() => blocker.reset?.()}
+          onSaveAndLeave={() => blocker.proceed?.()}
+          onDiscardAndLeave={async () => {
+            setMeetingGuardBusy(true);
+            await adminMeetingsRef.current?.discardIncompleteMeetings?.();
+            setMeetingGuardBusy(false);
+            blocker.proceed?.();
+          }}
+        />
+      )}
+      {blocker.state === "blocked" && !meetingsGuardActive && (
         <UnsavedChangesModal
           onSave={handleSaveAndProceed}
           onDiscard={handleDiscardAndProceed}

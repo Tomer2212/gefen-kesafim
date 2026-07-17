@@ -24,6 +24,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
+import graph_client
 from academic_years import ACADEMIC_YEARS, DEFAULT_ACADEMIC_YEAR
 from auth import get_current_user, invalidate_profile_cache
 from email_resend import send_resend_email
@@ -220,6 +221,7 @@ class MeetingIn(BaseModel):
     notes: str | None = None
     reminder_enabled: bool | None = False
     academic_year: str | None = None
+    primary_contact_key: str | None = None  # which participant's phone to use in the Outlook event subject
 
 
 class MeetingStatusPatchIn(BaseModel):
@@ -588,6 +590,20 @@ def delete_school(
         "status": "pending_deletion",
         "deleted_at": datetime.now(timezone.utc).isoformat(),
     }).eq("id", school_id).eq("org_id", user["org_id"]).execute()
+
+    # Cancel the Outlook events for this school's future meetings — a deleted school's
+    # meetings shouldn't keep sitting on advisors' calendars. Restoring the school
+    # (recycle-bin flow) re-creates them; the meeting DB rows themselves are untouched.
+    try:
+        today = datetime.now(timezone.utc).date().isoformat()
+        future = db.table("meetings").select("id, calendar_sync").eq("school_id", school_id).gte("meeting_date", today).eq("status", "scheduled").execute()
+        for m in (future.data or []):
+            if m.get("calendar_sync"):
+                graph_client.sync_meeting_cancel(db, user["org_id"], m["calendar_sync"])
+                db.table("meetings").update({"calendar_sync": {}}).eq("id", m["id"]).execute()
+    except Exception as exc:
+        logger.warning("calendar cancel-sync failed for deleted school %s (non-fatal): %s", school_id, exc)
+
     try:
         owner_ids = [r["id"] for r in (db.table("profiles").select("id").eq("role", "owner").eq("org_id", user["org_id"]).execute().data or [])]
         notif_rows = [{
@@ -649,6 +665,22 @@ def restore_school(
         _create_notifications(db, notif_rows, pref_key="notify_advisor_assignment")
     except Exception as exc:
         logger.warning("restore_school advisor notification failed (non-fatal): %s", exc)
+
+    # Re-create Outlook events for this school's future meetings that were cancelled
+    # when the school was deleted (calendar_sync was cleared to {} at that point).
+    try:
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).date().isoformat()
+        future = db.table("meetings").select("*").eq("school_id", school_id).gte("meeting_date", today).eq("status", "scheduled").execute()
+        for m in (future.data or []):
+            if m.get("calendar_sync"):
+                continue  # already synced (wasn't touched by the delete flow)
+            subject = _build_meeting_subject(db, school_id, m.get("participants"), m.get("primary_contact_key"))
+            sync_map = graph_client.sync_meeting_create(db, user["org_id"], m, subject)
+            if sync_map:
+                db.table("meetings").update({"calendar_sync": sync_map}).eq("id", m["id"]).execute()
+    except Exception as exc:
+        logger.warning("calendar re-sync failed for restored school %s (non-fatal): %s", school_id, exc)
 
     return {"ok": True}
 
@@ -2101,6 +2133,95 @@ def send_due_reminders(request: Request):
     return {"ok": True, "sent": sent, "failed": failed, "skipped_meetings": skipped_meetings, "total_due": len(meetings)}
 
 
+@router.post("/meetings/poll-outlook-changes")
+def poll_outlook_changes(request: Request):
+    """Cron-triggered (every 15 min). Reconciles meetings *we* created/synced against
+    Outlook: if an advisor edited the time or deleted the event directly in Outlook,
+    that change is reflected back here (date/time update, or status='cancelled').
+
+    Deliberately narrow in scope: we never pull the subject/title back from Outlook —
+    our own naming logic (school/city/contact) stays authoritative for that. A meeting
+    is only cancelled if its event is confirmed gone for *every* synced advisor (not
+    just one, for multi-advisor meetings) — and any check that fails/errors is skipped
+    for that round rather than ever being treated as "deleted"."""
+    if not CRON_SECRET or request.headers.get("X-Cron-Secret") != CRON_SECRET:
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+    from datetime import datetime, timezone
+
+    db = get_admin_client()
+    today = datetime.now(timezone.utc).date().isoformat()
+    try:
+        meetings = (
+            db.table("meetings")
+            .select("id, school_id, meeting_date, start_time, end_time, status, calendar_sync")
+            .eq("status", "scheduled")
+            .gte("meeting_date", today)
+            .execute()
+            .data or []
+        )
+    except Exception as exc:
+        logger.error("poll_outlook_changes failed to fetch meetings: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת")
+
+    meetings = [m for m in meetings if m.get("calendar_sync")]
+    if not meetings:
+        return {"checked": 0, "updated": 0, "cancelled": 0}
+
+    school_ids = list({m["school_id"] for m in meetings if m.get("school_id")})
+    schools_map = {}
+    if school_ids:
+        try:
+            srows = db.table("schools").select("id, org_id").in_("id", school_ids).execute().data or []
+            schools_map = {s["id"]: s.get("org_id") for s in srows}
+        except Exception as exc:
+            logger.warning("poll_outlook_changes school lookup failed (non-fatal): %s", exc)
+
+    checked = updated = cancelled = 0
+
+    for m in meetings:
+        org_id = schools_map.get(m.get("school_id"))
+        if not org_id:
+            continue
+        sync_map = m.get("calendar_sync") or {}
+        advisor_results = {}
+        for advisor_id, entry in sync_map.items():
+            event_id = entry.get("external_event_id")
+            if not event_id:
+                continue
+            checked += 1
+            advisor_results[advisor_id] = graph_client.get_event(db, org_id, advisor_id, event_id)
+
+        if not advisor_results:
+            continue
+        if any(v == graph_client.EVENT_CHECK_SKIPPED for v in advisor_results.values()):
+            continue  # inconclusive this round — never guess, just retry next poll
+
+        if all(v is None for v in advisor_results.values()):
+            try:
+                db.table("meetings").update({"status": "cancelled", "calendar_sync": {}}).eq("id", m["id"]).execute()
+                cancelled += 1
+            except Exception as exc:
+                logger.warning("poll_outlook_changes: failed to cancel meeting %s: %s", m["id"], exc)
+            continue
+
+        for advisor_id, result in advisor_results.items():
+            if result is None:
+                continue
+            new_date, new_start, new_end = result["start"][:10], result["start"][11:16], result["end"][11:16]
+            if new_date != m.get("meeting_date") or new_start != m.get("start_time") or new_end != m.get("end_time"):
+                try:
+                    db.table("meetings").update({
+                        "meeting_date": new_date, "start_time": new_start, "end_time": new_end,
+                    }).eq("id", m["id"]).execute()
+                    updated += 1
+                except Exception as exc:
+                    logger.warning("poll_outlook_changes: failed to update meeting %s: %s", m["id"], exc)
+                break  # one shared date/time per meeting row — first conclusive change wins
+
+    return {"checked": checked, "updated": updated, "cancelled": cancelled}
+
+
 @router.get("/meetings/{meeting_id}/reminder-status")
 def get_meeting_reminder_status(
     meeting_id: str,
@@ -2624,6 +2745,118 @@ def delete_user(
     return {"ok": True}
 
 
+@router.get("/users/{user_id}/future-meetings")
+def get_user_future_meetings(user_id: str, user: Annotated[dict, Depends(get_current_user)]):
+    """Future scheduled meetings for this advisor — shown before deleting them, so the
+    caller can decide whether to transfer or cancel before the user itself is removed."""
+    if user["role"] not in ("owner", "manager"):
+        raise HTTPException(status_code=403, detail="אין הרשאה")
+    from datetime import datetime, timezone
+    db = get_admin_client()
+    today = datetime.now(timezone.utc).date().isoformat()
+    rows = (
+        db.table("meetings")
+        .select("id, meeting_date, start_time, end_time, school_id")
+        .gte("meeting_date", today)
+        .eq("status", "scheduled")
+        .filter("advisor_ids", "cs", json.dumps([user_id]))
+        .order("meeting_date")
+        .execute()
+    )
+    meetings = rows.data or []
+    school_ids = list({m["school_id"] for m in meetings if m.get("school_id")})
+    schools_map = {}
+    if school_ids:
+        srows = db.table("schools").select("id, name, city").in_("id", school_ids).execute().data or []
+        schools_map = {s["id"]: s for s in srows}
+    for m in meetings:
+        sch = schools_map.get(m.get("school_id"), {})
+        m["school_name"] = sch.get("name")
+        m["school_city"] = sch.get("city")
+    return meetings
+
+
+class TransferMeetingsIn(BaseModel):
+    new_advisor_id: str
+
+
+@router.post("/users/{user_id}/meetings/transfer")
+def transfer_user_meetings(user_id: str, body: TransferMeetingsIn, user: Annotated[dict, Depends(get_current_user)]):
+    """Moves this advisor's future meetings to another advisor, re-syncing Outlook
+    (cancels the old advisor's event, creates one on the new advisor's calendar).
+    Returns per-meeting results including whether the new advisor already had a
+    conflicting commitment, so the caller can surface that in a summary."""
+    if user["role"] not in ("owner", "manager"):
+        raise HTTPException(status_code=403, detail="אין הרשאה")
+    from datetime import datetime, timezone
+    db = get_admin_client()
+    today = datetime.now(timezone.utc).date().isoformat()
+    rows = (
+        db.table("meetings")
+        .select("*")
+        .gte("meeting_date", today)
+        .eq("status", "scheduled")
+        .filter("advisor_ids", "cs", json.dumps([user_id]))
+        .execute()
+    )
+    meetings = rows.data or []
+    school_ids = list({m["school_id"] for m in meetings if m.get("school_id")})
+    schools_map = {}
+    if school_ids:
+        srows = db.table("schools").select("id, name").in_("id", school_ids).execute().data or []
+        schools_map = {s["id"]: s["name"] for s in srows}
+
+    results = []
+    for m in meetings:
+        new_ids = [body.new_advisor_id if aid == user_id else aid for aid in (m.get("advisor_ids") or [])]
+        previous_sync = m.get("calendar_sync") or {}
+        conflict = False
+        try:
+            db.table("meetings").update({"advisor_ids": new_ids}).eq("id", m["id"]).execute()
+            subject = _build_meeting_subject(db, m["school_id"], m.get("participants"), m.get("primary_contact_key"))
+            sync_map = graph_client.sync_meeting_update(db, user["org_id"], {**m, "advisor_ids": new_ids}, previous_sync, subject)
+            db.table("meetings").update({"calendar_sync": sync_map}).eq("id", m["id"]).execute()
+            conflict = bool(sync_map.get(body.new_advisor_id, {}).get("conflict"))
+        except Exception as exc:
+            logger.warning("transfer meeting %s failed (non-fatal): %s", m["id"], exc)
+        results.append({
+            "meeting_id": m["id"],
+            "meeting_date": m["meeting_date"],
+            "start_time": m.get("start_time"),
+            "end_time": m.get("end_time"),
+            "school_name": schools_map.get(m["school_id"]),
+            "conflict": conflict,
+        })
+    return {"transferred": len(results), "results": results}
+
+
+@router.post("/users/{user_id}/meetings/cancel-future")
+def cancel_user_future_meetings(user_id: str, user: Annotated[dict, Depends(get_current_user)]):
+    """Deletes this advisor's future meetings entirely — from the system and from Outlook."""
+    if user["role"] not in ("owner", "manager"):
+        raise HTTPException(status_code=403, detail="אין הרשאה")
+    from datetime import datetime, timezone
+    db = get_admin_client()
+    today = datetime.now(timezone.utc).date().isoformat()
+    rows = (
+        db.table("meetings")
+        .select("id, calendar_sync")
+        .gte("meeting_date", today)
+        .eq("status", "scheduled")
+        .filter("advisor_ids", "cs", json.dumps([user_id]))
+        .execute()
+    )
+    meetings = rows.data or []
+    for m in meetings:
+        try:
+            if m.get("calendar_sync"):
+                graph_client.sync_meeting_cancel(db, user["org_id"], m["calendar_sync"])
+        except Exception as exc:
+            logger.warning("cancel meeting %s failed (non-fatal): %s", m["id"], exc)
+        db.table("meetings").delete().eq("id", m["id"]).execute()
+    return {"cancelled": len(meetings)}
+
+
 # ---------------------------------------------------------------------------
 # Check logs
 # ---------------------------------------------------------------------------
@@ -3040,6 +3273,68 @@ async def import_schools(
 # Meetings
 # ---------------------------------------------------------------------------
 
+def _build_meeting_subject(db, school_id: str, participants: list[dict] | None, primary_contact_key: str | None) -> str:
+    """Outlook event subject: "<school>, <city> - <contact name> - <contact phone>".
+
+    The contact is resolved from `participants` (selected in the meeting row): the
+    principal always wins if present among them; otherwise `primary_contact_key`
+    (explicitly chosen by the user via a disambiguation dialog on the frontend when
+    there are multiple participants and no principal) picks which one. Falls back to
+    just "<school>, <city>" if there's no participant to resolve.
+    """
+    try:
+        row = (
+            db.table("schools")
+            .select("name, city, principal_name, principal_phone, secretary_name, secretary_phone, "
+                     "finance_contact_name, finance_contact_phone, extra_contacts")
+            .eq("id", school_id)
+            .execute()
+        )
+        school = row.data[0] if row.data else {}
+    except Exception:
+        school = {}
+
+    school_name = school.get("name") or ""
+    city = school.get("city") or ""
+    base = f"{school_name}, {city}" if city else school_name
+
+    contact_map = {
+        "principal": (school.get("principal_name"), school.get("principal_phone")),
+        "secretary": (school.get("secretary_name"), school.get("secretary_phone")),
+        "finance": (school.get("finance_contact_name"), school.get("finance_contact_phone")),
+    }
+    for i, ec in enumerate(school.get("extra_contacts") or []):
+        contact_map[f"extra_{i}"] = (ec.get("name"), ec.get("phone"))
+
+    participants = participants or []
+    key = primary_contact_key
+    if not key:
+        if any(p.get("key") == "principal" for p in participants):
+            key = "principal"
+        elif len(participants) == 1:
+            key = participants[0].get("key")
+
+    name, phone = contact_map.get(key, (None, None)) if key else (None, None)
+    if name:
+        return f"{base} - {name} - {phone or ''}".rstrip(" -")
+    return base
+
+
+class MeetingSubjectPreviewIn(BaseModel):
+    participants: list[dict] | None = None
+    primary_contact_key: str | None = None
+
+
+@router.post("/{school_id}/meeting-subject-preview")
+def preview_meeting_subject(school_id: str, body: MeetingSubjectPreviewIn, user: Annotated[dict, Depends(get_current_user)]):
+    """What the Outlook event subject will look like for this school + participant
+    selection — used by the frontend's conflict-warning dialog so it shows the same
+    text that will actually be sent to Outlook, not a stale hardcoded guess."""
+    db = get_admin_client()
+    subject = _build_meeting_subject(db, school_id, body.participants, body.primary_contact_key)
+    return {"subject": subject}
+
+
 @router.get("/{school_id}/meetings")
 def list_meetings(school_id: str, user: Annotated[dict, Depends(get_current_user)], academic_year: str | None = None):
     meetings = []
@@ -3107,6 +3402,7 @@ def create_meeting(school_id: str, body: MeetingIn, user: Annotated[dict, Depend
     if body.meeting_type: data["meeting_type"] = body.meeting_type
     if body.actual_duration: data["actual_duration"] = body.actual_duration
     if body.notes: data["notes"] = body.notes
+    if body.primary_contact_key is not None: data["primary_contact_key"] = body.primary_contact_key
     # advisor_ids takes precedence; fall back to legacy advisor_id
     if body.advisor_ids is not None:
         data["advisor_ids"] = body.advisor_ids
@@ -3116,9 +3412,20 @@ def create_meeting(school_id: str, body: MeetingIn, user: Annotated[dict, Depend
         data["advisor_ids"] = []
     try:
         res = db.table("meetings").insert(data).execute()
-        return res.data[0]
+        meeting = res.data[0]
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"שגיאת DB: {str(e)}")
+
+    try:
+        subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"))
+        sync_map = graph_client.sync_meeting_create(db, user["org_id"], meeting, subject)
+        if sync_map:
+            db.table("meetings").update({"calendar_sync": sync_map}).eq("id", meeting["id"]).execute()
+            meeting["calendar_sync"] = sync_map
+    except Exception as exc:
+        logger.warning("calendar sync failed for new meeting %s (non-fatal): %s", meeting.get("id"), exc)
+
+    return meeting
 
 
 @router.put("/{school_id}/meetings/{meeting_id}")
@@ -3136,6 +3443,7 @@ def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annot
     if body.actual_duration: data["actual_duration"] = body.actual_duration
     if body.notes: data["notes"] = body.notes
     if body.academic_year: data["academic_year"] = body.academic_year
+    if body.primary_contact_key is not None: data["primary_contact_key"] = body.primary_contact_key
     # advisor_ids takes precedence; fall back to legacy advisor_id
     if body.advisor_ids is not None:
         data["advisor_ids"] = body.advisor_ids
@@ -3143,11 +3451,32 @@ def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annot
         data["advisor_ids"] = [body.advisor_id]
     else:
         data["advisor_ids"] = []
+
+    try:
+        existing = db.table("meetings").select("calendar_sync").eq("id", meeting_id).execute()
+        previous_sync = (existing.data[0].get("calendar_sync") or {}) if existing.data else {}
+    except Exception:
+        previous_sync = {}
+
     try:
         res = db.table("meetings").update(data).eq("id", meeting_id).eq("school_id", school_id).execute()
-        return res.data[0] if res.data else {}
+        meeting = res.data[0] if res.data else {}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"שגיאת DB: {str(e)}")
+
+    try:
+        if meeting.get("status") == "cancelled":
+            graph_client.sync_meeting_cancel(db, user["org_id"], previous_sync)
+            sync_map = {}
+        else:
+            subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"))
+            sync_map = graph_client.sync_meeting_update(db, user["org_id"], {**meeting, "id": meeting_id}, previous_sync, subject)
+        db.table("meetings").update({"calendar_sync": sync_map}).eq("id", meeting_id).execute()
+        meeting["calendar_sync"] = sync_map
+    except Exception as exc:
+        logger.warning("calendar sync failed for updated meeting %s (non-fatal): %s", meeting_id, exc)
+
+    return meeting
 
 
 @router.patch("/{school_id}/meetings/{meeting_id}")
@@ -3163,9 +3492,25 @@ def patch_meeting(school_id: str, meeting_id: str, body: MeetingStatusPatchIn, u
         return {"ok": True}
     try:
         db.table("meetings").update(data).eq("id", meeting_id).eq("school_id", school_id).execute()
-        return {"ok": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail="שגיאה בעדכון פגישה")
+
+    try:
+        row = db.table("meetings").select("*").eq("id", meeting_id).execute()
+        meeting = row.data[0] if row.data else None
+        if meeting:
+            previous_sync = meeting.get("calendar_sync") or {}
+            if meeting.get("status") == "cancelled":
+                graph_client.sync_meeting_cancel(db, user["org_id"], previous_sync)
+                sync_map = {}
+            else:
+                subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"))
+                sync_map = graph_client.sync_meeting_update(db, user["org_id"], meeting, previous_sync, subject)
+            db.table("meetings").update({"calendar_sync": sync_map}).eq("id", meeting_id).execute()
+    except Exception as exc:
+        logger.warning("calendar sync failed for patched meeting %s (non-fatal): %s", meeting_id, exc)
+
+    return {"ok": True}
 
 
 @router.delete("/{school_id}/meetings/{meeting_id}")
@@ -3173,6 +3518,12 @@ def delete_meeting(school_id: str, meeting_id: str, user: Annotated[dict, Depend
     db = get_admin_client()
     if not _check_permission(db, user, "can_delete_own_meetings"):
         raise HTTPException(status_code=403, detail="אין הרשאה למחוק פגישות")
+    try:
+        row = db.table("meetings").select("calendar_sync").eq("id", meeting_id).execute()
+        previous_sync = (row.data[0].get("calendar_sync") or {}) if row.data else {}
+        graph_client.sync_meeting_cancel(db, user["org_id"], previous_sync)
+    except Exception as exc:
+        logger.warning("calendar cancel-sync failed before deleting meeting %s (non-fatal): %s", meeting_id, exc)
     db.table("meetings").delete().eq("id", meeting_id).eq("school_id", school_id).execute()
     return {"ok": True}
 
@@ -3183,16 +3534,33 @@ class MeetingReassignSchoolIn(BaseModel):
 
 @router.patch("/meetings/{meeting_id}/reassign-school")
 def reassign_meeting_school(meeting_id: str, body: MeetingReassignSchoolIn, user: Annotated[dict, Depends(get_current_user)]):
-    """Move an existing meeting to a different school. Used by the admin 'פגישות' tab school-picker cell."""
+    """Move an existing meeting to a different school. Used by the admin 'פגישות' tab school-picker cell.
+
+    Clears `participants`/`primary_contact_key` on reassignment — they refer to the
+    *old* school's staff, and re-syncing without clearing them would build the Outlook
+    subject from a mismatched name (old school's contact) + phone (looked up fresh from
+    the new school), which is worse than just showing the school name until participants
+    are re-selected for the new school.
+    """
     _require_manager(user)
+    db = None
+    meeting = None
+    previous_sync = {}
     for attempt in range(2):
         try:
             db = get_admin_client()
             sch = db.table("schools").select("id").eq("id", body.new_school_id).eq("org_id", user["org_id"]).execute()
             if not sch.data:
                 raise HTTPException(status_code=404, detail="בית ספר לא נמצא")
-            db.table("meetings").update({"school_id": body.new_school_id}).eq("id", meeting_id).execute()
-            return {"ok": True}
+            existing = db.table("meetings").select("calendar_sync").eq("id", meeting_id).execute()
+            previous_sync = (existing.data[0].get("calendar_sync") or {}) if existing.data else {}
+            res = db.table("meetings").update({
+                "school_id": body.new_school_id,
+                "participants": [],
+                "primary_contact_key": None,
+            }).eq("id", meeting_id).execute()
+            meeting = res.data[0] if res.data else {}
+            break
         except HTTPException:
             raise
         except Exception as exc:
@@ -3203,6 +3571,15 @@ def reassign_meeting_school(meeting_id: str, body: MeetingReassignSchoolIn, user
             else:
                 logger.error("reassign_meeting_school failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    try:
+        subject = _build_meeting_subject(db, body.new_school_id, [], None)
+        sync_map = graph_client.sync_meeting_update(db, user["org_id"], {**meeting, "id": meeting_id}, previous_sync, subject)
+        db.table("meetings").update({"calendar_sync": sync_map}).eq("id", meeting_id).execute()
+    except Exception as exc:
+        logger.warning("calendar sync failed for reassigned meeting %s (non-fatal): %s", meeting_id, exc)
+
+    return {"ok": True}
 
 
 class MentionIn(BaseModel):

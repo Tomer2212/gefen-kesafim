@@ -4,6 +4,8 @@ import { MeetingRemindersProvider } from "./context/MeetingRemindersContext";
 import MeetingRemindersOverlay from "./components/MeetingRemindersOverlay";
 import { CompareChecksProvider } from "./context/CompareChecksContext";
 import CompareResultsWindow from "./components/CompareResultsWindow";
+import { GuideProvider } from "./context/GuideContext";
+import GuideWindow from "./components/GuideWindow";
 import ChatWidget from "./components/ChatWidget";
 import axios from "axios";
 import { supabase } from "./lib/supabase";
@@ -64,6 +66,7 @@ function AppLayout() {
       <Outlet />
       <MeetingRemindersOverlay />
       <CompareResultsWindow />
+      <GuideWindow />
       <ChatWidget />
     </>
   );
@@ -127,7 +130,9 @@ export default function App() {
     <SessionContext.Provider value={session}>
       <MeetingRemindersProvider>
         <CompareChecksProvider>
-          <RouterProvider router={router} />
+          <GuideProvider>
+            <RouterProvider router={router} />
+          </GuideProvider>
         </CompareChecksProvider>
       </MeetingRemindersProvider>
     </SessionContext.Provider>

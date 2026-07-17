@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useBlocker } from "react-router-dom";
 import axios from "axios";
 import * as XLSX from "xlsx";
 import { DeleteMeetingModal } from "../components/meetings/DeleteMeetingModal";
@@ -9,6 +10,10 @@ import { SchoolPickerModal, SchoolPickerPopover, schoolLabel } from "../componen
 import { MEETING_STATUS_OPTIONS, MEETING_TYPE_OPTIONS, STATUS_MAP, formatMeetingDate } from "../components/meetings/constants";
 import { AcademicYearSelector } from "../components/AcademicYearSelector";
 import { DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
+import MeetingNavigationGuardModal from "../components/meetings/MeetingNavigationGuardModal";
+import { getMissingCriticalFields, isMeetingIncomplete } from "../components/meetings/meetingCompleteness";
+import { buildSchoolContacts } from "../components/meetings/schoolContacts";
+import { normalizeTimeValue } from "../components/meetings/TimeInput";
 
 const TODAY = new Date().toISOString().slice(0, 10);
 const DEFAULT_FILTERS = { status: "", date_from: TODAY, date_to: TODAY };
@@ -48,6 +53,24 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
   const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false);
   const [reminderToasts, setReminderToasts] = useState([]);
   const [alreadySentModal, setAlreadySentModal] = useState(null);
+  const sessionCreatedMeetingIdsRef = useRef(new Set());
+  const [meetingGuardBusy, setMeetingGuardBusy] = useState(false);
+
+  const incompleteSessionMeetings = meetings.filter(m =>
+    sessionCreatedMeetingIdsRef.current.has(m.id) && isMeetingIncomplete(m, { requireSchool: true })
+  );
+  const hasIncompleteMeetings = incompleteSessionMeetings.length > 0;
+  const blocker = useBlocker(hasIncompleteMeetings);
+
+  async function discardIncompleteMeetings(ids) {
+    for (const id of ids) {
+      const m = meetings.find(x => x.id === id);
+      if (!m) continue;
+      try { await axios.delete(`/schools/${m.school_id}/meetings/${id}`); } catch { /* best-effort */ }
+    }
+    setMeetings(prev => prev.filter(m => !ids.includes(m.id)));
+    ids.forEach(id => sessionCreatedMeetingIdsRef.current.delete(id));
+  }
 
   function addReminderToast(msg) {
     const id = Date.now();
@@ -103,8 +126,13 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
 
   async function updateMeeting(draft) {
     const { id, school_id, ...rest } = draft;
+    const payload = {
+      ...rest,
+      start_time: normalizeTimeValue(draft.start_time) || null,
+      end_time: normalizeTimeValue(draft.end_time) || null,
+    };
     try {
-      const res = await axios.patch(`/schools/${school_id}/meetings/${id}`, rest);
+      const res = await axios.put(`/schools/${school_id}/meetings/${id}`, payload);
       setMeetings(prev => prev.map(m => m.id === id ? { ...m, ...res.data } : m));
     } catch { /* silent */ }
   }
@@ -124,6 +152,7 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
       const res = await axios.post(`/schools/${school.id}/meetings`, payload);
       const newMeeting = { ...res.data, advisor_profiles: [], school_name: school.name, school_symbol: school.symbol, school_city: school.city, school_district: school.district };
       setMeetings(prev => [newMeeting, ...prev]);
+      sessionCreatedMeetingIdsRef.current.add(newMeeting.id);
     } catch { /* silent */ }
     setSchoolPickerFor(null);
   }
@@ -131,8 +160,10 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
   async function reassignSchool(meetingId, school) {
     try {
       await axios.patch(`/schools/meetings/${meetingId}/reassign-school`, { new_school_id: school.id });
+      // Server clears participants/primary_contact_key on reassignment (they belonged to
+      // the old school's staff) — mirror that here so the row doesn't show stale contacts.
       setMeetings(prev => prev.map(m => m.id === meetingId
-        ? { ...m, school_id: school.id, school_name: school.name, school_symbol: school.symbol, school_city: school.city }
+        ? { ...m, school_id: school.id, school_name: school.name, school_symbol: school.symbol, school_city: school.city, participants: [], primary_contact_key: null }
         : m));
     } catch { /* silent */ }
     setSchoolPickerFor(null);
@@ -332,6 +363,20 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
           onCancel={() => setDeleteConfirmId(null)}
         />
       )}
+      {blocker.state === "blocked" && hasIncompleteMeetings && (
+        <MeetingNavigationGuardModal
+          missingFields={[...new Set(incompleteSessionMeetings.flatMap(m => getMissingCriticalFields(m, { requireSchool: true })))]}
+          busy={meetingGuardBusy}
+          onStay={() => blocker.reset()}
+          onSaveAndLeave={() => blocker.proceed()}
+          onDiscardAndLeave={async () => {
+            setMeetingGuardBusy(true);
+            await discardIncompleteMeetings(incompleteSessionMeetings.map(m => m.id));
+            setMeetingGuardBusy(false);
+            blocker.proceed();
+          }}
+        />
+      )}
 
       {/* Header row */}
       <div className="flex items-center justify-between mb-4">
@@ -466,7 +511,7 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
             meetings={displayedMeetings}
             usersWithAccess={users || []}
             usersWithoutAccess={[]}
-            contacts={[]}
+            contactsFor={m => buildSchoolContacts(schools.find(s => s.id === m.school_id))}
             onSave={updateMeeting}
             onDelete={id => setDeleteConfirmId(id)}
             onOpenNotes={(meetingId, notes, onSave) => setNotesModal({ meetingId, notes, onSave })}

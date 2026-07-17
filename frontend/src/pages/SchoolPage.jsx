@@ -18,6 +18,8 @@ import { DeleteMeetingModal } from "../components/meetings/DeleteMeetingModal";
 import { MeetingRow } from "../components/meetings/MeetingRow";
 import { MeetingsTable } from "../components/meetings/MeetingsTable";
 import { MeetingTypeSelect } from "../components/meetings/MeetingTypeSelect";
+import MeetingNavigationGuardModal from "../components/meetings/MeetingNavigationGuardModal";
+import { getMissingCriticalFields, isMeetingIncomplete } from "../components/meetings/meetingCompleteness";
 import { NoParticipantsModal } from "../components/meetings/NoParticipantsModal";
 import MeetingUploadComparisonModal from "../components/meetings/MeetingUploadComparisonModal";
 import { NotesModal } from "../components/meetings/NotesModal";
@@ -610,6 +612,18 @@ function renderCheckLogCell(log, key) {
 
 function NotCheckedBadge({ reason, onAddFile, anchorRight = true }) {
   const [hovered, setHovered] = useState(false);
+  const hideTimeoutRef = useRef(null);
+
+  useEffect(() => () => { if (hideTimeoutRef.current) clearTimeout(hideTimeoutRef.current); }, []);
+
+  function showTooltip() {
+    if (hideTimeoutRef.current) { clearTimeout(hideTimeoutRef.current); hideTimeoutRef.current = null; }
+    setHovered(true);
+  }
+  function scheduleHideTooltip() {
+    hideTimeoutRef.current = setTimeout(() => setHovered(false), 500);
+  }
+
   const iconEl = onAddFile ? (
     <button type="button" onClick={onAddFile}
       aria-label="הוסף קובץ"
@@ -621,7 +635,7 @@ function NotCheckedBadge({ reason, onAddFile, anchorRight = true }) {
   );
   return (
     <span className="relative inline-flex"
-          onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}>
+          onMouseEnter={showTooltip} onMouseLeave={scheduleHideTooltip}>
       {iconEl}
       {hovered && (
         <div className={`absolute z-50 bottom-full mb-1 rounded shadow
@@ -640,17 +654,20 @@ function NotCheckedBadge({ reason, onAddFile, anchorRight = true }) {
 }
 
 function renderCheckLogCellForBudget(log, key, budgetName, onAddFile) {
-  if (!budgetName) return renderCheckLogCell(log, key);
-
-  // Per-combo reconciliation cases — evaluated independently of tikhnun ov
+  // Per-combo reconciliation cases — evaluated the same way whether or not a
+  // budget is selected, so a missing finance file always renders as ✕, never "0".
   if (["fn_count", "fn_sum", "gn_count", "gn_sum"].includes(key)) {
     const perCombo = log.summary?.per_combo_results;
     if (perCombo != null) {
-      const entries = Object.values(perCombo).filter(c => c.budget === budgetName);
+      const entries = budgetName
+        ? Object.values(perCombo).filter(c => c.budget === budgetName)
+        : Object.values(perCombo);
       const noDataForBudget = entries.length === 0 || entries.every(c => c.not_checked);
       if (noDataForBudget) {
         const reason = entries[0]?.not_checked_text
-          || `לא בוצעה בדיקה עבור תקציב ${budgetName} — לא נמצאו שורות דיווח תואמות`;
+          || (budgetName
+              ? `לא בוצעה בדיקה עבור תקציב ${budgetName} — לא נמצאו שורות דיווח תואמות`
+              : "לא בוצעה השוואת גפן-כספים — לא הועלה קובץ כספים");
         return <NotCheckedBadge reason={reason} onAddFile={onAddFile} anchorRight={false} />;
       }
       const checked = entries.filter(c => !c.not_checked);
@@ -669,9 +686,19 @@ function renderCheckLogCellForBudget(log, key, budgetName, onAddFile) {
         return total != null ? formatNum(total) : "—";
       }
     }
-    // No per_combo for this check — cannot filter by budget, don't show misleading global totals
+    // No per_combo_results saved for this check (e.g. legacy log, or no finance
+    // file was ever uploaded — including gefen_only runs, which is exactly the
+    // "no finance file" case) — never show a misleading "0", flag as not checked.
+    if (!log.finance_file_name) {
+      return <NotCheckedBadge
+        reason="לא בוצעה השוואת גפן-כספים — לא הועלה קובץ כספים"
+        onAddFile={onAddFile} anchorRight={false} />;
+    }
+    if (!budgetName) return renderCheckLogCell(log, key);
     return "—";
   }
+
+  if (!budgetName) return renderCheckLogCell(log, key);
 
   const budgets = log.summary?.tikhnun_result?.budgets;
   // No tikhnun/budgets for this check — cannot filter by budget, don't show misleading global totals
@@ -703,7 +730,7 @@ function renderCheckLogCellForBudget(log, key, budgetName, onAddFile) {
     case "rejected": {
       const perBudget = log.summary?.tikhnun_result?.per_budget_rejected;
       if (perBudget != null) return (perBudget[budgetName] ?? []).length;
-      return "—";
+      return <NotCheckedBadge reason="לא ניתן היה לחשב אסמכתאות שנדחו עבור בדיקה זו" anchorRight={false} />;
     }
     case "rejected_sum": {
       const perBudget = log.summary?.tikhnun_result?.per_budget_rejected;
@@ -713,12 +740,12 @@ function renderCheckLogCellForBudget(log, key, budgetName, onAddFile) {
         const total = sumRowAmounts(rows);
         return total != null ? formatNum(total) : "—";
       }
-      return "—";
+      return <NotCheckedBadge reason="לא ניתן היה לחשב אסמכתאות שנדחו עבור בדיקה זו" anchorRight={false} />;
     }
     case "no_pdf": {
       const perBudget = log.summary?.tikhnun_result?.per_budget_no_pdf;
       if (perBudget != null) return (perBudget[budgetName] ?? []).length;
-      return "—";
+      return <NotCheckedBadge reason="לא ניתן היה לחשב אסמכתאות ללא PDF עבור בדיקה זו" anchorRight={false} />;
     }
     case "no_pdf_sum": {
       const perBudget = log.summary?.tikhnun_result?.per_budget_no_pdf;
@@ -728,7 +755,7 @@ function renderCheckLogCellForBudget(log, key, budgetName, onAddFile) {
         const total = sumRowAmounts(rows);
         return total != null ? formatNum(total) : "—";
       }
-      return "—";
+      return <NotCheckedBadge reason="לא ניתן היה לחשב אסמכתאות ללא PDF עבור בדיקה זו" anchorRight={false} />;
     }
     case "fixed_gap":
       return ov.fixed_gap_abs != null ? formatNum(ov.fixed_gap_abs) : "—";
@@ -738,8 +765,43 @@ function renderCheckLogCellForBudget(log, key, budgetName, onAddFile) {
   }
 }
 
+async function downloadLogSourceFile(logId, filename) {
+  try {
+    const res = await axios.get(`/analyze/logs/${logId}/source-file`, {
+      params: { name: filename },
+      responseType: "blob",
+    });
+    const url = URL.createObjectURL(res.data);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    console.error("downloadLogSourceFile failed:", err);
+  }
+}
+
 function FileCheckCell({ log, colKey, state, notCheckedReason, title, onAddFile }) {
   const [hovered, setHovered] = useState(false);
+  const hideTimeoutRef = useRef(null);
+
+  useEffect(() => () => { if (hideTimeoutRef.current) clearTimeout(hideTimeoutRef.current); }, []);
+
+  function showTooltip() {
+    if (hideTimeoutRef.current) { clearTimeout(hideTimeoutRef.current); hideTimeoutRef.current = null; }
+    setHovered(true);
+  }
+  // Delayed close — the tooltip is positioned above the trigger button with a
+  // gap, so an instant close on mouseleave removes it before the cursor can
+  // travel there (both hiding it prematurely and killing in-flight clicks on
+  // the download links inside it).
+  function scheduleHideTooltip() {
+    hideTimeoutRef.current = setTimeout(() => setHovered(false), 500);
+  }
+
   let filenames = [];
   if (colKey === "doch")    filenames = log.gefen_file_names || [];
   if (colKey === "kasafim") filenames = log.finance_file_name ? [log.finance_file_name] : [];
@@ -759,7 +821,7 @@ function FileCheckCell({ log, colKey, state, notCheckedReason, title, onAddFile 
   }
   return (
     <span className="relative inline-flex" dir="rtl"
-          onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}>
+          onMouseEnter={showTooltip} onMouseLeave={scheduleHideTooltip}>
       <button type="button" onClick={onAddFile} aria-label="הוסף קובץ"
         className="inline-flex items-center justify-center w-6 h-6 rounded-full
                    bg-green-50 text-green-600 text-xs font-bold hover:bg-green-100 transition-colors">
@@ -769,7 +831,16 @@ function FileCheckCell({ log, colKey, state, notCheckedReason, title, onAddFile 
         <div className="absolute z-50 bottom-full right-0 mb-2 p-2.5 bg-white border
                         border-slate-200 rounded-xl shadow-lg text-right min-w-max">
           {filenames.map((f, i) => (
-            <div key={i} className="text-xs text-slate-600 whitespace-nowrap py-0.5">{f}</div>
+            log.id ? (
+              <button key={i} type="button" onClick={() => downloadLogSourceFile(log.id, f)}
+                title={`הורד את ${f}`}
+                className="block w-full text-right text-xs text-blue-600 hover:text-blue-800
+                           hover:underline whitespace-nowrap py-0.5">
+                {f}
+              </button>
+            ) : (
+              <div key={i} className="text-xs text-slate-600 whitespace-nowrap py-0.5">{f}</div>
+            )
           ))}
           <div className="mt-1.5 pt-1.5 border-t border-slate-100 text-xs text-slate-400 whitespace-nowrap text-center">
             לחץ על ה✓ להוספת קובץ
@@ -787,6 +858,36 @@ function getLogFileCols(log) {
     doch: (log.gefen_file_names || []).length > 0,
     kasafim: !!log.finance_file_name,
   };
+}
+
+// Shared by both persisted log rows and the just-finished "pending" row so the
+// two never drift apart — "present" (✓) / "absent" (+) / "not_checked" (✕).
+//
+// "tikhnun" (planning file) is genuinely optional — a check can run gefen-vs-
+// finance without it, so a missing planning file is a neutral "+" (add if you
+// want). "kasafim" (finance file) is not: without it the entire gefen-finance
+// comparison never ran, so it must always flag as "not_checked" (✕), never the
+// neutral "+" — otherwise a missing finance file looks like an optional extra
+// instead of an incomplete check.
+function getFileState(fc, budgetEntries, colKey) {
+  if (colKey === "tikhnun") return fc.tikhnun ? "present" : "absent";
+  if (colKey === "kasafim" && !fc.kasafim) return "not_checked";
+  if (!budgetEntries) return fc[colKey] ? "present" : "absent";
+  if (colKey === "doch") {
+    if (budgetEntries.length > 0) return "present";
+    return fc.doch ? "not_checked" : "absent";
+  }
+  if (colKey === "kasafim") {
+    return budgetEntries.some(c => !c.not_checked) ? "present" : "not_checked";
+  }
+  return fc[colKey] ? "present" : "absent";
+}
+
+function getFileNotCheckedReason(colKey, budgetEntries, budgetName) {
+  if (colKey === "kasafim" && !budgetEntries) return "לא בוצעה השוואת גפן-כספים — לא הועלה קובץ כספים";
+  if (colKey === "doch") return `לא זוהו שורות דיווח עבור תקציב ${budgetName}`;
+  const ncEntry = budgetEntries?.find(c => c.not_checked);
+  return ncEntry?.not_checked_text || `לא נמצאו נתוני כספים עבור תקציב ${budgetName}`;
 }
 
 function logToResult(log) {
@@ -1337,6 +1438,14 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
     return result;
   }, [filteredLogs]);
 
+  // No "כולם" (all) pill anymore — once multiple budgets are detected, always
+  // land on a real budget name instead of the ambiguous null/"all" state.
+  useEffect(() => {
+    if (allHistBudgets.length > 1 && !allHistBudgets.includes(selectedHistBudget)) {
+      setSelectedHistBudget(allHistBudgets[0]);
+    }
+  }, [allHistBudgets, selectedHistBudget]);
+
   // Auto-clear pendingRun once the real log row appears in the VISIBLE (filtered) list
   useEffect(() => {
     if (!pendingRun?.runId || pendingRun.status !== "done") return;
@@ -1655,9 +1764,9 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
       {/* Toolbar: budget type tabs (right) + action buttons (left) */}
       <div className="flex items-end border-b border-slate-200 mb-4 gap-1 flex-shrink-0">
         {/* Budget type tabs — styled like main page tabs */}
-        {allHistBudgets.length > 1 && [null, ...allHistBudgets].map(bname => (
+        {allHistBudgets.length > 1 && allHistBudgets.map(bname => (
           <button
-            key={bname ?? "__all__"}
+            key={bname}
             type="button"
             onClick={() => setSelectedHistBudget(bname)}
             className={`px-4 py-2.5 text-sm font-medium transition-all border-b-2 -mb-px whitespace-nowrap ${
@@ -1666,7 +1775,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
                 : "border-transparent text-slate-500 hover:text-slate-800 hover:border-slate-300"
             }`}
           >
-            {bname ?? "כולם"}
+            {bname}
           </button>
         ))}
 
@@ -1862,13 +1971,16 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
                     </td>
                     {(() => {
                       const r = pendingRun.status === "done" ? pendingRun.result : null;
-                      const pfc = r ? {
-                        tikhnun: !!(r.tikhnun && !r.tikhnun.error),
-                        doch: (r.summary?.gefen_files || []).length > 0,
-                        kasafim: !!(r.summary?.finance_file),
-                      } : null;
-                      const pProxy = r ? {
-                        summary: { ...r.summary, tikhnun_overview: r.tikhnun?.overview || {} },
+                      const pLog = r ? {
+                        summary: {
+                          ...r.summary,
+                          tikhnun_overview: r.tikhnun?.overview || {},
+                          tikhnun_result: r.tikhnun || null,
+                          gefen_only: r.gefen_only ?? false,
+                          per_combo_results: r.per_combo_results ?? null,
+                        },
+                        gefen_file_names: (r.summary?.gefen_files || []).map(f => f.filename).filter(Boolean),
+                        finance_file_name: r.summary?.finance_file?.filename || null,
                         in_gefen_not_finance_count: r.summary?.in_gefen_not_finance ?? 0,
                         in_finance_not_gefen_count: r.summary?.in_finance_not_gefen ?? 0,
                         rows_finance_not_gefen: r.rows_finance_not_gefen,
@@ -1876,19 +1988,27 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
                         in_finance_not_gefen_sum: null,
                         in_gefen_not_finance_sum: null,
                       } : null;
+                      const pFc = pLog ? getLogFileCols(pLog) : null;
+                      const pPerCombo = pLog?.summary?.per_combo_results;
+                      const pBudgetEntries = (pPerCombo && selectedHistBudget)
+                        ? Object.values(pPerCombo).filter(c => c.budget === selectedHistBudget)
+                        : null;
                       return (
                         <>
-                          {[["tikhnun", pfc?.tikhnun], ["doch", pfc?.doch], ["kasafim", pfc?.kasafim]].map(([k, present]) => (
+                          {["tikhnun", "doch", "kasafim"].map(k => (
                             <td key={k} className="px-3 py-3 text-center" style={k === "kasafim" ? { borderLeft: "1px solid black" } : {}}>
-                              {pfc == null ? <span className="text-slate-400">—</span>
-                                : present
-                                  ? <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-green-50 text-green-600 text-xs font-bold">✓</span>
-                                  : <span className="text-slate-300 text-xs">—</span>}
+                              {pFc == null ? <span className="text-slate-400">—</span>
+                                : <FileCheckCell
+                                    log={pLog} colKey={k}
+                                    state={getFileState(pFc, pBudgetEntries, k)}
+                                    notCheckedReason={getFileNotCheckedReason(k, pBudgetEntries, selectedHistBudget)}
+                                    title={k === "tikhnun" ? "קובץ תכנון" : k === "doch" ? "קובץ דיווח גפן" : "קובץ כספים"}
+                                  />}
                             </td>
                           ))}
                           {visibleColOrder.map(key => (
                             <td key={key} className="px-4 py-3 text-slate-600 whitespace-nowrap" style={colBorderStyle(key)}>
-                              {pProxy ? renderCheckLogCell(pProxy, key) : <span className="text-slate-400">—</span>}
+                              {pLog ? renderCheckLogCellForBudget(pLog, key, selectedHistBudget) : <span className="text-slate-400">—</span>}
                             </td>
                           ))}
                         </>
@@ -1906,25 +2026,8 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
                   const budgetEntries = (perCombo && selectedHistBudget)
                     ? Object.values(perCombo).filter(c => c.budget === selectedHistBudget)
                     : null;
-                  function fileState(colKey) {
-                    if (colKey === "tikhnun") return fc.tikhnun ? "present" : "absent";
-                    if (!budgetEntries) return fc[colKey] ? "present" : "absent";
-                    if (colKey === "doch") {
-                      if (budgetEntries.length > 0) return "present";
-                      return fc.doch ? "not_checked" : "absent";
-                    }
-                    if (colKey === "kasafim") {
-                      if (budgetEntries.some(c => !c.not_checked)) return "present";
-                      if (budgetEntries.length > 0) return "not_checked";
-                      return fc.kasafim ? "present" : "absent";
-                    }
-                    return fc[colKey] ? "present" : "absent";
-                  }
-                  function fileNotCheckedReason(colKey) {
-                    if (colKey === "doch") return `לא זוהו שורות דיווח עבור תקציב ${selectedHistBudget}`;
-                    const ncEntry = budgetEntries?.find(c => c.not_checked);
-                    return ncEntry?.not_checked_text || `לא נמצאו נתוני כספים עבור תקציב ${selectedHistBudget}`;
-                  }
+                  const fileState = (colKey) => getFileState(fc, budgetEntries, colKey);
+                  const fileNotCheckedReason = (colKey) => getFileNotCheckedReason(colKey, budgetEntries, selectedHistBudget);
                   return (
                     <tr key={log.id} className="border-b border-slate-100 hover:bg-slate-50 transition-colors">
                       <td className="px-3 py-3 font-medium whitespace-nowrap" style={{ borderLeft: "1px solid black", position: "sticky", right: 0, zIndex: 5, background: "white", boxShadow: "-6px 0 6px -6px rgba(0,0,0,0.15)" }}>
@@ -2405,6 +2508,9 @@ export default function SchoolPage() {
   const [meetingsLoading, setMeetingsLoading] = useState(true);
   const [notesModal, setNotesModal] = useState(null);
   const [accessGrantModal, setAccessGrantModal] = useState(null);
+  const sessionCreatedMeetingIdsRef = useRef(new Set());
+  const [pendingTabSwitch, setPendingTabSwitch] = useState(null);
+  const [meetingGuardBusy, setMeetingGuardBusy] = useState(false);
 
   const [schoolAdvisors, setSchoolAdvisors] = useState(
     (location.state?.school?.advisor_schools || []).map(as => as.profiles).filter(Boolean)
@@ -2458,7 +2564,30 @@ export default function SchoolPage() {
   const isDirty = isEditing && originalForm !== null &&
     JSON.stringify(editForm) !== JSON.stringify(originalForm);
 
-  const blocker = useBlocker(isDirty);
+  const incompleteSessionMeetings = meetings.filter(m =>
+    sessionCreatedMeetingIdsRef.current.has(m.id) && isMeetingIncomplete(m, { requireAdvisor: true })
+  );
+  const hasIncompleteMeetings = incompleteSessionMeetings.length > 0;
+
+  const blocker = useBlocker(isDirty || hasIncompleteMeetings);
+
+  function handleTabClick(id) {
+    if (activeTab === "meetings" && id !== "meetings" && hasIncompleteMeetings) {
+      setPendingTabSwitch(id);
+      return;
+    }
+    setActiveTab(id);
+  }
+
+  async function discardIncompleteMeetings(ids) {
+    for (const id of ids) {
+      try {
+        await axios.delete(`/schools/${schoolId}/meetings/${id}`);
+      } catch { /* best-effort */ }
+    }
+    setMeetings(prev => prev.filter(m => !ids.includes(m.id)));
+    ids.forEach(id => sessionCreatedMeetingIdsRef.current.delete(id));
+  }
 
   async function loadUsers() {
     setLoadingUsers(true);
@@ -2576,6 +2705,7 @@ export default function SchoolPage() {
       const res = await axios.post(`/schools/${schoolId}/meetings`, payload);
       const newMeeting = { ...res.data, advisor_profiles: defaultAdvisor ? [defaultAdvisor] : [] };
       setMeetings(prev => [newMeeting, ...prev]);
+      sessionCreatedMeetingIdsRef.current.add(newMeeting.id);
     } catch (err) {
       console.error("Failed to create meeting:", err);
     }
@@ -2974,7 +3104,29 @@ export default function SchoolPage() {
     <div dir="rtl" className="bg-scene min-h-screen">
       <Sidebar dark />
 
-      {blocker.state === "blocked" && (
+      {(pendingTabSwitch || (blocker.state === "blocked" && hasIncompleteMeetings)) && (
+        <MeetingNavigationGuardModal
+          missingFields={[...new Set(incompleteSessionMeetings.flatMap(m => getMissingCriticalFields(m, { requireAdvisor: true })))]}
+          busy={meetingGuardBusy}
+          onStay={() => {
+            if (pendingTabSwitch) setPendingTabSwitch(null);
+            else blocker.reset();
+          }}
+          onSaveAndLeave={() => {
+            if (pendingTabSwitch) { setActiveTab(pendingTabSwitch); setPendingTabSwitch(null); }
+            else blocker.proceed();
+          }}
+          onDiscardAndLeave={async () => {
+            setMeetingGuardBusy(true);
+            await discardIncompleteMeetings(incompleteSessionMeetings.map(m => m.id));
+            setMeetingGuardBusy(false);
+            if (pendingTabSwitch) { setActiveTab(pendingTabSwitch); setPendingTabSwitch(null); }
+            else blocker.proceed();
+          }}
+        />
+      )}
+
+      {blocker.state === "blocked" && !hasIncompleteMeetings && (
         <UnsavedChangesModal
           saving={saving}
           onSave={async () => {
@@ -3065,7 +3217,7 @@ export default function SchoolPage() {
             ].map(t => (
               <button
                 key={t.id}
-                onClick={() => setActiveTab(t.id)}
+                onClick={() => handleTabClick(t.id)}
                 className={`px-4 py-2.5 text-sm font-medium transition-all border-b-2 -mb-px whitespace-nowrap ${
                   activeTab === t.id
                     ? "border-blue-600 text-blue-600 font-semibold"

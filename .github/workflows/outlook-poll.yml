@@ -1,0 +1,22 @@
+name: Poll Outlook Calendar Changes
+
+on:
+  schedule:
+    # Every 15 minutes. GitHub Actions schedules are best-effort and can lag under
+    # load — the endpoint itself is idempotent (safe to run late or to double-fire).
+    - cron: '*/15 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call Outlook poll endpoint
+        run: |
+          URL="${BACKEND_URL%/}"
+          curl -sf -X POST "${URL}/schools/meetings/poll-outlook-changes" \
+            -H "X-Cron-Secret: ${CRON_SECRET}" \
+            --max-time 60
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
