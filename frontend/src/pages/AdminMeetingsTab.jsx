@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import * as XLSX from "xlsx";
 import { DeleteMeetingModal } from "../components/meetings/DeleteMeetingModal";
@@ -9,6 +9,8 @@ import { SchoolPickerModal, SchoolPickerPopover, schoolLabel } from "../componen
 import { MEETING_STATUS_OPTIONS, MEETING_TYPE_OPTIONS, STATUS_MAP, formatMeetingDate } from "../components/meetings/constants";
 import { AcademicYearSelector } from "../components/AcademicYearSelector";
 import { DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
+import { getMissingCriticalFields, isMeetingIncomplete } from "../components/meetings/meetingCompleteness";
+import { buildSchoolContacts } from "../components/meetings/schoolContacts";
 
 const TODAY = new Date().toISOString().slice(0, 10);
 const DEFAULT_FILTERS = { status: "scheduled", date_from: null, date_to: TODAY, advisor_id: null, school_id: null };
@@ -23,7 +25,7 @@ function saveState(state) {
   try { sessionStorage.setItem(SS_KEY, JSON.stringify(state)); } catch { /* ignore */ }
 }
 
-export default function AdminMeetingsTab({ users, loadingUsers, loadUsers, canDeleteMeetings }) {
+const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUsers, loadUsers, canDeleteMeetings, onIncompleteChange }, ref) {
   const saved = readSavedState();
 
   const [meetings, setMeetings] = useState([]);
@@ -61,6 +63,33 @@ export default function AdminMeetingsTab({ users, loadingUsers, loadUsers, canDe
     setTimeout(() => setReminderToasts(prev => prev.filter(t => t.id !== id)), 3000);
   }
 
+  const sessionCreatedMeetingIdsRef = useRef(new Set());
+  const incompleteSessionMeetings = meetings.filter(m =>
+    sessionCreatedMeetingIdsRef.current.has(m.id) && isMeetingIncomplete(m, { requireSchool: true, requireAdvisor: true })
+  );
+  const hasIncompleteMeetings = incompleteSessionMeetings.length > 0;
+
+  useEffect(() => {
+    onIncompleteChange?.(hasIncompleteMeetings);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasIncompleteMeetings]);
+
+  useImperativeHandle(ref, () => ({
+    getMissingFields: () =>
+      [...new Set(incompleteSessionMeetings.flatMap(m => getMissingCriticalFields(m, { requireSchool: true, requireAdvisor: true })))],
+    discardIncompleteMeetings: async () => {
+      const ids = incompleteSessionMeetings.map(m => m.id);
+      for (const id of ids) {
+        const m = meetings.find(x => x.id === id);
+        if (!m) continue;
+        try { await axios.delete(`/schools/${m.school_id}/meetings/${id}`); } catch { /* best-effort */ }
+      }
+      setMeetings(prev => prev.filter(m => !ids.includes(m.id)));
+      ids.forEach(id => sessionCreatedMeetingIdsRef.current.delete(id));
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [incompleteSessionMeetings, meetings]);
+
   async function loadAllMeetings(activeFilters, year = academicYear) {
     setLoading(true);
     setError("");
@@ -90,7 +119,7 @@ export default function AdminMeetingsTab({ users, loadingUsers, loadUsers, canDe
     setLoadingSchools(true);
     try {
       const res = await axios.get("/schools/");
-      setSchools((res.data || []).map(s => ({ id: s.id, name: s.name, symbol: s.symbol, city: s.city })));
+      setSchools(res.data || []);
     } catch {
       setSchools([]);
     } finally {
@@ -221,6 +250,7 @@ export default function AdminMeetingsTab({ users, loadingUsers, loadUsers, canDe
       const res = await axios.post(`/schools/${school.id}/meetings`, payload);
       const newMeeting = { ...res.data, advisor_profiles: [], school_name: school.name, school_symbol: school.symbol, school_city: school.city };
       setMeetings(prev => [newMeeting, ...prev]);
+      sessionCreatedMeetingIdsRef.current.add(newMeeting.id);
     } catch (err) {
       console.error("Failed to create meeting:", err);
     }
@@ -230,8 +260,10 @@ export default function AdminMeetingsTab({ users, loadingUsers, loadUsers, canDe
   async function reassignSchool(meetingId, school) {
     try {
       await axios.patch(`/schools/meetings/${meetingId}/reassign-school`, { new_school_id: school.id });
+      // Server clears participants/primary_contact_key on reassignment (they belonged to
+      // the old school's staff) — mirror that here so the row doesn't show stale contacts.
       setMeetings(prev => prev.map(m => m.id === meetingId
-        ? { ...m, school_id: school.id, school_name: school.name, school_symbol: school.symbol, school_city: school.city }
+        ? { ...m, school_id: school.id, school_name: school.name, school_symbol: school.symbol, school_city: school.city, participants: [], primary_contact_key: null }
         : m));
     } catch (err) {
       console.error("Failed to reassign school:", err);
@@ -658,7 +690,7 @@ export default function AdminMeetingsTab({ users, loadingUsers, loadUsers, canDe
             meetings={displayedMeetings}
             usersWithAccess={users || []}
             usersWithoutAccess={[]}
-            contacts={[]}
+            contactsFor={m => buildSchoolContacts(schools.find(s => s.id === m.school_id))}
             onSave={updateMeeting}
             onDelete={id => setDeleteConfirmId(id)}
             onOpenNotes={(meetingId, notes, onSave) => setNotesModal({ meetingId, notes, onSave })}
@@ -709,4 +741,6 @@ export default function AdminMeetingsTab({ users, loadingUsers, loadUsers, canDe
       </div>
     </div>
   );
-}
+});
+
+export default AdminMeetingsTab;

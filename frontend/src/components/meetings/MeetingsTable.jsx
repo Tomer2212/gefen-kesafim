@@ -45,7 +45,7 @@ function ReminderToast({ onClose }) {
 }
 
 export function MeetingsTable({
-  meetings, usersWithAccess, usersWithoutAccess, contacts, onSave, onDelete, onOpenNotes,
+  meetings, usersWithAccess, usersWithoutAccess, contacts, contactsFor, onSave, onDelete, onOpenNotes,
   onRequestAccess, canDeleteMeetings,
   showSchoolColumn, schoolLabelFor, onOpenSchoolPicker,
   selectable, selectedIds, onToggleSelect, onToggleSelectAll,
@@ -169,7 +169,7 @@ export function MeetingsTable({
                   onRequestDelete={canDeleteMeetings ? setPendingDeleteId : null}
                   onOpenNotes={onOpenNotes}
                   usersWithAccess={usersWithAccess} usersWithoutAccess={usersWithoutAccess}
-                  contacts={contacts} onRequestAccess={onRequestAccess}
+                  contacts={contactsFor ? contactsFor(m) : contacts} onRequestAccess={onRequestAccess}
                   onReminderOn={() => setReminderToast(true)}
                   showSchoolColumn={showSchoolColumn}
                   schoolLabel={schoolLabelFor ? schoolLabelFor(m) : null}

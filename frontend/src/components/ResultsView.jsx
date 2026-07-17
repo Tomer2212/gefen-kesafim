@@ -20,6 +20,27 @@ function splitByDivision(rows) {
   return { tikkon, beinayim };
 }
 
+// Mirrors backend/zihuy_core.py normalize_budget_name() — used only as a fallback
+// for kvua_rows saved before the "budget_norm" field was attached server-side.
+const BUDGET_NAME_MAP = [
+  [["חירום מחוזי", "גפן חירום", "חירום"], "גפן חירום"],
+  [["גפ\"ן", "גפן"], "גפן"],
+  [["תנופה לצפון", "תנופה"], "תנופה"],
+  [["תקומה"], "תקומה"],
+  [["דוקאטי", "סל דוקאטי"], "דוקאטי"],
+  [["חינוך לסובלנות"], "חינוך לסובלנות"],
+  [["קולות קוראים", "קול קורא"], "קולות קוראים"],
+  [["פל\"ג", "פלג"], "פל\"ג"],
+];
+function normalizeBudgetNameJS(rawName) {
+  if (!rawName) return rawName;
+  const name = String(rawName).trim();
+  for (const [keys, normalized] of BUDGET_NAME_MAP) {
+    if (keys.some(key => name.includes(key))) return normalized;
+  }
+  return name;
+}
+
 const CODE_COL_STYLE = { width: "48px", minWidth: "48px", maxWidth: "48px", padding: "12px 6px", textAlign: "center", whiteSpace: "normal", wordBreak: "break-word" };
 
 const UNIFIED_COLS = [
@@ -786,15 +807,50 @@ function SikarTab({ tikhnun, activeBudgetIdx: propIdx, setActiveBudgetIdx: propS
 }
 
 function KvuaTab({ tikhnun }) {
+  const [activeBudgetIdx, setActiveBudgetIdx] = useState(0);
+
   if (!tikhnun) return <NoTikhnunNotice />;
-  const rows = tikhnun.kvua_rows ?? [];
-  const hasMulti = tikhnun.has_multiple_budget_types;
+  const allRows = tikhnun.kvua_rows ?? [];
+  const budgets = tikhnun.budgets;
+  const isMultiBudget = budgets && budgets.length > 1;
+  const safeIdx = isMultiBudget ? Math.min(activeBudgetIdx, budgets.length - 1) : 0;
+  const selectedBudget = isMultiBudget ? budgets[safeIdx]?.name : null;
+  const rows = selectedBudget
+    ? allRows.filter(r => (r.budget_norm ?? normalizeBudgetNameJS(r.budget_type)) === selectedBudget)
+    : allRows;
+  const hasMulti = !isMultiBudget && tikhnun.has_multiple_budget_types;
   const totalKvua    = rows.reduce((s, r) => s + (r.kvua    ?? 0), 0);
   const totalTikhnun = rows.reduce((s, r) => s + (r.tikhnun ?? 0), 0);
   const totalHefresh = rows.reduce((s, r) => s + (r.hefresh ?? 0), 0);
 
+  const pillsEl = isMultiBudget ? (
+    <div className="flex gap-2 flex-wrap" dir="rtl">
+      {budgets.map((b, i) => (
+        <button
+          key={i}
+          onClick={() => setActiveBudgetIdx(i)}
+          style={{
+            fontWeight: safeIdx === i ? 700 : 500,
+            fontSize: "12px",
+            padding: "4px 14px",
+            borderRadius: "20px",
+            border: `1.5px solid ${safeIdx === i ? "#0070F3" : "#e2e8f0"}`,
+            background: safeIdx === i ? "#0070F3" : "transparent",
+            color: safeIdx === i ? "white" : "#64748b",
+            cursor: "pointer",
+            transition: "all 0.15s",
+          }}
+        >
+          {b.name}
+        </button>
+      ))}
+    </div>
+  ) : null;
+
   return (
-    <div className="glass-card-dark rounded-2xl overflow-hidden">
+    <div className="flex flex-col gap-3">
+      {pillsEl}
+      <div className="glass-card-dark rounded-2xl overflow-hidden">
       <div className="table-scroll">
         <table className="w-full text-sm border-collapse" dir="rtl">
           <thead>
@@ -837,6 +893,7 @@ function KvuaTab({ tikhnun }) {
             </tr>
           </tbody>
         </table>
+      </div>
       </div>
     </div>
   );

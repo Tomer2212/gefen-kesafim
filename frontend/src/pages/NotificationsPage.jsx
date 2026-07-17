@@ -178,11 +178,18 @@ function PrefToggle({ label, prefKey, prefs, saving, savePrefs }) {
 function SettingsModal({ onClose, role }) {
   const [prefs, setPrefs] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [syncEmail, setSyncEmail] = useState(null);
+  const [accountEmail, setAccountEmail] = useState(null);
+  const [savingSyncEmail, setSavingSyncEmail] = useState(false);
   const { ref, handleKeyDown } = useFocusTrap(onClose);
 
   useEffect(() => {
     axios.get("/schools/users/me").then(r => {
       setPrefs(r.data.notification_preferences || { meeting_reminder: true, meeting_reminder_minutes: 10 });
+    }).catch(() => {});
+    axios.get("/calendar/sync-email").then(r => {
+      setAccountEmail(r.data.email || "");
+      setSyncEmail(r.data.calendar_sync_email || "");
     }).catch(() => {});
   }, []);
 
@@ -195,6 +202,17 @@ function SettingsModal({ onClose, role }) {
       // non-fatal
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function saveSyncEmail() {
+    setSavingSyncEmail(true);
+    try {
+      await axios.patch("/calendar/sync-email", { calendar_sync_email: syncEmail || null });
+    } catch {
+      // non-fatal
+    } finally {
+      setSavingSyncEmail(false);
     }
   }
 
@@ -276,6 +294,34 @@ function SettingsModal({ onClose, role }) {
               </div>
             )}
           </div>
+
+          {/* Calendar sync email override */}
+          {syncEmail !== null && (
+            <div className="flex flex-col gap-2">
+              <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider">📅 סנכרון יומן Outlook</h3>
+              <p className="text-xs text-slate-500 leading-snug">
+                פגישות שנקבעות עבורך יסונכרנו ליומן ה-Outlook של הכתובת הזו. ברירת המחדל היא כתובת המייל שלך במערכת ({accountEmail || "—"}); שנו רק אם היומן הארגוני שלכם רשום תחת כתובת אחרת.
+              </p>
+              <div className="flex items-center gap-2">
+                <label htmlFor="calendar-sync-email" className="sr-only">כתובת מייל לסנכרון יומן</label>
+                <input
+                  id="calendar-sync-email"
+                  type="email"
+                  className="input-field text-sm py-1.5 flex-1"
+                  placeholder={accountEmail || "כתובת מייל"}
+                  value={syncEmail}
+                  onChange={e => setSyncEmail(e.target.value)}
+                />
+                <button
+                  onClick={saveSyncEmail}
+                  disabled={savingSyncEmail}
+                  className="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-medium transition-colors disabled:opacity-50"
+                >
+                  {savingSyncEmail ? "שומר..." : "שמור"}
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Per-event toggles */}
           <div className="flex flex-col gap-1">

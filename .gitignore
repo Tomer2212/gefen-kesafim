@@ -14,6 +14,7 @@ skills-lock.json
 .agents/
 *.png
 !frontend/src/assets/*.png
+!frontend/public/guides/**/*.png
 backend/result_debug.json
 .claude/
 temp_*.json

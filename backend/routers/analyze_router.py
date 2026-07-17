@@ -451,6 +451,45 @@ def get_result(run_id: str, _user: dict = Depends(get_current_user)):
     return _strip_for_response(run)
 
 
+@router.get("/logs/{log_id}/source-file")
+def download_log_source_file(log_id: str, name: str, _user: dict = Depends(get_current_user)):
+    """Download one of the original files uploaded for a saved check — used by
+    the filename links in the "קבצים שזוהו" tooltip in SchoolPage.jsx."""
+    db = get_admin_client()
+    log_result = db.table("check_logs").select("summary").eq("id", log_id).single().execute()
+    log = log_result.data
+    if not log:
+        raise HTTPException(status_code=404, detail="הבדיקה לא נמצאה")
+
+    stored_paths = (log.get("summary") or {}).get("stored_file_paths") or []
+    match = None
+    for sp in stored_paths:
+        sp_name = sp.get("name") if isinstance(sp, dict) else Path(sp).name
+        if sp_name == name:
+            match = sp.get("path") if isinstance(sp, dict) else sp
+            break
+    if not match:
+        raise HTTPException(status_code=404, detail="הקובץ לא נמצא")
+
+    try:
+        content = db.storage.from_("check-files").download(match)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"שגיאה בהורדת הקובץ: {exc}")
+
+    # HTTP headers must be ASCII — a raw Hebrew filename in Content-Disposition
+    # breaks the response entirely. RFC 5987's filename* handles non-ASCII names
+    # correctly (with an ASCII fallback for older clients).
+    import urllib.parse
+    ext = Path(name).suffix or ".xlsx"
+    ascii_fallback = f"file{ext}"
+    encoded_name = urllib.parse.quote(name)
+    return Response(
+        content=content,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{encoded_name}"},
+    )
+
+
 @router.get("/download/{run_id}")
 def download(run_id: str, _user: dict = Depends(get_current_user)):
     run = _get_run(run_id)
@@ -647,15 +686,14 @@ async def classify_rows(
         except Exception as _nhe:
             logger.warning("per-budget nihul breakdown (classify) failed: %s", _nhe)
     try:
-        per_bud_rej = _build_rejected_from_results_clean(results_clean)
-        if per_bud_rej:
-            tikhnun["per_budget_rejected"] = per_bud_rej
+        # Always attach, even when empty ({} means "checked, zero found" — a
+        # falsy-dict skip here would make that indistinguishable from "never
+        # computed" on the frontend, which needs to tell the two apart).
+        tikhnun["per_budget_rejected"] = _build_rejected_from_results_clean(results_clean)
     except Exception as rej_exc:
         logger.warning("per_budget_rejected build failed (classify): %s", rej_exc)
     try:
-        per_bud_nopdf = _build_no_pdf_from_results_clean(results_clean)
-        if per_bud_nopdf:
-            tikhnun["per_budget_no_pdf"] = per_bud_nopdf
+        tikhnun["per_budget_no_pdf"] = _build_no_pdf_from_results_clean(results_clean)
     except Exception as nopdf_exc:
         logger.warning("per_budget_no_pdf build failed (classify): %s", nopdf_exc)
 
@@ -788,15 +826,12 @@ async def retry_finance(
                 except Exception as _nhe:
                     logger.warning("per-budget nihul breakdown (classify2) failed: %s", _nhe)
             try:
-                per_bud_rej = _build_rejected_from_results_clean(results_clean)
-                if per_bud_rej:
-                    tikhnun["per_budget_rejected"] = per_bud_rej
+                # Always attach, even when empty — see comment in the "classify" branch above.
+                tikhnun["per_budget_rejected"] = _build_rejected_from_results_clean(results_clean)
             except Exception as rej_exc:
                 logger.warning("per_budget_rejected build failed (classify2): %s", rej_exc)
             try:
-                per_bud_nopdf = _build_no_pdf_from_results_clean(results_clean)
-                if per_bud_nopdf:
-                    tikhnun["per_budget_no_pdf"] = per_bud_nopdf
+                tikhnun["per_budget_no_pdf"] = _build_no_pdf_from_results_clean(results_clean)
             except Exception as nopdf_exc:
                 logger.warning("per_budget_no_pdf build failed (classify2): %s", nopdf_exc)
             gefen_paths_rc   = [Path(p) for p in ctx.get("gefen_paths", [])]
@@ -1539,6 +1574,7 @@ def _finalize_tikhnun_metrics(
         for kr in kvua_rows:
             bt = str(kr.get("budget_type") or "").strip()
             nb = _nb_kvua(bt)
+            kr["budget_norm"] = nb
             kvua_by_budget[nb] = kvua_by_budget.get(nb, 0.0) + float(kr.get("hefresh") or 0)
         for bdict in budgets_list:
             nb = bdict["name"]
@@ -2475,15 +2511,12 @@ def _compute_multi_budget_tikhnun(
             except Exception as _nhe:
                 logger.warning("per-budget nihul breakdown failed: %s", _nhe)
         try:
-            per_bud_rej = _build_rejected_from_results_clean(results_clean)
-            if per_bud_rej:
-                tikhnun_result["per_budget_rejected"] = per_bud_rej
+            # Always attach, even when empty — see comment in the "classify" branch above.
+            tikhnun_result["per_budget_rejected"] = _build_rejected_from_results_clean(results_clean)
         except Exception as rej_exc:
             logger.warning("per_budget_rejected build failed: %s", rej_exc)
         try:
-            per_bud_nopdf = _build_no_pdf_from_results_clean(results_clean)
-            if per_bud_nopdf:
-                tikhnun_result["per_budget_no_pdf"] = per_bud_nopdf
+            tikhnun_result["per_budget_no_pdf"] = _build_no_pdf_from_results_clean(results_clean)
         except Exception as nopdf_exc:
             logger.warning("per_budget_no_pdf build failed: %s", nopdf_exc)
         return tikhnun_result, results_clean
