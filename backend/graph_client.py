@@ -21,6 +21,7 @@ GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 MS_CLIENT_ID = os.getenv("MS_CLIENT_ID")
 MS_CLIENT_SECRET = os.getenv("MS_CLIENT_SECRET")
 MS_REDIRECT_URI = os.getenv("MS_REDIRECT_URI")
+BACKEND_PUBLIC_URL = os.getenv("BACKEND_PUBLIC_URL")
 
 
 def _fernet() -> Fernet:
@@ -313,6 +314,163 @@ def get_freebusy(db, org_id: str, advisor_id: str, start_iso: str, end_iso: str)
         return []
 
 
+def persist_calendar_sync(db, meeting_id: str, sync_map: dict) -> None:
+    """Single place that writes calendar_sync onto a meeting. Also keeps
+    calendar_event_index up to date — a reverse lookup (external_event_id ->
+    meeting_id) used by the webhook handler so an incoming Graph notification
+    can find its meeting with one indexed query instead of scanning meetings.
+
+    Clears out the meeting's old index rows first: an advisor removed from the
+    meeting, or an event recreated with a new id, must not leave a stale row
+    that would misroute a future webhook notification to this meeting."""
+    db.table("meetings").update({"calendar_sync": sync_map}).eq("id", meeting_id).execute()
+    try:
+        db.table("calendar_event_index").delete().eq("meeting_id", meeting_id).execute()
+        rows = [
+            {"meeting_id": meeting_id, "advisor_id": aid, "external_event_id": entry["external_event_id"]}
+            for aid, entry in sync_map.items() if entry.get("external_event_id")
+        ]
+        if rows:
+            db.table("calendar_event_index").upsert(rows, on_conflict="external_event_id").execute()
+    except Exception as exc:
+        logger.warning("calendar_event_index update failed for meeting %s (non-fatal): %s", meeting_id, exc)
+
+
+# ---------------------------------------------------------------------------
+# Webhook subscriptions (Microsoft Graph change notifications) — one
+# subscription per advisor mailbox, covering all of that advisor's events.
+# Lets Microsoft push us a notification within seconds of a change instead of
+# us polling on a schedule. Subscriptions expire after ~3 days (Graph's own
+# hard limit for calendar resources) and must be renewed periodically — see
+# renew_all_subscriptions_expiring_soon, called from a daily cron.
+# ---------------------------------------------------------------------------
+
+SUBSCRIPTION_MAX_MINUTES = 4230  # Graph's hard cap for calendar-resource subscriptions
+
+
+def _get_subscription_row(db, org_id: str, advisor_id: str) -> dict | None:
+    res = (
+        db.table("calendar_subscriptions")
+        .select("*")
+        .eq("org_id", org_id)
+        .eq("advisor_id", advisor_id)
+        .execute()
+    )
+    return res.data[0] if res.data else None
+
+
+def _ensure_subscription(db, org_id: str, advisor_id: str) -> None:
+    """Non-fatal. Creates a webhook subscription for this advisor's calendar if
+    one doesn't already exist with plenty of time left before it expires."""
+    if not BACKEND_PUBLIC_URL:
+        logger.info("_ensure_subscription skipped: BACKEND_PUBLIC_URL not configured")
+        return
+    try:
+        now = datetime.now(timezone.utc)
+        existing = _get_subscription_row(db, org_id, advisor_id)
+        if existing:
+            expires_at = datetime.fromisoformat(existing["expires_at"].replace("Z", "+00:00"))
+            if expires_at - now > timedelta(hours=48):
+                return  # still valid for a while, nothing to do
+
+        token = _get_app_only_token(db, org_id)
+        email = _resolve_advisor_email(db, advisor_id)
+        if not email:
+            return
+
+        client_state = Fernet.generate_key().decode()
+        expiration = now + timedelta(minutes=SUBSCRIPTION_MAX_MINUTES)
+        resp = httpx.post(
+            f"{GRAPH_BASE}/subscriptions",
+            headers=_headers(token),
+            json={
+                "changeType": "created,updated,deleted",
+                "notificationUrl": f"{BACKEND_PUBLIC_URL.rstrip('/')}/calendar/webhook/microsoft",
+                "resource": f"users/{email}/events",
+                "expirationDateTime": expiration.isoformat(),
+                "clientState": client_state,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        sub = resp.json()
+        payload = {
+            "org_id": org_id,
+            "advisor_id": advisor_id,
+            "subscription_id": sub["id"],
+            "client_state": _encrypt(client_state),
+            "expires_at": expiration.isoformat(),
+            "updated_at": now.isoformat(),
+        }
+        if existing:
+            db.table("calendar_subscriptions").update(payload).eq("id", existing["id"]).execute()
+        else:
+            db.table("calendar_subscriptions").insert(payload).execute()
+    except Exception as exc:
+        logger.warning("_ensure_subscription failed for advisor %s (non-fatal): %s", advisor_id, exc)
+
+
+def renew_subscription(db, sub_row: dict) -> bool:
+    """Non-fatal. Extends one subscription's expiry. If Graph no longer has it
+    (404 — e.g. it silently expired already), recreates it from scratch via
+    _ensure_subscription instead of failing. Returns True on success."""
+    try:
+        token = _get_app_only_token(db, sub_row["org_id"])
+        now = datetime.now(timezone.utc)
+        expiration = now + timedelta(minutes=SUBSCRIPTION_MAX_MINUTES)
+        resp = httpx.patch(
+            f"{GRAPH_BASE}/subscriptions/{sub_row['subscription_id']}",
+            headers=_headers(token),
+            json={"expirationDateTime": expiration.isoformat()},
+            timeout=15,
+        )
+        if resp.status_code == 404:
+            db.table("calendar_subscriptions").delete().eq("id", sub_row["id"]).execute()
+            _ensure_subscription(db, sub_row["org_id"], sub_row["advisor_id"])
+            return True
+        resp.raise_for_status()
+        db.table("calendar_subscriptions").update({
+            "expires_at": expiration.isoformat(),
+            "updated_at": now.isoformat(),
+        }).eq("id", sub_row["id"]).execute()
+        return True
+    except Exception as exc:
+        logger.warning("renew_subscription failed for %s (non-fatal): %s", sub_row.get("id"), exc)
+        return False
+
+
+def renew_all_subscriptions_expiring_soon(db) -> dict:
+    """Cron entry point (daily). Renews any subscription expiring within 24h.
+    Each row is independent/non-fatal — one failure never blocks the rest."""
+    now = datetime.now(timezone.utc)
+    cutoff = (now + timedelta(hours=24)).isoformat()
+    rows = db.table("calendar_subscriptions").select("*").lte("expires_at", cutoff).execute().data or []
+    renewed = failed = 0
+    for row in rows:
+        if renew_subscription(db, row):
+            renewed += 1
+        else:
+            failed += 1
+    return {"renewed": renewed, "failed": failed, "checked": len(rows)}
+
+
+def verify_client_state(db, subscription_id: str, client_state: str) -> str | None:
+    """Looks up the subscription by Graph's subscription_id and checks the
+    clientState the notification carried matches what we generated when we
+    created it. Returns the advisor_id on success, None otherwise (wrong/missing
+    clientState, or an unknown subscription — never trust an unverified notification)."""
+    res = db.table("calendar_subscriptions").select("advisor_id, client_state").eq("subscription_id", subscription_id).execute()
+    if not res.data:
+        return None
+    row = res.data[0]
+    try:
+        if _decrypt(row["client_state"]) != client_state:
+            return None
+    except Exception:
+        return None
+    return row["advisor_id"]
+
+
 # ---------------------------------------------------------------------------
 # Meeting sync (create / update / cancel)
 # ---------------------------------------------------------------------------
@@ -363,14 +521,14 @@ def sync_meeting_create(db, org_id: str, meeting: dict, subject: str | None = No
         return sync_map
 
     for advisor_id in meeting.get("advisor_ids") or []:
-        entry = _create_event_for_advisor(db, token, advisor_id, meeting, subject)
+        entry = _create_event_for_advisor(db, org_id, token, advisor_id, meeting, subject)
         if entry.get("status") == "synced":
             entry["conflict"] = _check_meeting_conflict(db, org_id, advisor_id, meeting, entry.get("external_event_id"))
         sync_map[advisor_id] = entry
     return sync_map
 
 
-def _create_event_for_advisor(db, token: str, advisor_id: str, meeting: dict, subject: str | None) -> dict:
+def _create_event_for_advisor(db, org_id: str, token: str, advisor_id: str, meeting: dict, subject: str | None) -> dict:
     email = _resolve_advisor_email(db, advisor_id)
     if not email:
         return {"provider": "microsoft", "status": "not_connected"}
@@ -382,9 +540,11 @@ def _create_event_for_advisor(db, token: str, advisor_id: str, meeting: dict, su
             timeout=15,
         )
         resp.raise_for_status()
+        event_id = resp.json()["id"]
+        _ensure_subscription(db, org_id, advisor_id)
         return {
             "provider": "microsoft",
-            "external_event_id": resp.json()["id"],
+            "external_event_id": event_id,
             "status": "synced",
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -416,9 +576,9 @@ def sync_meeting_update(db, org_id: str, meeting: dict, previous_sync: dict, sub
         prior = previous_sync.get(advisor_id)
         email = _resolve_advisor_email(db, advisor_id)
         if prior and prior.get("external_event_id") and email:
-            entry = _update_event_for_advisor(db, token, advisor_id, email, prior["external_event_id"], meeting, subject)
+            entry = _update_event_for_advisor(db, org_id, token, advisor_id, email, prior["external_event_id"], meeting, subject)
         else:
-            entry = _create_event_for_advisor(db, token, advisor_id, meeting, subject)
+            entry = _create_event_for_advisor(db, org_id, token, advisor_id, meeting, subject)
         if entry.get("status") == "synced":
             entry["conflict"] = _check_meeting_conflict(db, org_id, advisor_id, meeting, entry.get("external_event_id"))
         sync_map[advisor_id] = entry
@@ -432,7 +592,7 @@ def sync_meeting_update(db, org_id: str, meeting: dict, previous_sync: dict, sub
     return sync_map
 
 
-def _update_event_for_advisor(db, token: str, advisor_id: str, email: str, event_id: str, meeting: dict, subject: str | None) -> dict:
+def _update_event_for_advisor(db, org_id: str, token: str, advisor_id: str, email: str, event_id: str, meeting: dict, subject: str | None) -> dict:
     try:
         resp = _request_with_retry(
             "PATCH", f"{GRAPH_BASE}/users/{email}/events/{event_id}",
@@ -444,7 +604,7 @@ def _update_event_for_advisor(db, token: str, advisor_id: str, email: str, event
             # The event was deleted directly in Outlook — recreate it rather than
             # leaving the meeting permanently stuck in an error state.
             logger.info("calendar event %s no longer exists — recreating", event_id)
-            return _create_event_for_advisor(db, token, advisor_id, meeting, subject)
+            return _create_event_for_advisor(db, org_id, token, advisor_id, meeting, subject)
         resp.raise_for_status()
         return {
             "provider": "microsoft",
