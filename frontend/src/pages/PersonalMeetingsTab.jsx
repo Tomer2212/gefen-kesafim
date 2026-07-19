@@ -14,6 +14,7 @@ import MeetingNavigationGuardModal from "../components/meetings/MeetingNavigatio
 import { getMissingCriticalFields, isMeetingIncomplete } from "../components/meetings/meetingCompleteness";
 import { buildSchoolContacts } from "../components/meetings/schoolContacts";
 import { normalizeTimeValue } from "../components/meetings/TimeInput";
+import { useMeetingsPolling } from "../hooks/useMeetingsPolling";
 
 const TODAY = new Date().toISOString().slice(0, 10);
 const DEFAULT_FILTERS = { status: "", date_from: TODAY, date_to: TODAY };
@@ -90,9 +91,9 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
     return () => document.removeEventListener("mousedown", h);
   }, [dotsOpen]);
 
-  async function loadMeetings(activeFilters) {
-    setLoading(true);
-    setError("");
+  async function loadMeetings(activeFilters, { silent } = {}) {
+    if (!silent) setLoading(true);
+    if (!silent) setError("");
     try {
       const params = new URLSearchParams();
       if (activeFilters.status) params.set("status", activeFilters.status);
@@ -102,9 +103,9 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
       const res = await axios.get(`/schools/meetings/my?${params}`);
       setMeetings(res.data || []);
     } catch {
-      setError("שגיאה בטעינת פגישות");
+      if (!silent) setError("שגיאה בטעינת פגישות");
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }
 
@@ -112,6 +113,8 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
     loadMeetings(filters);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filters, academicYear]);
+
+  useMeetingsPolling(() => loadMeetings(filters, { silent: true }), true, [filters, academicYear]);
 
   useEffect(() => {
     axios.get("/schools/").then(r => setSchools((r.data || []).filter(s => s.status !== "deleted"))).catch(() => {});

@@ -155,6 +155,26 @@ export function MeetingRow({
 
   useEffect(() => { setDraft({ ...meeting }); lastSentRef.current = null; }, [meeting.id]);
 
+  // Background polling (useMeetingsPolling) replaces `meeting` with a fresh object on
+  // every tick, but `draft` above only re-syncs on an actual id change — otherwise an
+  // in-progress edit would get clobbered mid-keystroke. That means an externally-driven
+  // change (e.g. an advisor editing the time directly in Outlook, picked up by the
+  // reverse-sync webhook) never reached the visible fields, since they render from
+  // `draft`. Fix: when date/time change externally *and the row has no unsaved edit*
+  // (draft still matches the previous meeting snapshot), pull the new values into
+  // draft. `prevMeetingRef` — not `meeting` itself — is compared against, since by the
+  // time this effect runs `meeting` already holds the new value.
+  const prevMeetingRef = useRef(meeting);
+  useEffect(() => {
+    const prev = prevMeetingRef.current;
+    const wasClean = draft.start_time === prev.start_time && draft.end_time === prev.end_time && draft.meeting_date === prev.meeting_date;
+    if (wasClean) {
+      setDraft(d => ({ ...d, start_time: meeting.start_time, end_time: meeting.end_time, meeting_date: meeting.meeting_date }));
+    }
+    prevMeetingRef.current = meeting;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [meeting.start_time, meeting.end_time, meeting.meeting_date]);
+
   // Fetch the advisor's Outlook busy ranges for this specific meeting date — used both
   // to warn/block saving on a real overlap, and to power the schedule hover tooltips.
   const advisorIdForBusyCheck = draft.advisor_ids?.[0];
