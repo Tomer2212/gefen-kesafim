@@ -606,6 +606,7 @@ def _update_event_for_advisor(db, org_id: str, token: str, advisor_id: str, emai
             logger.info("calendar event %s no longer exists — recreating", event_id)
             return _create_event_for_advisor(db, org_id, token, advisor_id, meeting, subject)
         resp.raise_for_status()
+        _ensure_subscription(db, org_id, advisor_id)
         return {
             "provider": "microsoft",
             "external_event_id": event_id,
