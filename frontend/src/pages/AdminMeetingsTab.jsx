@@ -11,6 +11,7 @@ import { AcademicYearSelector } from "../components/AcademicYearSelector";
 import { DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
 import { getMissingCriticalFields, isMeetingIncomplete } from "../components/meetings/meetingCompleteness";
 import { buildSchoolContacts } from "../components/meetings/schoolContacts";
+import { useMeetingsPolling } from "../hooks/useMeetingsPolling";
 
 const TODAY = new Date().toISOString().slice(0, 10);
 const DEFAULT_FILTERS = { status: "scheduled", date_from: null, date_to: TODAY, advisor_id: null, school_id: null };
@@ -90,9 +91,9 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [incompleteSessionMeetings, meetings]);
 
-  async function loadAllMeetings(activeFilters, year = academicYear) {
-    setLoading(true);
-    setError("");
+  async function loadAllMeetings(activeFilters, year = academicYear, { silent } = {}) {
+    if (!silent) setLoading(true);
+    if (!silent) setError("");
     try {
       const params = {};
       if (activeFilters.status) params.status = activeFilters.status;
@@ -104,11 +105,13 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
       const res = await axios.get("/schools/meetings/all", { params });
       setMeetings(res.data || []);
     } catch {
-      setError("שגיאה בטעינת הפגישות — נסה לרענן");
+      if (!silent) setError("שגיאה בטעינת הפגישות — נסה לרענן");
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }
+
+  useMeetingsPolling(() => loadAllMeetings(filters, academicYear, { silent: true }), true, [filters, academicYear]);
 
   function handleYearChange(year) {
     setAcademicYear(year);

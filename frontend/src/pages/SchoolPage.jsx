@@ -10,6 +10,7 @@ import ResultsView from "../components/ResultsView";
 import ClassifyModal from "../components/ClassifyModal";
 import { GoalsTab } from "../components/GoalsTab";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { useMeetingsPolling } from "../hooks/useMeetingsPolling";
 import { useCompareChecks } from "../context/CompareChecksContext";
 import { AdvisorSearch } from "../components/AdvisorSearch";
 import { AdvisorCell } from "../components/meetings/AdvisorCell";
@@ -2664,16 +2665,16 @@ export default function SchoolPage() {
     load();
   }, [schoolId, academicYear]);
 
-  async function loadMeetings() {
-    setMeetingsLoading(true);
+  async function loadMeetings({ silent } = {}) {
+    if (!silent) setMeetingsLoading(true);
     setMeetingsError("");
     try {
       const res = await axios.get(`/schools/${schoolId}/meetings`, { params: { academic_year: academicYear } });
       setMeetings(res.data || []);
     } catch {
-      setMeetingsError("שגיאה בטעינת הפגישות — נסה לרענן");
+      if (!silent) setMeetingsError("שגיאה בטעינת הפגישות — נסה לרענן");
     } finally {
-      setMeetingsLoading(false);
+      if (!silent) setMeetingsLoading(false);
     }
   }
 
@@ -2683,6 +2684,8 @@ export default function SchoolPage() {
       if (users.length === 0 && (role === "owner" || role === "manager")) loadUsers();
     }
   }, [activeTab, schoolId, role, academicYear]);
+
+  useMeetingsPolling(() => loadMeetings({ silent: true }), activeTab === "meetings", [schoolId, academicYear]);
 
   // When "היועצים המלווים שנבחרו" mode is active, keep restrict_access_to in sync
   useEffect(() => {
