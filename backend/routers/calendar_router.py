@@ -3,18 +3,20 @@ import os
 import time
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.responses import PlainTextResponse, RedirectResponse
 from pydantic import BaseModel
 
 import graph_client
 from auth import get_current_user
+from routers.schools_router import _reconcile_meeting_from_outlook
 from supabase_client import get_admin_client, reset_admin_client
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 APP_URL = os.getenv("APP_URL", "http://localhost:5173")
+CRON_SECRET = os.getenv("CRON_SECRET", "")
 
 
 def _require_manager(user: dict):
@@ -196,3 +198,80 @@ def freebusy(
             else:
                 logger.warning("freebusy failed after 2 attempts: %s", exc)
                 return {"busy": []}
+
+
+def _handle_notification(db, notif: dict) -> None:
+    """One Graph change notification -> reconcile the meeting it belongs to.
+
+    clientState is the only thing protecting this endpoint from spoofed calls
+    (there's no way to require an Authorization header on a Graph webhook), so
+    it's verified before anything else. Events that aren't in our index (e.g.
+    an advisor's unrelated personal calendar event, since a subscription covers
+    their whole mailbox) are silently ignored — not every notification is ours."""
+    subscription_id = notif.get("subscriptionId")
+    event_id = (notif.get("resourceData") or {}).get("id")
+    if not subscription_id or not event_id:
+        return
+    advisor_id = graph_client.verify_client_state(db, subscription_id, notif.get("clientState") or "")
+    if not advisor_id:
+        logger.warning("webhook notification failed clientState verification for subscription %s", subscription_id)
+        return
+
+    idx = db.table("calendar_event_index").select("meeting_id").eq("external_event_id", event_id).execute()
+    if not idx.data:
+        return  # not an event tied to any meeting we track
+    meeting_row = (
+        db.table("meetings")
+        .select("id, school_id, meeting_date, start_time, end_time, status, calendar_sync")
+        .eq("id", idx.data[0]["meeting_id"])
+        .execute()
+    )
+    if not meeting_row.data:
+        return
+    meeting = meeting_row.data[0]
+    if meeting.get("status") != "scheduled":
+        return
+
+    school_row = db.table("schools").select("org_id").eq("id", meeting.get("school_id")).execute()
+    org_id = school_row.data[0]["org_id"] if school_row.data else None
+    if not org_id:
+        return
+    _reconcile_meeting_from_outlook(db, org_id, meeting)
+
+
+@router.post("/webhook/microsoft")
+async def microsoft_webhook(request: Request, validationToken: str | None = None):
+    """Public endpoint — Microsoft Graph calls this directly the moment a synced
+    advisor's calendar changes, no bearer token possible on their side. Two request
+    shapes hit this same URL:
+    - Subscription-creation handshake: a bare validationToken query param that must
+      be echoed back as plain text within 10 seconds (Graph's proof the endpoint is real).
+    - Real change notifications: a JSON body with a `value` array of notifications.
+    """
+    if validationToken is not None:
+        return PlainTextResponse(validationToken, status_code=200)
+    try:
+        body = await request.json()
+    except Exception:
+        return Response(status_code=202)
+    db = get_admin_client()
+    for notif in body.get("value", []):
+        try:
+            _handle_notification(db, notif)
+        except Exception as exc:
+            logger.warning("webhook notification handling failed (non-fatal): %s", exc)
+    return Response(status_code=202)
+
+
+@router.post("/renew-subscriptions")
+def renew_subscriptions(request: Request):
+    """Cron-triggered (daily). Subscriptions expire after ~3 days regardless of how
+    reliably the cron actually fires — see graph_client.renew_all_subscriptions_expiring_soon."""
+    if not CRON_SECRET or request.headers.get("X-Cron-Secret") != CRON_SECRET:
+        raise HTTPException(status_code=401, detail="unauthorized")
+    db = get_admin_client()
+    try:
+        return graph_client.renew_all_subscriptions_expiring_soon(db)
+    except Exception as exc:
+        logger.error("renew_subscriptions failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת")

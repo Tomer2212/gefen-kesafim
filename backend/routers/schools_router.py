@@ -189,6 +189,20 @@ class SchoolIn(BaseModel):
     extra_contacts: list[dict] | None = None
 
 
+class SchoolYearAdminDataIn(BaseModel):
+    service_type: str | None = None
+    requested_price: float | None = None
+    order_method: str | None = None
+    order_amount_gefen: float | None = None
+    hours_ordered: float | None = None
+    rate: float | None = None
+    payment_received: float | None = None
+    payment_requests_sent: float | None = None
+    contract_sent: bool | None = None
+    contract_received: bool | None = None
+    receipts_sent: float | None = None
+
+
 class GefenAccountIn(BaseModel):
     division_type: str
     custom_label: str | None = None
@@ -600,7 +614,7 @@ def delete_school(
         for m in (future.data or []):
             if m.get("calendar_sync"):
                 graph_client.sync_meeting_cancel(db, user["org_id"], m["calendar_sync"])
-                db.table("meetings").update({"calendar_sync": {}}).eq("id", m["id"]).execute()
+                graph_client.persist_calendar_sync(db, m["id"], {})
     except Exception as exc:
         logger.warning("calendar cancel-sync failed for deleted school %s (non-fatal): %s", school_id, exc)
 
@@ -678,11 +692,230 @@ def restore_school(
             subject = _build_meeting_subject(db, school_id, m.get("participants"), m.get("primary_contact_key"))
             sync_map = graph_client.sync_meeting_create(db, user["org_id"], m, subject)
             if sync_map:
-                db.table("meetings").update({"calendar_sync": sync_map}).eq("id", m["id"]).execute()
+                graph_client.persist_calendar_sync(db, m["id"], sync_map)
     except Exception as exc:
         logger.warning("calendar re-sync failed for restored school %s (non-fatal): %s", school_id, exc)
 
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# School year admin data (מסך ניהול → בתי ספר: מחירים, חוזים, תשלומים)
+# ---------------------------------------------------------------------------
+
+def _advisor_has_school_access(db, user: dict, school_id: str) -> bool:
+    """Whether an advisor (non-manager) may view/edit this school's data."""
+    school_row = (
+        db.table("schools")
+        .select("restrict_access_to")
+        .eq("id", school_id)
+        .eq("org_id", user["org_id"])
+        .execute()
+    )
+    if not school_row.data:
+        return False
+    restrict = school_row.data[0].get("restrict_access_to")
+    if restrict is None:
+        return True
+    if user["id"] in restrict:
+        return True
+    assigned = (
+        db.table("advisor_schools")
+        .select("school_id")
+        .eq("advisor_id", user["id"])
+        .eq("school_id", school_id)
+        .execute()
+    )
+    return bool(assigned.data)
+
+
+def _attach_updater_names(db, rows: list[dict]) -> None:
+    """Non-fatal enrichment: resolve order_amount_gefen_updated_by → full_name."""
+    updater_ids = list({r["order_amount_gefen_updated_by"] for r in rows if r.get("order_amount_gefen_updated_by")})
+    if not updater_ids:
+        return
+    try:
+        p_rows = db.table("profiles").select("id, full_name").in_("id", updater_ids).execute()
+        names_map = {p["id"]: p["full_name"] for p in (p_rows.data or [])}
+        for r in rows:
+            uid = r.get("order_amount_gefen_updated_by")
+            r["order_amount_gefen_updated_by_name"] = names_map.get(uid) if uid else None
+    except Exception as exc:
+        logger.warning("profile enrichment for year_admin_data failed (non-fatal): %s", exc)
+
+
+@router.get("/year-admin-data")
+def list_year_admin_data(
+    user: Annotated[dict, Depends(get_current_user)],
+    academic_year: str = DEFAULT_ACADEMIC_YEAR,
+):
+    _require_manager(user)
+    data = []
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            rows = (
+                db.table("school_year_admin_data")
+                .select("*")
+                .eq("academic_year", academic_year)
+                .execute()
+            )
+            data = rows.data or []
+            break
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("list_year_admin_data attempt 1 failed: %s — resetting client and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("list_year_admin_data failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    _attach_updater_names(db, data)
+    return {r["school_id"]: r for r in data}
+
+
+@router.get("/{school_id}/year-admin-data")
+def get_year_admin_data(
+    school_id: str,
+    user: Annotated[dict, Depends(get_current_user)],
+    academic_year: str = DEFAULT_ACADEMIC_YEAR,
+):
+    db = get_admin_client()
+    if user["role"] not in ("owner", "manager") and not _advisor_has_school_access(db, user, school_id):
+        raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
+
+    row = (
+        db.table("school_year_admin_data")
+        .select("*")
+        .eq("school_id", school_id)
+        .eq("academic_year", academic_year)
+        .execute()
+    )
+    data = row.data[0] if row.data else {}
+    if data:
+        _attach_updater_names(db, [data])
+    return data
+
+
+@router.put("/{school_id}/year-admin-data")
+def upsert_year_admin_data(
+    school_id: str,
+    body: SchoolYearAdminDataIn,
+    user: Annotated[dict, Depends(get_current_user)],
+    academic_year: str = DEFAULT_ACADEMIC_YEAR,
+):
+    from datetime import datetime, timezone
+
+    db = get_admin_client()
+    is_manager = user["role"] in ("owner", "manager")
+    if not is_manager:
+        if not _advisor_has_school_access(db, user, school_id):
+            raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
+        # Advisors (non-manager) may only update the Gefen order amount from the school card —
+        # every other admin-table field is manager+ only.
+        allowed_fields = {"order_amount_gefen"}
+        submitted_fields = set(body.model_fields_set)
+        if submitted_fields - allowed_fields:
+            raise HTTPException(status_code=403, detail="אין הרשאה לעדכן שדות אלו")
+
+    update_data = body.model_dump(exclude_unset=True)
+
+    old_row = (
+        db.table("school_year_admin_data")
+        .select("order_amount_gefen")
+        .eq("school_id", school_id)
+        .eq("academic_year", academic_year)
+        .execute()
+    )
+    old_amount = old_row.data[0]["order_amount_gefen"] if old_row.data else None
+
+    if "order_amount_gefen" in update_data and update_data["order_amount_gefen"] != old_amount:
+        update_data["order_amount_gefen_updated_by"] = user["id"]
+        update_data["order_amount_gefen_updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    update_data["school_id"] = school_id
+    update_data["academic_year"] = academic_year
+    update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    row = (
+        db.table("school_year_admin_data")
+        .upsert(update_data, on_conflict="school_id,academic_year")
+        .execute()
+    )
+    data = row.data[0] if row.data else update_data
+    _attach_updater_names(db, [data])
+    return data
+
+
+@router.post("/{school_id}/year-admin-data/contract-file")
+async def upload_contract_file(
+    school_id: str,
+    user: Annotated[dict, Depends(get_current_user)],
+    file: UploadFile = File(...),
+    academic_year: str = DEFAULT_ACADEMIC_YEAR,
+):
+    import secrets
+    import shutil
+    import tempfile
+
+    _require_manager(user)
+    db = get_admin_client()
+
+    run_dir = Path(tempfile.mkdtemp(prefix=f"contract_{school_id}_"))
+    try:
+        suffix = Path(file.filename or "").suffix
+        dest = run_dir / f"contract{suffix}"
+        dest.write_bytes(await file.read())
+        storage_key = f"contracts/{school_id}/{academic_year}/{secrets.token_hex(8)}{suffix}"
+        db.storage.from_("check-files").upload(storage_key, dest.read_bytes())
+    finally:
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+    row = (
+        db.table("school_year_admin_data")
+        .upsert(
+            {
+                "school_id": school_id,
+                "academic_year": academic_year,
+                "contract_file_storage_key": storage_key,
+                "contract_file_name": file.filename,
+            },
+            on_conflict="school_id,academic_year",
+        )
+        .execute()
+    )
+    return row.data[0] if row.data else {"contract_file_storage_key": storage_key, "contract_file_name": file.filename}
+
+
+@router.get("/{school_id}/year-admin-data/contract-file")
+def download_contract_file(
+    school_id: str,
+    user: Annotated[dict, Depends(get_current_user)],
+    academic_year: str = DEFAULT_ACADEMIC_YEAR,
+):
+    db = get_admin_client()
+    if user["role"] not in ("owner", "manager") and not _advisor_has_school_access(db, user, school_id):
+        raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
+
+    row = (
+        db.table("school_year_admin_data")
+        .select("contract_file_storage_key, contract_file_name")
+        .eq("school_id", school_id)
+        .eq("academic_year", academic_year)
+        .execute()
+    )
+    if not row.data or not row.data[0].get("contract_file_storage_key"):
+        raise HTTPException(status_code=404, detail="לא הועלה קובץ חוזה")
+
+    storage_key = row.data[0]["contract_file_storage_key"]
+    filename = row.data[0].get("contract_file_name") or "contract"
+    content = db.storage.from_("check-files").download(storage_key)
+    return Response(
+        content=content,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2133,17 +2366,68 @@ def send_due_reminders(request: Request):
     return {"ok": True, "sent": sent, "failed": failed, "skipped_meetings": skipped_meetings, "total_due": len(meetings)}
 
 
-@router.post("/meetings/poll-outlook-changes")
-def poll_outlook_changes(request: Request):
-    """Cron-triggered (every 15 min). Reconciles meetings *we* created/synced against
-    Outlook: if an advisor edited the time or deleted the event directly in Outlook,
-    that change is reflected back here (date/time update, or status='cancelled').
+def _reconcile_meeting_from_outlook(db, org_id: str, meeting: dict) -> dict:
+    """Shared by the periodic poll (backup safety net) and the real-time webhook
+    handler: checks every synced advisor's event for this meeting and applies any
+    confirmed change (reschedule or cancellation) back onto the meeting row.
 
     Deliberately narrow in scope: we never pull the subject/title back from Outlook —
     our own naming logic (school/city/contact) stays authoritative for that. A meeting
     is only cancelled if its event is confirmed gone for *every* synced advisor (not
     just one, for multi-advisor meetings) — and any check that fails/errors is skipped
-    for that round rather than ever being treated as "deleted"."""
+    rather than ever being treated as "deleted".
+
+    Returns {"action": "updated"|"cancelled"|"skipped"|"none", "checked": N} where N
+    is the number of advisor events actually queried against Graph.
+    """
+    sync_map = meeting.get("calendar_sync") or {}
+    advisor_results = {}
+    checked = 0
+    for advisor_id, entry in sync_map.items():
+        event_id = entry.get("external_event_id")
+        if not event_id:
+            continue
+        checked += 1
+        advisor_results[advisor_id] = graph_client.get_event(db, org_id, advisor_id, event_id)
+
+    if not advisor_results:
+        return {"action": "none", "checked": checked}
+    if any(v == graph_client.EVENT_CHECK_SKIPPED for v in advisor_results.values()):
+        return {"action": "skipped", "checked": checked}  # inconclusive — never guess, retry next round
+
+    if all(v is None for v in advisor_results.values()):
+        try:
+            db.table("meetings").update({"status": "cancelled"}).eq("id", meeting["id"]).execute()
+            graph_client.persist_calendar_sync(db, meeting["id"], {})
+            return {"action": "cancelled", "checked": checked}
+        except Exception as exc:
+            logger.warning("_reconcile_meeting_from_outlook: failed to cancel meeting %s: %s", meeting["id"], exc)
+            return {"action": "skipped", "checked": checked}
+
+    for advisor_id, result in advisor_results.items():
+        if result is None:
+            continue
+        new_date, new_start, new_end = result["start"][:10], result["start"][11:16], result["end"][11:16]
+        if new_date != meeting.get("meeting_date") or new_start != meeting.get("start_time") or new_end != meeting.get("end_time"):
+            try:
+                db.table("meetings").update({
+                    "meeting_date": new_date, "start_time": new_start, "end_time": new_end,
+                }).eq("id", meeting["id"]).execute()
+                return {"action": "updated", "checked": checked}
+            except Exception as exc:
+                logger.warning("_reconcile_meeting_from_outlook: failed to update meeting %s: %s", meeting["id"], exc)
+                return {"action": "skipped", "checked": checked}
+
+    return {"action": "none", "checked": checked}
+
+
+@router.post("/meetings/poll-outlook-changes")
+def poll_outlook_changes(request: Request):
+    """Cron-triggered backup safety net (best-effort schedule, currently firing
+    roughly every 1-3h in practice — see the real-time webhook handler in
+    calendar_router.py for the primary, near-instant reconciliation path).
+    Reconciles all synced future meetings via _reconcile_meeting_from_outlook,
+    catching anything a missed/lost webhook notification would otherwise leave stale."""
     if not CRON_SECRET or request.headers.get("X-Cron-Secret") != CRON_SECRET:
         raise HTTPException(status_code=401, detail="unauthorized")
 
@@ -2183,41 +2467,12 @@ def poll_outlook_changes(request: Request):
         org_id = schools_map.get(m.get("school_id"))
         if not org_id:
             continue
-        sync_map = m.get("calendar_sync") or {}
-        advisor_results = {}
-        for advisor_id, entry in sync_map.items():
-            event_id = entry.get("external_event_id")
-            if not event_id:
-                continue
-            checked += 1
-            advisor_results[advisor_id] = graph_client.get_event(db, org_id, advisor_id, event_id)
-
-        if not advisor_results:
-            continue
-        if any(v == graph_client.EVENT_CHECK_SKIPPED for v in advisor_results.values()):
-            continue  # inconclusive this round — never guess, just retry next poll
-
-        if all(v is None for v in advisor_results.values()):
-            try:
-                db.table("meetings").update({"status": "cancelled", "calendar_sync": {}}).eq("id", m["id"]).execute()
-                cancelled += 1
-            except Exception as exc:
-                logger.warning("poll_outlook_changes: failed to cancel meeting %s: %s", m["id"], exc)
-            continue
-
-        for advisor_id, result in advisor_results.items():
-            if result is None:
-                continue
-            new_date, new_start, new_end = result["start"][:10], result["start"][11:16], result["end"][11:16]
-            if new_date != m.get("meeting_date") or new_start != m.get("start_time") or new_end != m.get("end_time"):
-                try:
-                    db.table("meetings").update({
-                        "meeting_date": new_date, "start_time": new_start, "end_time": new_end,
-                    }).eq("id", m["id"]).execute()
-                    updated += 1
-                except Exception as exc:
-                    logger.warning("poll_outlook_changes: failed to update meeting %s: %s", m["id"], exc)
-                break  # one shared date/time per meeting row — first conclusive change wins
+        result = _reconcile_meeting_from_outlook(db, org_id, m)
+        checked += result["checked"]
+        if result["action"] == "updated":
+            updated += 1
+        elif result["action"] == "cancelled":
+            cancelled += 1
 
     return {"checked": checked, "updated": updated, "cancelled": cancelled}
 
@@ -2815,7 +3070,7 @@ def transfer_user_meetings(user_id: str, body: TransferMeetingsIn, user: Annotat
             db.table("meetings").update({"advisor_ids": new_ids}).eq("id", m["id"]).execute()
             subject = _build_meeting_subject(db, m["school_id"], m.get("participants"), m.get("primary_contact_key"))
             sync_map = graph_client.sync_meeting_update(db, user["org_id"], {**m, "advisor_ids": new_ids}, previous_sync, subject)
-            db.table("meetings").update({"calendar_sync": sync_map}).eq("id", m["id"]).execute()
+            graph_client.persist_calendar_sync(db, m["id"], sync_map)
             conflict = bool(sync_map.get(body.new_advisor_id, {}).get("conflict"))
         except Exception as exc:
             logger.warning("transfer meeting %s failed (non-fatal): %s", m["id"], exc)
@@ -3420,7 +3675,7 @@ def create_meeting(school_id: str, body: MeetingIn, user: Annotated[dict, Depend
         subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"))
         sync_map = graph_client.sync_meeting_create(db, user["org_id"], meeting, subject)
         if sync_map:
-            db.table("meetings").update({"calendar_sync": sync_map}).eq("id", meeting["id"]).execute()
+            graph_client.persist_calendar_sync(db, meeting["id"], sync_map)
             meeting["calendar_sync"] = sync_map
     except Exception as exc:
         logger.warning("calendar sync failed for new meeting %s (non-fatal): %s", meeting.get("id"), exc)
@@ -3471,7 +3726,7 @@ def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annot
         else:
             subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"))
             sync_map = graph_client.sync_meeting_update(db, user["org_id"], {**meeting, "id": meeting_id}, previous_sync, subject)
-        db.table("meetings").update({"calendar_sync": sync_map}).eq("id", meeting_id).execute()
+        graph_client.persist_calendar_sync(db, meeting_id, sync_map)
         meeting["calendar_sync"] = sync_map
     except Exception as exc:
         logger.warning("calendar sync failed for updated meeting %s (non-fatal): %s", meeting_id, exc)
@@ -3506,7 +3761,7 @@ def patch_meeting(school_id: str, meeting_id: str, body: MeetingStatusPatchIn, u
             else:
                 subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"))
                 sync_map = graph_client.sync_meeting_update(db, user["org_id"], meeting, previous_sync, subject)
-            db.table("meetings").update({"calendar_sync": sync_map}).eq("id", meeting_id).execute()
+            graph_client.persist_calendar_sync(db, meeting_id, sync_map)
     except Exception as exc:
         logger.warning("calendar sync failed for patched meeting %s (non-fatal): %s", meeting_id, exc)
 
@@ -3575,7 +3830,7 @@ def reassign_meeting_school(meeting_id: str, body: MeetingReassignSchoolIn, user
     try:
         subject = _build_meeting_subject(db, body.new_school_id, [], None)
         sync_map = graph_client.sync_meeting_update(db, user["org_id"], {**meeting, "id": meeting_id}, previous_sync, subject)
-        db.table("meetings").update({"calendar_sync": sync_map}).eq("id", meeting_id).execute()
+        graph_client.persist_calendar_sync(db, meeting_id, sync_map)
     except Exception as exc:
         logger.warning("calendar sync failed for reassigned meeting %s (non-fatal): %s", meeting_id, exc)
 

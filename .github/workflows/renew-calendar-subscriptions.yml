@@ -1,0 +1,22 @@
+name: Renew Outlook Webhook Subscriptions
+
+on:
+  schedule:
+    # Once a day. Subscriptions are valid for ~3 days, so even a multi-hour lag
+    # in GitHub's best-effort schedule leaves huge margin before anything expires.
+    - cron: '0 3 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call subscription renewal endpoint
+        run: |
+          URL="${BACKEND_URL%/}"
+          curl -sf -X POST "${URL}/calendar/renew-subscriptions" \
+            -H "X-Cron-Secret: ${CRON_SECRET}" \
+            --max-time 60
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
