@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+﻿import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useNavigate, useParams, useLocation, useBlocker, useSearchParams } from "react-router-dom";
 import axios from "axios";
@@ -11,13 +11,16 @@ import ClassifyModal from "../components/ClassifyModal";
 import { GoalsTab } from "../components/GoalsTab";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useMeetingsPolling } from "../hooks/useMeetingsPolling";
+import { mergeMeetingsSilently } from "../components/meetings/mergeMeetings";
 import { useCompareChecks } from "../context/CompareChecksContext";
 import { AdvisorSearch } from "../components/AdvisorSearch";
+import { AccessSelector } from "../components/AccessSelector";
 import { AdvisorCell } from "../components/meetings/AdvisorCell";
 import { DatePickerPopover } from "../components/meetings/DatePickerPopover";
 import { DeleteMeetingModal } from "../components/meetings/DeleteMeetingModal";
 import { MeetingRow } from "../components/meetings/MeetingRow";
 import { MeetingsTable } from "../components/meetings/MeetingsTable";
+import { MeetingSummaryModal } from "../components/meetings/MeetingSummaryModal";
 import { MeetingTypeSelect } from "../components/meetings/MeetingTypeSelect";
 import MeetingNavigationGuardModal from "../components/meetings/MeetingNavigationGuardModal";
 import { getMissingCriticalFields, isMeetingIncomplete } from "../components/meetings/meetingCompleteness";
@@ -67,10 +70,6 @@ const SCHOOL_STAGE_OPTIONS = [
 const SCHOOL_STAGE_LABEL = Object.fromEntries(
   SCHOOL_STAGE_OPTIONS.filter(o => o.value).map(o => [o.value, o.label])
 );
-
-const ROLE_LABELS = { owner: "בעלים", manager: "מנהל", advisor: "יועץ" };
-const ROLE_SORT_ORDER = { owner: 0, manager: 1, advisor: 2 };
-function sortByRole(arr) { return [...arr].sort((a, b) => (ROLE_SORT_ORDER[a.role] ?? 3) - (ROLE_SORT_ORDER[b.role] ?? 3)); }
 
 const DISTRICT_OPTIONS = ["צפון", "דרום", "מרכז", "ירושלים", "תל-אביב", "חיפה", "חינוך התיישבותי", "חרדי"];
 
@@ -2332,138 +2331,6 @@ function AccessGrantModal({ advisorName, canGrant, onGrant, onRequest, onCancel 
   );
 }
 
-
-function AccessSelector({ restrictTo, users, loadingUsers, onChange, schoolAdvisors, onSelectAdvisors }) {
-  const [query, setQuery] = useState("");
-  const [open, setOpen] = useState(false);
-  const containerRef = useRef(null);
-
-  // Owners always have full access — exclude them from the selector
-  const nonOwnerUsers = users.filter(u => u.role !== "owner");
-
-  const isAll = restrictTo === null || restrictTo === undefined;
-  // Also strip any owner IDs that may exist in stored data
-  const selected = (restrictTo || []).filter(id => nonOwnerUsers.some(u => u.id === id));
-
-  return (
-    <div
-      ref={containerRef}
-      className="relative"
-      onFocus={() => setOpen(true)}
-      onBlur={e => { if (!containerRef.current?.contains(e.relatedTarget)) setOpen(false); }}
-    >
-      <div
-        className="input-field flex flex-wrap items-center gap-1.5 min-h-[38px] cursor-pointer"
-        role="button"
-        tabIndex={0}
-        onClick={() => setOpen(o => !o)}
-        onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setOpen(o => !o); } }}
-        aria-expanded={open}
-        aria-haspopup="listbox"
-      >
-        {isAll ? (
-          <span className="text-xs font-medium px-2.5 py-0.5 rounded-full" style={{ background: "rgba(22,163,74,0.12)", color: "#15803d" }}>
-            כולם
-          </span>
-        ) : selected.map(id => {
-          const u = nonOwnerUsers.find(u => u.id === id);
-          return u ? (
-            <span key={id} className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full" style={{ background: "rgba(0,112,243,0.08)", color: "#1d4ed8" }}>
-              {u.full_name || u.email}
-              <button
-                type="button"
-                onMouseDown={e => { e.stopPropagation(); e.preventDefault(); const n = selected.filter(i => i !== id); onChange(n.length === 0 ? null : n); }}
-                className="hover:text-red-500 leading-none"
-                aria-label={`הסר ${u.full_name || u.email} מרשימת הגישה`}
-              >×</button>
-            </span>
-          ) : null;
-        })}
-        {!isAll && (
-          <button
-            type="button"
-            onMouseDown={e => { e.stopPropagation(); e.preventDefault(); onChange(null); }}
-            className="text-xs text-slate-400 hover:text-slate-600 mr-auto px-1"
-            aria-label="אפס לכולם"
-          >↺ כולם</button>
-        )}
-      </div>
-
-      {open && (
-        <div className="absolute z-30 right-0 left-0 mt-1 border border-slate-200 rounded-xl bg-white shadow-lg">
-          <div className="p-2 border-b border-slate-100">
-            <label htmlFor="access-selector-search-sp" className="sr-only">חיפוש</label>
-            <input
-              id="access-selector-search-sp"
-              type="search"
-              className="input-field text-sm"
-              placeholder="חפש יועץ..."
-              value={query}
-              onChange={e => setQuery(e.target.value)}
-              autoComplete="off"
-            />
-          </div>
-          <div className="max-h-44 overflow-y-auto divide-y divide-slate-50" role="listbox">
-            <button
-              type="button"
-              role="option"
-              aria-selected={isAll}
-              onMouseDown={e => { e.preventDefault(); onChange(null); setOpen(false); }}
-              className="w-full text-right px-4 py-2.5 text-sm hover:bg-green-50 flex items-center gap-2"
-            >
-              <span className={`w-4 h-4 rounded border flex-shrink-0 ${isAll ? "bg-green-500 border-green-500" : "border-slate-300"}`} aria-hidden="true" />
-              <span className="font-medium">כולם</span>
-              <span className="text-xs text-slate-400 mr-auto">ללא הגבלה</span>
-            </button>
-            {(schoolAdvisors || []).length > 0 && (
-              <button
-                type="button"
-                role="option"
-                aria-selected={false}
-                onMouseDown={e => {
-                  e.preventDefault();
-                  if (onSelectAdvisors) {
-                    onSelectAdvisors();
-                  } else {
-                    const ids = (schoolAdvisors || []).map(a => a.id).filter(Boolean);
-                    onChange(ids.length > 0 ? ids : null);
-                  }
-                  setOpen(false);
-                }}
-                className="w-full text-right px-4 py-2.5 text-sm hover:bg-blue-50 flex items-center gap-2"
-              >
-                <span className="w-4 h-4 rounded border flex-shrink-0 border-slate-300" aria-hidden="true" />
-                <span className="font-medium">היועצים המלווים שנבחרו</span>
-                <span className="text-xs text-slate-400 mr-auto">{(schoolAdvisors || []).length} יועצים</span>
-              </button>
-            )}
-            {sortByRole(loadingUsers ? [] : nonOwnerUsers)
-              .filter(u => !query.trim() || (u.full_name || u.email || "").toLowerCase().includes(query.toLowerCase()))
-              .map(u => (
-                <button
-                  key={u.id}
-                  type="button"
-                  role="option"
-                  aria-selected={selected.includes(u.id)}
-                  onMouseDown={e => {
-                    e.preventDefault();
-                    const newSel = selected.includes(u.id) ? selected.filter(i => i !== u.id) : [...selected, u.id];
-                    onChange(newSel.length === 0 ? null : newSel);
-                  }}
-                  className="w-full text-right px-4 py-2.5 text-sm hover:bg-blue-50 flex items-center gap-2"
-                >
-                  <span className={`w-4 h-4 rounded border flex-shrink-0 ${selected.includes(u.id) ? "bg-blue-500 border-blue-500" : "border-slate-300"}`} aria-hidden="true" />
-                  {u.full_name || u.email}
-                  <span className="text-xs text-slate-400 mr-auto">{ROLE_LABELS[u.role]}</span>
-                </button>
-              ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
 export default function SchoolPage() {
   const { schoolId } = useParams();
   const navigate = useNavigate();
@@ -2491,6 +2358,10 @@ export default function SchoolPage() {
   const [activeSubTab, setActiveSubTab] = useState("tikkon");
   const [uploadComparisonMeetingId, setUploadComparisonMeetingId] = useState(null);
 
+  // "גובה הזמנה בגפן" — synced with the same admin-table field on AdminPage's schools table
+  // (both read/write the school_year_admin_data row for this school_id+academic_year).
+  const [yearAdminData, setYearAdminData] = useState({});
+
   useEffect(() => {
     const meetingParam = searchParams.get("meeting");
     const tabParam = searchParams.get("tab");
@@ -2504,10 +2375,62 @@ export default function SchoolPage() {
   const [role, setRole] = useState("advisor");
   const [subscriptionStatus, setSubscriptionStatus] = useState(null);
 
+  useEffect(() => {
+    if (!schoolId) return;
+    axios.get(`/schools/${schoolId}/year-admin-data`, { params: { academic_year: academicYear } })
+      .then(res => setYearAdminData(res.data && typeof res.data === "object" ? res.data : {}))
+      .catch(() => setYearAdminData({}));
+  }, [schoolId, academicYear]);
+
+  async function saveOrderAmountGefen(value) {
+    setYearAdminData(prev => ({ ...prev, order_amount_gefen: value }));
+    try {
+      const res = await axios.put(`/schools/${schoolId}/year-admin-data`, { order_amount_gefen: value }, { params: { academic_year: academicYear } });
+      setYearAdminData(res.data && typeof res.data === "object" ? res.data : {});
+    } catch {
+      // revert on failure
+      axios.get(`/schools/${schoolId}/year-admin-data`, { params: { academic_year: academicYear } })
+        .then(res => setYearAdminData(res.data && typeof res.data === "object" ? res.data : {}))
+        .catch(() => {});
+    }
+  }
+
+  // Shared "גובה הזמנה בגפן" field, rendered inside the ליווי section under יועץ מלווה —
+  // always visible/editable regardless of isEditing (synced live with ניהול → בתי ספר)
+  const orderAmountField = (
+    <div className="flex items-start gap-2 py-1.5">
+      <span className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[9px]">גובה הזמנה בגפן:</span>
+      <div className="flex-1 min-w-0">
+        <label htmlFor="order-amount-gefen" className="sr-only">גובה הזמנה בגפן</label>
+        <input
+          id="order-amount-gefen"
+          key={`${schoolId}-${academicYear}`}
+          type="number"
+          defaultValue={yearAdminData.order_amount_gefen ?? ""}
+          onBlur={e => {
+            const v = e.target.value === "" ? null : Number(e.target.value);
+            if (v !== (yearAdminData.order_amount_gefen ?? null)) saveOrderAmountGefen(v);
+          }}
+          title={yearAdminData.order_amount_gefen_updated_by_name
+            ? `${yearAdminData.order_amount_gefen_updated_by_name} - ${formatDate(yearAdminData.order_amount_gefen_updated_at)}`
+            : ""}
+          className="input-field text-sm w-32"
+        />
+        {yearAdminData.order_amount_gefen_updated_by_name && (
+          <p className="text-xs text-slate-400 mt-1">
+            עודכן לאחרונה על ידי {yearAdminData.order_amount_gefen_updated_by_name} · {formatDate(yearAdminData.order_amount_gefen_updated_at)}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+
   // Meetings state
   const [meetings, setMeetings] = useState([]);
   const [meetingsLoading, setMeetingsLoading] = useState(true);
   const [notesModal, setNotesModal] = useState(null);
+  const [summaryModalFor, setSummaryModalFor] = useState(null);
+  const [showCalendarColumn, setShowCalendarColumn] = useState(false);
   const [accessGrantModal, setAccessGrantModal] = useState(null);
   const sessionCreatedMeetingIdsRef = useRef(new Set());
   const [pendingTabSwitch, setPendingTabSwitch] = useState(null);
@@ -2518,6 +2441,11 @@ export default function SchoolPage() {
   );
   const [users, setUsers] = useState([]);
   const [loadingUsers, setLoadingUsers] = useState(false);
+
+  // Draft advisor selection while editing — kept purely local until saveEdit() diffs it
+  // against originalAdvisorIds and only sends the net add/remove calls (and notifications).
+  const [draftAdvisorIds, setDraftAdvisorIds] = useState([]);
+  const [originalAdvisorIds, setOriginalAdvisorIds] = useState([]);
 
   const [isEditing, setIsEditing] = useState(false);
   const [originalForm, setOriginalForm] = useState(null);
@@ -2670,7 +2598,11 @@ export default function SchoolPage() {
     setMeetingsError("");
     try {
       const res = await axios.get(`/schools/${schoolId}/meetings`, { params: { academic_year: academicYear } });
-      setMeetings(res.data || []);
+      if (silent) {
+        setMeetings(prev => mergeMeetingsSilently(prev, res.data || []));
+      } else {
+        setMeetings(res.data || []);
+      }
     } catch {
       if (!silent) setMeetingsError("שגיאה בטעינת הפגישות — נסה לרענן");
     } finally {
@@ -2685,14 +2617,19 @@ export default function SchoolPage() {
     }
   }, [activeTab, schoolId, role, academicYear]);
 
+  useEffect(() => {
+    axios.get("/calendar/connection")
+      .then(r => setShowCalendarColumn(r.data?.org?.status === "connected"))
+      .catch(() => {});
+  }, []);
+
   useMeetingsPolling(() => loadMeetings({ silent: true }), activeTab === "meetings", [schoolId, academicYear]);
 
   // When "היועצים המלווים שנבחרו" mode is active, keep restrict_access_to in sync
   useEffect(() => {
     if (!accessLinkedToAdvisors) return;
-    const ids = schoolAdvisors.map(a => a.id).filter(Boolean);
-    setEditForm(p => ({ ...p, restrict_access_to: ids.length > 0 ? ids : null }));
-  }, [schoolAdvisors, accessLinkedToAdvisors]);
+    setEditForm(p => ({ ...p, restrict_access_to: draftAdvisorIds.length > 0 ? draftAdvisorIds : null }));
+  }, [draftAdvisorIds, accessLinkedToAdvisors]);
 
   async function startNewMeeting() {
     const defaultAdvisor = schoolAdvisors[0] || null;
@@ -2857,7 +2794,13 @@ export default function SchoolPage() {
     setTriedSave(false);
     setAccessLinkedToAdvisors(false);
     if (role === "owner" || role === "manager") {
-      axios.get(`/schools/${schoolId}/advisors`).then(res => setSchoolAdvisors(res.data || [])).catch(() => {});
+      axios.get(`/schools/${schoolId}/advisors`).then(res => {
+        const advisors = res.data || [];
+        setSchoolAdvisors(advisors);
+        const ids = advisors.map(a => a.id);
+        setDraftAdvisorIds(ids);
+        setOriginalAdvisorIds(ids);
+      }).catch(() => {});
       loadUsers();
     }
     setIsEditing(true);
@@ -2907,19 +2850,6 @@ export default function SchoolPage() {
     }
   }
 
-  async function addAdvisorToSchool(advisorId) {
-    if (!advisorId) return;
-    await axios.post(`/schools/${schoolId}/advisors`, { advisor_id: advisorId });
-    const res = await axios.get(`/schools/${schoolId}/advisors`);
-    setSchoolAdvisors(res.data || []);
-  }
-
-  async function removeAdvisorFromSchool(advisorId) {
-    await axios.delete(`/schools/${schoolId}/advisors/${advisorId}`);
-    const res = await axios.get(`/schools/${schoolId}/advisors`);
-    setSchoolAdvisors(res.data || []);
-  }
-
   async function saveEdit() {
     setSaveError("");
     setTriedSave(true);
@@ -2931,13 +2861,39 @@ export default function SchoolPage() {
       setSaveError("יש שגיאות בטופס — אנא בדוק את השדות המסומנים.");
       return false;
     }
+    const managingAdvisors = role === "owner" || role === "manager";
+    if (managingAdvisors && draftAdvisorIds.length === 0) {
+      setSaveError("יש לבחור לפחות יועץ מלווה אחד.");
+      return false;
+    }
     setSaving(true);
     try {
+      // Apply only the net advisor changes (adds before removes, so the backend's
+      // "last advisor" guard never sees a false zero-advisor state) — this is what
+      // keeps notifications limited to real, saved changes instead of every click.
+      if (managingAdvisors) {
+        const added = draftAdvisorIds.filter(id => !originalAdvisorIds.includes(id));
+        const removed = originalAdvisorIds.filter(id => !draftAdvisorIds.includes(id));
+        for (const id of added) {
+          await axios.post(`/schools/${schoolId}/advisors`, { advisor_id: id });
+        }
+        for (const id of removed) {
+          await axios.delete(`/schools/${schoolId}/advisors/${id}`);
+        }
+      }
       await axios.put(`/schools/${schoolId}`, editForm);
+      const updatedAdvisors = managingAdvisors
+        ? draftAdvisorIds.map(id => users.find(u => u.id === id)).filter(Boolean)
+        : schoolAdvisors;
+      setSchoolAdvisors(updatedAdvisors);
+      setOriginalAdvisorIds(draftAdvisorIds);
       setSchool(prev => ({
         ...prev,
         ...editForm,
-        advisor_schools: schoolAdvisors.map(adv => ({ advisor_id: adv.id, profiles: adv })),
+        advisor_schools: updatedAdvisors.map(adv => ({ advisor_id: adv.id, profiles: adv })),
+        // Keep the display-mode "גישה" row in sync — otherwise it keeps showing the
+        // pre-save snapshot from the initial GET instead of the just-saved selection.
+        restrict_access_profiles: (editForm.restrict_access_to || []).map(id => users.find(u => u.id === id)).filter(Boolean),
       }));
       setIsEditing(false);
       setOriginalForm(null);
@@ -3139,6 +3095,7 @@ export default function SchoolPage() {
           onDiscard={() => {
             setIsEditing(false);
             setOriginalForm(null);
+            setDraftAdvisorIds(originalAdvisorIds);
             blocker.proceed();
           }}
           onCancel={() => blocker.reset()}
@@ -3484,33 +3441,42 @@ export default function SchoolPage() {
                     </table>
                   </div>
 
-                  {/* ליווי — visible only to owner/manager */}
-                  {(role === "owner" || role === "manager") && <div className="mt-6 pt-5 border-t border-slate-100">
+                  {/* ליווי — advisor/access management visible only to owner/manager; order-amount field visible to all roles */}
+                  {(role === "owner" || role === "manager" || role === "advisor") && <div className="mt-6 pt-5 border-t border-slate-100">
                     <p className="text-sm font-semibold text-slate-700 text-right mb-3">ליווי</p>
                     <div className="grid grid-cols-2 gap-x-8">
                       <div>
-                        <div className="flex items-start gap-2 py-1.5">
-                          <span className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[9px]">יועץ מלווה:</span>
-                          <div className="flex-1 min-w-0">
-                            <AdvisorSearch schoolId={schoolId} assigned={schoolAdvisors} users={users}
-                              loadingUsers={loadingUsers} onAdd={addAdvisorToSchool} onRemove={removeAdvisorFromSchool} onRetry={loadUsers} />
+                        {(role === "owner" || role === "manager") && (
+                          <div className="flex items-start gap-2 py-1.5">
+                            <span className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[9px]">יועץ מלווה:</span>
+                            <div className="flex-1 min-w-0">
+                              <AdvisorSearch schoolId={schoolId} selectedIds={draftAdvisorIds} users={users}
+                                loadingUsers={loadingUsers} onChange={setDraftAdvisorIds} onRetry={loadUsers}
+                                invalid={triedSave && draftAdvisorIds.length === 0} />
+                              {triedSave && draftAdvisorIds.length === 0 && (
+                                <span className="text-xs text-red-500 mt-1 block" role="alert">יש לבחור לפחות יועץ אחד</span>
+                              )}
+                            </div>
                           </div>
-                        </div>
+                        )}
+                        {orderAmountField}
                       </div>
                       <div>
-                        <div className="flex items-start gap-2 py-1.5">
-                          <span className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 inline-flex items-center gap-1 pt-[9px]">
-                            <QuestionTooltip text="בחר למי תהיה גישה לנתוני בית הספר." />
-                            גישה:
-                          </span>
-                          <div className="flex-1 min-w-0">
-                            <AccessSelector restrictTo={editForm.restrict_access_to} users={users}
-                              loadingUsers={loadingUsers}
-                              onChange={val => { setAccessLinkedToAdvisors(false); setEditForm(p => ({ ...p, restrict_access_to: val })); }}
-                              onSelectAdvisors={() => setAccessLinkedToAdvisors(true)}
-                              schoolAdvisors={schoolAdvisors} />
+                        {(role === "owner" || role === "manager") && (
+                          <div className="flex items-start gap-2 py-1.5">
+                            <span className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 inline-flex items-center gap-1 pt-[9px]">
+                              <QuestionTooltip text="בחר למי תהיה גישה לנתוני בית הספר." />
+                              גישה:
+                            </span>
+                            <div className="flex-1 min-w-0">
+                              <AccessSelector restrictTo={editForm.restrict_access_to} users={users}
+                                loadingUsers={loadingUsers}
+                                onChange={val => { setAccessLinkedToAdvisors(false); setEditForm(p => ({ ...p, restrict_access_to: val })); }}
+                                onSelectAdvisors={() => setAccessLinkedToAdvisors(true)}
+                                schoolAdvisors={draftAdvisorIds.map(id => users.find(u => u.id === id)).filter(Boolean)} />
+                            </div>
                           </div>
-                        </div>
+                        )}
                       </div>
                     </div>
                   </div>}
@@ -3520,7 +3486,7 @@ export default function SchoolPage() {
                     <button onClick={isRequestMode ? submitFullRequest : saveEdit} disabled={saving} className="btn-green-light text-sm px-5 py-2">
                       {saving ? (isRequestMode ? "שולח..." : "שומר...") : (isRequestMode ? "הגש בקשה" : "שמור שינויים")}
                     </button>
-                    <button onClick={() => { setIsEditing(false); setIsRequestMode(false); setOriginalForm(null); setSaveError(""); setAccessLinkedToAdvisors(false); }} disabled={saving} className="btn-ghost text-sm px-5 py-2">ביטול</button>
+                    <button onClick={() => { setIsEditing(false); setIsRequestMode(false); setOriginalForm(null); setSaveError(""); setAccessLinkedToAdvisors(false); setDraftAdvisorIds(originalAdvisorIds); }} disabled={saving} className="btn-ghost text-sm px-5 py-2">ביטול</button>
                   </div>
                 </div>
 
@@ -3665,6 +3631,7 @@ export default function SchoolPage() {
                             </span>
                           ))}
                         </InfoRow>
+                        {orderAmountField}
                       </div>
                       <div>
                         <InfoRow label="גישה" tooltip="בחר למי תהיה גישה לנתוני בית הספר.">
@@ -3674,9 +3641,8 @@ export default function SchoolPage() {
                             const profiles = school?.restrict_access_profiles !== undefined
                               ? (school.restrict_access_profiles || [])
                               : (school?.restrict_access_to || []).map(id => users.find(u => u.id === id)).filter(Boolean);
-                            const visible = profiles.filter(u => u.role !== "owner");
-                            if (visible.length === 0 && loadingUsers) return <span className="text-xs text-slate-400">טוען...</span>;
-                            return visible.map(u => (
+                            if (profiles.length === 0 && loadingUsers) return <span className="text-xs text-slate-400">טוען...</span>;
+                            return profiles.map(u => (
                               <span key={u.id} className="text-xs font-medium px-2 py-0.5 rounded-full" style={{ background: "rgba(0,112,243,0.08)", color: "#1d4ed8" }}>
                                 {u.full_name || u.email}
                               </span>
@@ -3720,6 +3686,15 @@ export default function SchoolPage() {
                     setNotesModal(null);
                   }}
                   onClose={() => setNotesModal(null)}
+                />
+              )}
+              {summaryModalFor && (
+                <MeetingSummaryModal
+                  meeting={summaryModalFor}
+                  onClose={() => setSummaryModalFor(null)}
+                  onOpenNotes={(meetingId, notes, onSave) => setNotesModal({ meetingId, notes, onSave })}
+                  onSave={updateMeeting}
+                  onUploadStarted={meetingId => setMeetings(prev => prev.map(m => m.id === meetingId ? { ...m, summary_status: "processing" } : m))}
                 />
               )}
               {accessGrantModal && (
@@ -3831,6 +3806,8 @@ export default function SchoolPage() {
                   onRequestAccess={requestAdvisorAccess}
                   canDeleteMeetings={canDeleteMeetings}
                   onSendStatusReminder={sendStatusReminderFromSchool}
+                  showCalendarColumn={showCalendarColumn}
+                  onOpenSummary={setSummaryModalFor}
                 />
                 </>
               )}

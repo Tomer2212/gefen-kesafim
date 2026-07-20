@@ -1,0 +1,23 @@
+name: Process Booking Email Queue
+
+on:
+  schedule:
+    # Every 5 minutes — drains a small batch (15-20) of pending "סוכן ניהול" booking-request
+    # emails so a manager's confirmed send goes out promptly without exceeding Outlook's
+    # per-minute sending rate limits.
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call booking email queue endpoint
+        run: |
+          URL="${BACKEND_URL%/}"
+          curl -sf -X POST "${URL}/schools/meetings/process-booking-email-queue" \
+            -H "X-Cron-Secret: ${CRON_SECRET}" \
+            --max-time 60
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}

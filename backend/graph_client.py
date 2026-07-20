@@ -582,6 +582,36 @@ def _check_meeting_conflict(db, org_id: str, advisor_id: str, meeting: dict, exc
     return False
 
 
+def send_mail_as_advisor(db, org_id: str, advisor_id: str, subject: str, html_body: str, to_email: str) -> None:
+    """Sends an email as the resolved advisor's real mailbox via Graph application-permission
+    Mail.Send (POST /users/{email}/sendMail — same authorization model app-only Calendars.ReadWrite
+    already uses for /users/{email}/events, just a different Graph permission).
+
+    Unlike the calendar-sync functions in this file (which are deliberately non-fatal — a failed
+    sync shouldn't block saving a meeting), this RAISES on failure so callers on a paid-action path
+    (the booking-request email queue) can mark the row 'failed' with the real error instead of
+    silently losing it.
+    """
+    token = _get_app_only_token(db, org_id)
+    email = _resolve_advisor_email(db, advisor_id)
+    if not email:
+        raise RuntimeError(f"could not resolve mailbox for advisor {advisor_id}")
+
+    payload = {
+        "message": {
+            "subject": subject,
+            "body": {"contentType": "HTML", "content": html_body},
+            "toRecipients": [{"emailAddress": {"address": to_email}}],
+        },
+        "saveToSentItems": True,
+    }
+    resp = _request_with_retry(
+        "POST", f"{GRAPH_BASE}/users/{email}/sendMail",
+        headers=_headers(token), json=payload, timeout=15,
+    )
+    resp.raise_for_status()
+
+
 def sync_meeting_create(db, org_id: str, meeting: dict, subject: str | None = None) -> dict:
     """Creates one event per advisor in meeting['advisor_ids']. Returns the calendar_sync map."""
     sync_map: dict = {}

@@ -4,6 +4,7 @@ import * as XLSX from "xlsx";
 import { DeleteMeetingModal } from "../components/meetings/DeleteMeetingModal";
 import { MeetingsBulkActionBar } from "../components/meetings/MeetingsBulkActionBar";
 import { MeetingsTable } from "../components/meetings/MeetingsTable";
+import { MeetingSummaryModal } from "../components/meetings/MeetingSummaryModal";
 import { NotesModal } from "../components/meetings/NotesModal";
 import { SchoolPickerModal, SchoolPickerPopover, schoolLabel } from "../components/meetings/SchoolPickerCell";
 import { MEETING_STATUS_OPTIONS, MEETING_TYPE_OPTIONS, STATUS_MAP, formatMeetingDate } from "../components/meetings/constants";
@@ -12,6 +13,7 @@ import { DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
 import { getMissingCriticalFields, isMeetingIncomplete } from "../components/meetings/meetingCompleteness";
 import { buildSchoolContacts } from "../components/meetings/schoolContacts";
 import { useMeetingsPolling } from "../hooks/useMeetingsPolling";
+import { mergeMeetingsSilently, visibleDateBounds } from "../components/meetings/mergeMeetings";
 
 const TODAY = new Date().toISOString().slice(0, 10);
 const DEFAULT_FILTERS = { status: "scheduled", date_from: null, date_to: TODAY, advisor_id: null, school_id: null };
@@ -51,8 +53,9 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
   const dotsRef = useRef(null);
   const [selectedIds, setSelectedIds] = useState({});
   const [notesModal, setNotesModal] = useState(null);
+  const [summaryModalFor, setSummaryModalFor] = useState(null);
+  const [showCalendarColumn, setShowCalendarColumn] = useState(false);
   const [schoolPickerFor, setSchoolPickerFor] = useState(null);
-  const [deleteConfirmId, setDeleteConfirmId] = useState(null);
   const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false);
 
   // Status reminder states
@@ -88,8 +91,26 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
       setMeetings(prev => prev.filter(m => !ids.includes(m.id)));
       ids.forEach(id => sessionCreatedMeetingIdsRef.current.delete(id));
     },
+    // Applies a read-only display filter coming from the "סוכן ניהול" chat widget — never
+    // creates/updates/deletes meetings or touches the Outlook sync flow, only re-runs the
+    // existing GET /schools/meetings/all query with different filter params (same as manual
+    // filter UI use) and updates the client-side text filters.
+    applyAgentFilters: (filterObj) => {
+      const next = {
+        ...DEFAULT_FILTERS,
+        ...filters,
+        ...(filterObj?.status !== undefined ? { status: filterObj.status } : {}),
+        ...(filterObj?.date_from !== undefined ? { date_from: filterObj.date_from } : {}),
+        ...(filterObj?.date_to !== undefined ? { date_to: filterObj.date_to } : {}),
+        ...(filterObj?.advisor_id !== undefined ? { advisor_id: filterObj.advisor_id } : {}),
+        ...(filterObj?.school_id !== undefined ? { school_id: filterObj.school_id } : {}),
+      };
+      setFilters(next);
+      if (filterObj?.search !== undefined) setNameFilter(filterObj.search || "");
+      loadAllMeetings(next);
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [incompleteSessionMeetings, meetings]);
+  }), [incompleteSessionMeetings, meetings, filters]);
 
   async function loadAllMeetings(activeFilters, year = academicYear, { silent } = {}) {
     if (!silent) setLoading(true);
@@ -97,13 +118,25 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
     try {
       const params = {};
       if (activeFilters.status) params.status = activeFilters.status;
-      if (activeFilters.date_from) params.date_from = activeFilters.date_from;
-      if (activeFilters.date_to) params.date_to = activeFilters.date_to;
+      if (!silent) {
+        if (activeFilters.date_from) params.date_from = activeFilters.date_from;
+        if (activeFilters.date_to) params.date_to = activeFilters.date_to;
+      } else {
+        // Bound the silent query to what's actually on screen right now — see
+        // visibleDateBounds' comment for why we can't just drop the date filter.
+        const bounds = visibleDateBounds(meetings);
+        if (bounds.date_from) params.date_from = bounds.date_from;
+        if (bounds.date_to) params.date_to = bounds.date_to;
+      }
       if (activeFilters.advisor_id) params.advisor_id = activeFilters.advisor_id;
       if (activeFilters.school_id) params.school_id = activeFilters.school_id;
       params.academic_year = year;
       const res = await axios.get("/schools/meetings/all", { params });
-      setMeetings(res.data || []);
+      if (silent) {
+        setMeetings(prev => mergeMeetingsSilently(prev, res.data || []));
+      } else {
+        setMeetings(res.data || []);
+      }
     } catch {
       if (!silent) setError("שגיאה בטעינת הפגישות — נסה לרענן");
     } finally {
@@ -150,6 +183,12 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
     loadOrgSchools();
     if (!users || users.length === 0) loadUsers?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    axios.get("/calendar/connection")
+      .then(r => setShowCalendarColumn(r.data?.org?.status === "connected"))
+      .catch(() => {});
   }, []);
 
   function setServerFilter(key, val) {
@@ -248,10 +287,28 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
   }
 
   async function createMeetingForSchool(school) {
-    const payload = { status: "scheduled", meeting_type: "remote", advisor_ids: [], participants: [], reminder_enabled: false, academic_year: academicYear };
+    // Same default-advisor convenience already used on the school card (SchoolPage.jsx):
+    // pre-fill the first linked advisor, still editable — just saves a click in the
+    // common case of one advisor per school.
+    let defaultAdvisor = null;
+    try {
+      const advisorsRes = await axios.get(`/schools/${school.id}/advisors`);
+      defaultAdvisor = (advisorsRes.data || [])[0] || null;
+    } catch {
+      // non-fatal — meeting creation proceeds without a pre-filled advisor
+    }
+    const payload = {
+      status: "scheduled", meeting_type: "remote",
+      advisor_ids: defaultAdvisor ? [defaultAdvisor.id] : [],
+      participants: [], reminder_enabled: false, academic_year: academicYear,
+    };
     try {
       const res = await axios.post(`/schools/${school.id}/meetings`, payload);
-      const newMeeting = { ...res.data, advisor_profiles: [], school_name: school.name, school_symbol: school.symbol, school_city: school.city };
+      const newMeeting = {
+        ...res.data,
+        advisor_profiles: defaultAdvisor ? [defaultAdvisor] : [],
+        school_name: school.name, school_symbol: school.symbol, school_city: school.city,
+      };
       setMeetings(prev => [newMeeting, ...prev]);
       sessionCreatedMeetingIdsRef.current.add(newMeeting.id);
     } catch (err) {
@@ -521,6 +578,16 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
         />
       )}
 
+      {summaryModalFor && (
+        <MeetingSummaryModal
+          meeting={summaryModalFor}
+          onClose={() => setSummaryModalFor(null)}
+          onOpenNotes={(meetingId, notes, onSave) => setNotesModal({ meetingId, notes, onSave })}
+          onSave={updateMeeting}
+          onUploadStarted={meetingId => setMeetings(prev => prev.map(m => m.id === meetingId ? { ...m, summary_status: "processing" } : m))}
+        />
+      )}
+
       {schoolPickerFor === "new" && (
         <SchoolPickerModal schools={schools} onConfirm={createMeetingForSchool} onCancel={() => setSchoolPickerFor(null)} />
       )}
@@ -531,13 +598,6 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
           confirmText={`האם למחוק ${selectedCount} פגישות לצמיתות? לא ניתן לשחזר פעולה זו.`}
           onConfirm={bulkDelete}
           onCancel={() => setBulkDeleteConfirm(false)}
-        />
-      )}
-
-      {deleteConfirmId && (
-        <DeleteMeetingModal
-          onConfirm={() => { deleteMeeting(deleteConfirmId); setDeleteConfirmId(null); }}
-          onCancel={() => setDeleteConfirmId(null)}
         />
       )}
 
@@ -695,7 +755,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
             usersWithoutAccess={[]}
             contactsFor={m => buildSchoolContacts(schools.find(s => s.id === m.school_id))}
             onSave={updateMeeting}
-            onDelete={id => setDeleteConfirmId(id)}
+            onDelete={deleteMeeting}
             onOpenNotes={(meetingId, notes, onSave) => setNotesModal({ meetingId, notes, onSave })}
             onRequestAccess={() => {}}
             canDeleteMeetings={canDeleteMeetings}
@@ -707,6 +767,8 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
             onToggleSelect={toggleSelect}
             onToggleSelectAll={toggleSelectAll}
             onSendStatusReminder={sendStatusReminder}
+            showCalendarColumn={showCalendarColumn}
+            onOpenSummary={setSummaryModalFor}
           />
           {currentSchoolPickerMeeting && (
             <SchoolPickerPopover

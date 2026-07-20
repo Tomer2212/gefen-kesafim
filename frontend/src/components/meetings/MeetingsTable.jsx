@@ -50,6 +50,7 @@ export function MeetingsTable({
   showSchoolColumn, schoolLabelFor, onOpenSchoolPicker,
   selectable, selectedIds, onToggleSelect, onToggleSelectAll,
   onSendStatusReminder, hideAdvisorColumn,
+  showCalendarColumn, onOpenSummary,
 }) {
   const [sortField, setSortField] = useState(null); // null | "date" | "status" | "advisor" | "type"
   const [sortDir, setSortDir]   = useState("asc");
@@ -125,9 +126,9 @@ export function MeetingsTable({
           onCancel={() => setPendingDeleteId(null)}
         />
       )}
-      <div className="glass-card rounded-2xl overflow-hidden border border-slate-200 flex flex-col" style={{ minHeight: "calc(100vh - 240px)" }}>
-        <div className="flex-1">
-          <table className="w-full text-right border-collapse">
+      <div className="glass-card rounded-2xl border border-slate-200 flex flex-col" style={{ minHeight: "calc(100vh - 240px)" }}>
+        <div className="flex-1 overflow-x-auto rounded-t-2xl">
+          <table className="w-full text-right border-collapse" style={{ minWidth: "1200px" }}>
             <thead>
               <tr className="border-b border-slate-200 bg-slate-50/80">
                 {selectable && (
@@ -160,6 +161,10 @@ export function MeetingsTable({
                 <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500">
                   <ReminderHeaderTooltip />
                 </th>
+                {showCalendarColumn && (
+                  <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap" style={{ width: "95px" }}>יומן</th>
+                )}
+                <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">סיכום פגישה</th>
                 {canDeleteMeetings && <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500"></th>}
               </tr>
             </thead>
@@ -179,13 +184,15 @@ export function MeetingsTable({
                   onToggleSelect={onToggleSelect}
                   onSendStatusReminder={onSendStatusReminder}
                   hideAdvisorColumn={hideAdvisorColumn}
+                  showCalendarColumn={showCalendarColumn}
+                  onOpenSummary={onOpenSummary}
                 />
               ))}
             </tbody>
           </table>
         </div>
         {/* Summary footer */}
-        <div className="border-t border-slate-200 bg-slate-50/80 px-4 py-2.5 flex items-center gap-6 flex-shrink-0" dir="rtl">
+        <div className="border-t border-slate-200 bg-slate-50/80 px-4 py-2.5 flex items-center gap-6 flex-shrink-0 rounded-b-2xl" dir="rtl">
           <span className="text-sm text-slate-500">
             סה"כ פגישות שבוצעו: <strong className="text-slate-800 font-semibold">{completedMeetings.length}</strong>
           </span>

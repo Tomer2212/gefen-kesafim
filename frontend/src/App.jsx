@@ -27,6 +27,7 @@ import UnsubscribePage from "./pages/UnsubscribePage";
 import ProfilePage from "./pages/ProfilePage";
 import AddSchoolPage from "./pages/AddSchoolPage";
 import MeetingUploadPage from "./pages/MeetingUploadPage";
+import MeetingBookingPage from "./pages/MeetingBookingPage";
 
 export const SessionContext = createContext(undefined);
 
@@ -94,6 +95,7 @@ const router = createBrowserRouter([
       { path: "/set-password", element: <SetPasswordPage /> },
       { path: "/unsubscribe", element: <UnsubscribePage /> },
       { path: "/upload/:token", element: <MeetingUploadPage /> },
+      { path: "/book/:token", element: <MeetingBookingPage /> },
       { path: "*", element: <Navigate to="/" replace /> },
     ],
   },
