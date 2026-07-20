@@ -1,31 +1,69 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { DayScheduleBlocks } from "./DayScheduleBlocks";
 import { HEBREW_MONTHS } from "./constants";
 import { classifyDay, computeSegments, fetchMonthBusyByDay } from "./dayScheduleUtils";
 
 const DOT_COLOR = { green: "bg-green-500", orange: "bg-amber-500", red: "bg-red-500" };
 
-export function DatePickerPopover({ value, onChange, onClose, advisorId }) {
+// Rendered via a portal into <body> with `position: fixed`, positioned from the anchor
+// element's bounding rect — same reasoning as ScheduleTooltip in MeetingRow.jsx: a plain
+// `position: absolute` popover gets silently clipped by any ancestor with `overflow` set
+// (the table's scroll container, in particular).
+export function DatePickerPopover({ value, onChange, onClose, advisorId, ownEventId, anchorRef }) {
   const today = new Date();
   const initDate = value ? new Date(value) : today;
   const [viewYear, setViewYear] = useState(initDate.getFullYear());
   const [viewMonth, setViewMonth] = useState(initDate.getMonth());
   // Map of day-of-month -> [{ startHM, endHM, subject }] busy time ranges for that day.
   const [busyByDay, setBusyByDay] = useState({});
+  const [busyLoading, setBusyLoading] = useState(true);
+  const [busyFailed, setBusyFailed] = useState(false);
   const [hoverDay, setHoverDay] = useState(null);
+  const [pos, setPos] = useState(null);
   const ref = useRef(null);
 
+  useLayoutEffect(() => {
+    if (!anchorRef?.current) { setPos(null); return; }
+    const rect = anchorRef.current.getBoundingClientRect();
+    setPos({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
+  }, [anchorRef]);
+
   useEffect(() => {
-    function handler(e) { if (ref.current && !ref.current.contains(e.target)) onClose(); }
+    function handler(e) {
+      if (ref.current && !ref.current.contains(e.target) && !anchorRef?.current?.contains(e.target)) onClose();
+    }
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
+  }, [onClose, anchorRef]);
+
+  // A fixed-position popover doesn't move with its anchor — scrolling the page (or the
+  // table's own scroll container) would otherwise leave it floating over the wrong row.
+  // Closing it (rather than repositioning) matches the common floating-UI convention and
+  // avoids tracking scroll on every possible ancestor container.
+  useEffect(() => {
+    const handler = () => onClose();
+    window.addEventListener("scroll", handler, { capture: true, passive: true });
+    return () => window.removeEventListener("scroll", handler, { capture: true });
   }, [onClose]);
 
   // Free/Busy overlay — shows which days (and exact time ranges) the advisor already
   // has Outlook events on, so scheduling doesn't require leaving the app to check.
   useEffect(() => {
     let cancelled = false;
-    fetchMonthBusyByDay(advisorId, viewYear, viewMonth).then(byDay => { if (!cancelled) setBusyByDay(byDay); });
+    setBusyLoading(true);
+    fetchMonthBusyByDay(advisorId, viewYear, viewMonth).then(byDay => {
+      if (cancelled) return;
+      if (byDay === null) {
+        // Couldn't check — keep whatever was last successfully shown rather than
+        // wiping it to an empty (falsely "free"-looking) state.
+        setBusyFailed(true);
+      } else {
+        setBusyByDay(byDay);
+        setBusyFailed(false);
+      }
+      setBusyLoading(false);
+    });
     return () => { cancelled = true; };
   }, [advisorId, viewYear, viewMonth]);
 
@@ -42,66 +80,85 @@ export function DatePickerPopover({ value, onChange, onClose, advisorId }) {
 
   const selected = value ? new Date(value) : null;
 
-  return (
-    <div ref={ref} className="absolute z-50 bg-white border border-slate-200 rounded-2xl shadow-xl p-3" style={{ top: "calc(100% + 4px)", right: 0, width: 390 }} dir="rtl">
-      <div className="flex items-center justify-between mb-2 gap-1">
-        <button type="button" onClick={() => { if (viewMonth === 0) { setViewMonth(11); setViewYear(y => y - 1); } else setViewMonth(m => m - 1); }}
-          className="p-1 hover:bg-slate-100 rounded-lg text-slate-500 text-xs font-bold">→</button>
-        <span className="text-sm font-semibold text-slate-700">{HEBREW_MONTHS[viewMonth]} {viewYear}</span>
-        <button type="button" onClick={() => { if (viewMonth === 11) { setViewMonth(0); setViewYear(y => y + 1); } else setViewMonth(m => m + 1); }}
-          className="p-1 hover:bg-slate-100 rounded-lg text-slate-500 text-xs font-bold">←</button>
-      </div>
-      <div className="grid grid-cols-7 text-center text-[10px] text-slate-400 mb-1">
-        {["א","ב","ג","ד","ה","ו","ש"].map(d => <span key={d}>{d}</span>)}
-      </div>
-      <div className="grid grid-cols-7 gap-0.5">
-        {cells.map((day, i) => {
-          if (!day) return <span key={`b${i}`} />;
-          const isSelected = selected && selected.getDate() === day && selected.getMonth() === viewMonth && selected.getFullYear() === viewYear;
-          const isToday = today.getDate() === day && today.getMonth() === viewMonth && today.getFullYear() === viewYear;
-          const dow = new Date(viewYear, viewMonth, day).getDay(); // 0=Sun..6=Sat
-          const isWorkday = advisorId && dow >= 0 && dow <= 4; // Sunday–Thursday
-          const dotStatus = isWorkday ? classifyDay(busyByDay[day]) : null;
-          return (
-            <button key={day} type="button" onClick={() => select(day)}
-              onMouseEnter={() => setHoverDay(day)}
-              onMouseLeave={() => setHoverDay(h => h === day ? null : h)}
-              title={dotStatus ? "פרטי הזמינות של היועץ למטה" : undefined}
-              className={`relative w-7 h-7 rounded-lg text-xs font-medium transition-colors mx-auto
-                ${isSelected ? "bg-blue-600 text-white" : isToday ? "bg-blue-50 text-blue-700" : "hover:bg-slate-100 text-slate-700"}`}>
-              {day}
-              {dotStatus && (
-                <span aria-hidden="true" className={`absolute bottom-0.5 left-1/2 -translate-x-1/2 w-1.5 h-1.5 rounded-full ${isSelected ? "bg-white" : DOT_COLOR[dotStatus]}`} />
-              )}
-            </button>
-          );
-        })}
+  if (!pos) return null;
+
+  const displayDay = hoverDay ?? (selected && selected.getMonth() === viewMonth && selected.getFullYear() === viewYear ? selected.getDate() : null);
+  const segments = displayDay ? computeSegments(busyByDay[displayDay]) : null;
+
+  return createPortal(
+    // Two columns side by side: calendar on the right (first in RTL document order),
+    // day schedule on the left — instead of stacking them vertically, which made the
+    // whole popover awkwardly tall once the schedule text got bigger.
+    <div ref={ref} className="fixed z-[9999] bg-white border border-slate-200 rounded-2xl shadow-xl p-3 flex items-start gap-3" style={{ top: pos.top, right: pos.right }} dir="rtl">
+      <div style={{ width: 390 }}>
+        <div className="flex items-center justify-between mb-2 gap-1">
+          <button type="button" onClick={() => { if (viewMonth === 0) { setViewMonth(11); setViewYear(y => y - 1); } else setViewMonth(m => m - 1); }}
+            className="p-1 hover:bg-slate-100 rounded-lg text-slate-500 text-xs font-bold">→</button>
+          <span className="text-sm font-semibold text-slate-700">{HEBREW_MONTHS[viewMonth]} {viewYear}</span>
+          <button type="button" onClick={() => { if (viewMonth === 11) { setViewMonth(0); setViewYear(y => y + 1); } else setViewMonth(m => m + 1); }}
+            className="p-1 hover:bg-slate-100 rounded-lg text-slate-500 text-xs font-bold">←</button>
+        </div>
+        <div className="grid grid-cols-7 text-center text-[10px] text-slate-400 mb-1">
+          {["א","ב","ג","ד","ה","ו","ש"].map(d => <span key={d}>{d}</span>)}
+        </div>
+        <div className="grid grid-cols-7 gap-0.5">
+          {cells.map((day, i) => {
+            if (!day) return <span key={`b${i}`} />;
+            const isSelected = selected && selected.getDate() === day && selected.getMonth() === viewMonth && selected.getFullYear() === viewYear;
+            const isToday = today.getDate() === day && today.getMonth() === viewMonth && today.getFullYear() === viewYear;
+            const dow = new Date(viewYear, viewMonth, day).getDay(); // 0=Sun..6=Sat
+            const isWorkday = advisorId && dow >= 0 && dow <= 4; // Sunday–Thursday
+            // While the month's data is still loading, don't guess "green" (free) — show a
+            // neutral dot instead, since an empty ranges list right now just means "not
+            // fetched yet", not "confirmed free".
+            const dotStatus = isWorkday ? (busyLoading ? "loading" : classifyDay(busyByDay[day])) : null;
+            return (
+              <button key={day} type="button" onClick={() => select(day)}
+                onMouseEnter={() => setHoverDay(day)}
+                onMouseLeave={() => setHoverDay(h => h === day ? null : h)}
+                title={dotStatus === "loading" ? "טוען זמינות..." : dotStatus ? "פרטי הזמינות של היועץ למטה" : undefined}
+                className={`relative w-7 h-7 rounded-lg text-xs font-medium transition-colors mx-auto
+                  ${isSelected ? "bg-blue-600 text-white" : isToday ? "bg-blue-50 text-blue-700" : "hover:bg-slate-100 text-slate-700"}`}>
+                {day}
+                {dotStatus && (
+                  <span aria-hidden="true" className={`absolute bottom-0.5 left-1/2 -translate-x-1/2 w-1.5 h-1.5 rounded-full ${
+                    isSelected ? "bg-white" : dotStatus === "loading" ? "bg-slate-300 animate-pulse" : DOT_COLOR[dotStatus]
+                  }`} />
+                )}
+              </button>
+            );
+          })}
+        </div>
+        {advisorId && (
+          <div className="flex items-center gap-3 mt-2 pt-2 border-t border-slate-100 text-[9px] text-slate-400">
+            <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-green-500" aria-hidden="true" /> פנוי</span>
+            <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-amber-500" aria-hidden="true" /> חלקית</span>
+            <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-red-500" aria-hidden="true" /> עמוס</span>
+          </div>
+        )}
       </div>
       {advisorId && (
-        <div className="flex items-center gap-3 mt-2 pt-2 border-t border-slate-100 text-[9px] text-slate-400">
-          <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-green-500" aria-hidden="true" /> פנוי</span>
-          <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-amber-500" aria-hidden="true" /> חלקית</span>
-          <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-red-500" aria-hidden="true" /> עמוס</span>
+        <div className="border-r border-slate-100 pr-3 text-[18px]" style={{ width: 420, minHeight: 300 }}>
+          {busyLoading ? (
+            <div className="text-slate-400 flex items-center justify-center text-center px-4 py-4 h-full">
+              טוען זמינות...
+            </div>
+          ) : !displayDay ? (
+            <div className="text-slate-400 flex items-center justify-center text-center px-4 py-4 h-full">
+              רחף/י מעל יום כדי לראות את לוח הזמנים המלא (08:00–19:00)
+            </div>
+          ) : (
+            <>
+              {busyFailed && (
+                <p className="text-amber-600 text-sm mb-2">⚠ לא ניתן היה לעדכן את הזמינות — הנתונים עשויים להיות לא מעודכנים</p>
+              )}
+              <span className="text-black block mb-1">לוח זמנים ב-{displayDay}/{viewMonth + 1}:</span>
+              <DayScheduleBlocks segments={segments} ownEventId={ownEventId} />
+            </>
+          )}
         </div>
       )}
-      {advisorId && (() => {
-        const displayDay = hoverDay ?? (selected && selected.getMonth() === viewMonth && selected.getFullYear() === viewYear ? selected.getDate() : null);
-        const segments = displayDay ? computeSegments(busyByDay[displayDay]) : null;
-        return (
-          <div className="mt-2 pt-2 border-t border-slate-100 text-[11px]" style={{ minHeight: 60 }}>
-            {!displayDay ? (
-              <div className="text-slate-400 flex items-center justify-center text-center px-4 py-4">
-                רחף/י מעל יום כדי לראות את לוח הזמנים המלא (08:00–19:00)
-              </div>
-            ) : (
-              <>
-                <span className="text-black block mb-1">לוח זמנים ב-{displayDay}/{viewMonth + 1}:</span>
-                <DayScheduleBlocks segments={segments} />
-              </>
-            )}
-          </div>
-        );
-      })()}
-    </div>
+    </div>,
+    document.body,
   );
 }

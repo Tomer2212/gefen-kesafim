@@ -64,7 +64,7 @@ export default function AdminIntegrationsTab() {
       )}
 
       <p className="text-slate-500 text-sm mb-6">
-        חיבור יומן ארגוני מאפשר לקבוע פגישות במערכת ולראות אותן אוטומטית ביומן ה-Outlook של היועצים, וגם להציג את זמינות היועץ בזמן קביעת פגישה.
+        חיבור יומן ארגוני מאפשר לקבוע פגישות במערכת ולראות אותן אוטומטית ביומן ה-Outlook של היועצים, וגם להציג את זמינות היועץ בזמן קביעת פגישה. החיבור הזה גם מאפשר ל"סוכן ניהול" לשלוח בקשות שריון פגישה ישירות מתיבת המייל האמיתית של היועץ.
       </p>
 
       {loading ? (
@@ -94,14 +94,14 @@ export default function AdminIntegrationsTab() {
             </button>
             <button
               onClick={handleConnectOutlook}
-              disabled={connecting || isConnected}
+              disabled={connecting}
               className={`px-4 py-2 rounded-xl text-sm font-medium transition-colors ${
                 isConnected
-                  ? "bg-green-50 text-green-700 cursor-default"
-                  : "bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60"
-              }`}
+                  ? "bg-green-50 text-green-700 hover:bg-green-100"
+                  : "bg-blue-600 text-white hover:bg-blue-700"
+              } disabled:opacity-60`}
             >
-              {isConnected ? "מחובר ✓" : connecting ? "מתחבר..." : "חבר יומן ארגוני"}
+              {isConnected ? "מחובר ✓ · עדכן הרשאות" : connecting ? "מתחבר..." : "חבר יומן ארגוני"}
             </button>
           </div>
         </div>

@@ -1182,6 +1182,13 @@ def unassign_advisor(
 ):
     _require_manager(user)
     db = get_admin_client()
+    existing = db.table("advisor_schools").select("advisor_id").eq("school_id", school_id).execute()
+    current_ids = [r["advisor_id"] for r in (existing.data or [])]
+    if advisor_id in current_ids and len(current_ids) <= 1:
+        raise HTTPException(
+            status_code=400,
+            detail="לא ניתן להסיר את היועץ היחיד המשויך לבית הספר. יש לשייך יועץ אחר לפני ההסרה.",
+        )
     try:
         school_row = db.table("schools").select("name").eq("id", school_id).execute()
         school_name = school_row.data[0]["name"] if school_row.data else "בית ספר"
@@ -2366,6 +2373,94 @@ def send_due_reminders(request: Request):
     return {"ok": True, "sent": sent, "failed": failed, "skipped_meetings": skipped_meetings, "total_due": len(meetings)}
 
 
+@router.post("/meetings/process-booking-email-queue")
+def process_booking_email_queue(request: Request):
+    """Cron-triggered (same GitHub Actions convention as send-due-reminders). Drains a small
+    batch of pending 'סוכן ניהול' booking-request emails, rate-limiting bulk sends against
+    Microsoft Graph the same way the existing reminder cron already does for its own queue."""
+    if not CRON_SECRET or request.headers.get("X-Cron-Secret") != CRON_SECRET:
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+    import booking_logic
+    from booking_draft_state import _update_draft
+
+    db = get_admin_client()
+    BATCH_SIZE = 20
+    rows = (
+        db.table("meeting_booking_email_queue")
+        .select("*")
+        .eq("status", "pending")
+        .order("created_at")
+        .limit(BATCH_SIZE)
+        .execute()
+        .data or []
+    )
+
+    sent, failed = 0, 0
+    for row in rows:
+        try:
+            school = db.table("schools").select(
+                "id, name, secretary_name, secretary_email, finance_contact_name, finance_contact_email"
+            ).eq("id", row["school_id"]).execute().data
+            school = school[0] if school else None
+            advisor = db.table("profiles").select("id, full_name").eq("id", row["advisor_id"]).execute().data
+            advisor = advisor[0] if advisor else None
+            token_row = db.table("meeting_booking_tokens").select("token, months").eq("id", row["token_id"]).execute().data
+            token_row = token_row[0] if token_row else None
+
+            if not school or not advisor or not token_row:
+                raise ValueError("missing school/advisor/token for queued row")
+
+            to_email = school.get("secretary_email") or school.get("finance_contact_email")
+            recipient_name = school.get("secretary_name") or school.get("finance_contact_name") or ""
+            if not to_email:
+                raise ValueError(f"school {row['school_id']} has no secretary/finance email")
+
+            booking_url = f"{os.getenv('APP_URL', '')}/book/{token_row['token']}"
+            html = booking_logic.build_booking_request_email_html(
+                recipient_name=recipient_name,
+                school_name=school["name"],
+                advisor_name=advisor.get("full_name") or "",
+                months=token_row["months"],
+                booking_url=booking_url,
+            )
+            subject = f"קביעת פגישה - {school['name']}"
+            booking_logic.send_booking_request_email(row["org_id"], row["advisor_id"], to_email, subject, html)
+
+            db.table("meeting_booking_email_queue").update({
+                "status": "sent", "attempted_at": "now()",
+            }).eq("id", row["id"]).execute()
+            sent += 1
+        except Exception as exc:
+            logger.warning("process_booking_email_queue: failed to send row %s: %s", row["id"], exc)
+            try:
+                db.table("meeting_booking_email_queue").update({
+                    "status": "failed", "error_message": str(exc), "attempted_at": "now()",
+                }).eq("id", row["id"]).execute()
+            except Exception as log_exc:
+                logger.error("process_booking_email_queue: failed to mark row %s failed: %s", row["id"], log_exc)
+            failed += 1
+
+    # Once a draft has zero remaining pending rows, flip it to 'sent'.
+    try:
+        draft_org_map = {r["draft_id"]: r["org_id"] for r in rows}
+        for draft_id, org_id in draft_org_map.items():
+            remaining = (
+                db.table("meeting_booking_email_queue")
+                .select("id")
+                .eq("draft_id", draft_id)
+                .eq("status", "pending")
+                .execute()
+                .data or []
+            )
+            if not remaining:
+                _update_draft(draft_id, org_id, {"status": "sent"})
+    except Exception as exc:
+        logger.warning("process_booking_email_queue: failed to finalize draft statuses (non-fatal): %s", exc)
+
+    return {"ok": True, "sent": sent, "failed": failed, "batch_size": len(rows)}
+
+
 def _reconcile_meeting_from_outlook(db, org_id: str, meeting: dict) -> dict:
     """Shared by the periodic poll (backup safety net) and the real-time webhook
     handler: checks every synced advisor's event for this meeting and applies any
@@ -3110,6 +3205,71 @@ def cancel_user_future_meetings(user_id: str, user: Annotated[dict, Depends(get_
             logger.warning("cancel meeting %s failed (non-fatal): %s", m["id"], exc)
         db.table("meetings").delete().eq("id", m["id"]).execute()
     return {"cancelled": len(meetings)}
+
+
+def _get_user_sole_schools(db, user_id: str) -> list[dict]:
+    """Schools where user_id is the only row in advisor_schools — i.e. deleting this
+    user would leave the school with no advisor at all."""
+    assigned = db.table("advisor_schools").select("school_id").eq("advisor_id", user_id).execute()
+    school_ids = [r["school_id"] for r in (assigned.data or [])]
+    if not school_ids:
+        return []
+    all_rows = db.table("advisor_schools").select("school_id, advisor_id").in_("school_id", school_ids).execute().data or []
+    counts: dict[str, int] = {}
+    for r in all_rows:
+        counts[r["school_id"]] = counts.get(r["school_id"], 0) + 1
+    return [sid for sid in school_ids if counts.get(sid, 0) <= 1]
+
+
+@router.get("/users/{user_id}/sole-schools")
+def get_user_sole_schools(user_id: str, user: Annotated[dict, Depends(get_current_user)]):
+    """Schools this advisor is the sole advisor of — shown before deleting them, so the
+    caller can transfer these schools to another advisor first. A school can never be
+    left without at least one advisor."""
+    if user["role"] not in ("owner", "manager"):
+        raise HTTPException(status_code=403, detail="אין הרשאה")
+    db = get_admin_client()
+    sole_ids = _get_user_sole_schools(db, user_id)
+    if not sole_ids:
+        return []
+    rows = db.table("schools").select("id, name, city").in_("id", sole_ids).execute().data or []
+    return rows
+
+
+class TransferSchoolsIn(BaseModel):
+    new_advisor_id: str
+
+
+@router.post("/users/{user_id}/schools/transfer")
+def transfer_user_sole_schools(user_id: str, body: TransferSchoolsIn, user: Annotated[dict, Depends(get_current_user)]):
+    """Reassigns this advisor's sole-advisor schools to another advisor, so the school is
+    never left without at least one advisor once the user is deleted."""
+    if user["role"] not in ("owner", "manager"):
+        raise HTTPException(status_code=403, detail="אין הרשאה")
+    db = get_admin_client()
+    sole_ids = _get_user_sole_schools(db, user_id)
+    if not sole_ids:
+        return {"transferred": 0, "schools": []}
+    srows = db.table("schools").select("id, name").in_("id", sole_ids).execute().data or []
+    names_map = {s["id"]: s["name"] for s in srows}
+    for sid in sole_ids:
+        db.table("advisor_schools").upsert({"advisor_id": body.new_advisor_id, "school_id": sid}).execute()
+    db.table("advisor_schools").delete().eq("advisor_id", user_id).in_("school_id", sole_ids).execute()
+    try:
+        _create_notifications(db, [{
+            "recipient_id": body.new_advisor_id,
+            "type": "advisor_assigned",
+            "school_id": sid,
+            "data": {
+                "title": f"שויכת לבית הספר {names_map.get(sid, '')}",
+                "school_name": names_map.get(sid, ""),
+                "sender_name": user.get("full_name", ""),
+                "deeplink": f"/school/{sid}",
+            }
+        } for sid in sole_ids], pref_key="notify_advisor_assignment")
+    except Exception as exc:
+        logger.warning("advisor_assigned notification failed (non-fatal): %s", exc)
+    return {"transferred": len(sole_ids), "schools": [{"id": sid, "name": names_map.get(sid)} for sid in sole_ids]}
 
 
 # ---------------------------------------------------------------------------

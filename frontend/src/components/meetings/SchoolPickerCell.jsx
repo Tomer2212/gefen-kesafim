@@ -6,6 +6,12 @@ function schoolLabel(s) {
 }
 
 function SchoolResultsList({ schools, query, setQuery, pendingId, setPendingId, onConfirm, onCancel }) {
+  // onConfirm (e.g. createMeetingForSchool) is async and does real work (a school-
+  // advisors lookup, then a POST) before the modal closes — with no per-click feedback,
+  // a user who doesn't see anything happen right away tends to click again, and again;
+  // each click fired a brand new meeting since nothing stopped the button from re-firing
+  // mid-request. Guard against that here, once, for every caller of this shared list.
+  const [submitting, setSubmitting] = useState(false);
   const filtered = schools.filter(s => {
     if (!query.trim()) return true;
     const q = query.trim().toLowerCase();
@@ -43,11 +49,20 @@ function SchoolResultsList({ schools, query, setQuery, pendingId, setPendingId, 
         ))}
       </div>
       <div className="flex items-center gap-2 justify-end mt-1">
-        <button type="button" onClick={onCancel} className="btn-ghost text-sm px-4 py-1.5">ביטול</button>
-        <button type="button" disabled={!pendingId}
-          onClick={() => { const s = schools.find(x => x.id === pendingId); if (s) onConfirm(s); }}
+        <button type="button" onClick={onCancel} disabled={submitting} className="btn-ghost text-sm px-4 py-1.5 disabled:opacity-40">ביטול</button>
+        <button type="button" disabled={!pendingId || submitting}
+          onClick={async () => {
+            const s = schools.find(x => x.id === pendingId);
+            if (!s || submitting) return;
+            setSubmitting(true);
+            try {
+              await onConfirm(s);
+            } finally {
+              setSubmitting(false);
+            }
+          }}
           className="btn-blue text-sm px-4 py-1.5 disabled:opacity-40 disabled:cursor-not-allowed">
-          אישור
+          {submitting ? "יוצר..." : "אישור"}
         </button>
       </div>
     </div>

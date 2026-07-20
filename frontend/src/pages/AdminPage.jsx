@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+﻿import { Fragment, useEffect, useRef, useState } from "react";
 import { useBlocker, useLocation, useNavigate } from "react-router-dom";
 import axios from "axios";
 import * as XLSX from "xlsx";
@@ -7,8 +7,186 @@ import { useFocusTrap } from "../hooks/useFocusTrap";
 import { supabase } from "../lib/supabase";
 import AdminIntegrationsTab from "./AdminIntegrationsTab";
 import AdminMeetingsTab from "./AdminMeetingsTab";
+import AgentChatWidget from "../components/AgentChatWidget";
 import UserMeetingsConflictModal from "./UserMeetingsConflictModal";
+import UserSchoolsConflictModal from "./UserSchoolsConflictModal";
 import MeetingNavigationGuardModal from "../components/meetings/MeetingNavigationGuardModal";
+import { AcademicYearSelector } from "../components/AcademicYearSelector";
+import { DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
+import { AdvisorSearch } from "../components/AdvisorSearch";
+import { AccessSelector } from "../components/AccessSelector";
+
+// --- Admin schools table (ניהול → בתי ספר) ------------------------------------------------
+
+const ADMIN_SCHOOL_STAGE_LABEL = {
+  yesodi:      "יסודי",
+  beinayim:    "חטיבת ביניים",
+  tikkon:      "תיכון",
+  sheshshnati: "שש שנתי",
+  other:       "אחר",
+};
+
+// "Identity" columns mirror the equivalent columns on DashboardPage (same key/label), minus
+// "advisor" (not relevant to the admin/financial view) — "שם מוסד" is always the frozen first
+// column and isn't part of this movable list.
+const ADMIN_IDENTITY_COLUMNS = [
+  { key: "symbol",             label: "סמל מוסד" },
+  { key: "city",                label: "עיר" },
+  { key: "authority",           label: "בעלות" },
+  { key: "stage",                label: "שלב מוסד" },
+  { key: "meetings_completed",  label: 'סה"כ פגישות שבוצעו' },
+  { key: "meetings_hours",      label: 'סה"כ שעות שבוצעו' },
+];
+
+const SERVICE_TYPE_OPTIONS = [
+  { value: "gefen", label: "גפן" },
+  { value: "current", label: "שוטף" },
+  { value: "gefen_current", label: "גפן+שוטף" },
+];
+
+const ORDER_METHOD_KNOWN_OPTIONS = [
+  { value: "gefen_tochniot", label: "גפן (מאגר התוכניות)" },
+  { value: "gefen_nihul", label: "גפן (ניהול ותפעול)" },
+];
+
+// New admin/financial columns, per-school-year (stored in school_year_admin_data).
+const ADMIN_DATA_COLUMNS = [
+  { key: "service_type",          label: "סוג שירות" },
+  { key: "requested_price",       label: "מחיר מבוקש" },
+  { key: "order_method",          label: "אמצעי הזמנה" },
+  { key: "order_amount_gefen",    label: "גובה הזמנה בגפן" },
+  { key: "hours_ordered",         label: "מספר שעות שהוזמנו" },
+  { key: "rate",                  label: "תעריף" },
+  { key: "payment_received",      label: "תשלום שהתקבל" },
+  { key: "payment_requests_sent", label: "דרישות תשלום שנשלחו" },
+  { key: "contract_sent",         label: "חוזה נשלח" },
+  { key: "contract_received",     label: "חוזה התקבל" },
+  { key: "contract_file",         label: "קובץ חוזה" },
+  { key: "receipts_sent",         label: "אסמכתאות שנשלחו" },
+];
+
+const ADMIN_ALL_COLUMNS = [...ADMIN_IDENTITY_COLUMNS, ...ADMIN_DATA_COLUMNS];
+const ADMIN_DEFAULT_COL_ORDER = ADMIN_ALL_COLUMNS.map(c => c.key);
+const ADMIN_DEFAULT_COL_VISIBLE = Object.fromEntries(ADMIN_ALL_COLUMNS.map(c => [c.key, true]));
+function isKnownAdminColumnKey(k) { return ADMIN_DEFAULT_COL_ORDER.includes(k); }
+
+// Column-filter type map for the admin schools table (ניהול → בתי ספר). "select" columns use
+// raw underlying values (not display labels) so the agent/tool layer can target them directly.
+const ADMIN_TEXT_FILTER_COLS = new Set(["symbol", "city", "authority", "contract_file"]);
+const ADMIN_NUMBER_FILTER_COLS = new Set([
+  "meetings_completed", "meetings_hours", "requested_price", "order_amount_gefen",
+  "hours_ordered", "rate", "payment_received", "payment_requests_sent", "receipts_sent",
+]);
+const ADMIN_SELECT_FILTER_OPTIONS = {
+  stage: Object.entries(ADMIN_SCHOOL_STAGE_LABEL).map(([value, label]) => ({ value, label })),
+  service_type: SERVICE_TYPE_OPTIONS,
+  order_method: ORDER_METHOD_KNOWN_OPTIONS,
+  contract_sent: [{ value: "yes", label: "כן" }, { value: "no", label: "לא" }],
+  contract_received: [{ value: "yes", label: "כן" }, { value: "no", label: "לא" }],
+};
+function getAdminColumnFilterType(key) {
+  if (ADMIN_TEXT_FILTER_COLS.has(key)) return "text";
+  if (ADMIN_NUMBER_FILTER_COLS.has(key)) return "number";
+  if (ADMIN_SELECT_FILTER_OPTIONS[key]) return "select";
+  return null;
+}
+// Raw (non-display) value used for "select" column filtering — distinct from getAdminSortValue,
+// which returns display labels / sort-order numbers for those same columns.
+function getAdminRawFilterValue(school, yad, key) {
+  switch (key) {
+    case "stage": return school.stage || null;
+    case "service_type": return yad.service_type || null;
+    case "order_method": return yad.order_method || null;
+    case "contract_sent": case "contract_received":
+      return yad[key] === true ? "yes" : yad[key] === false ? "no" : null;
+    default: return null;
+  }
+}
+function passesAdminColumnFilters(school, yad, filters, getSortValue) {
+  for (const [key, spec] of Object.entries(filters)) {
+    if (!spec) continue;
+    const type = getAdminColumnFilterType(key);
+    if (type === "text") {
+      if (!spec.value) continue;
+      const cellValue = String(getSortValue(school, key) || "");
+      const needle = spec.value.trim();
+      if (!needle) continue;
+      const matches = spec.op === "equals" ? cellValue === needle : cellValue.includes(needle);
+      if (!matches) return false;
+    } else if (type === "number") {
+      if (spec.value === "" || spec.value === null || spec.value === undefined) continue;
+      const cellValue = Number(getSortValue(school, key));
+      const target = Number(spec.value);
+      if (Number.isNaN(cellValue) || Number.isNaN(target)) return false;
+      const ok = spec.op === "eq" ? cellValue === target
+        : spec.op === "ne" ? cellValue !== target
+        : spec.op === "gt" ? cellValue > target
+        : spec.op === "gte" ? cellValue >= target
+        : spec.op === "lt" ? cellValue < target
+        : spec.op === "lte" ? cellValue <= target
+        : true;
+      if (!ok) return false;
+    } else if (type === "select") {
+      if (!spec.values || spec.values.length === 0) continue;
+      const raw = getAdminRawFilterValue(school, yad, key);
+      if (!spec.values.includes(raw)) return false;
+    }
+  }
+  return true;
+}
+
+function formatAdminMeetingHours(totalMinutes) {
+  if (!totalMinutes) return "—";
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  if (h === 0) return `${m} דק'`;
+  if (m === 0) return `${h} שעות`;
+  return `${h}:${String(m).padStart(2, "0")} שעות`;
+}
+
+function formatUpdatedAt(iso) {
+  if (!iso) return "";
+  try {
+    return new Date(iso).toLocaleDateString("he-IL");
+  } catch {
+    return "";
+  }
+}
+
+// "אמצעי הזמנה" — single-select from a closed list, with an "אחר" option that switches to
+// free-text entry. Keyed by (school.id + academicYear) at the call site so it remounts (and
+// resets its custom/select mode) whenever the underlying row changes.
+function OrderMethodCell({ value, onSave }) {
+  const isKnown = ORDER_METHOD_KNOWN_OPTIONS.some(o => o.value === value);
+  const [customMode, setCustomMode] = useState(!isKnown && !!value);
+  if (customMode) {
+    return (
+      <input
+        type="text"
+        defaultValue={isKnown ? "" : (value || "")}
+        onBlur={e => onSave(e.target.value.trim() || null)}
+        placeholder="הקלד אמצעי הזמנה"
+        aria-label="אמצעי הזמנה (טקסט חופשי)"
+        className="input-field text-sm w-36"
+      />
+    );
+  }
+  return (
+    <select
+      className="input-field text-sm w-36"
+      aria-label="אמצעי הזמנה"
+      value={isKnown ? value : ""}
+      onChange={e => {
+        if (e.target.value === "__other__") { setCustomMode(true); return; }
+        onSave(e.target.value || null);
+      }}
+    >
+      <option value="">בחר</option>
+      {ORDER_METHOD_KNOWN_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+      <option value="__other__">אחר</option>
+    </select>
+  );
+}
 
 const DIVISION_OPTIONS = [
   { value: "tikkon", label: "חטיבה עליונה" },
@@ -55,220 +233,12 @@ const CONTACT_ROWS = [
   { label: "מנהלנ/ית",      nameField: "secretary_name",       phoneField: "secretary_phone",       emailField: "secretary_email" },
   { label: "אחראי/ת כספים", nameField: "finance_contact_name", phoneField: "finance_contact_phone", emailField: "finance_contact_email" },
 ];
-const ROLE_LABELS = { owner: "בעלים", manager: "מנהל", advisor: "יועץ" };
 const ROLE_SORT_ORDER = { owner: 0, manager: 1, advisor: 2 };
 function sortByRole(arr) { return [...arr].sort((a, b) => (ROLE_SORT_ORDER[a.role] ?? 3) - (ROLE_SORT_ORDER[b.role] ?? 3)); }
 
 const DISTRICT_OPTIONS = ["צפון", "דרום", "מרכז", "ירושלים", "תל-אביב", "חיפה", "חינוך התיישבותי", "חרדי"];
 
 const HEBREW_MONTHS = ["ינואר", "פברואר", "מרץ", "אפריל", "מאי", "יוני", "יולי", "אוגוסט", "ספטמבר", "אוקטובר", "נובמבר", "דצמבר"];
-
-function AdvisorSearch({ schoolId, assigned, users, loadingUsers, onAdd, onRemove, onRetry }) {
-  const [query, setQuery] = useState("");
-  const [open, setOpen] = useState(false);
-  const containerRef = useRef(null);
-  const inputRef = useRef(null);
-
-  const filtered = sortByRole(users).filter(u =>
-    !query.trim() || (u.full_name || u.email || "").toLowerCase().includes(query.toLowerCase())
-  );
-
-  return (
-    <div
-      ref={containerRef}
-      className="relative"
-      onBlur={e => { if (!containerRef.current?.contains(e.relatedTarget)) setOpen(false); }}
-    >
-      <label htmlFor={`advisor-search-${schoolId}`} className="sr-only">חיפוש יועץ</label>
-      <div
-        className="input-field flex flex-wrap items-center gap-1.5 min-h-[38px] cursor-text"
-        onClick={() => { setOpen(true); inputRef.current?.focus(); }}
-      >
-        {(assigned || []).map(adv => (
-          <span key={adv.id} className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full flex-shrink-0" style={{ background: "rgba(0,112,243,0.08)", color: "#1d4ed8" }}>
-            {adv.full_name || adv.email}
-            {onRemove && (
-              <button
-                type="button"
-                onMouseDown={e => { e.stopPropagation(); e.preventDefault(); onRemove(schoolId, adv.id); }}
-                className="hover:text-red-500 leading-none text-base"
-                aria-label={`הסר ${adv.full_name || adv.email}`}
-              >×</button>
-            )}
-          </span>
-        ))}
-        <input
-          ref={inputRef}
-          id={`advisor-search-${schoolId}`}
-          type="text"
-          className="flex-1 min-w-[80px] text-sm outline-none bg-transparent"
-          placeholder={loadingUsers ? "טוען..." : (assigned || []).length === 0 ? "לחץ לפתיחת רשימה, או הקלד שם לסינון..." : ""}
-          disabled={loadingUsers}
-          value={query}
-          onChange={e => setQuery(e.target.value)}
-          onFocus={() => setOpen(true)}
-          autoComplete="off"
-        />
-      </div>
-      {open && (
-        <div className="absolute z-20 right-0 left-0 mt-1 border border-slate-200 rounded-xl overflow-hidden bg-white max-h-52 overflow-y-auto shadow-lg">
-          {filtered.length === 0 ? (
-            <div className="px-4 py-3 text-sm text-slate-400">
-              {query.trim() ? "לא נמצאו יועצים" : users.length === 0 ? (
-                <button
-                  onMouseDown={e => { e.preventDefault(); if (onRetry) onRetry(); }}
-                  className="text-blue-500 hover:text-blue-700 underline"
-                >טעינה נכשלה — לחץ לניסיון חוזר</button>
-              ) : "לא נמצאו יועצים"}
-            </div>
-          ) : filtered.map(u => (
-            <button
-              key={u.id}
-              onMouseDown={e => {
-                e.preventDefault();
-                onAdd(schoolId, u.id);
-                setQuery("");
-              }}
-              className="w-full text-right px-4 py-2.5 text-sm text-slate-700 hover:bg-blue-50 transition-colors flex items-center justify-between"
-            >
-              <span>{u.full_name || u.email}</span>
-              <span className="text-xs text-slate-400">{ROLE_LABELS[u.role]}</span>
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function AccessSelector({ restrictTo, users, loadingUsers, onChange, schoolAdvisors, onSelectAdvisors }) {
-  const [query, setQuery] = useState("");
-  const [open, setOpen] = useState(false);
-  const containerRef = useRef(null);
-
-  const isAll = restrictTo === null || restrictTo === undefined;
-  const selected = restrictTo || [];
-
-  return (
-    <div
-      ref={containerRef}
-      className="relative"
-      onBlur={e => { if (!containerRef.current?.contains(e.relatedTarget)) setOpen(false); }}
-    >
-      {/* Display chip area */}
-      <div
-        className="input-field flex flex-wrap items-center gap-1.5 min-h-[38px] cursor-pointer"
-        role="button"
-        tabIndex={0}
-        onClick={() => setOpen(o => !o)}
-        onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setOpen(o => !o); } }}
-        aria-expanded={open}
-        aria-haspopup="listbox"
-      >
-        {isAll ? (
-          <span className="text-xs font-medium px-2.5 py-0.5 rounded-full" style={{ background: "rgba(22,163,74,0.12)", color: "#15803d" }}>
-            כולם
-          </span>
-        ) : selected.map(id => {
-          const u = users.find(u => u.id === id);
-          return u ? (
-            <span key={id} className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full" style={{ background: "rgba(0,112,243,0.08)", color: "#1d4ed8" }}>
-              {u.full_name || u.email}
-              <button
-                type="button"
-                onMouseDown={e => { e.stopPropagation(); e.preventDefault(); const n = selected.filter(i => i !== id); onChange(n.length === 0 ? null : n); }}
-                className="hover:text-red-500 leading-none"
-                aria-label={`הסר ${u.full_name || u.email} מרשימת הגישה`}
-              >×</button>
-            </span>
-          ) : null;
-        })}
-        {selected.length > 0 && (
-          <button
-            type="button"
-            onMouseDown={e => { e.stopPropagation(); e.preventDefault(); onChange(null); }}
-            className="text-xs text-slate-400 hover:text-slate-600 mr-auto px-1"
-            aria-label="אפס לכולם"
-          >↺ כולם</button>
-        )}
-      </div>
-
-      {/* Dropdown */}
-      {open && (
-        <div className="absolute z-30 right-0 left-0 mt-1 border border-slate-200 rounded-xl bg-white shadow-lg">
-          <div className="p-2 border-b border-slate-100">
-            <label htmlFor="access-selector-search" className="sr-only">חיפוש</label>
-            <input
-              id="access-selector-search"
-              type="search"
-              className="input-field text-sm"
-              placeholder="חפש יועץ..."
-              value={query}
-              onChange={e => setQuery(e.target.value)}
-              autoComplete="off"
-            />
-          </div>
-          <div className="max-h-44 overflow-y-auto divide-y divide-slate-50" role="listbox">
-            {/* כולם option */}
-            <button
-              type="button"
-              role="option"
-              aria-selected={isAll}
-              onMouseDown={e => { e.preventDefault(); onChange(null); setOpen(false); }}
-              className="w-full text-right px-4 py-2.5 text-sm hover:bg-green-50 flex items-center gap-2"
-            >
-              <span className={`w-4 h-4 rounded border flex-shrink-0 ${isAll ? "bg-green-500 border-green-500" : "border-slate-300"}`} aria-hidden="true" />
-              <span className="font-medium">כולם</span>
-              <span className="text-xs text-slate-400 mr-auto">ללא הגבלה</span>
-            </button>
-            {/* היועצים המלווים שנבחרו option */}
-            {schoolAdvisors && schoolAdvisors.length > 0 && (
-              <button
-                type="button"
-                role="option"
-                onMouseDown={e => {
-                  e.preventDefault();
-                  if (onSelectAdvisors) {
-                    onSelectAdvisors();
-                  } else {
-                    const ids = schoolAdvisors.map(a => a.id).filter(Boolean);
-                    onChange(ids.length > 0 ? ids : null);
-                  }
-                  setOpen(false);
-                }}
-                className="w-full text-right px-4 py-2.5 text-sm hover:bg-blue-50 flex items-center gap-2"
-              >
-                <span className="w-4 h-4 rounded border border-slate-300 flex-shrink-0" aria-hidden="true" />
-                <span className="font-medium">היועצים המלווים שנבחרו</span>
-                <span className="text-xs text-slate-400 mr-auto">{schoolAdvisors.length} יועצים</span>
-              </button>
-            )}
-            {sortByRole(loadingUsers ? [] : users)
-              .filter(u => !query.trim() || (u.full_name || u.email || "").toLowerCase().includes(query.toLowerCase()))
-              .map(u => (
-                <button
-                  key={u.id}
-                  type="button"
-                  role="option"
-                  aria-selected={selected.includes(u.id)}
-                  onMouseDown={e => {
-                    e.preventDefault();
-                    const newSel = selected.includes(u.id) ? selected.filter(i => i !== u.id) : [...selected, u.id];
-                    onChange(newSel.length === 0 ? null : newSel);
-                  }}
-                  className="w-full text-right px-4 py-2.5 text-sm hover:bg-blue-50 flex items-center gap-2"
-                >
-                  <span className={`w-4 h-4 rounded border flex-shrink-0 ${selected.includes(u.id) ? "bg-blue-500 border-blue-500" : "border-slate-300"}`} aria-hidden="true" />
-                  {u.full_name || u.email}
-                  <span className="text-xs text-slate-400 mr-auto">{ROLE_LABELS[u.role]}</span>
-                </button>
-              ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
 
 function DeleteConfirmModal({ title, subtitle, message, error, onConfirm, onCancel, confirming }) {
   const { ref, handleKeyDown } = useFocusTrap(onCancel);
@@ -805,6 +775,83 @@ const PERM_GROUPS = [
 ];
 const ADVISOR_NA_PERMS = new Set(PERM_GROUPS.flatMap(g => [...(g.advisorNA || [])]));
 
+const ADMIN_NUMBER_FILTER_OPS = [
+  { value: "eq", label: "שווה ל" },
+  { value: "ne", label: "שונה מ" },
+  { value: "gt", label: "גדול מ" },
+  { value: "gte", label: "גדול או שווה ל" },
+  { value: "lt", label: "קטן מ" },
+  { value: "lte", label: "קטן או שווה ל" },
+];
+
+function AdminColumnFilterPopover({ colKey, colLabel, filterType, spec, onChange, onClear, onClose }) {
+  if (filterType === "text") {
+    const value = spec?.value || "";
+    return (
+      <div className="flex flex-col gap-2">
+        <label htmlFor={`admin-filter-${colKey}`} className="text-xs text-slate-500">סינון: {colLabel}</label>
+        <input id={`admin-filter-${colKey}`} type="text" autoComplete="off" className="input-field text-sm"
+          value={value}
+          onChange={e => onChange({ op: "contains", value: e.target.value })} />
+        <div className="flex justify-between gap-2">
+          <button type="button" onClick={() => { onClear(); onClose(); }} className="text-xs text-slate-400 hover:text-slate-600">נקה</button>
+          <button type="button" onClick={onClose} className="btn-blue text-xs px-3 py-1">סגור</button>
+        </div>
+      </div>
+    );
+  }
+  if (filterType === "number") {
+    const op = spec?.op || "eq";
+    const value = spec?.value ?? "";
+    return (
+      <div className="flex flex-col gap-2">
+        <label htmlFor={`admin-filter-op-${colKey}`} className="text-xs text-slate-500">סינון: {colLabel}</label>
+        <select id={`admin-filter-op-${colKey}`} className="input-field text-sm"
+          value={op}
+          onChange={e => onChange({ op: e.target.value, value })}>
+          {ADMIN_NUMBER_FILTER_OPS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+        <label htmlFor={`admin-filter-val-${colKey}`} className="sr-only">ערך</label>
+        <input id={`admin-filter-val-${colKey}`} type="number" className="input-field text-sm"
+          value={value}
+          onChange={e => onChange({ op, value: e.target.value })} />
+        <div className="flex justify-between gap-2">
+          <button type="button" onClick={() => { onClear(); onClose(); }} className="text-xs text-slate-400 hover:text-slate-600">נקה</button>
+          <button type="button" onClick={onClose} className="btn-blue text-xs px-3 py-1">סגור</button>
+        </div>
+      </div>
+    );
+  }
+  if (filterType === "select") {
+    const options = ADMIN_SELECT_FILTER_OPTIONS[colKey] || [];
+    const values = spec?.values || [];
+    function toggleValue(v) {
+      const next = values.includes(v) ? values.filter(x => x !== v) : [...values, v];
+      onChange({ op: "in", values: next });
+    }
+    return (
+      <div className="flex flex-col gap-2">
+        <p className="text-xs text-slate-500">סינון: {colLabel}</p>
+        <div className="flex flex-col gap-1 max-h-40 overflow-y-auto">
+          {options.map(o => (
+            <label key={o.value} className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+              <input type="checkbox" className="w-4 h-4 rounded accent-blue-600"
+                checked={values.includes(o.value)}
+                onChange={() => toggleValue(o.value)} />
+              {o.label}
+            </label>
+          ))}
+        </div>
+        <div className="flex justify-between gap-2">
+          <button type="button" onClick={() => { onClear(); onClose(); }} className="text-xs text-slate-400 hover:text-slate-600">נקה</button>
+          <button type="button" onClick={onClose} className="btn-blue text-xs px-3 py-1">סגור</button>
+        </div>
+      </div>
+    );
+  }
+  return null;
+}
+
 export default function AdminPage() {
   const location = useLocation();
   const navigate  = useNavigate();
@@ -828,9 +875,6 @@ export default function AdminPage() {
   const [loadingSchools, setLoadingSchools] = useState(true);
   const [schoolForm, setSchoolForm] = useState(EMPTY_FORM);
   const [schoolStage, setSchoolStage] = useState("");
-  const [advisorListOpen, setAdvisorListOpen] = useState(false);
-  const advisorContainerRef = useRef(null);
-  const advisorInputRef = useRef(null);
   const [accessLinkedToAdvisors, setAccessLinkedToAdvisors] = useState(false);
   const [customDivisions, setCustomDivisions] = useState(DEFAULT_CUSTOM_DIVISIONS);
   const [editingSchool, setEditingSchool] = useState(null);
@@ -841,6 +885,23 @@ export default function AdminPage() {
   const [importing, setImporting] = useState(false);
   const [importMappingData, setImportMappingData] = useState(null);
   const [importProgressMsg, setImportProgressMsg] = useState("");
+
+  // Admin schools table state (ניהול → בתי ספר: מחירים/חוזים/תשלומים, per school year)
+  const [adminAcademicYear, setAdminAcademicYear] = useState(DEFAULT_ACADEMIC_YEAR);
+  const [yearAdminData, setYearAdminData] = useState({}); // school_id -> row
+  const [loadingYearAdminData, setLoadingYearAdminData] = useState(false);
+  const [adminColOrder, setAdminColOrder] = useState(ADMIN_DEFAULT_COL_ORDER);
+  const [adminColVisible, setAdminColVisible] = useState(ADMIN_DEFAULT_COL_VISIBLE);
+  const [showAdminColPicker, setShowAdminColPicker] = useState(false);
+  const [adminSortKey, setAdminSortKey] = useState(null);
+  const [adminSortDir, setAdminSortDir] = useState("asc");
+  const [adminSearchQuery, setAdminSearchQuery] = useState("");
+  const [adminColumnFilters, setAdminColumnFilters] = useState({}); // {[colKey]: FilterSpec}
+  const [openAdminFilterKey, setOpenAdminFilterKey] = useState(null); // only one column's filter popover open at a time
+  const [uploadingContractFor, setUploadingContractFor] = useState(null);
+  const adminContractInputRef = useRef(null);
+  const adminColPickerRef = useRef(null);
+  const adminFilterPopoverRef = useRef(null);
 
   // Accounts state
   const [expandedSchool, setExpandedSchool] = useState(null);
@@ -855,6 +916,12 @@ export default function AdminPage() {
   // Advisors per school in expanded panel
   const [schoolAdvisors, setSchoolAdvisors] = useState({});
 
+  // Draft advisor selection while editing an existing school — kept purely local until
+  // saveSchool() diffs it against originalAdvisorIds and only sends the net add/remove
+  // calls (and notifications) on save.
+  const [draftAdvisorIds, setDraftAdvisorIds] = useState([]);
+  const [originalAdvisorIds, setOriginalAdvisorIds] = useState([]);
+
   // Delete confirmation modal
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deletingSchool, setDeletingSchool] = useState(false);
@@ -862,9 +929,6 @@ export default function AdminPage() {
   const [recycleInfoSchoolName, setRecycleInfoSchoolName] = useState(null);
   const [restoreSuccessSchoolName, setRestoreSuccessSchoolName] = useState(null);
   const schoolFormDotsRef = useRef(null);
-
-  // Search filter for new-school advisor checkbox list
-  const [advisorSearchQuery, setAdvisorSearchQuery] = useState("");
 
   // Users state
   const [users, setUsers] = useState([]);
@@ -891,6 +955,7 @@ export default function AdminPage() {
   const [savingUser, setSavingUser] = useState(false);
   const [userToDelete, setUserToDelete] = useState(null);
   const [userMeetingsConflict, setUserMeetingsConflict] = useState(null);
+  const [userSchoolsConflict, setUserSchoolsConflict] = useState(null);
   const [confirmingUserDelete, setConfirmingUserDelete] = useState(false);
   const [userDeleteError, setUserDeleteError] = useState("");
 
@@ -930,6 +995,7 @@ export default function AdminPage() {
     setEditingSchool(null);
     setSchoolForm(EMPTY_FORM);
     setSelectedAdvisors([]);
+    setDraftAdvisorIds([]);
     setSchoolStage("");
     setCustomDivisions(DEFAULT_CUSTOM_DIVISIONS);
     setTriedSave(false);
@@ -1063,6 +1129,148 @@ export default function AdminPage() {
   // Advisors must not access the admin area — redirect immediately once role is confirmed
   useEffect(() => { if (myRole === "advisor") navigate("/", { replace: true }); }, [myRole]);
 
+  async function loadYearAdminData(year) {
+    setLoadingYearAdminData(true);
+    try {
+      const res = await axios.get("/schools/year-admin-data", { params: { academic_year: year } });
+      setYearAdminData(res.data && typeof res.data === "object" ? res.data : {});
+    } catch {
+      setYearAdminData({});
+    } finally {
+      setLoadingYearAdminData(false);
+    }
+  }
+  useEffect(() => {
+    if (myRole === "owner" || myRole === "manager") loadYearAdminData(adminAcademicYear);
+  }, [adminAcademicYear, myRole]);
+
+  // Restore admin-table column prefs (mirrors DashboardPage's col_order/col_visible pattern,
+  // stored under separate keys/columns so the two tables' layouts don't collide).
+  useEffect(() => {
+    if (!myUserId) return;
+    try {
+      const savedOrder = JSON.parse(localStorage.getItem(`admin-schools-col-order-${myUserId}`) || "null");
+      if (Array.isArray(savedOrder) && savedOrder.length > 0 && savedOrder.every(isKnownAdminColumnKey)) setAdminColOrder(savedOrder);
+      const savedVisible = JSON.parse(localStorage.getItem(`admin-schools-col-visible-${myUserId}`) || "null");
+      if (savedVisible && typeof savedVisible === "object" && Object.keys(savedVisible).every(isKnownAdminColumnKey)) setAdminColVisible(savedVisible);
+    } catch {}
+    supabase.from("profiles").select("admin_col_order, admin_col_visible").eq("id", myUserId).single().then(({ data }) => {
+      if (data?.admin_col_order && Array.isArray(data.admin_col_order) && data.admin_col_order.length > 0 && data.admin_col_order.every(isKnownAdminColumnKey)) {
+        setAdminColOrder(data.admin_col_order);
+      }
+      if (data?.admin_col_visible && typeof data.admin_col_visible === "object" && Object.keys(data.admin_col_visible).every(isKnownAdminColumnKey)) {
+        setAdminColVisible(data.admin_col_visible);
+      }
+    }).catch(() => {});
+  }, [myUserId]);
+
+  useEffect(() => {
+    if (!showAdminColPicker) return;
+    function handleOutside(e) {
+      if (adminColPickerRef.current && !adminColPickerRef.current.contains(e.target)) setShowAdminColPicker(false);
+    }
+    document.addEventListener("mousedown", handleOutside);
+    return () => document.removeEventListener("mousedown", handleOutside);
+  }, [showAdminColPicker]);
+
+  // Restore admin-table column filters (localStorage only — per-device, mirrors col-order/visible pattern).
+  useEffect(() => {
+    if (!myUserId) return;
+    try {
+      const saved = JSON.parse(localStorage.getItem(`admin-schools-col-filters-${myUserId}`) || "null");
+      if (saved && typeof saved === "object") setAdminColumnFilters(saved);
+    } catch {}
+  }, [myUserId]);
+
+  useEffect(() => {
+    if (!myUserId) return;
+    localStorage.setItem(`admin-schools-col-filters-${myUserId}`, JSON.stringify(adminColumnFilters));
+  }, [adminColumnFilters, myUserId]);
+
+  useEffect(() => {
+    if (!openAdminFilterKey) return;
+    function handleOutside(e) {
+      if (adminFilterPopoverRef.current && !adminFilterPopoverRef.current.contains(e.target)) setOpenAdminFilterKey(null);
+    }
+    document.addEventListener("mousedown", handleOutside);
+    return () => document.removeEventListener("mousedown", handleOutside);
+  }, [openAdminFilterKey]);
+
+  function saveAdminColPrefs(order, visible) {
+    if (!myUserId) return;
+    localStorage.setItem(`admin-schools-col-order-${myUserId}`, JSON.stringify(order));
+    localStorage.setItem(`admin-schools-col-visible-${myUserId}`, JSON.stringify(visible));
+    supabase.from("profiles").update({ admin_col_order: order, admin_col_visible: visible }).eq("id", myUserId).then(() => {});
+  }
+
+  function toggleAdminColVisible(key) {
+    setAdminColVisible(prev => {
+      const next = { ...prev, [key]: !prev[key] };
+      saveAdminColPrefs(adminColOrder, next);
+      return next;
+    });
+  }
+
+  function toggleAdminSort(key) {
+    if (adminSortKey !== key) { setAdminSortKey(key); setAdminSortDir("asc"); }
+    else if (adminSortDir === "asc") setAdminSortDir("desc");
+    else { setAdminSortKey(null); setAdminSortDir("asc"); }
+  }
+
+  async function saveYearAdminField(schoolId, field, value) {
+    setYearAdminData(prev => ({
+      ...prev,
+      [schoolId]: { ...(prev[schoolId] || {}), school_id: schoolId, [field]: value },
+    }));
+    try {
+      const res = await axios.put(`/schools/${schoolId}/year-admin-data`, { [field]: value }, { params: { academic_year: adminAcademicYear } });
+      setYearAdminData(prev => ({ ...prev, [schoolId]: res.data }));
+    } catch {
+      loadYearAdminData(adminAcademicYear);
+    }
+  }
+
+  function openContractUpload(schoolId) {
+    setUploadingContractFor(schoolId);
+    adminContractInputRef.current?.click();
+  }
+
+  async function handleContractFileChange(e) {
+    const file = e.target.files?.[0];
+    const schoolId = uploadingContractFor;
+    e.target.value = "";
+    setUploadingContractFor(null);
+    if (!file || !schoolId) return;
+    const formData = new FormData();
+    formData.append("file", file);
+    try {
+      const res = await axios.post(`/schools/${schoolId}/year-admin-data/contract-file`, formData, {
+        params: { academic_year: adminAcademicYear },
+      });
+      setYearAdminData(prev => ({ ...prev, [schoolId]: { ...(prev[schoolId] || {}), ...res.data } }));
+    } catch {
+      /* non-fatal — user can retry the upload */
+    }
+  }
+
+  async function downloadContractFile(schoolId) {
+    try {
+      const res = await axios.get(`/schools/${schoolId}/year-admin-data/contract-file`, {
+        params: { academic_year: adminAcademicYear },
+        responseType: "blob",
+      });
+      const filename = yearAdminData[schoolId]?.contract_file_name || "contract";
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      /* non-fatal */
+    }
+  }
+
   useEffect(() => {
     function handler(e) { if (schoolFormDotsRef.current && !schoolFormDotsRef.current.contains(e.target)) setShowSchoolFormDots(false); }
     document.addEventListener("mousedown", handler);
@@ -1072,11 +1280,9 @@ export default function AdminPage() {
   // When "היועצים המלווים שנבחרו" mode is active, keep restrict_access_to in sync with selected advisors
   useEffect(() => {
     if (!accessLinkedToAdvisors) return;
-    const ids = editingSchool
-      ? (schoolAdvisors[editingSchool.id] || []).map(a => a.id).filter(Boolean)
-      : selectedAdvisors;
+    const ids = editingSchool ? draftAdvisorIds : selectedAdvisors;
     setSchoolForm(p => ({ ...p, restrict_access_to: ids.length > 0 ? ids : null }));
-  }, [selectedAdvisors, schoolAdvisors, editingSchool, accessLinkedToAdvisors]);
+  }, [selectedAdvisors, draftAdvisorIds, editingSchool, accessLinkedToAdvisors]);
 
   async function loadSchools() {
     setLoadingSchools(true);
@@ -1131,6 +1337,7 @@ export default function AdminPage() {
     if (!editingSchool && schools.some(s => s.symbol === schoolForm.symbol)) return;
     if (!editingSchool && !schoolStage) return;
     if (!editingSchool && selectedAdvisors.length === 0) return;
+    if (editingSchool && draftAdvisorIds.length === 0) return;
     if (!editingSchool && (schoolStage === "sheshshnati" || schoolStage === "other") && customDivisions.length === 0) return;
     if (schoolForm.principal_phone && validateSecretaryPhone(schoolForm.principal_phone)) return;
     if (schoolForm.secretary_phone && validateSecretaryPhone(schoolForm.secretary_phone)) return;
@@ -1139,7 +1346,26 @@ export default function AdminPage() {
     setSavingSchool(true);
     try {
       if (editingSchool) {
+        // Apply only the net advisor changes (adds before removes, so the backend's
+        // "last advisor" guard never sees a false zero-advisor state) — this is what
+        // keeps notifications limited to real, saved changes instead of every click.
+        const added = draftAdvisorIds.filter(id => !originalAdvisorIds.includes(id));
+        const removed = originalAdvisorIds.filter(id => !draftAdvisorIds.includes(id));
+        try {
+          for (const id of added) {
+            await axios.post(`/schools/${editingSchool.id}/advisors`, { advisor_id: id });
+          }
+          for (const id of removed) {
+            await axios.delete(`/schools/${editingSchool.id}/advisors/${id}`);
+          }
+        } catch (err) {
+          window.alert(err.response?.data?.detail || "שגיאה בעדכון היועצים המלווים");
+          return false;
+        }
         await axios.put(`/schools/${editingSchool.id}`, schoolForm);
+        const updatedAdvisors = draftAdvisorIds.map(id => users.find(u => u.id === id)).filter(Boolean);
+        setSchoolAdvisors(prev => ({ ...prev, [editingSchool.id]: updatedAdvisors }));
+        setOriginalAdvisorIds(draftAdvisorIds);
       } else {
         const res = await axios.post("/schools/", { ...schoolForm, stage: schoolStage });
         const newId = res.data.id;
@@ -1205,11 +1431,14 @@ export default function AdminPage() {
       extra_contacts: school.extra_contacts || [],
     });
     setTriedSave(false);
-    setAdvisorSearchQuery("");
     setShowSchoolForm(true);
     window.scrollTo({ top: 0, behavior: "smooth" });
     axios.get(`/schools/${school.id}/advisors`).then(res => {
-      setSchoolAdvisors(prev => ({ ...prev, [school.id]: res.data }));
+      const advisors = res.data || [];
+      setSchoolAdvisors(prev => ({ ...prev, [school.id]: advisors }));
+      const ids = advisors.map(a => a.id);
+      setDraftAdvisorIds(ids);
+      setOriginalAdvisorIds(ids);
     }).catch(() => {});
     loadUsers();
   }
@@ -1249,7 +1478,6 @@ export default function AdminPage() {
     if (expandedSchool === school.id) { setExpandedSchool(null); setEditingAccount(null); return; }
     setExpandedSchool(school.id);
     setEditingAccount(null);
-    setAdvisorSearchQuery("");
     if (!schoolAccounts[school.id]) {
       const res = await axios.get(`/schools/${school.id}/accounts`);
       setSchoolAccounts(prev => ({ ...prev, [school.id]: res.data }));
@@ -1267,9 +1495,23 @@ export default function AdminPage() {
   }
 
   async function removeAdvisorFromSchool(schoolId, advisorId) {
-    await axios.delete(`/schools/${schoolId}/advisors/${advisorId}`);
-    const res = await axios.get(`/schools/${schoolId}/advisors`);
-    setSchoolAdvisors(prev => ({ ...prev, [schoolId]: res.data }));
+    try {
+      await axios.delete(`/schools/${schoolId}/advisors/${advisorId}`);
+      const res = await axios.get(`/schools/${schoolId}/advisors`);
+      setSchoolAdvisors(prev => ({ ...prev, [schoolId]: res.data }));
+    } catch (err) {
+      window.alert(err.response?.data?.detail || "שגיאה בהסרת היועץ");
+    }
+  }
+
+  // Expanded-row quick panel has no separate "save" step — every checkbox toggle is applied
+  // immediately (unlike the deferred draft used in the edit-school form above).
+  async function handleExpandedAdvisorChange(schoolId, newIds) {
+    const current = (schoolAdvisors[schoolId] || []).map(a => a.id);
+    const added = newIds.filter(id => !current.includes(id));
+    const removed = current.filter(id => !newIds.includes(id));
+    for (const id of added) await addAdvisorToSchool(schoolId, id);
+    for (const id of removed) await removeAdvisorFromSchool(schoolId, id);
   }
 
   async function addAccount(schoolId) {
@@ -1341,6 +1583,19 @@ export default function AdminPage() {
       const res = await axios.get(`/schools/users/${u.id}/future-meetings`);
       if (res.data && res.data.length > 0) {
         setUserMeetingsConflict({ user: u, meetings: res.data });
+        return;
+      }
+    } catch {
+      // fall through to the sole-schools check if the meetings check itself fails
+    }
+    await checkSoleSchoolsThenDelete(u);
+  }
+
+  async function checkSoleSchoolsThenDelete(u) {
+    try {
+      const res = await axios.get(`/schools/users/${u.id}/sole-schools`);
+      if (res.data && res.data.length > 0) {
+        setUserSchoolsConflict({ user: u, schools: res.data });
         return;
       }
     } catch {
@@ -1557,6 +1812,7 @@ export default function AdminPage() {
 
   const showBillingTab = myRole === "owner" || (myRole === "manager" && permDefaults?.can_view_billing?.manager === true);
   const showIntegrationsTab = myRole === "owner" || myRole === "manager";
+  const showAgentWidget = myRole === "owner" || myRole === "manager";
   // null=loading, true=allowed, false=denied
   // owner → always true; manager → depends on permDefaults (null while loading → treat as not-yet-known)
   const canAddSchool = myRole === "owner"
@@ -1570,6 +1826,63 @@ export default function AdminPage() {
     : myRole === "manager" && permDefaults !== null
       ? permDefaults?.can_change_user_role?.manager === true
       : null;
+
+  // Derived rows for the new admin schools table (active schools only — "סל מחזור" below it
+  // is unaffected and keeps reading straight from `schools`).
+  const activeAdminSchools = schools.filter(s => s.status === "active" || !s.status);
+  const filteredAdminSchools = adminSearchQuery.trim()
+    ? activeAdminSchools.filter(s => {
+        const q = adminSearchQuery.trim();
+        return (s.name || "").includes(q) || (s.symbol || "").includes(q) || (s.city || "").includes(q);
+      })
+    : activeAdminSchools;
+  function getAdminSortValue(school, key) {
+    const yad = yearAdminData[school.id] || {};
+    switch (key) {
+      case "symbol": return school.symbol || "";
+      case "city": return school.city || "";
+      case "authority": return school.authority || "";
+      case "stage": return ADMIN_SCHOOL_STAGE_LABEL[school.stage] || school.stage || "";
+      case "meetings_completed": return school.meetings_stats?.completed ?? -1;
+      case "meetings_hours": return school.meetings_stats?.total_minutes ?? -1;
+      case "contract_sent": case "contract_received":
+        return yad[key] === true ? 2 : yad[key] === false ? 1 : 0;
+      case "contract_file": return yad.contract_file_name || "";
+      case "service_type": {
+        const opt = SERVICE_TYPE_OPTIONS.find(o => o.value === yad.service_type);
+        return opt ? opt.label : (yad.service_type || "");
+      }
+      case "order_method": {
+        const opt = ORDER_METHOD_KNOWN_OPTIONS.find(o => o.value === yad.order_method);
+        return opt ? opt.label : (yad.order_method || "");
+      }
+      default: {
+        const v = yad[key];
+        return v === undefined || v === null ? "" : v;
+      }
+    }
+  }
+  const columnFilteredAdminSchools = Object.keys(adminColumnFilters).length === 0
+    ? filteredAdminSchools
+    : filteredAdminSchools.filter(s => passesAdminColumnFilters(s, yearAdminData[s.id] || {}, adminColumnFilters, getAdminSortValue));
+  const adminColumnFilterActiveKeys = Object.entries(adminColumnFilters)
+    .filter(([, spec]) => spec && (spec.value || (spec.values && spec.values.length > 0)))
+    .map(([key]) => key);
+  const sortedAdminSchools = adminSortKey
+    ? [...columnFilteredAdminSchools].sort((a, b) => {
+        const va = getAdminSortValue(a, adminSortKey);
+        const vb = getAdminSortValue(b, adminSortKey);
+        let cmp;
+        if (typeof va === "number" && typeof vb === "number") cmp = va - vb;
+        else cmp = String(va).localeCompare(String(vb), "he");
+        return adminSortDir === "asc" ? cmp : -cmp;
+      })
+    : columnFilteredAdminSchools;
+  const visibleAdminColOrder = adminColOrder.filter(k => adminColVisible[k] && ADMIN_ALL_COLUMNS.some(c => c.key === k));
+  const adminColumnCategories = [
+    { title: "כללי", cols: ADMIN_IDENTITY_COLUMNS },
+    { title: "ניהולי", cols: ADMIN_DATA_COLUMNS },
+  ];
 
   const tabs = [
     { id: "schools", label: "בתי ספר" },
@@ -1585,7 +1898,7 @@ export default function AdminPage() {
       <Sidebar dark />
 
       <div style={{ marginRight: "var(--sidebar-w, 240px)", transition: "margin-right 0.25s cubic-bezier(0.4,0,0.2,1)" }}>
-        <div className="max-w-4xl mx-auto px-6 py-10">
+        <div className={`mx-auto px-6 py-10 ${activeTab === "schools" ? "max-w-[100rem]" : "max-w-4xl"}`}>
           <div className="mb-8">
             <h1 className="text-2xl font-bold text-slate-900">פאנל ניהול</h1>
             <p className="text-slate-500 text-sm mt-1">ניהול בתי ספר, חטיבות ומשתמשים</p>
@@ -1942,98 +2255,39 @@ export default function AdminPage() {
                           יועצים אחראיים {!editingSchool && <span className="text-red-500">*</span>}
                         </p>
                         {editingSchool ? (
-                          <AdvisorSearch
-                            schoolId={editingSchool.id}
-                            assigned={schoolAdvisors[editingSchool.id] || []}
-                            users={users}
-                            loadingUsers={loadingUsers}
-                            onAdd={addAdvisorToSchool}
-                            onRemove={removeAdvisorFromSchool}
-                            onRetry={loadUsers}
-                          />
+                          <>
+                            <AdvisorSearch
+                              schoolId={editingSchool.id}
+                              selectedIds={draftAdvisorIds}
+                              users={users}
+                              loadingUsers={loadingUsers}
+                              onChange={setDraftAdvisorIds}
+                              onRetry={loadUsers}
+                              invalid={triedSave && draftAdvisorIds.length === 0}
+                            />
+                            {triedSave && draftAdvisorIds.length === 0 && (
+                              <span className="text-xs text-red-500 mt-1 block" role="alert">יש לבחור לפחות יועץ אחד</span>
+                            )}
+                          </>
                         ) : (
                           <>
-                            {loadingUsers ? (
-                              <p className="text-sm text-slate-400 py-1">טוען...</p>
-                            ) : (
-                              <div
-                                ref={advisorContainerRef}
-                                onBlur={e => {
-                                  if (!advisorContainerRef.current?.contains(e.relatedTarget)) setAdvisorListOpen(false);
-                                }}
-                                className="relative"
-                              >
-                                <label htmlFor="new-school-advisor-search" className="sr-only">חיפוש יועץ</label>
-                                {/* Chip + input container */}
-                                <div
-                                  className={`input-field flex flex-wrap items-center gap-1.5 min-h-[38px] cursor-text ${triedSave && selectedAdvisors.length === 0 ? "border-red-400" : ""}`}
-                                  onClick={() => { setAdvisorListOpen(true); advisorInputRef.current?.focus(); }}
-                                >
-                                  {selectedAdvisors.map(id => {
-                                    const u = users.find(u => u.id === id);
-                                    return u ? (
-                                      <span key={id} className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full" style={{ background: "rgba(0,112,243,0.08)", color: "#1d4ed8" }}>
-                                        {u.full_name || u.email}
-                                        <button
-                                          type="button"
-                                          onMouseDown={e => {
-                                            e.stopPropagation(); e.preventDefault();
-                                            const newList = selectedAdvisors.filter(i => i !== id);
-                                            setSelectedAdvisors(newList);
-                                            if (newList.length === 0) {
-                                              setAccessLinkedToAdvisors(false);
-                                              setSchoolForm(p => ({ ...p, restrict_access_to: [] }));
-                                            }
-                                          }}
-                                          className="hover:text-red-500 leading-none text-base"
-                                          aria-label={`הסר ${u.full_name || u.email}`}
-                                        >×</button>
-                                      </span>
-                                    ) : null;
-                                  })}
-                                  <input
-                                    ref={advisorInputRef}
-                                    id="new-school-advisor-search"
-                                    type="search"
-                                    className="flex-1 min-w-[80px] text-sm outline-none bg-transparent"
-                                    placeholder={selectedAdvisors.length === 0 ? "לחץ לבחירת יועץ..." : ""}
-                                    value={advisorSearchQuery}
-                                    onFocus={() => setAdvisorListOpen(true)}
-                                    onChange={e => setAdvisorSearchQuery(e.target.value)}
-                                  />
-                                </div>
-                                {advisorListOpen && (
-                                  <div className="absolute z-20 right-0 left-0 border border-slate-200 rounded-xl overflow-y-auto max-h-44 bg-white divide-y divide-slate-50 mt-1 shadow-lg">
-                                    {users.length === 0 && <p className="text-sm text-slate-400 px-3 py-2">אין משתמשים</p>}
-                                    {sortByRole(users).filter(u => !advisorSearchQuery.trim() || (u.full_name || u.email || "").toLowerCase().includes(advisorSearchQuery.toLowerCase())).map(u => (
-                                      <button
-                                        key={u.id}
-                                        type="button"
-                                        onMouseDown={e => {
-                                          e.preventDefault();
-                                          if (selectedAdvisors.includes(u.id)) {
-                                            const newList = selectedAdvisors.filter(id => id !== u.id);
-                                            setSelectedAdvisors(newList);
-                                            if (newList.length === 0) {
-                                              setAccessLinkedToAdvisors(false);
-                                              setSchoolForm(p => ({ ...p, restrict_access_to: [] }));
-                                            }
-                                          } else {
-                                            setSelectedAdvisors(prev => [...prev, u.id]);
-                                            if (selectedAdvisors.length === 0) setAccessLinkedToAdvisors(true);
-                                          }
-                                        }}
-                                        className="w-full text-right flex items-center gap-2 px-2.5 py-1.5 hover:bg-slate-50 cursor-pointer"
-                                      >
-                                        <span className={`w-3.5 h-3.5 rounded border flex-shrink-0 ${selectedAdvisors.includes(u.id) ? "bg-blue-500 border-blue-500" : "border-slate-300"}`} aria-hidden="true" />
-                                        <span className="text-xs text-slate-700 flex-1">{u.full_name || u.email}</span>
-                                        <span className="text-xs text-slate-400">{ROLE_LABELS[u.role]}</span>
-                                      </button>
-                                    ))}
-                                  </div>
-                                )}
-                              </div>
-                            )}
+                            <AdvisorSearch
+                              schoolId="new"
+                              selectedIds={selectedAdvisors}
+                              users={users}
+                              loadingUsers={loadingUsers}
+                              onRetry={loadUsers}
+                              invalid={triedSave && selectedAdvisors.length === 0}
+                              onChange={newIds => {
+                                setSelectedAdvisors(newIds);
+                                if (newIds.length === 0) {
+                                  setAccessLinkedToAdvisors(false);
+                                  setSchoolForm(p => ({ ...p, restrict_access_to: [] }));
+                                } else if (selectedAdvisors.length === 0) {
+                                  setAccessLinkedToAdvisors(true);
+                                }
+                              }}
+                            />
                             {triedSave && selectedAdvisors.length === 0 && (
                               <span className="text-xs text-red-500 mt-1 block" role="alert">יש לבחור לפחות יועץ אחד</span>
                             )}
@@ -2058,9 +2312,8 @@ export default function AdminPage() {
                           onChange={val => { setAccessLinkedToAdvisors(false); setSchoolForm(p => ({ ...p, restrict_access_to: val })); }}
                           onSelectAdvisors={() => setAccessLinkedToAdvisors(true)}
                           schoolAdvisors={
-                            editingSchool
-                              ? (schoolAdvisors[editingSchool.id] || [])
-                              : selectedAdvisors.map(id => users.find(u => u.id === id)).filter(Boolean)
+                            (editingSchool ? draftAdvisorIds : selectedAdvisors)
+                              .map(id => users.find(u => u.id === id)).filter(Boolean)
                           }
                         />
                       </div>
@@ -2071,7 +2324,7 @@ export default function AdminPage() {
                     <button onClick={saveSchool} disabled={savingSchool} className={`${editingSchool ? "btn-green-light" : "btn-blue"} text-sm px-5 py-2`}>
                       {savingSchool ? "שומר..." : editingSchool ? "שמור שינויים" : "שמור"}
                     </button>
-                    <button onClick={() => setShowSchoolForm(false)} className="btn-ghost text-sm px-5 py-2">ביטול</button>
+                    <button onClick={() => { setShowSchoolForm(false); setDraftAdvisorIds(originalAdvisorIds); }} className="btn-ghost text-sm px-5 py-2">ביטול</button>
                   </div>
                 </div>
               )}
@@ -2084,113 +2337,313 @@ export default function AdminPage() {
 
               {!showSchoolForm && (
               <>
-              {schools.some(s => s.status === "pending_deletion") && (
-                <h3 className="text-sm font-semibold text-slate-500 mb-3 flex items-center gap-2">
-                  🏫 בתי ספר פעילים ({schools.filter(s => s.status === "active" || !s.status).length})
-                </h3>
-              )}
-              <div className="flex flex-col gap-3">
-                {schools.filter(s => s.status === "active" || !s.status).map(school => (
-                  <div key={school.id} className="glass-card rounded-2xl overflow-hidden">
-                    <div className="flex items-center justify-between px-6 py-4 gap-4">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-3">
-                          <span className="font-bold text-slate-900">{school.name}</span>
-                          {school.symbol && <span className="text-xs text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">סמל {school.symbol}</span>}
-                          {school.city && <span className="text-xs text-slate-800">{school.city}</span>}
-                        </div>
-                      </div>
-                      <div className="flex gap-2">
-                        <button onClick={() => toggleExpand(school)} className="btn-ghost text-xs px-3 py-1.5">
-                          {expandedSchool === school.id ? "סגור" : "חטיבות"}
-                        </button>
-                        <button onClick={() => startEdit(school)} className="btn-ghost text-xs px-3 py-1.5">✏️ ערוך</button>
-                      </div>
-                    </div>
+              <input ref={adminContractInputRef} type="file" className="hidden" onChange={handleContractFileChange} aria-label="העלאת קובץ חוזה" />
 
-                    {expandedSchool === school.id && (
-                      <div className="border-t border-slate-100 px-6 py-4 bg-slate-50/70">
-                        <p className="text-xs text-slate-800 mb-3 font-medium">חטיבות / חשבונות גפן</p>
-                        <div className="flex flex-col gap-2 mb-4">
-                          {(schoolAccounts[school.id] || []).length === 0 && (
-                            <p className="text-sm text-slate-400">אין חטיבות מוגדרות</p>
-                          )}
-                          {(schoolAccounts[school.id] || []).map(acc => (
-                            <div key={acc.id} className="bg-white rounded-xl border border-slate-100 overflow-hidden">
-                              <div className="flex items-center justify-between px-4 py-2.5">
-                                <span className="text-sm font-medium text-slate-800">
-                                  {acc.custom_label || DIVISION_OPTIONS.find(d => d.value === acc.division_type)?.label || acc.division_type}
-                                </span>
-                                <div className="flex gap-2 items-center">
-                                  {acc.finance_software && (
-                                    <span className="text-xs text-slate-800">{FINANCE_SOFTWARE_OPTIONS.find(o => o.value === acc.finance_software)?.label}</span>
-                                  )}
-                                  {acc.tmura_model && (
-                                    <span className="text-xs px-2 py-0.5 rounded-full bg-green-50 text-green-700">מודל תמרוץ</span>
-                                  )}
-                                  <button onClick={() => editingAccount === acc.id ? setEditingAccount(null) : startEditAccount(acc)} className="text-xs text-blue-500 hover:text-blue-600">✏️</button>
-                                  <button onClick={() => deleteAccount(school.id, acc.id)} className="text-xs text-red-500 hover:text-red-600">הסר</button>
-                                </div>
-                              </div>
-                              {editingAccount === acc.id && (
-                                <div className="px-4 pb-3 pt-1 border-t border-slate-100 bg-slate-50/60 flex gap-3 items-end flex-wrap">
-                                  <div className="flex flex-col gap-1">
-                                    <label htmlFor={`fs-${acc.id}`} className="text-xs text-slate-800">תוכנת כספים</label>
-                                    <select id={`fs-${acc.id}`} className="input-field text-sm"
-                                      value={accountForm.finance_software}
-                                      onChange={e => setAccountForm(p => ({ ...p, finance_software: e.target.value }))}>
-                                      {FINANCE_SOFTWARE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                                    </select>
-                                  </div>
-                                  <div className="flex items-center gap-2 pb-1">
-                                    <input type="checkbox" id={`tmura-${acc.id}`}
-                                      checked={accountForm.tmura_model}
-                                      onChange={e => setAccountForm(p => ({ ...p, tmura_model: e.target.checked }))}
-                                      className="w-4 h-4 rounded" />
-                                    <label htmlFor={`tmura-${acc.id}`} className="text-sm text-slate-700">עמד במודל התמרוץ</label>
-                                  </div>
-                                  <button onClick={() => saveAccount(school.id, acc.id)} className="btn-blue text-xs px-3 py-1.5">שמור</button>
-                                </div>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                        <div className="flex gap-2">
-                          <label htmlFor={`division-select-${school.id}`} className="sr-only">סוג חטיבה</label>
-                          <select id={`division-select-${school.id}`} value={newDivision} onChange={e => setNewDivision(e.target.value)} className="input-field text-sm flex-1">
-                            {DIVISION_OPTIONS.map(d => <option key={d.value} value={d.value}>{d.label}</option>)}
-                          </select>
-                          <button onClick={() => addAccount(school.id)} className="btn-blue text-sm px-4 py-2">+ הוסף</button>
-                        </div>
-
-                        <div className="mt-4 pt-3 border-t border-slate-100">
-                          <p className="text-xs text-slate-800 mb-2 font-medium">יועצים מוקצים</p>
-                          <div className="flex flex-wrap gap-2 mb-3 min-h-[28px]">
-                            {(schoolAdvisors[school.id] || []).length === 0 && (
-                              <p className="text-sm text-slate-400">אין יועצים מוקצים</p>
-                            )}
-                            {(schoolAdvisors[school.id] || []).map(adv => (
-                              <span key={adv.id} className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full" style={{ background: "rgba(0,112,243,0.08)", color: "#1d4ed8" }}>
-                                {adv.full_name || adv.email}
-                                <button onClick={() => removeAdvisorFromSchool(school.id, adv.id)}
-                                  className="hover:text-red-500 transition-colors leading-none text-base"
-                                  aria-label={`הסר ${adv.full_name || adv.email}`}>×</button>
-                              </span>
+              <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <label htmlFor="admin-schools-search" className="sr-only">חיפוש בתי ספר</label>
+                  <input
+                    id="admin-schools-search"
+                    type="text"
+                    value={adminSearchQuery}
+                    onChange={e => setAdminSearchQuery(e.target.value)}
+                    placeholder="חיפוש לפי שם, סמל או עיר..."
+                    className="input-field text-sm w-56"
+                  />
+                  <div className="relative" ref={adminColPickerRef}>
+                    <button type="button" onClick={() => setShowAdminColPicker(o => !o)} className="btn-ghost text-xs px-3 py-1.5"
+                      aria-haspopup="true" aria-expanded={showAdminColPicker}>
+                      עמודות לתצוגה
+                    </button>
+                    {showAdminColPicker && (
+                      <div className="absolute z-30 top-full mt-1 right-0 bg-white border border-slate-200 rounded-xl shadow-lg py-2 w-64 max-h-96 overflow-y-auto" dir="rtl">
+                        {adminColumnCategories.map(cat => (
+                          <div key={cat.title} className="px-3 py-1">
+                            <p className="text-xs font-semibold text-slate-400 mt-1 mb-1">{cat.title}</p>
+                            {cat.cols.map(col => (
+                              <label key={col.key} className="flex items-center gap-2 py-1 text-sm text-slate-700 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={!!adminColVisible[col.key]}
+                                  onChange={() => toggleAdminColVisible(col.key)}
+                                  className="w-4 h-4 rounded accent-blue-600"
+                                />
+                                {col.label}
+                              </label>
                             ))}
                           </div>
-                          <AdvisorSearch
-                            schoolId={school.id}
-                            assigned={schoolAdvisors[school.id] || []}
-                            users={users}
-                            loadingUsers={loadingUsers}
-                            onAdd={addAdvisorToSchool}
-                            onRetry={loadUsers}
-                          />
-                        </div>
+                        ))}
                       </div>
                     )}
                   </div>
-                ))}
+                </div>
+                <AcademicYearSelector value={adminAcademicYear} onChange={setAdminAcademicYear} />
+              </div>
+
+              {schools.some(s => s.status === "pending_deletion") && (
+                <h3 className="text-sm font-semibold text-slate-500 mb-3 flex items-center gap-2">
+                  🏫 בתי ספר פעילים ({activeAdminSchools.length})
+                </h3>
+              )}
+
+              <div className="glass-card rounded-2xl overflow-hidden relative mb-3">
+                {loadingYearAdminData && sortedAdminSchools.length === 0 ? (
+                  <div role="status" aria-label="טוען נתוני ניהול" className="flex justify-center py-10">
+                    <div aria-hidden="true" className="spinner w-8 h-8" />
+                  </div>
+                ) : sortedAdminSchools.length === 0 ? (
+                  <div className="p-8 text-center">
+                    <p className="text-slate-500">לא נמצאו בתי ספר</p>
+                  </div>
+                ) : (
+                  <div className="overflow-auto dash-scroll-x max-h-[70vh]">
+                    <table className="w-full text-sm border-collapse">
+                      <thead>
+                        <tr
+                          className="border-b border-slate-200"
+                          style={{ position: "sticky", top: 0, background: "rgba(241,245,249,0.97)", zIndex: 10, backdropFilter: "blur(8px)" }}
+                        >
+                          <th scope="col" className="text-right px-5 py-3 text-slate-900 font-semibold border-l border-slate-200"
+                            style={{ position: "sticky", right: 0, zIndex: 11, background: "rgba(241,245,249,0.97)" }}>שם מוסד</th>
+                          {visibleAdminColOrder.map((key, i) => {
+                            const col = ADMIN_ALL_COLUMNS.find(c => c.key === key);
+                            const isLast = i === visibleAdminColOrder.length - 1;
+                            const isSorted = adminSortKey === key;
+                            const filterType = getAdminColumnFilterType(key);
+                            const isFiltered = adminColumnFilterActiveKeys.includes(key);
+                            return (
+                              <th key={key} scope="col"
+                                className={`text-right px-4 py-3 font-semibold select-none text-slate-900 ${isLast ? "" : "border-l border-slate-200"}`}>
+                                <div className="flex items-center gap-1">
+                                  <button type="button" onClick={() => toggleAdminSort(key)}
+                                    className={`flex items-center gap-1 hover:text-blue-600 ${isSorted ? "text-blue-600" : ""}`}>
+                                    <span>{col.label}</span>
+                                    {isSorted && (
+                                      <svg aria-hidden="true" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                        {adminSortDir === "asc" ? <polyline points="18 15 12 9 6 15" /> : <polyline points="6 9 12 15 18 9" />}
+                                      </svg>
+                                    )}
+                                  </button>
+                                  {filterType && (
+                                    <div className="relative">
+                                      <button type="button"
+                                        onClick={() => setOpenAdminFilterKey(o => o === key ? null : key)}
+                                        className={`p-0.5 rounded hover:bg-slate-200 ${isFiltered ? "text-blue-600" : "text-slate-400"}`}
+                                        aria-label={`סינון לפי ${col.label}`}
+                                        aria-haspopup="true"
+                                        aria-expanded={openAdminFilterKey === key}
+                                      >
+                                        <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+                                          <path d="M3 5h18l-7 8v6l-4 2v-8L3 5z" />
+                                        </svg>
+                                      </button>
+                                      {openAdminFilterKey === key && (
+                                        <div ref={adminFilterPopoverRef}
+                                          className="absolute z-30 top-full mt-1 right-0 bg-white border border-slate-200 rounded-xl shadow-lg p-3 w-56 font-normal normal-case" dir="rtl">
+                                          <AdminColumnFilterPopover
+                                            colKey={key}
+                                            colLabel={col.label}
+                                            filterType={filterType}
+                                            spec={adminColumnFilters[key]}
+                                            onChange={spec => setAdminColumnFilters(prev => ({ ...prev, [key]: spec }))}
+                                            onClear={() => setAdminColumnFilters(prev => { const next = { ...prev }; delete next[key]; return next; })}
+                                            onClose={() => setOpenAdminFilterKey(null)}
+                                          />
+                                        </div>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                              </th>
+                            );
+                          })}
+                          <th scope="col" className="text-right px-4 py-3 text-slate-900 font-semibold">פעולות</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sortedAdminSchools.map(school => {
+                          const yad = yearAdminData[school.id] || {};
+                          const rowKey = `${school.id}-${adminAcademicYear}`;
+                          return (
+                            <Fragment key={school.id}>
+                              <tr className="group border-b border-slate-100 hover:bg-slate-50 transition-colors">
+                                <td className="px-5 py-3 border-l border-slate-100 bg-white group-hover:bg-slate-50"
+                                  style={{ position: "sticky", right: 0, zIndex: 5 }}>
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <span className="font-semibold text-slate-900">{school.name}</span>
+                                    {school.symbol && <span className="text-xs text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">סמל {school.symbol}</span>}
+                                  </div>
+                                </td>
+                                {visibleAdminColOrder.map((key, i) => {
+                                  const isLast = i === visibleAdminColOrder.length - 1;
+                                  const tdClass = `px-4 py-2 text-slate-600 ${isLast ? "" : "border-l border-slate-100"}`;
+                                  if (key === "symbol") return <td key={key} className={tdClass}><span className="font-mono">{school.symbol || "—"}</span></td>;
+                                  if (key === "city") return <td key={key} className={tdClass}>{school.city || "—"}</td>;
+                                  if (key === "authority") return <td key={key} className={tdClass}>{school.authority || "—"}</td>;
+                                  if (key === "stage") return <td key={key} className={tdClass}>{ADMIN_SCHOOL_STAGE_LABEL[school.stage] || school.stage || "—"}</td>;
+                                  if (key === "meetings_completed") return <td key={key} className={tdClass}>{school.meetings_stats ? String(school.meetings_stats.completed) : "—"}</td>;
+                                  if (key === "meetings_hours") return <td key={key} className={tdClass}>{school.meetings_stats ? formatAdminMeetingHours(school.meetings_stats.total_minutes) : "—"}</td>;
+                                  if (key === "service_type") return (
+                                    <td key={key} className={tdClass}>
+                                      <label htmlFor={`svc-${rowKey}`} className="sr-only">סוג שירות</label>
+                                      <select id={`svc-${rowKey}`} className="input-field text-sm w-32"
+                                        value={yad.service_type || ""}
+                                        onChange={e => saveYearAdminField(school.id, "service_type", e.target.value || null)}>
+                                        <option value="">בחר</option>
+                                        {SERVICE_TYPE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                                      </select>
+                                    </td>
+                                  );
+                                  if (key === "order_method") return (
+                                    <td key={key} className={tdClass}>
+                                      <OrderMethodCell key={rowKey} value={yad.order_method || ""} onSave={v => saveYearAdminField(school.id, "order_method", v)} />
+                                    </td>
+                                  );
+                                  if (key === "order_amount_gefen") return (
+                                    <td key={key} className={tdClass}>
+                                      <input
+                                        key={rowKey}
+                                        type="number"
+                                        defaultValue={yad.order_amount_gefen ?? ""}
+                                        onBlur={e => {
+                                          const v = e.target.value === "" ? null : Number(e.target.value);
+                                          if (v !== (yad.order_amount_gefen ?? null)) saveYearAdminField(school.id, "order_amount_gefen", v);
+                                        }}
+                                        title={yad.order_amount_gefen_updated_by_name ? `${yad.order_amount_gefen_updated_by_name} - ${formatUpdatedAt(yad.order_amount_gefen_updated_at)}` : ""}
+                                        aria-label="גובה הזמנה בגפן"
+                                        className="input-field text-sm w-24"
+                                      />
+                                    </td>
+                                  );
+                                  if (["requested_price", "hours_ordered", "rate", "payment_received", "payment_requests_sent", "receipts_sent"].includes(key)) return (
+                                    <td key={key} className={tdClass}>
+                                      <input
+                                        key={rowKey}
+                                        type="number"
+                                        defaultValue={yad[key] ?? ""}
+                                        onBlur={e => {
+                                          const v = e.target.value === "" ? null : Number(e.target.value);
+                                          if (v !== (yad[key] ?? null)) saveYearAdminField(school.id, key, v);
+                                        }}
+                                        aria-label={ADMIN_DATA_COLUMNS.find(c => c.key === key)?.label}
+                                        className="input-field text-sm w-24"
+                                      />
+                                    </td>
+                                  );
+                                  if (key === "contract_sent" || key === "contract_received") return (
+                                    <td key={key} className={tdClass}>
+                                      <label htmlFor={`${key}-${rowKey}`} className="sr-only">{ADMIN_DATA_COLUMNS.find(c => c.key === key)?.label}</label>
+                                      <select id={`${key}-${rowKey}`} className="input-field text-sm w-20"
+                                        value={yad[key] === true ? "yes" : yad[key] === false ? "no" : ""}
+                                        onChange={e => saveYearAdminField(school.id, key, e.target.value === "yes" ? true : e.target.value === "no" ? false : null)}>
+                                        <option value="">—</option>
+                                        <option value="yes">כן</option>
+                                        <option value="no">לא</option>
+                                      </select>
+                                    </td>
+                                  );
+                                  if (key === "contract_file") return (
+                                    <td key={key} className={tdClass}>
+                                      {yad.contract_file_name ? (
+                                        <div className="flex items-center gap-2">
+                                          <button type="button" onClick={() => downloadContractFile(school.id)} className="text-xs text-blue-600 hover:underline truncate max-w-[100px]">
+                                            {yad.contract_file_name}
+                                          </button>
+                                          <button type="button" onClick={() => openContractUpload(school.id)} className="text-xs text-slate-400 hover:text-slate-600">החלף</button>
+                                        </div>
+                                      ) : (
+                                        <button type="button" onClick={() => openContractUpload(school.id)} className="btn-ghost text-xs px-2 py-1">העלה קובץ</button>
+                                      )}
+                                    </td>
+                                  );
+                                  return <td key={key} className={tdClass}>—</td>;
+                                })}
+                                <td className="px-4 py-2">
+                                  <div className="flex gap-2">
+                                    <button onClick={() => toggleExpand(school)} className="btn-ghost text-xs px-3 py-1.5">
+                                      {expandedSchool === school.id ? "סגור" : "חטיבות"}
+                                    </button>
+                                    <button onClick={() => startEdit(school)} className="btn-ghost text-xs px-3 py-1.5">✏️ ערוך</button>
+                                  </div>
+                                </td>
+                              </tr>
+                              {expandedSchool === school.id && (
+                                <tr className="border-b border-slate-100 bg-slate-50/70">
+                                  <td colSpan={visibleAdminColOrder.length + 2} className="px-6 py-4">
+                                    <p className="text-xs text-slate-800 mb-3 font-medium">חטיבות / חשבונות גפן</p>
+                                    <div className="flex flex-col gap-2 mb-4">
+                                      {(schoolAccounts[school.id] || []).length === 0 && (
+                                        <p className="text-sm text-slate-400">אין חטיבות מוגדרות</p>
+                                      )}
+                                      {(schoolAccounts[school.id] || []).map(acc => (
+                                        <div key={acc.id} className="bg-white rounded-xl border border-slate-100 overflow-hidden">
+                                          <div className="flex items-center justify-between px-4 py-2.5">
+                                            <span className="text-sm font-medium text-slate-800">
+                                              {acc.custom_label || DIVISION_OPTIONS.find(d => d.value === acc.division_type)?.label || acc.division_type}
+                                            </span>
+                                            <div className="flex gap-2 items-center">
+                                              {acc.finance_software && (
+                                                <span className="text-xs text-slate-800">{FINANCE_SOFTWARE_OPTIONS.find(o => o.value === acc.finance_software)?.label}</span>
+                                              )}
+                                              {acc.tmura_model && (
+                                                <span className="text-xs px-2 py-0.5 rounded-full bg-green-50 text-green-700">מודל תמרוץ</span>
+                                              )}
+                                              <button onClick={() => editingAccount === acc.id ? setEditingAccount(null) : startEditAccount(acc)} className="text-xs text-blue-500 hover:text-blue-600">✏️</button>
+                                              <button onClick={() => deleteAccount(school.id, acc.id)} className="text-xs text-red-500 hover:text-red-600">הסר</button>
+                                            </div>
+                                          </div>
+                                          {editingAccount === acc.id && (
+                                            <div className="px-4 pb-3 pt-1 border-t border-slate-100 bg-slate-50/60 flex gap-3 items-end flex-wrap">
+                                              <div className="flex flex-col gap-1">
+                                                <label htmlFor={`fs-${acc.id}`} className="text-xs text-slate-800">תוכנת כספים</label>
+                                                <select id={`fs-${acc.id}`} className="input-field text-sm"
+                                                  value={accountForm.finance_software}
+                                                  onChange={e => setAccountForm(p => ({ ...p, finance_software: e.target.value }))}>
+                                                  {FINANCE_SOFTWARE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                                                </select>
+                                              </div>
+                                              <div className="flex items-center gap-2 pb-1">
+                                                <input type="checkbox" id={`tmura-${acc.id}`}
+                                                  checked={accountForm.tmura_model}
+                                                  onChange={e => setAccountForm(p => ({ ...p, tmura_model: e.target.checked }))}
+                                                  className="w-4 h-4 rounded" />
+                                                <label htmlFor={`tmura-${acc.id}`} className="text-sm text-slate-700">עמד במודל התמרוץ</label>
+                                              </div>
+                                              <button onClick={() => saveAccount(school.id, acc.id)} className="btn-blue text-xs px-3 py-1.5">שמור</button>
+                                            </div>
+                                          )}
+                                        </div>
+                                      ))}
+                                    </div>
+                                    <div className="flex gap-2">
+                                      <label htmlFor={`division-select-${school.id}`} className="sr-only">סוג חטיבה</label>
+                                      <select id={`division-select-${school.id}`} value={newDivision} onChange={e => setNewDivision(e.target.value)} className="input-field text-sm flex-1">
+                                        {DIVISION_OPTIONS.map(d => <option key={d.value} value={d.value}>{d.label}</option>)}
+                                      </select>
+                                      <button onClick={() => addAccount(school.id)} className="btn-blue text-sm px-4 py-2">+ הוסף</button>
+                                    </div>
+
+                                    <div className="mt-4 pt-3 border-t border-slate-100">
+                                      <p className="text-xs text-slate-800 mb-2 font-medium">יועצים מוקצים</p>
+                                      <AdvisorSearch
+                                        schoolId={school.id}
+                                        selectedIds={(schoolAdvisors[school.id] || []).map(a => a.id)}
+                                        users={users}
+                                        loadingUsers={loadingUsers}
+                                        onChange={newIds => handleExpandedAdvisorChange(school.id, newIds)}
+                                        onRetry={loadUsers}
+                                      />
+                                    </div>
+                                  </td>
+                                </tr>
+                              )}
+                            </Fragment>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
 
               {schools.some(s => s.status === "pending_deletion") && (
@@ -2707,6 +3160,19 @@ export default function AdminPage() {
           onResolved={() => {
             const u = userMeetingsConflict.user;
             setUserMeetingsConflict(null);
+            checkSoleSchoolsThenDelete(u);
+          }}
+        />
+      )}
+      {userSchoolsConflict && (
+        <UserSchoolsConflictModal
+          targetUser={userSchoolsConflict.user}
+          schools={userSchoolsConflict.schools}
+          otherUsers={users.filter(u => u.id !== userSchoolsConflict.user.id)}
+          onClose={() => setUserSchoolsConflict(null)}
+          onResolved={() => {
+            const u = userSchoolsConflict.user;
+            setUserSchoolsConflict(null);
             setUserToDelete(u);
           }}
         />
@@ -2754,6 +3220,18 @@ export default function AdminPage() {
           newRole={roleChangeConfirm.newRole}
           onConfirm={confirmRoleChange}
           onCancel={() => setRoleChangeConfirm(null)}
+        />
+      )}
+
+      {showAgentWidget && (
+        <AgentChatWidget
+          activeTab={activeTab}
+          setAdminColumnFilters={setAdminColumnFilters}
+          setAdminSearchQuery={setAdminSearchQuery}
+          setAdminSortKey={setAdminSortKey}
+          setAdminSortDir={setAdminSortDir}
+          adminMeetingsRef={adminMeetingsRef}
+          onNavigateToTab={setActiveTab}
         />
       )}
     </div>

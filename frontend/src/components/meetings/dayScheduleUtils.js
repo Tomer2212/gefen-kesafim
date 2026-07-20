@@ -1,5 +1,33 @@
 import axios from "axios";
 
+// Short-lived in-memory cache for freebusy lookups — Graph calls are noticeably slower
+// than normal CRUD, and without this every hover/reopen during the same edit re-fetches
+// from scratch, which is where the "sometimes instant, sometimes slow" inconsistency
+// came from. 60s is short enough that a genuinely new Outlook-side change still shows
+// up quickly (the poll/webhook path already handles real-time correctness elsewhere —
+// this cache is purely about not re-asking Graph the same question seconds apart).
+const FREEBUSY_CACHE_TTL_MS = 60000;
+const freebusyCache = new Map();
+
+function getCached(key) {
+  const entry = freebusyCache.get(key);
+  if (entry && entry.expiresAt > Date.now()) return entry.data;
+  return null;
+}
+function setCached(key, data) {
+  freebusyCache.set(key, { data, expiresAt: Date.now() + FREEBUSY_CACHE_TTL_MS });
+}
+
+// Must be called right after saving a meeting for this advisor — otherwise a freebusy
+// popover reopened within the cache TTL would show pre-save data, silently omitting the
+// meeting the user just created/edited from their own availability view.
+export function invalidateFreebusyCache(advisorId) {
+  if (!advisorId) return;
+  for (const key of freebusyCache.keys()) {
+    if (key.includes(`:${advisorId}:`)) freebusyCache.delete(key);
+  }
+}
+
 export const DAY_START_MIN = 8 * 60;
 export const DAY_END_MIN = 19 * 60;
 export const WORK_START_MIN = 8 * 60;
@@ -25,28 +53,45 @@ export function israelDayAndTime(dateTimeStr) {
   return { day: parseInt(dateTimeStr.slice(8, 10), 10), hm: dateTimeStr.slice(11, 16) };
 }
 
-export async function fetchDayBusy(advisorId, dateStr, excludeEventId) {
+// Returns the advisor's full busy list for the day, including this meeting's own synced
+// event if any — callers that need to check for conflicts (where a meeting can't count
+// as "conflicting" with itself) filter their own event id out of the result themselves.
+//
+// Returns `null` if the check itself failed (backend responded ok:false, or the request
+// errored outright) — this must NEVER be treated the same as a real empty list. A failed
+// check silently rendering as "confirmed free" is a real safety issue for a scheduling
+// tool; callers should show a distinct "couldn't check" state instead of green/free.
+// Failures are also deliberately not cached, so the next attempt is a real retry.
+export async function fetchDayBusy(advisorId, dateStr) {
   if (!advisorId || !dateStr) return [];
+  const cacheKey = `day:${advisorId}:${dateStr}`;
+  const cached = getCached(cacheKey);
+  if (cached) return cached.map(b => ({ id: b.id, startHM: b.start.slice(11, 16), endHM: b.end.slice(11, 16), subject: b.subject }));
   const dayStart = new Date(`${dateStr}T00:00:00`);
   const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
   try {
     const res = await axios.get("/calendar/freebusy", {
       params: { advisor_id: advisorId, start: dayStart.toISOString(), end: dayEnd.toISOString() },
     });
-    return (res.data?.busy || [])
-      .filter(b => !excludeEventId || b.id !== excludeEventId)
-      .map(b => ({ id: b.id, startHM: b.start.slice(11, 16), endHM: b.end.slice(11, 16), subject: b.subject }));
+    if (res.data?.ok === false) return null;
+    const busy = res.data?.busy || [];
+    setCached(cacheKey, busy);
+    return busy.map(b => ({ id: b.id, startHM: b.start.slice(11, 16), endHM: b.end.slice(11, 16), subject: b.subject }));
   } catch {
-    return [];
+    return null;
   }
 }
 
 export async function fetchMonthBusyByDay(advisorId, viewYear, viewMonth) {
   if (!advisorId) return {};
+  const cacheKey = `month:${advisorId}:${viewYear}-${viewMonth}`;
+  const cached = getCached(cacheKey);
+  if (cached) return cached;
   const start = new Date(viewYear, viewMonth, 1).toISOString();
   const end = new Date(viewYear, viewMonth + 1, 1).toISOString();
   try {
     const res = await axios.get("/calendar/freebusy", { params: { advisor_id: advisorId, start, end } });
+    if (res.data?.ok === false) return null;
     const byDay = {};
     for (const b of (res.data?.busy || [])) {
       const startInfo = israelDayAndTime(b.start);
@@ -55,9 +100,10 @@ export async function fetchMonthBusyByDay(advisorId, viewYear, viewMonth) {
       if (!byDay[day]) byDay[day] = [];
       byDay[day].push({ id: b.id, startHM: startInfo.hm, endHM: endInfo.hm, subject: b.subject });
     }
+    setCached(cacheKey, byDay);
     return byDay;
   } catch {
-    return {};
+    return null;
   }
 }
 
@@ -122,6 +168,7 @@ export function computeSegments(ranges) {
       startHM: fromMinutes(Math.max(toMinutes(r.startHM), DAY_START_MIN)),
       endHM: fromMinutes(Math.min(toMinutes(r.endHM), DAY_END_MIN)),
       subject: r.subject,
+      id: r.id,
     }))
     .filter(r => toMinutes(r.startHM) < toMinutes(r.endHM))
     .sort((a, b) => toMinutes(a.startHM) - toMinutes(b.startHM));
@@ -140,7 +187,7 @@ export function computeSegments(ranges) {
       // No genuine overlap — a single item spanning this whole cluster window.
       // Render it as one plain busy row, not a lane grid.
       const it = c.items[0];
-      blocks.push({ type: "busy", startHM: it.startHM, endHM: it.endHM, subject: it.subject, heightPx: Math.max(MIN_ROW_PX, ((c.end - c.start) / totalMin) * PANEL_HEIGHT_PX) });
+      blocks.push({ type: "busy", startHM: it.startHM, endHM: it.endHM, subject: it.subject, id: it.id, heightPx: Math.max(MIN_ROW_PX, ((c.end - c.start) / totalMin) * PANEL_HEIGHT_PX) });
       cursor = c.end;
       continue;
     }
@@ -156,7 +203,7 @@ export function computeSegments(ranges) {
       for (const it of laneItems) {
         const s = toMinutes(it.startHM), e = toMinutes(it.endHM);
         if (s > laneCursor) subs.push({ type: "empty", grow: s - laneCursor });
-        subs.push({ type: "busy", startHM: it.startHM, endHM: it.endHM, subject: it.subject, grow: e - s });
+        subs.push({ type: "busy", startHM: it.startHM, endHM: it.endHM, subject: it.subject, id: it.id, grow: e - s });
         laneCursor = e;
       }
       if (laneCursor < c.end) subs.push({ type: "empty", grow: c.end - laneCursor });

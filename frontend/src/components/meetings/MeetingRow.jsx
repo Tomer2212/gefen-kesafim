@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
 import axios from "axios";
 import { AdvisorCell } from "./AdvisorCell";
@@ -9,7 +10,7 @@ import { NoParticipantsModal } from "./NoParticipantsModal";
 import { ParticipantsSelector } from "./ParticipantsSelector";
 import { TimeInput, normalizeTimeValue } from "./TimeInput";
 import { MEETING_STATUS_OPTIONS, STATUS_MAP, formatMeetingDate } from "./constants";
-import { computeFreeWindows, computeSegments, fetchDayBusy, findNextEvent, toMinutes } from "./dayScheduleUtils";
+import { computeFreeWindows, computeSegments, fetchDayBusy, findNextEvent, invalidateFreebusyCache, toMinutes } from "./dayScheduleUtils";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
 
 const TODAY = new Date().toISOString().slice(0, 10);
@@ -83,14 +84,39 @@ function ChooseContactModal({ options, onChoose, onClose }) {
   );
 }
 
-// Small fixed-position schedule tooltip shared by the date cell and the time-input hovers.
-function ScheduleTooltip({ children }) {
-  return (
+// Small schedule tooltip shared by the date cell and the time-input hovers. Rendered
+// via a portal straight into <body> with `position: fixed`, computed from the anchor
+// element's own bounding rect — a plain `position: absolute` child used to get silently
+// clipped by any ancestor with `overflow` set (e.g. the table's scroll container), which
+// is exactly what made the taller post-resize tooltip look "swallowed" at the bottom.
+function ScheduleTooltip({ children, anchorRef }) {
+  const [pos, setPos] = useState(null);
+
+  useLayoutEffect(() => {
+    if (!anchorRef?.current) { setPos(null); return; }
+    const rect = anchorRef.current.getBoundingClientRect();
+    setPos({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
+  }, [anchorRef]);
+
+  // A fixed-position tooltip doesn't move with its anchor — scrolling the page (or the
+  // table's own scroll container) would otherwise leave it floating next to the wrong
+  // row. Simplest correct fix: hide it on any scroll; it reappears on the next hover.
+  useEffect(() => {
+    if (!pos) return;
+    const hide = () => setPos(null);
+    window.addEventListener("scroll", hide, { capture: true, passive: true });
+    return () => window.removeEventListener("scroll", hide, { capture: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [!!pos]);
+
+  if (!pos) return null;
+  return createPortal(
     <div role="tooltip"
-      className="absolute z-40 bg-white border border-slate-200 rounded-lg shadow-lg p-2 text-[11px]"
-      style={{ top: "calc(100% + 4px)", right: 0, width: 260 }}>
+      className="fixed z-[9999] bg-white border border-slate-200 rounded-lg shadow-lg p-4 text-[18px]"
+      style={{ top: pos.top, right: pos.right, width: "max-content", maxWidth: 640, minWidth: 320 }}>
       {children}
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -111,7 +137,7 @@ function CalendarSyncBadge({ calendarSync }) {
     return (
       <span
         title="סנכרון ליומן Outlook נכשל עבור אחד או יותר מהיועצים"
-        className="text-[11px] font-semibold px-1.5 py-0.5 rounded-full border bg-red-50 border-red-300 text-red-700 mr-1">
+        className="text-[11px] font-semibold px-1.5 py-0.5 rounded-full border bg-red-50 border-red-300 text-red-700 whitespace-nowrap inline-block">
         ⚠ יומן
       </span>
     );
@@ -120,7 +146,7 @@ function CalendarSyncBadge({ calendarSync }) {
     return (
       <span
         title="הפגישה סונכרנה ליומן ה-Outlook של היועצים"
-        className="text-[11px] font-semibold px-1.5 py-0.5 rounded-full border bg-blue-50 border-blue-300 text-blue-700 mr-1">
+        className="text-[11px] font-semibold px-1.5 py-0.5 rounded-full border bg-blue-50 border-blue-300 text-blue-700 whitespace-nowrap inline-block">
         📅 יומן ✓
       </span>
     );
@@ -133,6 +159,7 @@ export function MeetingRow({
   contacts, onRequestAccess, onReminderOn,
   showSchoolColumn, schoolLabel, onOpenSchoolPicker,
   selectable, selected, onToggleSelect, onSendStatusReminder, hideAdvisorColumn,
+  showCalendarColumn, onOpenSummary,
 }) {
   const navigate = useNavigate();
   const [draft, setDraft] = useState({ ...meeting });
@@ -143,11 +170,16 @@ export function MeetingRow({
   const [showNoParticipantsModal, setShowNoParticipantsModal] = useState(false);
   const [showActionsMenu, setShowActionsMenu] = useState(false);
   const [advisorBusy, setAdvisorBusy] = useState([]);
+  const [busyLoading, setBusyLoading] = useState(true);
+  const [busyFailed, setBusyFailed] = useState(false);
   const [conflictModal, setConflictModal] = useState(null);
   const [contactPickerOptions, setContactPickerOptions] = useState(null);
   const [dateHovered, setDateHovered] = useState(false);
   const [startHovered, setStartHovered] = useState(false);
   const [endHovered, setEndHovered] = useState(false);
+  const dateCellRef = useRef(null);
+  const startCellRef = useRef(null);
+  const endCellRef = useRef(null);
   const rowRef = useRef(null);
   const actionsMenuRef = useRef(null);
   // Track what was last sent so blur doesn't double-save after an immediate save
@@ -177,13 +209,27 @@ export function MeetingRow({
 
   // Fetch the advisor's Outlook busy ranges for this specific meeting date — used both
   // to warn/block saving on a real overlap, and to power the schedule hover tooltips.
+  // Fetches the FULL list, including this meeting's own synced event — the day-schedule
+  // tooltips are meant to show the real picture of the day (this meeting genuinely
+  // occupies that slot), not a version with a gap where it pretends to be free. Only the
+  // conflict check below needs the own event excluded (see conflictCheckBusy).
   const advisorIdForBusyCheck = draft.advisor_ids?.[0];
+  const ownEventId = meeting.calendar_sync?.[advisorIdForBusyCheck]?.external_event_id;
   useEffect(() => {
-    if (!advisorIdForBusyCheck || !draft.meeting_date) { setAdvisorBusy([]); return; }
+    if (!advisorIdForBusyCheck || !draft.meeting_date) { setAdvisorBusy([]); setBusyLoading(false); setBusyFailed(false); return; }
     let cancelled = false;
-    const ownEventId = meeting.calendar_sync?.[advisorIdForBusyCheck]?.external_event_id;
-    fetchDayBusy(advisorIdForBusyCheck, draft.meeting_date, ownEventId).then(ranges => {
-      if (!cancelled) setAdvisorBusy(ranges);
+    setBusyLoading(true);
+    fetchDayBusy(advisorIdForBusyCheck, draft.meeting_date).then(ranges => {
+      if (cancelled) return;
+      if (ranges === null) {
+        // Couldn't check — keep whatever was last successfully shown rather than
+        // wiping it to an empty (falsely "free"-looking) list.
+        setBusyFailed(true);
+      } else {
+        setAdvisorBusy(ranges);
+        setBusyFailed(false);
+      }
+      setBusyLoading(false);
     });
     return () => { cancelled = true; };
   }, [advisorIdForBusyCheck, draft.meeting_date, meeting.calendar_sync]);
@@ -194,7 +240,9 @@ export function MeetingRow({
   // live check (against advisorBusy) takes over for real-time feedback while typing.
   const draftMatchesSaved = draft.start_time === meeting.start_time && draft.end_time === meeting.end_time && draft.meeting_date === meeting.meeting_date;
   const persistedConflict = draftMatchesSaved && !!advisorIdForBusyCheck && !!meeting.calendar_sync?.[advisorIdForBusyCheck]?.conflict;
-  const liveConflict = computeTimeConflict(draft.start_time, draft.end_time, advisorBusy);
+  // Excludes this meeting's own synced event — otherwise it would always "conflict" with itself.
+  const conflictCheckBusy = advisorBusy.filter(b => b.id !== ownEventId);
+  const liveConflict = computeTimeConflict(draft.start_time, draft.end_time, conflictCheckBusy);
   const startConflict = liveConflict.startConflict || persistedConflict;
   const endConflict = liveConflict.endConflict || persistedConflict;
   const advisorName = draft.advisor_profiles?.[0]?.full_name || "היועץ";
@@ -239,26 +287,45 @@ export function MeetingRow({
     // state is populated asynchronously and can lag behind rapid edits (e.g. setting
     // date → start → end back-to-back), which would otherwise show a stale (non-red)
     // warning state for a moment. A live check right before saving avoids that.
+    // Fetched locally for an accurate conflict check right at save time — deliberately
+    // NOT written into the shared `advisorBusy` display state. That state already has its
+    // own effect (with proper stale-response guarding via the `cancelled` flag) that
+    // refetches once the save completes and syncs; if this snapshot — taken *before* the
+    // save/sync even started — were also allowed to call setAdvisorBusy, whichever of the
+    // two resolves last would win, and this earlier one sometimes did, intermittently
+    // clobbering the correct post-sync picture with a stale pre-save one.
     let liveBusy = advisorBusy;
     if (advisorId && draftToSave.meeting_date && draftToSave.start_time && draftToSave.end_time) {
-      const ownEventId = meeting.calendar_sync?.[advisorId]?.external_event_id;
-      liveBusy = await fetchDayBusy(advisorId, draftToSave.meeting_date, ownEventId);
-      setAdvisorBusy(liveBusy);
+      // null means the live check failed — fall back to the last known-good state
+      // rather than treating a failed check as "nothing booked".
+      liveBusy = await fetchDayBusy(advisorId, draftToSave.meeting_date) ?? advisorBusy;
     }
-    const conflict = computeTimeConflict(draftToSave.start_time, draftToSave.end_time, liveBusy);
+    const ownEventIdForSave = meeting.calendar_sync?.[advisorId]?.external_event_id;
+    const conflict = computeTimeConflict(draftToSave.start_time, draftToSave.end_time, liveBusy.filter(b => b.id !== ownEventIdForSave));
     if (conflict.startConflict || conflict.endConflict) {
       // Warn, but still let the save go through — the advisor may genuinely need two
       // overlapping commitments (e.g. a "day off" alongside a meeting); we just make
       // sure the double-booking is visible and impossible to save by accident.
       const subject = await resolveMeetingSubject(draftToSave);
       setConflictModal({
-        advisorName,
+        // Read from draftToSave, not the outer `advisorName` — that's derived from
+        // `draft` at the *previous* render and can still be one step behind here (e.g.
+        // right after changing the advisor: setDraft(nd) + saveDraft(nd) both fire
+        // synchronously, before React re-renders with the new `draft`), showing the
+        // advisor being replaced instead of the one the conflict actually applies to.
+        advisorName: draftToSave.advisor_profiles?.[0]?.full_name || "היועץ",
         existingEvent: conflict.conflictingRange,
         newEvent: { startHM: draftToSave.start_time, endHM: draftToSave.end_time, subject },
       });
     }
     lastSentRef.current = JSON.stringify(draftToSave);
-    onSave(draftToSave);
+    // Invalidate the freebusy cache only *after* onSave's PUT round-trip (and the
+    // Outlook sync it triggers server-side) actually completes — not before. Clearing
+    // it earlier leaves a window where a freebusy fetch can slip in before the backend
+    // has actually written the change, cache the pre-save snapshot, and then sit there
+    // looking authoritative for the full cache TTL even though it's now stale again.
+    await onSave(draftToSave);
+    (draftToSave.advisor_ids || []).forEach(invalidateFreebusyCache);
   }
 
   function handleRowBlur(e) {
@@ -317,7 +384,7 @@ export function MeetingRow({
         {/* תאריך */}
         <td className="py-2.5 px-2">
           <div className="relative">
-            <button type="button"
+            <button type="button" ref={dateCellRef}
               onMouseDown={e => e.stopPropagation()}
               onClick={() => setShowDate(o => !o)}
               onMouseEnter={() => setDateHovered(true)}
@@ -327,11 +394,22 @@ export function MeetingRow({
             </button>
             {showDate && <DatePickerPopover value={draft.meeting_date}
               advisorId={draft.advisor_ids?.[0]}
+              ownEventId={ownEventId}
+              anchorRef={dateCellRef}
               onChange={v => { const nd = { ...draft, meeting_date: v }; setDraft(nd); setShowDate(false); saveDraft(nd); }}
               onClose={() => setShowDate(false)} />}
             {!showDate && dateHovered && advisorIdForBusyCheck && draft.meeting_date && (
-              <ScheduleTooltip>
-                <DayScheduleBlocks segments={computeSegments(advisorBusy)} />
+              <ScheduleTooltip anchorRef={dateCellRef}>
+                {busyLoading ? (
+                  <span className="text-slate-400">טוען זמינות...</span>
+                ) : (
+                  <>
+                    {busyFailed && (
+                      <p className="text-amber-600 text-sm mb-2">⚠ לא ניתן היה לעדכן את הזמינות כרגע — הנתונים המוצגים עשויים להיות לא מעודכנים</p>
+                    )}
+                    <DayScheduleBlocks segments={computeSegments(advisorBusy)} ownEventId={ownEventId} />
+                  </>
+                )}
               </ScheduleTooltip>
             )}
           </div>
@@ -381,38 +459,53 @@ export function MeetingRow({
           </td>
         )}
         {/* שעת התחלה */}
-        <td className="py-2.5 pr-2 pl-3 relative"
+        <td className="py-2.5 pr-2 pl-3 relative" ref={startCellRef}
           onMouseEnter={() => setStartHovered(true)} onMouseLeave={() => setStartHovered(false)}>
           <TimeInput id={`start-${meeting.id}`} value={draft.start_time || ""}
             onChange={v => set("start_time", v)}
             ariaLabel="שעת התחלה" hasError={startConflict}
             errorMessage="היועץ כבר תפוס בזמן הזה ביומן ה-Outlook" />
           {startHovered && advisorIdForBusyCheck && draft.meeting_date && (
-            <ScheduleTooltip>
-              <span className="text-black block mb-1">היועץ פנוי ב:</span>
-              {computeFreeWindows(advisorBusy).length === 0 ? (
-                <span className="text-slate-400">אין נתוני זמינות</span>
+            <ScheduleTooltip anchorRef={startCellRef}>
+              {busyLoading ? (
+                <span className="text-slate-400">טוען זמינות...</span>
               ) : (
-                <div className="flex flex-col gap-1">
-                  {computeFreeWindows(advisorBusy).map((w, i) => (
-                    <span key={i} dir="ltr" className="text-black font-medium">{w.startHM}–{w.endHM}</span>
-                  ))}
-                </div>
+                <>
+                  {busyFailed && (
+                    <p className="text-amber-600 text-sm mb-2">⚠ לא ניתן היה לעדכן את הזמינות — הנתונים עשויים להיות לא מעודכנים</p>
+                  )}
+                  <span className="text-black block mb-1">היועץ פנוי ב:</span>
+                  {computeFreeWindows(advisorBusy).length === 0 ? (
+                    <span className="text-slate-400">אין נתוני זמינות</span>
+                  ) : (
+                    <div className="flex flex-col gap-1">
+                      {computeFreeWindows(advisorBusy).map((w, i) => (
+                        <span key={i} dir="ltr" className="text-black font-medium">{w.startHM}–{w.endHM}</span>
+                      ))}
+                    </div>
+                  )}
+                </>
               )}
             </ScheduleTooltip>
           )}
         </td>
         {/* שעת סיום */}
-        <td className="py-2.5 px-1 relative"
+        <td className="py-2.5 px-1 relative" ref={endCellRef}
           onMouseEnter={() => setEndHovered(true)} onMouseLeave={() => setEndHovered(false)}>
           <TimeInput id={`end-${meeting.id}`} value={draft.end_time || ""}
             onChange={v => set("end_time", v)}
             ariaLabel="שעת סיום" hasError={endConflict}
             errorMessage="היועץ כבר תפוס בזמן הזה ביומן ה-Outlook" />
           {endHovered && advisorIdForBusyCheck && draft.meeting_date && draft.start_time && (() => {
+            if (busyLoading) {
+              return <ScheduleTooltip anchorRef={endCellRef}><span className="text-slate-400">טוען זמינות...</span></ScheduleTooltip>;
+            }
             const next = findNextEvent(draft.start_time, advisorBusy);
             return (
-              <ScheduleTooltip>
+              <ScheduleTooltip anchorRef={endCellRef}>
+                {busyFailed && (
+                  <p className="text-amber-600 text-sm mb-2">⚠ לא ניתן היה לעדכן את הזמינות — הנתונים עשויים להיות לא מעודכנים</p>
+                )}
                 {next ? (
                   <span className="text-black">
                     פנוי עד <span dir="ltr" className="font-medium">{next.startHM}</span>.
@@ -515,8 +608,28 @@ export function MeetingRow({
                 )}
               </div>
             )}
-            <CalendarSyncBadge calendarSync={meeting.calendar_sync} />
           </div>
+        </td>
+        {/* יומן */}
+        {showCalendarColumn && (
+          <td className="py-2.5 px-2 text-center whitespace-nowrap" style={{ width: "95px" }}>
+            <CalendarSyncBadge calendarSync={meeting.calendar_sync} />
+          </td>
+        )}
+        {/* סיכום פגישה */}
+        <td className="py-2.5 px-2 text-center">
+          {meeting.summary_status === "processing" ? (
+            <span className="text-xs text-amber-600 font-medium whitespace-nowrap">מעבד...</span>
+          ) : (
+            <button type="button"
+              onMouseDown={e => { e.preventDefault(); onOpenSummary?.(meeting); }}
+              className="text-slate-400 hover:text-blue-600 transition-colors text-base leading-none"
+              aria-label="סיכום פגישה">
+              {meeting.summary_status === "error"
+                ? <span title={meeting.summary_error || "אירעה שגיאה"} className="text-red-500">⚠</span>
+                : <span className="text-slate-400 text-lg font-light">+</span>}
+            </button>
+          )}
         </td>
         {/* Actions */}
         {(onRequestDelete || onSendStatusReminder) && (
@@ -541,7 +654,8 @@ export function MeetingRow({
                   )}
                   {onRequestDelete && (
                     <button type="button"
-                      onMouseDown={e => { e.preventDefault(); onRequestDelete(meeting.id); setShowActionsMenu(false); }}
+                      onMouseDown={e => e.preventDefault()}
+                      onClick={() => { onRequestDelete(meeting.id); setShowActionsMenu(false); }}
                       className="w-full text-right px-3 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors whitespace-nowrap">
                       מחק
                     </button>

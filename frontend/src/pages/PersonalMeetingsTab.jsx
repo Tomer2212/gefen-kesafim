@@ -5,6 +5,7 @@ import * as XLSX from "xlsx";
 import { DeleteMeetingModal } from "../components/meetings/DeleteMeetingModal";
 import { MeetingsBulkActionBar } from "../components/meetings/MeetingsBulkActionBar";
 import { MeetingsTable } from "../components/meetings/MeetingsTable";
+import { MeetingSummaryModal } from "../components/meetings/MeetingSummaryModal";
 import { NotesModal } from "../components/meetings/NotesModal";
 import { SchoolPickerModal, SchoolPickerPopover, schoolLabel } from "../components/meetings/SchoolPickerCell";
 import { MEETING_STATUS_OPTIONS, MEETING_TYPE_OPTIONS, STATUS_MAP, formatMeetingDate } from "../components/meetings/constants";
@@ -15,6 +16,7 @@ import { getMissingCriticalFields, isMeetingIncomplete } from "../components/mee
 import { buildSchoolContacts } from "../components/meetings/schoolContacts";
 import { normalizeTimeValue } from "../components/meetings/TimeInput";
 import { useMeetingsPolling } from "../hooks/useMeetingsPolling";
+import { mergeMeetingsSilently, visibleDateBounds } from "../components/meetings/mergeMeetings";
 
 const TODAY = new Date().toISOString().slice(0, 10);
 const DEFAULT_FILTERS = { status: "", date_from: TODAY, date_to: TODAY };
@@ -49,8 +51,9 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
   const dotsRef = useRef(null);
   const [selectedIds, setSelectedIds] = useState({});
   const [notesModal, setNotesModal] = useState(null);
+  const [summaryModalFor, setSummaryModalFor] = useState(null);
+  const [showCalendarColumn, setShowCalendarColumn] = useState(false);
   const [schoolPickerFor, setSchoolPickerFor] = useState(null);
-  const [deleteConfirmId, setDeleteConfirmId] = useState(null);
   const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false);
   const [reminderToasts, setReminderToasts] = useState([]);
   const [alreadySentModal, setAlreadySentModal] = useState(null);
@@ -97,11 +100,24 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
     try {
       const params = new URLSearchParams();
       if (activeFilters.status) params.set("status", activeFilters.status);
-      if (activeFilters.date_from) params.set("date_from", activeFilters.date_from);
-      if (activeFilters.date_to) params.set("date_to", activeFilters.date_to);
+      if (!silent) {
+        if (activeFilters.date_from) params.set("date_from", activeFilters.date_from);
+        if (activeFilters.date_to) params.set("date_to", activeFilters.date_to);
+      } else {
+        // Bound the silent query to what's actually on screen right now — see
+        // visibleDateBounds' comment (mergeMeetings.js) for why we can't just drop
+        // the date filter entirely (that would make every poll an unbounded query).
+        const bounds = visibleDateBounds(meetings);
+        if (bounds.date_from) params.set("date_from", bounds.date_from);
+        if (bounds.date_to) params.set("date_to", bounds.date_to);
+      }
       params.set("academic_year", academicYear);
       const res = await axios.get(`/schools/meetings/my?${params}`);
-      setMeetings(res.data || []);
+      if (silent) {
+        setMeetings(prev => mergeMeetingsSilently(prev, res.data || []));
+      } else {
+        setMeetings(res.data || []);
+      }
     } catch {
       if (!silent) setError("שגיאה בטעינת פגישות");
     } finally {
@@ -118,6 +134,12 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
 
   useEffect(() => {
     axios.get("/schools/").then(r => setSchools((r.data || []).filter(s => s.status !== "deleted"))).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    axios.get("/calendar/connection")
+      .then(r => setShowCalendarColumn(r.data?.org?.status === "connected"))
+      .catch(() => {});
   }, []);
 
   function setServerFilter(key, val) {
@@ -349,6 +371,15 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
           onSave={noteText => { notesModal.onSave(noteText); setNotesModal(null); }}
           onClose={() => setNotesModal(null)} />
       )}
+      {summaryModalFor && (
+        <MeetingSummaryModal
+          meeting={summaryModalFor}
+          onClose={() => setSummaryModalFor(null)}
+          onOpenNotes={(meetingId, notes, onSave) => setNotesModal({ meetingId, notes, onSave })}
+          onSave={updateMeeting}
+          onUploadStarted={meetingId => setMeetings(prev => prev.map(m => m.id === meetingId ? { ...m, summary_status: "processing" } : m))}
+        />
+      )}
       {schoolPickerFor === "new" && (
         <SchoolPickerModal schools={schools} onConfirm={createMeetingForSchool} onCancel={() => setSchoolPickerFor(null)} />
       )}
@@ -358,12 +389,6 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
           confirmText={`האם למחוק ${selectedCount} פגישות לצמיתות? לא ניתן לשחזר פעולה זו.`}
           onConfirm={bulkDelete}
           onCancel={() => setBulkDeleteConfirm(false)}
-        />
-      )}
-      {deleteConfirmId && (
-        <DeleteMeetingModal
-          onConfirm={() => { deleteMeeting(deleteConfirmId); setDeleteConfirmId(null); }}
-          onCancel={() => setDeleteConfirmId(null)}
         />
       )}
       {blocker.state === "blocked" && hasIncompleteMeetings && (
@@ -516,7 +541,7 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
             usersWithoutAccess={[]}
             contactsFor={m => buildSchoolContacts(schools.find(s => s.id === m.school_id))}
             onSave={updateMeeting}
-            onDelete={id => setDeleteConfirmId(id)}
+            onDelete={deleteMeeting}
             onOpenNotes={(meetingId, notes, onSave) => setNotesModal({ meetingId, notes, onSave })}
             onRequestAccess={() => {}}
             canDeleteMeetings={canDeleteMeetings}
@@ -529,6 +554,8 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
             onToggleSelectAll={toggleSelectAll}
             hideAdvisorColumn
             onSendStatusReminder={sendStatusReminder}
+            showCalendarColumn={showCalendarColumn}
+            onOpenSummary={setSummaryModalFor}
           />
           {currentSchoolPickerMeeting && (
             <SchoolPickerPopover
