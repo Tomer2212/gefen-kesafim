@@ -190,14 +190,20 @@ def freebusy(
         try:
             db = get_admin_client()
             blocks = graph_client.get_freebusy(db, user["org_id"], advisor_id, start, end)
-            return {"busy": blocks}
+            # blocks is None means the Graph check itself failed — surface that as
+            # ok:False rather than silently returning an empty (indistinguishable from
+            # "confirmed free") list. The frontend must never render a failed check as
+            # if the advisor were genuinely free.
+            if blocks is None:
+                return {"busy": [], "ok": False}
+            return {"busy": blocks, "ok": True}
         except Exception as exc:
             if attempt == 0:
                 reset_admin_client()
                 time.sleep(0.3)
             else:
                 logger.warning("freebusy failed after 2 attempts: %s", exc)
-                return {"busy": []}
+                return {"busy": [], "ok": False}
 
 
 def _handle_notification(db, notif: dict) -> None:
