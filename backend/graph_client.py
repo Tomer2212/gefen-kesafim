@@ -15,6 +15,8 @@ from datetime import datetime, timedelta, timezone
 import httpx
 from cryptography.fernet import Fernet
 
+from supabase_client import get_admin_client, reset_admin_client
+
 logger = logging.getLogger(__name__)
 
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
@@ -131,47 +133,82 @@ def get_user_connection(db, org_id: str, user_id: str) -> dict | None:
 
 
 def _get_app_only_token(db, org_id: str) -> str:
-    """Client-credentials flow, cached in calendar_connections until near expiry."""
-    conn = get_org_connection(db, org_id)
-    if not conn or conn.get("status") != "connected" or not conn.get("tenant_id"):
-        raise RuntimeError("no active org-level Microsoft calendar connection")
+    """Client-credentials flow, cached in calendar_connections until near expiry.
 
-    now = datetime.now(timezone.utc)
-    if conn.get("access_token") and conn.get("expires_at"):
-        expires_at = datetime.fromisoformat(conn["expires_at"].replace("Z", "+00:00"))
-        if expires_at - now > timedelta(minutes=5):
-            return _decrypt(conn["access_token"])
+    Retries once with a freshly-fetched Supabase client on a transient failure.
+    Under the concurrent load this function now sees (many freebusy checks firing
+    at once across a table full of rows), the shared httpx/HTTP2 client can end up
+    in a corrupted state — the same class of issue documented elsewhere in this
+    project for the Supabase singleton under load. Without this retry, a single such
+    hiccup used to surface as "advisor is free" to the end user, which is exactly the
+    failure mode this function's callers must never produce.
+    """
+    last_exc = None
+    for attempt in range(2):
+        try:
+            if attempt == 1:
+                db = get_admin_client()
+            conn = get_org_connection(db, org_id)
+            if not conn or conn.get("status") != "connected" or not conn.get("tenant_id"):
+                raise RuntimeError("no active org-level Microsoft calendar connection")
 
-    resp = httpx.post(
-        f"https://login.microsoftonline.com/{conn['tenant_id']}/oauth2/v2.0/token",
-        data={
-            "client_id": MS_CLIENT_ID,
-            "client_secret": MS_CLIENT_SECRET,
-            "scope": "https://graph.microsoft.com/.default",
-            "grant_type": "client_credentials",
-        },
-        timeout=15,
-    )
-    resp.raise_for_status()
-    token_data = resp.json()
-    access_token = token_data["access_token"]
-    new_expires_at = now + timedelta(seconds=token_data.get("expires_in", 3600))
+            now = datetime.now(timezone.utc)
+            if conn.get("access_token") and conn.get("expires_at"):
+                expires_at = datetime.fromisoformat(conn["expires_at"].replace("Z", "+00:00"))
+                if expires_at - now > timedelta(minutes=5):
+                    return _decrypt(conn["access_token"])
 
-    db.table("calendar_connections").update({
-        "access_token": _encrypt(access_token),
-        "expires_at": new_expires_at.isoformat(),
-        "updated_at": now.isoformat(),
-    }).eq("id", conn["id"]).execute()
+            resp = httpx.post(
+                f"https://login.microsoftonline.com/{conn['tenant_id']}/oauth2/v2.0/token",
+                data={
+                    "client_id": MS_CLIENT_ID,
+                    "client_secret": MS_CLIENT_SECRET,
+                    "scope": "https://graph.microsoft.com/.default",
+                    "grant_type": "client_credentials",
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+            token_data = resp.json()
+            access_token = token_data["access_token"]
+            new_expires_at = now + timedelta(seconds=token_data.get("expires_in", 3600))
 
-    return access_token
+            db.table("calendar_connections").update({
+                "access_token": _encrypt(access_token),
+                "expires_at": new_expires_at.isoformat(),
+                "updated_at": now.isoformat(),
+            }).eq("id", conn["id"]).execute()
+
+            return access_token
+        except RuntimeError:
+            raise  # "no active connection" is a real state, not transient — never retry/mask it
+        except Exception as exc:
+            last_exc = exc
+            if attempt == 0:
+                logger.warning("_get_app_only_token attempt 1 failed for org %s, retrying: %s", org_id, exc)
+                reset_admin_client()
+                time.sleep(0.2)
+    raise last_exc
 
 
 def _resolve_advisor_email(db, advisor_id: str) -> str | None:
-    res = db.table("profiles").select("email, calendar_sync_email").eq("id", advisor_id).execute()
-    if not res.data:
-        return None
-    row = res.data[0]
-    return row.get("calendar_sync_email") or row.get("email")
+    for attempt in range(2):
+        try:
+            if attempt == 1:
+                db = get_admin_client()
+            res = db.table("profiles").select("email, calendar_sync_email").eq("id", advisor_id).execute()
+            if not res.data:
+                return None
+            row = res.data[0]
+            return row.get("calendar_sync_email") or row.get("email")
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("_resolve_advisor_email attempt 1 failed for advisor %s, retrying: %s", advisor_id, exc)
+                reset_admin_client()
+                time.sleep(0.2)
+            else:
+                logger.warning("_resolve_advisor_email failed for advisor %s: %s", advisor_id, exc)
+                return None
 
 
 def _headers(token: str) -> dict:
@@ -266,19 +303,27 @@ def _event_payload(meeting: dict, subject: str | None) -> dict:
 # Free/Busy
 # ---------------------------------------------------------------------------
 
-def get_freebusy(db, org_id: str, advisor_id: str, start_iso: str, end_iso: str) -> list[dict]:
-    """Returns busy time blocks (with subject) for one advisor. Empty list (never raises) if unavailable.
+def get_freebusy(db, org_id: str, advisor_id: str, start_iso: str, end_iso: str) -> list[dict] | None:
+    """Returns busy time blocks (with subject) for one advisor.
 
     Uses calendarView (not getSchedule) so the response includes the event subject —
     the secretary needs to see *what* the advisor is booked for, not just that he's busy.
     The `Prefer: outlook.timezone` header makes Graph return times already converted to
     Israel local time, avoiding manual UTC conversion entirely.
+
+    Returns:
+    - list[dict] of busy blocks — including an empty list if the advisor genuinely has
+      nothing booked, or isn't connected to a calendar at all (a stable, known state).
+    - None if the check itself failed (token/network/Graph error) — never conflate this
+      with "confirmed free"; callers must treat it as "couldn't determine," not as an
+      empty calendar. A transient failure silently rendering as green/free would be a
+      real safety issue for a scheduling tool.
     """
     try:
         token = _get_app_only_token(db, org_id)
     except Exception as exc:
         logger.info("freebusy skipped for org %s: %s", org_id, exc)
-        return []
+        return None
 
     email = _resolve_advisor_email(db, advisor_id)
     if not email:
@@ -311,7 +356,7 @@ def get_freebusy(db, org_id: str, advisor_id: str, start_iso: str, end_iso: str)
         ]
     except Exception as exc:
         logger.warning("freebusy fetch failed for advisor %s: %s", advisor_id, exc)
-        return []
+        return None
 
 
 def persist_calendar_sync(db, meeting_id: str, sync_map: dict) -> None:
@@ -322,8 +367,34 @@ def persist_calendar_sync(db, meeting_id: str, sync_map: dict) -> None:
 
     Clears out the meeting's old index rows first: an advisor removed from the
     meeting, or an event recreated with a new id, must not leave a stale row
-    that would misroute a future webhook notification to this meeting."""
-    db.table("meetings").update({"calendar_sync": sync_map}).eq("id", meeting_id).execute()
+    that would misroute a future webhook notification to this meeting.
+
+    This write is the single most safety-critical one in the whole sync flow: by
+    the time this function runs, the Graph-side event has *already* been
+    created/updated. If this DB write silently fails (confirmed to happen under
+    concurrent load — see the retry patterns elsewhere in this file), the meeting
+    row is left pointing at the old/no event while a new real one now exists in
+    Outlook, orphaned and invisible to us forever. Retries with a fresh client
+    before giving up, matching this project's established resilience pattern.
+    """
+    last_exc = None
+    for attempt in range(2):
+        try:
+            if attempt == 1:
+                db = get_admin_client()
+            db.table("meetings").update({"calendar_sync": sync_map}).eq("id", meeting_id).execute()
+            last_exc = None
+            break
+        except Exception as exc:
+            last_exc = exc
+            if attempt == 0:
+                logger.warning("persist_calendar_sync attempt 1 failed for meeting %s, retrying: %s", meeting_id, exc)
+                reset_admin_client()
+                time.sleep(0.2)
+    if last_exc:
+        logger.error("persist_calendar_sync failed for meeting %s after retry: %s", meeting_id, last_exc, exc_info=True)
+        raise last_exc
+
     try:
         db.table("calendar_event_index").delete().eq("meeting_id", meeting_id).execute()
         rows = [
@@ -501,6 +572,8 @@ def _check_meeting_conflict(db, org_id: str, advisor_id: str, meeting: dict, exc
     start_iso = day_start.strftime("%Y-%m-%dT00:00:00.000Z")
     end_iso = (day_start + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00.000Z")
     blocks = get_freebusy(db, org_id, advisor_id, start_iso, end_iso)
+    if blocks is None:
+        return False  # couldn't check — don't claim a conflict we can't actually see
     for b in blocks:
         if exclude_event_id and b.get("id") == exclude_event_id:
             continue
@@ -601,10 +674,22 @@ def _update_event_for_advisor(db, org_id: str, token: str, advisor_id: str, emai
             timeout=15,
         )
         if resp.status_code == 404:
-            # The event was deleted directly in Outlook — recreate it rather than
-            # leaving the meeting permanently stuck in an error state.
-            logger.info("calendar event %s no longer exists — recreating", event_id)
-            return _create_event_for_advisor(db, org_id, token, advisor_id, meeting, subject)
+            # A single 404 on PATCH could mean the event was genuinely deleted in
+            # Outlook, OR it could be a transient Graph inconsistency (e.g. under the
+            # kind of concurrent load this function now sees) — recreating blindly on
+            # an unverified 404 would create a real duplicate event while orphaning the
+            # original id (persist_calendar_sync only ever remembers the latest id per
+            # advisor, so the old one would never get cleaned up again). Verify via a
+            # fresh GET first; only recreate once that independently confirms it's gone.
+            check = get_event(db, org_id, advisor_id, event_id)
+            if check is None:
+                logger.info("calendar event %s confirmed gone on re-check — recreating", event_id)
+                return _create_event_for_advisor(db, org_id, token, advisor_id, meeting, subject)
+            logger.warning(
+                "calendar event %s returned 404 on PATCH but still exists (or check was inconclusive) on "
+                "re-check — treating as transient, not recreating to avoid a duplicate", event_id,
+            )
+            return {"provider": "microsoft", "external_event_id": event_id, "status": "error"}
         resp.raise_for_status()
         _ensure_subscription(db, org_id, advisor_id)
         return {
