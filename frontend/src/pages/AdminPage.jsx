@@ -5,6 +5,7 @@ import * as XLSX from "xlsx";
 import Sidebar from "../components/Sidebar";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { supabase } from "../lib/supabase";
+import AdminCallsTab from "./AdminCallsTab";
 import AdminIntegrationsTab from "./AdminIntegrationsTab";
 import AdminMeetingsTab from "./AdminMeetingsTab";
 import AgentChatWidget from "../components/AgentChatWidget";
@@ -1812,6 +1813,7 @@ export default function AdminPage() {
 
   const showBillingTab = myRole === "owner" || (myRole === "manager" && permDefaults?.can_view_billing?.manager === true);
   const showIntegrationsTab = myRole === "owner" || myRole === "manager";
+  const showCallsTab = myRole === "owner" || myRole === "manager";
   const showAgentWidget = myRole === "owner" || myRole === "manager";
   // null=loading, true=allowed, false=denied
   // owner → always true; manager → depends on permDefaults (null while loading → treat as not-yet-known)
@@ -1888,6 +1890,7 @@ export default function AdminPage() {
     { id: "schools", label: "בתי ספר" },
     { id: "users", label: "משתמשים" },
     { id: "meetings", label: "פגישות" },
+    ...(showCallsTab ? [{ id: "calls", label: "שיחות" }] : []),
     { id: "permissions", label: "הרשאות" },
     ...(showIntegrationsTab ? [{ id: "integrations", label: "אינטגרציות" }] : []),
     ...(showBillingTab ? [{ id: "billing", label: "חיובים" }] : []),
@@ -2990,6 +2993,13 @@ export default function AdminPage() {
                 canDeleteMeetings={canDeleteMeetings}
                 onIncompleteChange={setMeetingsGuardActive}
               />
+            </div>
+          )}
+
+          {/* Calls Tab */}
+          {activeTab === "calls" && showCallsTab && (
+            <div className="-mx-24">
+              <AdminCallsTab users={users} />
             </div>
           )}
 

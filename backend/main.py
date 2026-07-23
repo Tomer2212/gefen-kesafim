@@ -21,6 +21,7 @@ from routers.meeting_summary_router import router as meeting_summary_router
 from routers.meeting_upload_router import router as meeting_upload_router
 from routers.schools_router import router as schools_router
 from routers.signup_router import router as signup_router
+from routers.voicenter_router import router as voicenter_router
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -136,6 +137,7 @@ app.include_router(meeting_summary_router)
 app.include_router(meeting_upload_router)
 app.include_router(schools_router, prefix="/schools")
 app.include_router(signup_router, prefix="/signup")
+app.include_router(voicenter_router, prefix="/voicenter")
 
 
 @app.get("/health")
