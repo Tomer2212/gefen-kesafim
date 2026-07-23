@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { CallRow, computeEndTimeIso } from "./CallRow";
 
-const NUM_COLUMNS = 11;
+const NUM_COLUMNS = 14;
 
 function SortableHeader({ field, sortField, sortDir, onSort, children }) {
   const icon = sortField !== field
@@ -54,6 +54,8 @@ function gapHeightPx(gapSeconds) {
 export function CallsTable({ calls, showGapRows }) {
   const [sortField, setSortField] = useState("start_time");
   const [sortDir, setSortDir] = useState("desc");
+  const [removedIds, setRemovedIds] = useState(() => new Set());
+  const visibleCalls = calls.filter(c => !removedIds.has(c.call_id));
 
   function handleSort(field) {
     if (sortField !== field) { setSortField(field); setSortDir("asc"); }
@@ -61,7 +63,7 @@ export function CallsTable({ calls, showGapRows }) {
     else { setSortField(null); setSortDir("asc"); }
   }
 
-  const sortedCalls = [...calls].sort((a, b) => {
+  const sortedCalls = [...visibleCalls].sort((a, b) => {
     if (!sortField) return 0;
     let va, vb;
     if (sortField === "start_time") { va = a.start_time || ""; vb = b.start_time || ""; }
@@ -80,25 +82,28 @@ export function CallsTable({ calls, showGapRows }) {
         <table className="w-full text-right border-collapse" style={{ minWidth: "1200px" }}>
           <thead>
             <tr className="border-b border-slate-200 bg-slate-50/80">
-              <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500">
-                <SortableHeader field="direction" sortField={sortField} sortDir={sortDir} onSort={handleSort}>סוג שיחה</SortableHeader>
-              </th>
-              <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">מספר צד שני</th>
-              <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">יועץ</th>
               <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">תאריך</th>
               <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">
                 <SortableHeader field="start_time" sortField={sortField} sortDir={sortDir} onSort={handleSort}>שעת התחלה</SortableHeader>
               </th>
+              <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">שעת סיום</th>
               <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">
                 <SortableHeader field="duration_seconds" sortField={sortField} sortDir={sortDir} onSort={handleSort}>משך שיחה</SortableHeader>
               </th>
-              <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">שעת סיום</th>
+              <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">יועץ</th>
+              <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500">
+                <SortableHeader field="direction" sortField={sortField} sortDir={sortDir} onSort={handleSort}>סוג שיחה</SortableHeader>
+              </th>
+              <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">מספר צד שני</th>
+              <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">שם צד שני</th>
+              <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">תפקיד</th>
+              <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">שם מוסד</th>
               <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">
                 <SortableHeader field="status" sortField={sortField} sortDir={sortDir} onSort={handleSort}>סטטוס</SortableHeader>
               </th>
-              <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">הקלטה</th>
               <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">סיכום AI</th>
-              <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">מחלקה</th>
+              <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">תמלול</th>
+              <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap"><span className="sr-only">פעולות</span></th>
             </tr>
           </thead>
           <tbody>
@@ -109,14 +114,15 @@ export function CallsTable({ calls, showGapRows }) {
                 </td>
               </tr>
             ) : (
-              <CallRow key={row.call.call_id} call={row.call} />
+              <CallRow key={row.call.call_id} call={row.call}
+                onDelete={id => setRemovedIds(prev => new Set(prev).add(id))} />
             ))}
           </tbody>
         </table>
       </div>
       <div className="border-t border-slate-200 bg-slate-50/80 px-4 py-2.5 flex items-center gap-6 flex-shrink-0 rounded-b-2xl" dir="rtl">
         <span className="text-sm text-slate-500">
-          סה"כ שיחות: <strong className="text-slate-800 font-semibold">{calls.length}</strong>
+          סה"כ שיחות: <strong className="text-slate-800 font-semibold">{visibleCalls.length}</strong>
         </span>
       </div>
     </div>

@@ -156,6 +156,16 @@
   color: #94a3b8;
 }
 
+/* Hides the native up/down spinner arrows on <input type="number"> */
+.no-spinner::-webkit-outer-spin-button,
+.no-spinner::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.no-spinner {
+  -moz-appearance: textfield;
+}
+
 /* ── Upload drop-zone ── */
 .drop-zone {
   border: 2px dashed #bfdbfe;

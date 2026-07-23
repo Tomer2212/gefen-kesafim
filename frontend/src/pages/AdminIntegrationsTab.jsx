@@ -371,12 +371,20 @@ export default function AdminIntegrationsTab() {
             </div>
           </div>
 
-          <button
-            onClick={() => setVoicenterModalOpen(true)}
-            className="px-4 py-2 rounded-xl text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition-colors"
-          >
-            הגדרות Voicenter
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => openGuide("voicenter")}
+              className="px-3 py-2 rounded-xl text-sm font-medium text-slate-500 hover:bg-slate-100 transition-colors"
+            >
+              הדרכה
+            </button>
+            <button
+              onClick={() => setVoicenterModalOpen(true)}
+              className="px-4 py-2 rounded-xl text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+            >
+              הגדרות Voicenter
+            </button>
+          </div>
         </div>
       )}
 

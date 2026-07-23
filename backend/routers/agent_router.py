@@ -35,7 +35,7 @@ ADMIN_NUMBER_COLUMNS = [
 ADMIN_SELECT_COLUMNS = {
     "stage": ["yesodi", "beinayim", "tikkon", "sheshshnati", "other"],
     "service_type": ["gefen", "current", "gefen_current"],
-    "order_method": ["gefen_tochniot", "gefen_nihul"],
+    "order_method": ["gefen", "tnufa", "tkuma", "dokati", "palg", "self_managed"],
     "contract_sent": ["yes", "no"],
     "contract_received": ["yes", "no"],
 }
@@ -43,7 +43,7 @@ ADMIN_ALL_COLUMN_KEYS = ADMIN_TEXT_COLUMNS + ADMIN_NUMBER_COLUMNS + list(ADMIN_S
 ADMIN_COLUMN_LABELS = {
     "symbol": "סמל מוסד", "city": "עיר", "authority": "בעלות", "contract_file": "קובץ חוזה",
     "meetings_completed": 'סה"כ פגישות שבוצעו', "meetings_hours": 'סה"כ שעות שבוצעו',
-    "requested_price": "מחיר מבוקש", "order_amount_gefen": "גובה הזמנה בגפן",
+    "requested_price": "מחיר מבוקש", "order_amount_gefen": "גובה הזמנה",
     "hours_ordered": "מספר שעות שהוזמנו", "rate": "תעריף", "payment_received": "תשלום שהתקבל",
     "payment_requests_sent": "דרישות תשלום שנשלחו", "receipts_sent": "אסמכתאות שנשלחו",
     "stage": "שלב מוסד", "service_type": "סוג שירות", "order_method": "אמצעי הזמנה",

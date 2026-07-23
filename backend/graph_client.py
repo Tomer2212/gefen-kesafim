@@ -291,12 +291,24 @@ def _event_payload(meeting: dict, subject: str | None) -> dict:
     date = meeting.get("meeting_date")
     start_time = meeting.get("start_time") or "09:00"
     end_time = meeting.get("end_time") or "10:00"
-    return {
+    payload = {
         "subject": subject,
         "body": {"contentType": "text", "content": meeting.get("notes") or ""},
         "start": {"dateTime": f"{date}T{start_time}:00", "timeZone": "Israel Standard Time"},
         "end": {"dateTime": f"{date}T{end_time}:00", "timeZone": "Israel Standard Time"},
     }
+    # meeting["participants"] is already the full contact objects the frontend selects
+    # from (schoolContacts.js's {key, label, name, email}) — no extra lookup needed here.
+    # A real Outlook meeting invite (with attendees) gets sent by Graph/Exchange
+    # automatically on create/update; no separate Mail.Send permission required for this.
+    attendees = [
+        {"emailAddress": {"address": p["email"].strip(), "name": p.get("name") or p["email"]}, "type": "required"}
+        for p in (meeting.get("participants") or [])
+        if (p.get("email") or "").strip()
+    ]
+    if attendees:
+        payload["attendees"] = attendees
+    return payload
 
 
 # ---------------------------------------------------------------------------

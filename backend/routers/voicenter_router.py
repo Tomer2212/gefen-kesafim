@@ -45,6 +45,45 @@ def _derive_direction(call_type: str) -> str:
     return "internal"
 
 
+def _phone_suffix(raw) -> str | None:
+    """Normalize a phone number to its last 9 digits, so '972524399715', '0524399715'
+    and '524399715' all compare equal — strips country code / leading zero variance."""
+    digits = "".join(ch for ch in str(raw or "") if ch.isdigit())
+    return digits[-9:] if len(digits) >= 9 else (digits or None)
+
+
+def _build_contact_map(org_id: str) -> dict:
+    """OUR OWN data (schools/contacts) — not Voicenter's — used to resolve the
+    counterpart phone number of a call to a known person, their role, and school."""
+    contact_map: dict = {}
+    try:
+        db = get_admin_client()
+        rows = (
+            db.table("schools")
+            .select("name, principal_name, principal_phone, secretary_name, secretary_phone, "
+                     "finance_contact_name, finance_contact_phone, extra_contacts")
+            .eq("org_id", org_id)
+            .execute()
+        ).data or []
+        for s in rows:
+            school_name = s.get("name")
+            for name_field, phone_field, role_label in (
+                ("principal_name", "principal_phone", "מנהל/ת"),
+                ("secretary_name", "secretary_phone", "מנהלנ/ית"),
+                ("finance_contact_name", "finance_contact_phone", "אחראי/ת כספים"),
+            ):
+                suffix = _phone_suffix(s.get(phone_field))
+                if suffix and s.get(name_field):
+                    contact_map[suffix] = {"name": s[name_field], "role": role_label, "school_name": school_name}
+            for ec in (s.get("extra_contacts") or []):
+                suffix = _phone_suffix(ec.get("phone"))
+                if suffix and ec.get("name"):
+                    contact_map[suffix] = {"name": ec["name"], "role": ec.get("role") or "", "school_name": school_name}
+    except Exception as exc:
+        logger.warning("voicenter: contact map enrichment failed (non-fatal): %s", exc)
+    return contact_map
+
+
 def _get_integration_config(org_id: str) -> dict | None:
     for attempt in range(2):
         try:
@@ -315,6 +354,10 @@ def list_calls(
         except Exception as exc:
             logger.warning("voicenter list_calls: AI summary enrichment failed (non-fatal): %s", exc)
 
+    # Contact matching is OUR OWN data (schools/contacts), not Voicenter's — resolves the
+    # counterpart phone number to a known person's name/role/school. Non-fatal enrichment.
+    contact_map = _build_contact_map(user["org_id"])
+
     calls = []
     for c in cdr_list:
         rep_code = c.get("representativecode")
@@ -327,10 +370,14 @@ def list_calls(
         ai_exists = str((c.get("customdata") or {}).get("AiExists", "")).lower() == "true"
         call_id = c.get("callid")
         ai_row = ai_by_call_id.get(call_id)
+        contact = contact_map.get(_phone_suffix(counterpart))
         calls.append({
             "call_id": call_id,
             "direction": direction,
             "counterpart_phone": counterpart,
+            "contact_name": contact["name"] if contact else None,
+            "contact_role": contact["role"] if contact else None,
+            "school_name": contact["school_name"] if contact else None,
             "representative_code": rep_code,
             "representative_name": c.get("representativename") or c.get("username"),
             "advisor_id": mapped_advisor_id,
@@ -338,9 +385,6 @@ def list_calls(
             "start_time": c.get("date"),
             "duration_seconds": duration,
             "status": c.get("dialstatus"),
-            "recording_url": c.get("recordurl"),
-            "queue_name": c.get("queuename"),
-            "department_name": c.get("departmentname"),
             "ai_summary": ai_row["summary"] if ai_row else None,
             "ai_summary_available": ai_exists,
             "ai_transcript_available": bool(ai_row and ai_row.get("transcript_path")),
@@ -383,6 +427,50 @@ def get_call_transcript(user: Annotated[dict, Depends(get_current_user)], call_i
     except Exception as exc:
         logger.error("voicenter get_call_transcript: failed to sign URL for %s: %s", transcript_path, exc, exc_info=True)
         raise HTTPException(status_code=503, detail="לא ניתן היה לטעון את התמלול כרגע")
+
+    return {"url": signed_url}
+
+
+@router.delete("/calls/{call_id}")
+def delete_call_ai_data(user: Annotated[dict, Depends(get_current_user)], call_id: str):
+    """Deletes only OUR captured AI summary/transcript for this call — the call itself
+    lives permanently in Voicenter and is never affected by this."""
+    _require_manager(user)
+
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            rows = (
+                db.table("voicenter_call_ai")
+                .select("transcript_path")
+                .eq("org_id", user["org_id"])
+                .eq("call_id", call_id)
+                .limit(1)
+                .execute()
+            ).data
+            break
+        except Exception as exc:
+            if attempt == 0:
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("voicenter delete_call_ai_data failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    transcript_path = rows[0]["transcript_path"] if rows else None
+    if transcript_path:
+        try:
+            db.storage.from_(_TRANSCRIPTS_BUCKET).remove([transcript_path])
+        except Exception as exc:
+            logger.warning("voicenter delete_call_ai_data: transcript file removal failed (non-fatal): %s", exc)
+
+    try:
+        db.table("voicenter_call_ai").delete().eq("org_id", user["org_id"]).eq("call_id", call_id).execute()
+    except Exception as exc:
+        logger.error("voicenter delete_call_ai_data: row delete failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="לא ניתן היה למחוק את הנתונים כרגע — נסה שוב")
+
+    return {"ok": True}
 
     return {"url": signed_url}
 

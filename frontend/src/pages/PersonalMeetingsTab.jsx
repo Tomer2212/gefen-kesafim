@@ -252,7 +252,7 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
 
   function exportSelectedToExcel() {
     const selected = displayedMeetings.filter(m => selectedIds[m.id]);
-    const headers = ["שם מוסד", "סמל", "תאריך", "שעה", "סטטוס", "סוג פגישה", "עיר"];
+    const headers = ["שם מוסד", "סמל", "תאריך", "שעה", "סטטוס", "מיקום", "עיר"];
     const rows = selected.map(m => [
       m.school_name || "", m.school_symbol || "",
       m.meeting_date ? formatMeetingDate(m.meeting_date) : "",
@@ -273,7 +273,7 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
 
   async function exportSelectedToPdf() {
     const selected = displayedMeetings.filter(m => selectedIds[m.id]);
-    const headers = ["שם מוסד", "סמל", "תאריך", "שעה", "סטטוס", "סוג פגישה", "עיר"];
+    const headers = ["שם מוסד", "סמל", "תאריך", "שעה", "סטטוס", "מיקום", "עיר"];
     const rows = selected.map(m => [
       m.school_name || "", m.school_symbol || "",
       m.meeting_date ? formatMeetingDate(m.meeting_date) : "",

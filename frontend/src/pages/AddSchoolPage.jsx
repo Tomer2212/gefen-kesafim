@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useBlocker, useNavigate } from "react-router-dom";
 import axios from "axios";
 import Sidebar from "../components/Sidebar";
+import { MultiSelectChips } from "../components/MultiSelectChips";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 
 // ---- constants (mirrored from AdminPage) ----
@@ -35,9 +36,18 @@ const FINANCE_SOFTWARE_OPTIONS = [
 ];
 
 const CONTACT_ROWS = [
-  { label: "מנהל/ת",        nameField: "principal_name",       phoneField: "principal_phone",       emailField: "principal_email" },
-  { label: "מנהלנ/ית",      nameField: "secretary_name",       phoneField: "secretary_phone",       emailField: "secretary_email" },
-  { label: "אחראי/ת כספים", nameField: "finance_contact_name", phoneField: "finance_contact_phone", emailField: "finance_contact_email" },
+  { label: "מנהל/ת",        nameField: "principal_name",       phoneField: "principal_phone",       emailField: "principal_email",       dayOffField: "principal_day_off",       coordValue: "principal" },
+  { label: "מנהלנ/ית",      nameField: "secretary_name",       phoneField: "secretary_phone",       emailField: "secretary_email",       dayOffField: "secretary_day_off",       coordValue: "secretary" },
+  { label: "אחראי/ת כספים", nameField: "finance_contact_name", phoneField: "finance_contact_phone", emailField: "finance_contact_email", dayOffField: "finance_contact_day_off", coordValue: "finance_contact" },
+];
+
+const WEEKDAY_OPTIONS = [
+  { value: "sun", label: "א" },
+  { value: "mon", label: "ב" },
+  { value: "tue", label: "ג" },
+  { value: "wed", label: "ד" },
+  { value: "thu", label: "ה" },
+  { value: "fri", label: "ו" },
 ];
 
 const ROLE_LABELS    = { owner: "בעלים", manager: "מנהל", advisor: "יועץ" };
@@ -53,6 +63,8 @@ const EMPTY_FORM = {
   secretary_email: "", finance_contact_name: "", finance_contact_phone: "",
   finance_contact_email: "", school_phone: "", address: "", district: "",
   restrict_access_to: [], extra_contacts: [],
+  principal_day_off: [], secretary_day_off: [], finance_contact_day_off: [],
+  meeting_coordinator: null,
 };
 
 function validateSymbol(val) {
@@ -312,6 +324,7 @@ export default function AddSchoolPage() {
     if (schoolForm.secretary_phone    && validateSecretaryPhone(schoolForm.secretary_phone))    return;
     if (schoolForm.finance_contact_phone && validateSecretaryPhone(schoolForm.finance_contact_phone)) return;
     if (schoolForm.school_phone       && validateSchoolPhone(schoolForm.school_phone))          return;
+    if (!schoolForm.meeting_coordinator) return;
 
     setSaving(true);
     try {
@@ -508,6 +521,8 @@ export default function AddSchoolPage() {
                     <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-500 font-semibold">שם</th>
                     <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-500 font-semibold">טלפון</th>
                     <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-500 font-semibold">מייל</th>
+                    <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-500 font-semibold">יום חופשי</th>
+                    <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-500 font-semibold">אחראי תיאום פגישות</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -539,6 +554,19 @@ export default function AddSchoolPage() {
                           onChange={e => setSchoolForm(p => ({ ...p, [row.emailField]: e.target.value }))}
                           placeholder="מייל..." dir="ltr" type="email" />
                       </td>
+                      <td className="py-2 px-2">
+                        <MultiSelectChips compact options={WEEKDAY_OPTIONS}
+                          selected={schoolForm[row.dayOffField] || []}
+                          onChange={v => setSchoolForm(p => ({ ...p, [row.dayOffField]: v }))} />
+                      </td>
+                      <td className="py-2 px-2 text-center">
+                        <label htmlFor={`add-coord-${row.coordValue}`} className="sr-only">{row.label} אחראי/ת לתיאום פגישות</label>
+                        <input id={`add-coord-${row.coordValue}`} type="radio" name="add-meeting-coordinator"
+                          className="w-4 h-4 accent-blue-600"
+                          checked={schoolForm.meeting_coordinator === row.coordValue}
+                          disabled={!schoolForm[row.nameField]}
+                          onChange={() => setSchoolForm(p => ({ ...p, meeting_coordinator: row.coordValue }))} />
+                      </td>
                     </tr>
                   ))}
 
@@ -569,17 +597,38 @@ export default function AddSchoolPage() {
                             onChange={e => setSchoolForm(p => { const ec2 = [...(p.extra_contacts || [])]; ec2[i] = { ...ec2[i], email: e.target.value }; return { ...p, extra_contacts: ec2 }; })}
                             dir="ltr" type="email" autoComplete="off" placeholder="מייל..." />
                           <button type="button"
-                            onClick={() => setSchoolForm(p => ({ ...p, extra_contacts: (p.extra_contacts || []).filter((_, j) => j !== i) }))}
+                            onClick={() => setSchoolForm(p => {
+                              let coord = p.meeting_coordinator;
+                              if (coord === `extra:${i}`) coord = null;
+                              else if (coord?.startsWith("extra:")) {
+                                const j = Number(coord.split(":")[1]);
+                                if (j > i) coord = `extra:${j - 1}`;
+                              }
+                              return { ...p, extra_contacts: (p.extra_contacts || []).filter((_, j) => j !== i), meeting_coordinator: coord };
+                            })}
                             className="text-slate-400 hover:text-red-500 flex-shrink-0 mr-1 text-base leading-none"
                             aria-label="הסר שורת איש קשר">✕</button>
                         </div>
+                      </td>
+                      <td className="py-1.5 px-2">
+                        <MultiSelectChips compact options={WEEKDAY_OPTIONS}
+                          selected={ec.day_off || []}
+                          onChange={v => setSchoolForm(p => { const ec2 = [...(p.extra_contacts || [])]; ec2[i] = { ...ec2[i], day_off: v }; return { ...p, extra_contacts: ec2 }; })} />
+                      </td>
+                      <td className="py-1.5 px-2 text-center">
+                        <label htmlFor={`add-coord-extra-${i}`} className="sr-only">איש קשר נוסף {i + 1} אחראי/ת לתיאום פגישות</label>
+                        <input id={`add-coord-extra-${i}`} type="radio" name="add-meeting-coordinator"
+                          className="w-4 h-4 accent-blue-600"
+                          checked={schoolForm.meeting_coordinator === `extra:${i}`}
+                          disabled={!ec.name}
+                          onChange={() => setSchoolForm(p => ({ ...p, meeting_coordinator: `extra:${i}` }))} />
                       </td>
                     </tr>
                   ))}
 
                   {(schoolForm.extra_contacts || []).length < 3 && (
                     <tr>
-                      <td colSpan={4} className="pt-3 pb-1">
+                      <td colSpan={6} className="pt-3 pb-1">
                         <button type="button"
                           onClick={() => setSchoolForm(p => ({ ...p, extra_contacts: [...(p.extra_contacts || []), { role: "", name: "", phone: "", email: "" }] }))}
                           className="text-sm text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1 transition-colors">
@@ -590,6 +639,9 @@ export default function AddSchoolPage() {
                   )}
                 </tbody>
               </table>
+              {triedSave && !schoolForm.meeting_coordinator && (
+                <p className="text-xs text-red-500 mt-1.5" role="alert">יש לבחור אחראי/ת לתיאום פגישות</p>
+              )}
             </div>
 
             {/* ליווי */}

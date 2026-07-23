@@ -7,13 +7,24 @@ function sortByRole(arr) { return [...arr].sort((a, b) => (ROLE_SORT_ORDER[a.rol
 // Controlled: restrictTo (null = "כולם", or array of user IDs) + onChange(newVal).
 // Structurally mirrors AdvisorSearch (closed chip box + dropdown search + אישור footer) so
 // the two "ליווי" fields look and behave identically.
-export function AccessSelector({ restrictTo, users, loadingUsers, onChange, schoolAdvisors, onSelectAdvisors }) {
+// `compact`: matches the smaller/plain field style used in "פרטי מוסד" (SchoolPage ליווי grid)
+// instead of the default glassy .input-field look used elsewhere (AdminPage, DashboardPage, ...).
+export function AccessSelector({ restrictTo, users, loadingUsers, onChange, schoolAdvisors, onSelectAdvisors, compact = false }) {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const containerRef = useRef(null);
 
   const isAll = restrictTo === null || restrictTo === undefined;
   const selected = restrictTo || [];
+
+  const boxCls = compact
+    ? "w-full text-sm border border-slate-300 rounded-md px-2 py-0.5 bg-transparent flex flex-wrap items-center gap-1 min-h-[26px] cursor-pointer focus-within:border-blue-400 focus-within:ring-1 focus-within:ring-blue-100"
+    : "input-field flex flex-wrap items-center gap-1.5 min-h-[38px] cursor-pointer";
+  const chipCls = compact
+    ? "inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 border border-slate-200"
+    : "inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full";
+  const chipStyle = compact ? {} : { background: "rgba(0,112,243,0.08)", color: "#1d4ed8" };
+  const checkedBoxCls = compact ? "bg-slate-500 border-slate-500" : "bg-blue-500 border-blue-500";
 
   return (
     <div
@@ -22,7 +33,7 @@ export function AccessSelector({ restrictTo, users, loadingUsers, onChange, scho
       onBlur={e => { if (!containerRef.current?.contains(e.relatedTarget)) setOpen(false); }}
     >
       <div
-        className="input-field flex flex-wrap items-center gap-1.5 min-h-[38px] cursor-pointer"
+        className={boxCls}
         role="button"
         tabIndex={0}
         onClick={() => setOpen(o => !o)}
@@ -37,7 +48,7 @@ export function AccessSelector({ restrictTo, users, loadingUsers, onChange, scho
         ) : selected.map(id => {
           const u = users.find(u => u.id === id);
           return u ? (
-            <span key={id} className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full" style={{ background: "rgba(0,112,243,0.08)", color: "#1d4ed8" }}>
+            <span key={id} className={chipCls} style={chipStyle}>
               {u.full_name || u.email}
               <button
                 type="button"
@@ -120,7 +131,7 @@ export function AccessSelector({ restrictTo, users, loadingUsers, onChange, scho
                   }}
                   className="w-full text-right px-4 py-2.5 text-sm hover:bg-blue-50 flex items-center gap-2"
                 >
-                  <span className={`w-4 h-4 rounded border flex-shrink-0 ${selected.includes(u.id) ? "bg-blue-500 border-blue-500" : "border-slate-300"}`} aria-hidden="true" />
+                  <span className={`w-4 h-4 rounded border flex-shrink-0 ${selected.includes(u.id) ? checkedBoxCls : "border-slate-300"}`} aria-hidden="true" />
                   {u.full_name || u.email}
                   <span className="text-xs text-slate-400 mr-auto">{ROLE_LABELS[u.role]}</span>
                 </button>

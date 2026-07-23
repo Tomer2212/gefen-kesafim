@@ -155,7 +155,7 @@ export function MeetingsTable({
                 )}
                 <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500">משתתפים</th>
                 <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500">
-                  <SortableHeader field="type">סוג</SortableHeader>
+                  <SortableHeader field="type">מיקום</SortableHeader>
                 </th>
                 <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">הערות</th>
                 <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500">

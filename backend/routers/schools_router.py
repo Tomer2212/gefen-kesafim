@@ -187,12 +187,17 @@ class SchoolIn(BaseModel):
     notes: str | None = None
     restrict_access_to: list[str] | None = None
     extra_contacts: list[dict] | None = None
+    principal_day_off: list[str] | None = None
+    secretary_day_off: list[str] | None = None
+    finance_contact_day_off: list[str] | None = None
+    meeting_coordinator: str | None = None
 
 
 class SchoolYearAdminDataIn(BaseModel):
     service_type: str | None = None
+    client_status: str | None = None
     requested_price: float | None = None
-    order_method: str | None = None
+    order_method: list[str] | None = None
     order_amount_gefen: float | None = None
     hours_ordered: float | None = None
     rate: float | None = None
@@ -249,6 +254,7 @@ class UserInviteIn(BaseModel):
     email: str
     full_name: str | None = None
     role: str = "advisor"
+    control_domains: list[str] = []
 
 
 class UserRoleIn(BaseModel):
@@ -304,6 +310,53 @@ class NotificationPreferencesIn(BaseModel):
 # ---------------------------------------------------------------------------
 # Schools
 # ---------------------------------------------------------------------------
+
+_MEETING_COORDINATOR_ROLE_LABEL = {
+    "principal": "מנהל/ת",
+    "secretary": "מנהלנ/ית",
+    "finance_contact": "אחראי/ת כספים",
+}
+
+
+def _resolve_meeting_coordinator(school: dict) -> dict | None:
+    """Resolves school['meeting_coordinator'] (a reference, e.g. 'secretary' or 'extra:1')
+    into the actual contact's current name/phone/email. Returns None if unset or the
+    reference no longer points to an existing contact (e.g. that extra contact was removed) —
+    never raises, so this stays non-fatal enrichment."""
+    ref = school.get("meeting_coordinator")
+    if not ref:
+        return None
+    if ref in _MEETING_COORDINATOR_ROLE_LABEL:
+        name = school.get(f"{ref}_name")
+        if not name:
+            return None
+        return {
+            "role": ref,
+            "role_label": _MEETING_COORDINATOR_ROLE_LABEL[ref],
+            "name": name,
+            "phone": school.get(f"{ref}_phone"),
+            "email": school.get(f"{ref}_email"),
+        }
+    if ref.startswith("extra:"):
+        try:
+            idx = int(ref.split(":", 1)[1])
+        except ValueError:
+            return None
+        extras = school.get("extra_contacts") or []
+        if idx < 0 or idx >= len(extras):
+            return None
+        ec = extras[idx]
+        if not ec.get("name"):
+            return None
+        return {
+            "role": ref,
+            "role_label": ec.get("role") or "איש קשר נוסף",
+            "name": ec.get("name"),
+            "phone": ec.get("phone"),
+            "email": ec.get("email"),
+        }
+    return None
+
 
 @router.get("/")
 def list_schools(
@@ -457,6 +510,7 @@ def list_schools(
     for school in schools:
         school["check_metrics"] = metrics_by_school.get(school["id"], [])
         school["goal_statuses"] = goals_by_school.get(school["id"], [])
+        school["meeting_coordinator_contact"] = _resolve_meeting_coordinator(school)
 
     return schools
 
@@ -471,6 +525,8 @@ def create_school(
     db = get_admin_client()
     if not _check_permission(db, user, "can_add_school"):
         raise HTTPException(status_code=403, detail="אין הרשאה להוסיף בתי ספר")
+    if not body.meeting_coordinator:
+        raise HTTPException(status_code=400, detail="יש להגדיר אחראי/ת לתיאום פגישות")
     payload = body.model_dump(exclude_none=True)
     payload["org_id"] = user["org_id"]
     row = db.table("schools").insert(payload).execute()
@@ -2662,6 +2718,7 @@ def get_school(
         except Exception as exc:
             logger.warning("get_school profiles enrichment failed (non-fatal): %s", exc)
 
+    school_data["meeting_coordinator_contact"] = _resolve_meeting_coordinator(school_data)
     return school_data
 
 
@@ -2801,6 +2858,7 @@ def invite_user(
                 "role": body.role,
                 "org_id": user["org_id"],
                 "status": "pending",
+                "control_domains": body.control_domains,
             }).execute()
             return {"ok": True, "user_id": user_id}
         except HTTPException:
@@ -3029,6 +3087,7 @@ def update_role(
 
 class UserProfileUpdateIn(BaseModel):
     full_name: str | None = None
+    control_domains: list[str] | None = None
 
 
 @router.patch("/users/{user_id}")

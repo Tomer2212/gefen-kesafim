@@ -4,6 +4,7 @@ import time
 from datetime import date
 
 from supabase_client import get_admin_client, reset_admin_client
+from email_resend import send_resend_email
 import graph_client
 
 _log = logging.getLogger(__name__)
@@ -169,6 +170,18 @@ def build_booking_request_email_html(recipient_name: str, school_name: str, advi
 
 def send_booking_request_email(org_id: str, advisor_id: str, to_email: str, subject: str, html: str) -> None:
     """Raises on failure (unlike the non-fatal calendar-sync functions in graph_client.py) so
-    the queue-processing cron can mark the row 'failed' with the real error."""
+    the queue-processing cron can mark the row 'failed' with the real error.
+
+    TEMPORARY: routed through Resend (with Reply-To set to the advisor's real mailbox, so
+    replies still land with them) instead of graph_client.send_mail_as_advisor, because the
+    org's Microsoft 365 tenant currently has an outbound-mail sending ban (error 5.7.705/
+    5.7.708 — "tenant has exceeded threshold") pending a Microsoft support ticket. This is a
+    one-line swap to revert once Microsoft lifts the ban:
+        graph_client.send_mail_as_advisor(db, org_id, advisor_id, subject, html, to_email)
+    The email will show as coming from RESEND_FROM (a system address), not the advisor's own
+    Outlook mailbox, and won't appear in the advisor's Sent Items — that trade-off is accepted
+    intentionally for now to keep the booking flow usable.
+    """
     db = get_admin_client()
-    graph_client.send_mail_as_advisor(db, org_id, advisor_id, subject, html, to_email)
+    advisor_email = graph_client._resolve_advisor_email(db, advisor_id)
+    send_resend_email(to_email, subject, html, reply_to=advisor_email)
