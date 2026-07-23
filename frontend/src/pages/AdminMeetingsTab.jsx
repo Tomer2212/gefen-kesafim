@@ -384,7 +384,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
 
   function exportSelectedToExcel() {
     const selected = displayedMeetings.filter(m => selectedIds[m.id]);
-    const headers = ["שם מוסד", "סמל", "תאריך", "שעה", "סטטוס", "סוג פגישה", "יועצים", "עיר"];
+    const headers = ["שם מוסד", "סמל", "תאריך", "שעה", "סטטוס", "מיקום", "יועצים", "עיר"];
     const rows = selected.map(m => [
       m.school_name || "",
       m.school_symbol || "",
@@ -407,7 +407,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
 
   async function exportSelectedToPdf() {
     const selected = displayedMeetings.filter(m => selectedIds[m.id]);
-    const headers = ["שם מוסד", "סמל", "תאריך", "שעה", "סטטוס", "סוג פגישה", "יועצים", "עיר"];
+    const headers = ["שם מוסד", "סמל", "תאריך", "שעה", "סטטוס", "מיקום", "יועצים", "עיר"];
     const rows = selected.map(m => [
       m.school_name || "",
       m.school_symbol || "",
@@ -476,7 +476,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
     ];
   }
 
-  const EXPORT_HEADERS = ["תאריך", "סטטוס", "שם מוסד", "התחלה", "סיום", "יועץ מבצע", "משתתפים", "סוג", "הערות", "תזכורת"];
+  const EXPORT_HEADERS = ["תאריך", "סטטוס", "שם מוסד", "התחלה", "סיום", "יועץ מבצע", "משתתפים", "מיקום", "הערות", "תזכורת"];
 
   function exportMeetingsToExcel() {
     const rows = displayedMeetings.map(meetingToRow);

@@ -15,6 +15,7 @@ import { mergeMeetingsSilently } from "../components/meetings/mergeMeetings";
 import { useCompareChecks } from "../context/CompareChecksContext";
 import { AdvisorSearch } from "../components/AdvisorSearch";
 import { AccessSelector } from "../components/AccessSelector";
+import { MultiSelectChips } from "../components/MultiSelectChips";
 import { AdvisorCell } from "../components/meetings/AdvisorCell";
 import { DatePickerPopover } from "../components/meetings/DatePickerPopover";
 import { DeleteMeetingModal } from "../components/meetings/DeleteMeetingModal";
@@ -46,9 +47,18 @@ const FINANCE_SOFTWARE_LABEL = {
 };
 
 const CONTACT_ROWS = [
-  { label: "מנהל/ת",        nameField: "principal_name",       phoneField: "principal_phone",       emailField: "principal_email" },
-  { label: "מנהלנ/ית",      nameField: "secretary_name",       phoneField: "secretary_phone",       emailField: "secretary_email" },
-  { label: "אחראי/ת כספים", nameField: "finance_contact_name", phoneField: "finance_contact_phone", emailField: "finance_contact_email" },
+  { label: "מנהל/ת",        nameField: "principal_name",       phoneField: "principal_phone",       emailField: "principal_email",       dayOffField: "principal_day_off",       coordValue: "principal" },
+  { label: "מנהלנ/ית",      nameField: "secretary_name",       phoneField: "secretary_phone",       emailField: "secretary_email",       dayOffField: "secretary_day_off",       coordValue: "secretary" },
+  { label: "אחראי/ת כספים", nameField: "finance_contact_name", phoneField: "finance_contact_phone", emailField: "finance_contact_email", dayOffField: "finance_contact_day_off", coordValue: "finance_contact" },
+];
+
+const WEEKDAY_OPTIONS = [
+  { value: "sun", label: "א" },
+  { value: "mon", label: "ב" },
+  { value: "tue", label: "ג" },
+  { value: "wed", label: "ד" },
+  { value: "thu", label: "ה" },
+  { value: "fri", label: "ו" },
 ];
 
 const FINANCE_SOFTWARE_OPTIONS = [
@@ -72,6 +82,32 @@ const SCHOOL_STAGE_LABEL = Object.fromEntries(
 );
 
 const DISTRICT_OPTIONS = ["צפון", "דרום", "מרכז", "ירושלים", "תל-אביב", "חיפה", "חינוך התיישבותי", "חרדי"];
+
+// "ליווי" section fields backed by school_year_admin_data — same field shown/edited on
+// AdminPage's ניהול → בתי ספר table (service_type, order_method). Options duplicated locally
+// per the existing project convention (no shared constants source for these label maps).
+const SERVICE_TYPE_OPTIONS = [
+  { value: "gefen", label: "גפן" },
+  { value: "current", label: "שוטף" },
+  { value: "gefen_current", label: "גפן+שוטף" },
+];
+
+const FUNDING_METHOD_OPTIONS = [
+  { value: "gefen", label: "גפן" },
+  { value: "tnufa", label: "תנופה" },
+  { value: "tkuma", label: "תקומה" },
+  { value: "dokati", label: "דוקאטי" },
+  { value: "palg", label: 'פל"ג' },
+  { value: "self_managed", label: "ניהול עצמי" },
+];
+
+// "סטטוס לקוח" — only shown here, not part of the ניהול → בתי ספר table.
+const CLIENT_STATUS_OPTIONS = [
+  { value: "active", label: "פעיל" },
+  { value: "inactive", label: "לא פעיל" },
+  { value: "in_progress", label: "בתהליך" },
+  { value: "former", label: "לקוח עבר" },
+];
 
 const FIELD_LABELS = {
   name: "שם מוסד",
@@ -171,6 +207,23 @@ function formatDateTime(iso) {
 
 function fmtILS(v) {
   try { return Math.round(Number(v)).toLocaleString("he-IL"); } catch { return String(v); }
+}
+
+// Displays a 10-digit Israeli mobile number ("05XXXXXXXX") as "05X-XXXXXXX" — used only for
+// read-only display of contact phone numbers; other phone numbers are shown as-is.
+function formatContactPhone(phone) {
+  return /^05\d{8}$/.test(phone || "") ? `${phone.slice(0, 3)}-${phone.slice(3)}` : phone;
+}
+
+// Thousands-separated (no decimal) display for amount fields like "גובה הזמנה" — "" for empty.
+function formatAmount(v) {
+  return v === null || v === undefined || v === "" ? "" : Math.round(Number(v)).toLocaleString("he-IL");
+}
+
+// Strips thousands separators back to a plain number (or null if empty) for saving.
+function parseAmount(raw) {
+  const stripped = String(raw).replace(/,/g, "").trim();
+  return stripped === "" ? null : Number(stripped);
 }
 
 // "תקציב" row — shown only when the budget amount changed between the two checks
@@ -305,24 +358,6 @@ function editFieldCls(hasErr, isEmpty = false) {
   if (hasErr) return `${base} border-red-400 focus:border-red-400 focus:ring-red-100`;
   if (isEmpty) return `${base} border-red-300 focus:border-blue-400 focus:ring-blue-100`;
   return `${base} border-slate-300 focus:border-blue-400 focus:ring-blue-100`;
-}
-
-function InfoRow({ label, value, dir, children, tooltip }) {
-  return (
-    <div className="flex items-baseline gap-2 py-1.5">
-      <span className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 inline-flex items-center gap-1">
-        {tooltip && <QuestionTooltip text={tooltip} />}
-        {label}:
-      </span>
-      {children ? (
-        <div className="flex-1 flex flex-wrap gap-1">{children}</div>
-      ) : (
-        <span className={`text-sm font-semibold ${value ? "text-slate-800" : "text-slate-400 font-normal"}`} dir={dir}>
-          {value || "—"}
-        </span>
-      )}
-    </div>
-  );
 }
 
 function QuestionTooltip({ text }) {
@@ -2358,7 +2393,7 @@ export default function SchoolPage() {
   const [activeSubTab, setActiveSubTab] = useState("tikkon");
   const [uploadComparisonMeetingId, setUploadComparisonMeetingId] = useState(null);
 
-  // "גובה הזמנה בגפן" — synced with the same admin-table field on AdminPage's schools table
+  // "גובה הזמנה" — synced with the same admin-table field on AdminPage's schools table
   // (both read/write the school_year_admin_data row for this school_id+academic_year).
   const [yearAdminData, setYearAdminData] = useState({});
 
@@ -2382,10 +2417,10 @@ export default function SchoolPage() {
       .catch(() => setYearAdminData({}));
   }, [schoolId, academicYear]);
 
-  async function saveOrderAmountGefen(value) {
-    setYearAdminData(prev => ({ ...prev, order_amount_gefen: value }));
+  async function saveYearAdminField(field, value) {
+    setYearAdminData(prev => ({ ...prev, [field]: value }));
     try {
-      const res = await axios.put(`/schools/${schoolId}/year-admin-data`, { order_amount_gefen: value }, { params: { academic_year: academicYear } });
+      const res = await axios.put(`/schools/${schoolId}/year-admin-data`, { [field]: value }, { params: { academic_year: academicYear } });
       setYearAdminData(res.data && typeof res.data === "object" ? res.data : {});
     } catch {
       // revert on failure
@@ -2395,35 +2430,11 @@ export default function SchoolPage() {
     }
   }
 
-  // Shared "גובה הזמנה בגפן" field, rendered inside the ליווי section under יועץ מלווה —
-  // always visible/editable regardless of isEditing (synced live with ניהול → בתי ספר)
-  const orderAmountField = (
-    <div className="flex items-start gap-2 py-1.5">
-      <span className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[9px]">גובה הזמנה בגפן:</span>
-      <div className="flex-1 min-w-0">
-        <label htmlFor="order-amount-gefen" className="sr-only">גובה הזמנה בגפן</label>
-        <input
-          id="order-amount-gefen"
-          key={`${schoolId}-${academicYear}`}
-          type="number"
-          defaultValue={yearAdminData.order_amount_gefen ?? ""}
-          onBlur={e => {
-            const v = e.target.value === "" ? null : Number(e.target.value);
-            if (v !== (yearAdminData.order_amount_gefen ?? null)) saveOrderAmountGefen(v);
-          }}
-          title={yearAdminData.order_amount_gefen_updated_by_name
-            ? `${yearAdminData.order_amount_gefen_updated_by_name} - ${formatDate(yearAdminData.order_amount_gefen_updated_at)}`
-            : ""}
-          className="input-field text-sm w-32"
-        />
-        {yearAdminData.order_amount_gefen_updated_by_name && (
-          <p className="text-xs text-slate-400 mt-1">
-            עודכן לאחרונה על ידי {yearAdminData.order_amount_gefen_updated_by_name} · {formatDate(yearAdminData.order_amount_gefen_updated_at)}
-          </p>
-        )}
-      </div>
-    </div>
-  );
+  // "גובה הזמנה" — editable input (edit mode) rendered in orderAmountEditField below;
+  // display mode shows the same value read-only (see the ליווי display grid).
+  function saveOrderAmountGefen(v) {
+    if (v !== (yearAdminData.order_amount_gefen ?? null)) saveYearAdminField("order_amount_gefen", v);
+  }
 
   // Meetings state
   const [meetings, setMeetings] = useState([]);
@@ -2480,6 +2491,8 @@ export default function SchoolPage() {
     school_phone: "", address: "", district: "",
     restrict_access_to: null,
     extra_contacts: [],
+    principal_day_off: [], secretary_day_off: [], finance_contact_day_off: [],
+    meeting_coordinator: null,
   });
   const [saving, setSaving] = useState(false);
   const [triedSave, setTriedSave] = useState(false);
@@ -2788,6 +2801,10 @@ export default function SchoolPage() {
       district: school.district || "",
       restrict_access_to: school.restrict_access_to ?? null,
       extra_contacts: school.extra_contacts || [],
+      principal_day_off: school.principal_day_off || [],
+      secretary_day_off: school.secretary_day_off || [],
+      finance_contact_day_off: school.finance_contact_day_off || [],
+      meeting_coordinator: school.meeting_coordinator || null,
     };
     setEditForm(formData);
     setOriginalForm(formData);
@@ -2861,6 +2878,10 @@ export default function SchoolPage() {
       setSaveError("יש שגיאות בטופס — אנא בדוק את השדות המסומנים.");
       return false;
     }
+    if (!editForm.meeting_coordinator) {
+      setSaveError("יש לבחור אחראי/ת לתיאום פגישות.");
+      return false;
+    }
     const managingAdvisors = role === "owner" || role === "manager";
     if (managingAdvisors && draftAdvisorIds.length === 0) {
       setSaveError("יש לבחור לפחות יועץ מלווה אחד.");
@@ -2915,7 +2936,15 @@ export default function SchoolPage() {
   }
 
   function removeExtra(i) {
-    setEditForm(p => ({ ...p, extra_contacts: (p.extra_contacts || []).filter((_, idx) => idx !== i) }));
+    setEditForm(p => {
+      let coord = p.meeting_coordinator;
+      if (coord === `extra:${i}`) coord = null;
+      else if (coord?.startsWith("extra:")) {
+        const j = Number(coord.split(":")[1]);
+        if (j > i) coord = `extra:${j - 1}`;
+      }
+      return { ...p, extra_contacts: (p.extra_contacts || []).filter((_, idx) => idx !== i), meeting_coordinator: coord };
+    });
   }
 
   function updateExtra(i, field, val) {
@@ -3357,6 +3386,8 @@ export default function SchoolPage() {
                           <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-400 font-semibold uppercase tracking-wide">שם</th>
                           <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-400 font-semibold uppercase tracking-wide">טלפון</th>
                           <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-400 font-semibold uppercase tracking-wide">מייל</th>
+                          <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-400 font-semibold uppercase tracking-wide">יום חופשי</th>
+                          <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-400 font-semibold uppercase tracking-wide">אחראי תיאום פגישות</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -3388,6 +3419,19 @@ export default function SchoolPage() {
                                   onChange={e => setEditForm(p => ({ ...p, [row.emailField]: e.target.value }))}
                                   dir="ltr" type="email" autoComplete="off" />
                                 {editForm[row.emailField] && emailErr && <span className="text-xs text-red-500 block mt-0.5" role="alert">{emailErr}</span>}
+                              </td>
+                              <td className="py-1.5 px-2">
+                                <MultiSelectChips compact options={WEEKDAY_OPTIONS}
+                                  selected={editForm[row.dayOffField] || []}
+                                  onChange={v => setEditForm(p => ({ ...p, [row.dayOffField]: v }))} />
+                              </td>
+                              <td className="py-1.5 px-2 text-center">
+                                <label htmlFor={`coord-${row.coordValue}`} className="sr-only">{row.label} אחראי/ת לתיאום פגישות</label>
+                                <input id={`coord-${row.coordValue}`} type="radio" name="meeting-coordinator"
+                                  className="w-4 h-4 accent-blue-600"
+                                  checked={editForm.meeting_coordinator === row.coordValue}
+                                  disabled={!editForm[row.nameField]}
+                                  onChange={() => setEditForm(p => ({ ...p, meeting_coordinator: row.coordValue }))} />
                               </td>
                             </tr>
                           );
@@ -3423,13 +3467,26 @@ export default function SchoolPage() {
                                   aria-label="הסר שורת איש קשר">✕</button>
                               </div>
                             </td>
+                            <td className="py-1.5 px-2">
+                              <MultiSelectChips compact options={WEEKDAY_OPTIONS}
+                                selected={ec.day_off || []}
+                                onChange={v => updateExtra(i, "day_off", v)} />
+                            </td>
+                            <td className="py-1.5 px-2 text-center">
+                              <label htmlFor={`coord-extra-${i}`} className="sr-only">איש קשר נוסף {i + 1} אחראי/ת לתיאום פגישות</label>
+                              <input id={`coord-extra-${i}`} type="radio" name="meeting-coordinator"
+                                className="w-4 h-4 accent-blue-600"
+                                checked={editForm.meeting_coordinator === `extra:${i}`}
+                                disabled={!ec.name}
+                                onChange={() => setEditForm(p => ({ ...p, meeting_coordinator: `extra:${i}` }))} />
+                            </td>
                           </tr>
                         ))}
 
                         {/* Add contact button */}
                         {(editForm.extra_contacts || []).length < 3 && (
                           <tr>
-                            <td colSpan={4} className="pt-3 pb-1">
+                            <td colSpan={6} className="pt-3 pb-1">
                               <button type="button" onClick={addExtra}
                                 className="text-sm text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1 transition-colors">
                                 <span aria-hidden="true">+</span> הוסף איש קשר
@@ -3439,43 +3496,114 @@ export default function SchoolPage() {
                         )}
                       </tbody>
                     </table>
+                    {triedSave && !editForm.meeting_coordinator && (
+                      <p className="text-xs text-red-500 mt-1.5" role="alert">יש לבחור אחראי/ת לתיאום פגישות</p>
+                    )}
                   </div>
 
-                  {/* ליווי — advisor/access management visible only to owner/manager; order-amount field visible to all roles */}
+                  {/* ליווי — same 3-column label/field grid format as פרטי מוסד. Advisor/access/
+                      client-status/service-type/order-method are owner/manager only; order-amount
+                      is visible/editable to all roles reaching this section (incl. advisor). */}
                   {(role === "owner" || role === "manager" || role === "advisor") && <div className="mt-6 pt-5 border-t border-slate-100">
                     <p className="text-sm font-semibold text-slate-700 text-right mb-3">ליווי</p>
-                    <div className="grid grid-cols-2 gap-x-8">
-                      <div>
+                    <div className="grid grid-cols-3 gap-x-8">
+                      {/* Right column */}
+                      <div style={editColGridStyle}>
                         {(role === "owner" || role === "manager") && (
-                          <div className="flex items-start gap-2 py-1.5">
-                            <span className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[9px]">יועץ מלווה:</span>
-                            <div className="flex-1 min-w-0">
-                              <AdvisorSearch schoolId={schoolId} selectedIds={draftAdvisorIds} users={users}
+                          <>
+                            <label htmlFor="client-status-select" className={editLabelCls}>סטטוס לקוח:</label>
+                            <div className="py-0.5">
+                              <select id="client-status-select" className={editFieldCls(false, !yearAdminData.client_status)}
+                                value={yearAdminData.client_status || ""}
+                                onChange={e => saveYearAdminField("client_status", e.target.value || null)}>
+                                <option value="">בחר</option>
+                                {CLIENT_STATUS_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                              </select>
+                            </div>
+                          </>
+                        )}
+                        {(role === "owner" || role === "manager") && (
+                          <>
+                            <label htmlFor="service-type-select" className={editLabelCls}>סוג שירות:</label>
+                            <div className="py-0.5">
+                              <select id="service-type-select" className={editFieldCls(false, !yearAdminData.service_type)}
+                                value={yearAdminData.service_type || ""}
+                                onChange={e => saveYearAdminField("service_type", e.target.value || null)}>
+                                <option value="">בחר</option>
+                                {SERVICE_TYPE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                              </select>
+                            </div>
+                          </>
+                        )}
+                      </div>
+
+                      {/* Middle column */}
+                      <div style={editColGridStyle}>
+                        {(role === "owner" || role === "manager") && (
+                          <>
+                            <span className={editLabelCls}>אמצעי הזמנה:</span>
+                            <div className="py-0.5">
+                              <MultiSelectChips compact options={FUNDING_METHOD_OPTIONS}
+                                selected={yearAdminData.order_method || []}
+                                onChange={v => saveYearAdminField("order_method", v.length ? v : null)} />
+                            </div>
+                          </>
+                        )}
+                        <label htmlFor="order-amount-gefen" className={editLabelCls}>גובה הזמנה:</label>
+                        <div className="py-0.5">
+                          <input
+                            id="order-amount-gefen"
+                            key={`${schoolId}-${academicYear}`}
+                            type="text"
+                            inputMode="numeric"
+                            defaultValue={formatAmount(yearAdminData.order_amount_gefen)}
+                            onBlur={e => {
+                              const v = parseAmount(e.target.value);
+                              e.target.value = formatAmount(v);
+                              saveOrderAmountGefen(v);
+                            }}
+                            title={yearAdminData.order_amount_gefen_updated_by_name
+                              ? `${yearAdminData.order_amount_gefen_updated_by_name} - ${formatDate(yearAdminData.order_amount_gefen_updated_at)}`
+                              : ""}
+                            className={editFieldCls(false, !yearAdminData.order_amount_gefen)}
+                          />
+                          {yearAdminData.order_amount_gefen_updated_by_name && (
+                            <p className="text-xs text-slate-400 mt-1">
+                              עודכן לאחרונה על ידי {yearAdminData.order_amount_gefen_updated_by_name} · {formatDate(yearAdminData.order_amount_gefen_updated_at)}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Left column */}
+                      <div style={editColGridStyle}>
+                        {(role === "owner" || role === "manager") && (
+                          <>
+                            <span className={editLabelCls}>יועץ מלווה:</span>
+                            <div className="py-0.5">
+                              <AdvisorSearch compact schoolId={schoolId} selectedIds={draftAdvisorIds} users={users}
                                 loadingUsers={loadingUsers} onChange={setDraftAdvisorIds} onRetry={loadUsers}
                                 invalid={triedSave && draftAdvisorIds.length === 0} />
                               {triedSave && draftAdvisorIds.length === 0 && (
                                 <span className="text-xs text-red-500 mt-1 block" role="alert">יש לבחור לפחות יועץ אחד</span>
                               )}
                             </div>
-                          </div>
+                          </>
                         )}
-                        {orderAmountField}
-                      </div>
-                      <div>
                         {(role === "owner" || role === "manager") && (
-                          <div className="flex items-start gap-2 py-1.5">
-                            <span className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 inline-flex items-center gap-1 pt-[9px]">
+                          <>
+                            <span className={`${editLabelCls} inline-flex items-center gap-1`}>
                               <QuestionTooltip text="בחר למי תהיה גישה לנתוני בית הספר." />
                               גישה:
                             </span>
-                            <div className="flex-1 min-w-0">
-                              <AccessSelector restrictTo={editForm.restrict_access_to} users={users}
+                            <div className="py-0.5">
+                              <AccessSelector compact restrictTo={editForm.restrict_access_to} users={users}
                                 loadingUsers={loadingUsers}
                                 onChange={val => { setAccessLinkedToAdvisors(false); setEditForm(p => ({ ...p, restrict_access_to: val })); }}
                                 onSelectAdvisors={() => setAccessLinkedToAdvisors(true)}
                                 schoolAdvisors={draftAdvisorIds.map(id => users.find(u => u.id === id)).filter(Boolean)} />
                             </div>
-                          </div>
+                          </>
                         )}
                       </div>
                     </div>
@@ -3558,10 +3686,12 @@ export default function SchoolPage() {
                     <table className="w-full text-sm table-fixed">
                       <thead>
                         <tr>
-                          <th scope="col" className="text-right pb-2 text-xs text-slate-400 font-semibold uppercase tracking-wide w-1/4">תפקיד</th>
-                          <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-400 font-semibold uppercase tracking-wide w-1/4">שם</th>
-                          <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-400 font-semibold uppercase tracking-wide w-1/4">טלפון</th>
-                          <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-400 font-semibold uppercase tracking-wide w-1/4">מייל</th>
+                          <th scope="col" className="text-right pb-2 text-xs text-slate-400 font-semibold uppercase tracking-wide w-[9%]">תפקיד</th>
+                          <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-400 font-semibold uppercase tracking-wide w-[13%]">שם</th>
+                          <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-400 font-semibold uppercase tracking-wide w-[17%]">טלפון</th>
+                          <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-400 font-semibold uppercase tracking-wide w-[31%]">מייל</th>
+                          <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-400 font-semibold uppercase tracking-wide w-[15%]">יום חופשי</th>
+                          <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-400 font-semibold uppercase tracking-wide w-[15%]">אחראי תיאום פגישות</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -3575,16 +3705,33 @@ export default function SchoolPage() {
                               </span>
                             </td>
                             <td className="py-2.5 px-2">
-                              <span className={`text-sm ${school?.[row.phoneField] ? "font-medium text-slate-800" : "text-slate-400 font-normal"}`}
+                              <span className={`text-sm whitespace-nowrap ${school?.[row.phoneField] ? "font-medium text-slate-800" : "text-slate-400 font-normal"}`}
                                 dir={school?.[row.phoneField] ? "ltr" : undefined} style={contactValStyle(school?.[row.phoneField])}>
-                                {school?.[row.phoneField] || "—"}
+                                {formatContactPhone(school?.[row.phoneField]) || "—"}
                               </span>
                             </td>
-                            <td className="py-2.5 px-2">
-                              <span className={`text-sm ${school?.[row.emailField] ? "font-medium text-slate-800" : "text-slate-400 font-normal"}`}
-                                dir={school?.[row.emailField] ? "ltr" : undefined} style={contactValStyle(school?.[row.emailField])}>
+                            <td className="py-2.5 px-2 overflow-hidden">
+                              <span className={`text-sm whitespace-nowrap overflow-hidden text-ellipsis block ${school?.[row.emailField] ? "font-medium text-slate-800" : "text-slate-400 font-normal"}`}
+                                dir={school?.[row.emailField] ? "ltr" : undefined} style={contactValStyle(school?.[row.emailField])}
+                                title={school?.[row.emailField] || undefined}>
                                 {school?.[row.emailField] || "—"}
                               </span>
+                            </td>
+                            <td className="py-2.5 px-2 overflow-hidden">
+                              <div className="flex flex-wrap gap-1 w-full">
+                                {(school?.[row.dayOffField] || []).length === 0 ? (
+                                  <span className="text-sm text-slate-400 font-normal">—</span>
+                                ) : school[row.dayOffField].map(v => (
+                                  <span key={v} className="inline-flex items-center text-xs font-medium px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 border border-slate-200">
+                                    {WEEKDAY_OPTIONS.find(o => o.value === v)?.label || v}
+                                  </span>
+                                ))}
+                              </div>
+                            </td>
+                            <td className="py-2.5 px-2 text-center">
+                              {school?.meeting_coordinator === row.coordValue && (
+                                <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-blue-100 text-blue-600" title="אחראי/ת לתיאום פגישות" aria-label="אחראי/ת לתיאום פגישות">✓</span>
+                              )}
                             </td>
                           </tr>
                         ))}
@@ -3602,16 +3749,33 @@ export default function SchoolPage() {
                               </span>
                             </td>
                             <td className="py-2.5 px-2">
-                              <span className={`text-sm ${ec.phone ? "font-medium text-slate-800" : "text-slate-400 font-normal"}`}
+                              <span className={`text-sm whitespace-nowrap ${ec.phone ? "font-medium text-slate-800" : "text-slate-400 font-normal"}`}
                                 dir={ec.phone ? "ltr" : undefined} style={contactValStyle(ec.phone)}>
-                                {ec.phone || "—"}
+                                {formatContactPhone(ec.phone) || "—"}
                               </span>
                             </td>
-                            <td className="py-2.5 px-2">
-                              <span className={`text-sm ${ec.email ? "font-medium text-slate-800" : "text-slate-400 font-normal"}`}
-                                dir={ec.email ? "ltr" : undefined} style={contactValStyle(ec.email)}>
+                            <td className="py-2.5 px-2 overflow-hidden">
+                              <span className={`text-sm whitespace-nowrap overflow-hidden text-ellipsis block ${ec.email ? "font-medium text-slate-800" : "text-slate-400 font-normal"}`}
+                                dir={ec.email ? "ltr" : undefined} style={contactValStyle(ec.email)}
+                                title={ec.email || undefined}>
                                 {ec.email || "—"}
                               </span>
+                            </td>
+                            <td className="py-2.5 px-2 overflow-hidden">
+                              <div className="flex flex-wrap gap-1 w-full">
+                                {(ec.day_off || []).length === 0 ? (
+                                  <span className="text-sm text-slate-400 font-normal">—</span>
+                                ) : ec.day_off.map(v => (
+                                  <span key={v} className="inline-flex items-center text-xs font-medium px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 border border-slate-200">
+                                    {WEEKDAY_OPTIONS.find(o => o.value === v)?.label || v}
+                                  </span>
+                                ))}
+                              </div>
+                            </td>
+                            <td className="py-2.5 px-2 text-center">
+                              {school?.meeting_coordinator === `extra:${i}` && (
+                                <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-blue-100 text-blue-600" title="אחראי/ת לתיאום פגישות" aria-label="אחראי/ת לתיאום פגישות">✓</span>
+                              )}
                             </td>
                           </tr>
                         ))}
@@ -3619,22 +3783,64 @@ export default function SchoolPage() {
                     </table>
                   </div>
 
-                  {/* ליווי section */}
+                  {/* ליווי section — same 3-column label/value grid format as פרטי מוסד */}
                   <div className="mt-6 pt-5 border-t border-slate-100">
                     <p className="text-sm font-semibold text-slate-700 text-right mb-3">ליווי</p>
-                    <div className="grid grid-cols-2 gap-x-8">
-                      <div>
-                        <InfoRow label="יועץ מלווה">
-                          {displayAdvisors.length === 0 ? null : displayAdvisors.map(p => (
-                            <span key={p.id} className="inline-flex items-center text-xs font-medium px-2.5 py-1 rounded-full" style={{ background: "rgba(0,112,243,0.08)", color: "#1d4ed8" }}>
+                    <div className="grid grid-cols-3 gap-x-8">
+                      {/* Right column */}
+                      <div style={colGridStyle}>
+                        <span className={labelCls}>סטטוס לקוח:</span>
+                        <span className={valCls(CLIENT_STATUS_OPTIONS.find(o => o.value === yearAdminData.client_status)?.label)}
+                          style={valStyle(CLIENT_STATUS_OPTIONS.find(o => o.value === yearAdminData.client_status)?.label)}>
+                          {CLIENT_STATUS_OPTIONS.find(o => o.value === yearAdminData.client_status)?.label || "—"}
+                        </span>
+
+                        <span className={labelCls}>סוג שירות:</span>
+                        <span className={valCls(SERVICE_TYPE_OPTIONS.find(o => o.value === yearAdminData.service_type)?.label)}
+                          style={valStyle(SERVICE_TYPE_OPTIONS.find(o => o.value === yearAdminData.service_type)?.label)}>
+                          {SERVICE_TYPE_OPTIONS.find(o => o.value === yearAdminData.service_type)?.label || "—"}
+                        </span>
+                      </div>
+
+                      {/* Middle column */}
+                      <div style={colGridStyle}>
+                        <span className={labelCls}>אמצעי הזמנה:</span>
+                        <div className="py-1.5 flex flex-wrap gap-1">
+                          {(yearAdminData.order_method || []).length === 0 ? (
+                            <span className={valCls()} style={valStyle()}>—</span>
+                          ) : yearAdminData.order_method.map(v => (
+                            <span key={v} className="inline-flex items-center text-xs font-medium px-2.5 py-1 rounded-md bg-slate-100 text-slate-700 border border-slate-200">
+                              {FUNDING_METHOD_OPTIONS.find(o => o.value === v)?.label || v}
+                            </span>
+                          ))}
+                        </div>
+                        <span className={labelCls}>גובה הזמנה:</span>
+                        <span className={valCls(yearAdminData.order_amount_gefen)} style={valStyle(yearAdminData.order_amount_gefen)}
+                          title={yearAdminData.order_amount_gefen_updated_by_name
+                            ? `${yearAdminData.order_amount_gefen_updated_by_name} - ${formatDate(yearAdminData.order_amount_gefen_updated_at)}`
+                            : ""}>
+                          {formatAmount(yearAdminData.order_amount_gefen) || "—"}
+                        </span>
+                      </div>
+
+                      {/* Left column */}
+                      <div style={colGridStyle}>
+                        <span className={labelCls}>יועץ מלווה:</span>
+                        <div className="py-1.5 flex flex-wrap gap-1">
+                          {displayAdvisors.length === 0 ? (
+                            <span className={valCls()} style={valStyle()}>—</span>
+                          ) : displayAdvisors.map(p => (
+                            <span key={p.id} className="inline-flex items-center text-xs font-medium px-2.5 py-1 rounded-md bg-slate-100 text-slate-700 border border-slate-200">
                               {p.full_name || p.email}
                             </span>
                           ))}
-                        </InfoRow>
-                        {orderAmountField}
-                      </div>
-                      <div>
-                        <InfoRow label="גישה" tooltip="בחר למי תהיה גישה לנתוני בית הספר.">
+                        </div>
+
+                        <span className={`${labelCls} inline-flex items-center gap-1`}>
+                          <QuestionTooltip text="בחר למי תהיה גישה לנתוני בית הספר." />
+                          גישה:
+                        </span>
+                        <div className="py-1.5 flex flex-wrap gap-1">
                           {accessIsAll ? (
                             <span className="text-xs font-medium px-2 py-0.5 rounded-full" style={{ background: "rgba(22,163,74,0.12)", color: "#15803d" }}>כולם</span>
                           ) : (() => {
@@ -3642,13 +3848,14 @@ export default function SchoolPage() {
                               ? (school.restrict_access_profiles || [])
                               : (school?.restrict_access_to || []).map(id => users.find(u => u.id === id)).filter(Boolean);
                             if (profiles.length === 0 && loadingUsers) return <span className="text-xs text-slate-400">טוען...</span>;
+                            if (profiles.length === 0) return <span className={valCls()} style={valStyle()}>—</span>;
                             return profiles.map(u => (
-                              <span key={u.id} className="text-xs font-medium px-2 py-0.5 rounded-full" style={{ background: "rgba(0,112,243,0.08)", color: "#1d4ed8" }}>
+                              <span key={u.id} className="text-xs font-medium px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 border border-slate-200">
                                 {u.full_name || u.email}
                               </span>
                             ));
                           })()}
-                        </InfoRow>
+                        </div>
                       </div>
                     </div>
                   </div>

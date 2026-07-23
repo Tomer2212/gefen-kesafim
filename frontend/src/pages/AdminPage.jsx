@@ -3,6 +3,7 @@ import { useBlocker, useLocation, useNavigate } from "react-router-dom";
 import axios from "axios";
 import * as XLSX from "xlsx";
 import Sidebar from "../components/Sidebar";
+import { MultiSelectChips } from "../components/MultiSelectChips";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { supabase } from "../lib/supabase";
 import AdminCallsTab from "./AdminCallsTab";
@@ -45,9 +46,22 @@ const SERVICE_TYPE_OPTIONS = [
   { value: "gefen_current", label: "גפן+שוטף" },
 ];
 
-const ORDER_METHOD_KNOWN_OPTIONS = [
-  { value: "gefen_tochniot", label: "גפן (מאגר התוכניות)" },
-  { value: "gefen_nihul", label: "גפן (ניהול ותפעול)" },
+// "אמצעי הזמנה" — multi-select from a closed list (same field shown in ליווי on SchoolPage,
+// backed by school_year_admin_data.order_method as a text[] column).
+const FUNDING_METHOD_OPTIONS = [
+  { value: "gefen", label: "גפן" },
+  { value: "tnufa", label: "תנופה" },
+  { value: "tkuma", label: "תקומה" },
+  { value: "dokati", label: "דוקאטי" },
+  { value: "palg", label: 'פל"ג' },
+  { value: "self_managed", label: "ניהול עצמי" },
+];
+
+const DOMAIN_OPTIONS = [
+  { value: "gefen", label: "גפן" },
+  { value: "kesafim2000", label: "כספים2000" },
+  { value: "payscool", label: "פייסקול" },
+  { value: "schoolcash", label: "סקולקאש" },
 ];
 
 // New admin/financial columns, per-school-year (stored in school_year_admin_data).
@@ -55,7 +69,7 @@ const ADMIN_DATA_COLUMNS = [
   { key: "service_type",          label: "סוג שירות" },
   { key: "requested_price",       label: "מחיר מבוקש" },
   { key: "order_method",          label: "אמצעי הזמנה" },
-  { key: "order_amount_gefen",    label: "גובה הזמנה בגפן" },
+  { key: "order_amount_gefen",    label: "גובה הזמנה" },
   { key: "hours_ordered",         label: "מספר שעות שהוזמנו" },
   { key: "rate",                  label: "תעריף" },
   { key: "payment_received",      label: "תשלום שהתקבל" },
@@ -81,7 +95,7 @@ const ADMIN_NUMBER_FILTER_COLS = new Set([
 const ADMIN_SELECT_FILTER_OPTIONS = {
   stage: Object.entries(ADMIN_SCHOOL_STAGE_LABEL).map(([value, label]) => ({ value, label })),
   service_type: SERVICE_TYPE_OPTIONS,
-  order_method: ORDER_METHOD_KNOWN_OPTIONS,
+  order_method: FUNDING_METHOD_OPTIONS,
   contract_sent: [{ value: "yes", label: "כן" }, { value: "no", label: "לא" }],
   contract_received: [{ value: "yes", label: "כן" }, { value: "no", label: "לא" }],
 };
@@ -97,7 +111,7 @@ function getAdminRawFilterValue(school, yad, key) {
   switch (key) {
     case "stage": return school.stage || null;
     case "service_type": return yad.service_type || null;
-    case "order_method": return yad.order_method || null;
+    case "order_method": return yad.order_method || [];
     case "contract_sent": case "contract_received":
       return yad[key] === true ? "yes" : yad[key] === false ? "no" : null;
     default: return null;
@@ -130,7 +144,8 @@ function passesAdminColumnFilters(school, yad, filters, getSortValue) {
     } else if (type === "select") {
       if (!spec.values || spec.values.length === 0) continue;
       const raw = getAdminRawFilterValue(school, yad, key);
-      if (!spec.values.includes(raw)) return false;
+      const rawArr = Array.isArray(raw) ? raw : [raw];
+      if (!rawArr.some(v => spec.values.includes(v))) return false;
     }
   }
   return true;
@@ -154,39 +169,15 @@ function formatUpdatedAt(iso) {
   }
 }
 
-// "אמצעי הזמנה" — single-select from a closed list, with an "אחר" option that switches to
-// free-text entry. Keyed by (school.id + academicYear) at the call site so it remounts (and
-// resets its custom/select mode) whenever the underlying row changes.
-function OrderMethodCell({ value, onSave }) {
-  const isKnown = ORDER_METHOD_KNOWN_OPTIONS.some(o => o.value === value);
-  const [customMode, setCustomMode] = useState(!isKnown && !!value);
-  if (customMode) {
-    return (
-      <input
-        type="text"
-        defaultValue={isKnown ? "" : (value || "")}
-        onBlur={e => onSave(e.target.value.trim() || null)}
-        placeholder="הקלד אמצעי הזמנה"
-        aria-label="אמצעי הזמנה (טקסט חופשי)"
-        className="input-field text-sm w-36"
-      />
-    );
-  }
-  return (
-    <select
-      className="input-field text-sm w-36"
-      aria-label="אמצעי הזמנה"
-      value={isKnown ? value : ""}
-      onChange={e => {
-        if (e.target.value === "__other__") { setCustomMode(true); return; }
-        onSave(e.target.value || null);
-      }}
-    >
-      <option value="">בחר</option>
-      {ORDER_METHOD_KNOWN_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-      <option value="__other__">אחר</option>
-    </select>
-  );
+// Thousands-separated (no decimal) display for amount fields like "גובה הזמנה" — "" for empty.
+function formatAmount(v) {
+  return v === null || v === undefined || v === "" ? "" : Math.round(Number(v)).toLocaleString("he-IL");
+}
+
+// Strips thousands separators back to a plain number (or null if empty) for saving.
+function parseAmount(raw) {
+  const stripped = String(raw).replace(/,/g, "").trim();
+  return stripped === "" ? null : Number(stripped);
 }
 
 const DIVISION_OPTIONS = [
@@ -230,9 +221,18 @@ const FINANCE_SOFTWARE_OPTIONS = [
 ];
 
 const CONTACT_ROWS = [
-  { label: "מנהל/ת",        nameField: "principal_name",       phoneField: "principal_phone",       emailField: "principal_email" },
-  { label: "מנהלנ/ית",      nameField: "secretary_name",       phoneField: "secretary_phone",       emailField: "secretary_email" },
-  { label: "אחראי/ת כספים", nameField: "finance_contact_name", phoneField: "finance_contact_phone", emailField: "finance_contact_email" },
+  { label: "מנהל/ת",        nameField: "principal_name",       phoneField: "principal_phone",       emailField: "principal_email",       dayOffField: "principal_day_off",       coordValue: "principal" },
+  { label: "מנהלנ/ית",      nameField: "secretary_name",       phoneField: "secretary_phone",       emailField: "secretary_email",       dayOffField: "secretary_day_off",       coordValue: "secretary" },
+  { label: "אחראי/ת כספים", nameField: "finance_contact_name", phoneField: "finance_contact_phone", emailField: "finance_contact_email", dayOffField: "finance_contact_day_off", coordValue: "finance_contact" },
+];
+
+const WEEKDAY_OPTIONS = [
+  { value: "sun", label: "א" },
+  { value: "mon", label: "ב" },
+  { value: "tue", label: "ג" },
+  { value: "wed", label: "ד" },
+  { value: "thu", label: "ה" },
+  { value: "fri", label: "ו" },
 ];
 const ROLE_SORT_ORDER = { owner: 0, manager: 1, advisor: 2 };
 function sortByRole(arr) { return [...arr].sort((a, b) => (ROLE_SORT_ORDER[a.role] ?? 3) - (ROLE_SORT_ORDER[b.role] ?? 3)); }
@@ -322,7 +322,7 @@ function validateSymbol(val) {
   return "";
 }
 
-const EMPTY_FORM = { name: "", symbol: "", city: "", authority: "", stage: "", finance_software: "", principal_name: "", principal_phone: "", principal_email: "", secretary_name: "", secretary_phone: "", secretary_email: "", finance_contact_name: "", finance_contact_phone: "", finance_contact_email: "", school_phone: "", address: "", district: "", restrict_access_to: [], extra_contacts: [] };
+const EMPTY_FORM = { name: "", symbol: "", city: "", authority: "", stage: "", finance_software: "", principal_name: "", principal_phone: "", principal_email: "", secretary_name: "", secretary_phone: "", secretary_email: "", finance_contact_name: "", finance_contact_phone: "", finance_contact_email: "", school_phone: "", address: "", district: "", restrict_access_to: [], extra_contacts: [], principal_day_off: [], secretary_day_off: [], finance_contact_day_off: [], meeting_coordinator: null };
 
 const IMPORT_FIELD_CONFIG = [
   { key: "name",                  label: "שם בית ספר",          required: true },
@@ -934,13 +934,11 @@ export default function AdminPage() {
   // Users state
   const [users, setUsers] = useState([]);
   const [loadingUsers, setLoadingUsers] = useState(false);
-  const [chatbotUsage, setChatbotUsage] = useState(null);
-  const [loadingChatbotUsage, setLoadingChatbotUsage] = useState(false);
   const [overrideCounts, setOverrideCounts] = useState({});  // { [userId]: count }
   const [openActionsMenu, setOpenActionsMenu] = useState(null); // userId of open 3-dot menu
   const [roleError, setRoleError] = useState("");
   const [roleChangeConfirm, setRoleChangeConfirm] = useState(null); // { userId, userName, oldRole, newRole }
-  const [inviteForm, setInviteForm] = useState({ email: "", full_name: "", role: "advisor" });
+  const [inviteForm, setInviteForm] = useState({ email: "", full_name: "", role: "advisor", control_domains: [] });
   const [inviting, setInviting] = useState(false);
   const [inviteMsg, setInviteMsg] = useState("");
   const [userImportMappingData, setUserImportMappingData] = useState(null);
@@ -987,7 +985,7 @@ export default function AdminPage() {
     if (inviteForm.email && inviteForm.full_name) {
       await inviteUser();
     }
-    setInviteForm({ email: "", full_name: "", role: "advisor" });
+    setInviteForm({ email: "", full_name: "", role: "advisor", control_domains: [] });
     blocker.proceed?.();
   }
 
@@ -1003,7 +1001,7 @@ export default function AdminPage() {
     setAccessLinkedToAdvisors(false);
     setEditingUser(null);
     setEditingUserName("");
-    setInviteForm({ email: "", full_name: "", role: "advisor" });
+    setInviteForm({ email: "", full_name: "", role: "advisor", control_domains: [] });
     setInviteMsg("");
     blocker.proceed?.();
   }
@@ -1123,9 +1121,6 @@ export default function AdminPage() {
     });
   }, []);
   useEffect(() => { if ((activeTab === "users" || activeTab === "billing") && users.length === 0) loadUsers(); }, [activeTab]);
-  useEffect(() => {
-    if (activeTab === "users" && chatbotUsage === null && (myRole === "owner" || myRole === "manager")) loadChatbotUsage();
-  }, [activeTab, myRole]);
   useEffect(() => { if (activeTab === "permissions" && !permDefaults && !permLoading) loadPermDefaults(); }, [activeTab]);
   // Advisors must not access the admin area — redirect immediately once role is confirmed
   useEffect(() => { if (myRole === "advisor") navigate("/", { replace: true }); }, [myRole]);
@@ -1320,18 +1315,6 @@ export default function AdminPage() {
     }
   }
 
-  async function loadChatbotUsage() {
-    setLoadingChatbotUsage(true);
-    try {
-      const res = await axios.get("/chatbot/usage-today");
-      setChatbotUsage(res.data);
-    } catch {
-      setChatbotUsage({ users: [], global_count: 0, per_user_limit: null, global_limit: null });
-    } finally {
-      setLoadingChatbotUsage(false);
-    }
-  }
-
   async function saveSchool() {
     setTriedSave(true);
     if (!schoolForm.name || validateSymbol(schoolForm.symbol)) return;
@@ -1344,6 +1327,7 @@ export default function AdminPage() {
     if (schoolForm.secretary_phone && validateSecretaryPhone(schoolForm.secretary_phone)) return;
     if (schoolForm.finance_contact_phone && validateSecretaryPhone(schoolForm.finance_contact_phone)) return;
     if (schoolForm.school_phone && validateSchoolPhone(schoolForm.school_phone)) return;
+    if (!schoolForm.meeting_coordinator) return;
     setSavingSchool(true);
     try {
       if (editingSchool) {
@@ -1430,6 +1414,10 @@ export default function AdminPage() {
       district: school.district || "",
       restrict_access_to: school.restrict_access_to || null,
       extra_contacts: school.extra_contacts || [],
+      principal_day_off: school.principal_day_off || [],
+      secretary_day_off: school.secretary_day_off || [],
+      finance_contact_day_off: school.finance_contact_day_off || [],
+      meeting_coordinator: school.meeting_coordinator || null,
     });
     setTriedSave(false);
     setShowSchoolForm(true);
@@ -1578,6 +1566,15 @@ export default function AdminPage() {
     }
   }
 
+  async function saveUserDomains(u, control_domains) {
+    setUsers(prev => prev.map(x => x.id === u.id ? { ...x, control_domains } : x));
+    try {
+      await axios.patch(`/schools/users/${u.id}`, { control_domains });
+    } catch {
+      loadUsers();
+    }
+  }
+
   async function handleDeleteButtonClick(u) {
     setOpenActionsMenu(null);
     try {
@@ -1626,7 +1623,7 @@ export default function AdminPage() {
     try {
       await axios.post("/schools/users/invite", inviteForm);
       setInviteMsg("הזמנה נשלחה בהצלחה לאימייל המשתמש");
-      setInviteForm({ email: "", full_name: "", role: "advisor" });
+      setInviteForm({ email: "", full_name: "", role: "advisor", control_domains: [] });
       await loadUsers();
     } catch {
       setInviteMsg("שגיאה בשליחת ההזמנה");
@@ -1767,6 +1764,12 @@ export default function AdminPage() {
         errors.push(`שורה ${i + 2}: חסר שם בית ספר או סמל מוסד`);
         continue;
       }
+      if (school.secretary_name) school.meeting_coordinator = "secretary";
+      else if (school.principal_name) school.meeting_coordinator = "principal";
+      else {
+        errors.push(`שורה ${i + 2}: לא ניתן לקבוע אחראי/ת לתיאום פגישות (חסר שם מנהלנ/ית או מנהל/ת)`);
+        continue;
+      }
       try {
         await axios.post("/schools/", school);
         imported++;
@@ -1855,8 +1858,9 @@ export default function AdminPage() {
         return opt ? opt.label : (yad.service_type || "");
       }
       case "order_method": {
-        const opt = ORDER_METHOD_KNOWN_OPTIONS.find(o => o.value === yad.order_method);
-        return opt ? opt.label : (yad.order_method || "");
+        return (yad.order_method || [])
+          .map(v => FUNDING_METHOD_OPTIONS.find(o => o.value === v)?.label || v)
+          .join(", ");
       }
       default: {
         const v = yad[key];
@@ -1901,7 +1905,9 @@ export default function AdminPage() {
       <Sidebar dark />
 
       <div style={{ marginRight: "var(--sidebar-w, 240px)", transition: "margin-right 0.25s cubic-bezier(0.4,0,0.2,1)" }}>
-        <div className={`mx-auto px-6 py-10 ${activeTab === "schools" ? "max-w-[100rem]" : "max-w-4xl"}`}>
+        {/* Header + tabs — always at a fixed width, independent of how wide the active
+            tab's own content area needs to be, so the tab bar never shifts position. */}
+        <div className="mx-auto max-w-4xl px-6 pt-10">
           <div className="mb-8">
             <h1 className="text-2xl font-bold text-slate-900">פאנל ניהול</h1>
             <p className="text-slate-500 text-sm mt-1">ניהול בתי ספר, חטיבות ומשתמשים</p>
@@ -1923,7 +1929,12 @@ export default function AdminPage() {
               </button>
             ))}
           </div>
+        </div>
 
+        <div className={`mx-auto px-6 pb-10 ${
+          activeTab === "users" ? "max-w-[95rem]" :
+          ["schools", "meetings", "calls"].includes(activeTab) ? "max-w-[100rem]" : "max-w-4xl"
+        }`}>
           {/* Schools Tab */}
           {activeTab === "schools" && (
             <div>
@@ -2144,6 +2155,8 @@ export default function AdminPage() {
                           <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-500 font-semibold">שם</th>
                           <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-500 font-semibold">טלפון</th>
                           <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-500 font-semibold">מייל</th>
+                          <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-500 font-semibold">יום חופשי</th>
+                          <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-500 font-semibold">אחראי תיאום פגישות</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -2193,6 +2206,19 @@ export default function AdminPage() {
                                 type="email"
                               />
                             </td>
+                            <td className="py-2 px-2">
+                              <MultiSelectChips compact options={WEEKDAY_OPTIONS}
+                                selected={schoolForm[row.dayOffField] || []}
+                                onChange={v => setSchoolForm(p => ({ ...p, [row.dayOffField]: v }))} />
+                            </td>
+                            <td className="py-2 px-2 text-center">
+                              <label htmlFor={`admin-coord-${row.coordValue}`} className="sr-only">{row.label} אחראי/ת לתיאום פגישות</label>
+                              <input id={`admin-coord-${row.coordValue}`} type="radio" name="admin-meeting-coordinator"
+                                className="w-4 h-4 accent-blue-600"
+                                checked={schoolForm.meeting_coordinator === row.coordValue}
+                                disabled={!schoolForm[row.nameField]}
+                                onChange={() => setSchoolForm(p => ({ ...p, meeting_coordinator: row.coordValue }))} />
+                            </td>
                           </tr>
                         ))}
 
@@ -2224,10 +2250,31 @@ export default function AdminPage() {
                                   onChange={e => setSchoolForm(p => { const ec2 = [...(p.extra_contacts || [])]; ec2[i] = { ...ec2[i], email: e.target.value }; return { ...p, extra_contacts: ec2 }; })}
                                   dir="ltr" type="email" autoComplete="off" placeholder="מייל..." />
                                 <button type="button"
-                                  onClick={() => setSchoolForm(p => ({ ...p, extra_contacts: (p.extra_contacts || []).filter((_, j) => j !== i) }))}
+                                  onClick={() => setSchoolForm(p => {
+                                    let coord = p.meeting_coordinator;
+                                    if (coord === `extra:${i}`) coord = null;
+                                    else if (coord?.startsWith("extra:")) {
+                                      const j = Number(coord.split(":")[1]);
+                                      if (j > i) coord = `extra:${j - 1}`;
+                                    }
+                                    return { ...p, extra_contacts: (p.extra_contacts || []).filter((_, j) => j !== i), meeting_coordinator: coord };
+                                  })}
                                   className="text-slate-400 hover:text-red-500 flex-shrink-0 mr-1 text-base leading-none"
                                   aria-label="הסר שורת איש קשר">✕</button>
                               </div>
+                            </td>
+                            <td className="py-1.5 px-2">
+                              <MultiSelectChips compact options={WEEKDAY_OPTIONS}
+                                selected={ec.day_off || []}
+                                onChange={v => setSchoolForm(p => { const ec2 = [...(p.extra_contacts || [])]; ec2[i] = { ...ec2[i], day_off: v }; return { ...p, extra_contacts: ec2 }; })} />
+                            </td>
+                            <td className="py-1.5 px-2 text-center">
+                              <label htmlFor={`admin-coord-extra-${i}`} className="sr-only">איש קשר נוסף {i + 1} אחראי/ת לתיאום פגישות</label>
+                              <input id={`admin-coord-extra-${i}`} type="radio" name="admin-meeting-coordinator"
+                                className="w-4 h-4 accent-blue-600"
+                                checked={schoolForm.meeting_coordinator === `extra:${i}`}
+                                disabled={!ec.name}
+                                onChange={() => setSchoolForm(p => ({ ...p, meeting_coordinator: `extra:${i}` }))} />
                             </td>
                           </tr>
                         ))}
@@ -2235,7 +2282,7 @@ export default function AdminPage() {
                         {/* Add contact button */}
                         {(schoolForm.extra_contacts || []).length < 3 && (
                           <tr>
-                            <td colSpan={4} className="pt-3 pb-1">
+                            <td colSpan={6} className="pt-3 pb-1">
                               <button type="button"
                                 onClick={() => setSchoolForm(p => ({ ...p, extra_contacts: [...(p.extra_contacts || []), { role: "", name: "", phone: "", email: "" }] }))}
                                 className="text-sm text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1 transition-colors">
@@ -2246,6 +2293,9 @@ export default function AdminPage() {
                         )}
                       </tbody>
                     </table>
+                    {triedSave && !schoolForm.meeting_coordinator && (
+                      <p className="text-xs text-red-500 mt-1.5" role="alert">יש לבחור אחראי/ת לתיאום פגישות</p>
+                    )}
                   </div>
 
                   {/* ליווי */}
@@ -2499,21 +2549,25 @@ export default function AdminPage() {
                                   );
                                   if (key === "order_method") return (
                                     <td key={key} className={tdClass}>
-                                      <OrderMethodCell key={rowKey} value={yad.order_method || ""} onSave={v => saveYearAdminField(school.id, "order_method", v)} />
+                                      <MultiSelectChips key={rowKey} className="w-36" options={FUNDING_METHOD_OPTIONS}
+                                        selected={yad.order_method || []}
+                                        onChange={v => saveYearAdminField(school.id, "order_method", v.length ? v : null)} />
                                     </td>
                                   );
                                   if (key === "order_amount_gefen") return (
                                     <td key={key} className={tdClass}>
                                       <input
                                         key={rowKey}
-                                        type="number"
-                                        defaultValue={yad.order_amount_gefen ?? ""}
+                                        type="text"
+                                        inputMode="numeric"
+                                        defaultValue={formatAmount(yad.order_amount_gefen)}
                                         onBlur={e => {
-                                          const v = e.target.value === "" ? null : Number(e.target.value);
+                                          const v = parseAmount(e.target.value);
+                                          e.target.value = formatAmount(v);
                                           if (v !== (yad.order_amount_gefen ?? null)) saveYearAdminField(school.id, "order_amount_gefen", v);
                                         }}
                                         title={yad.order_amount_gefen_updated_by_name ? `${yad.order_amount_gefen_updated_by_name} - ${formatUpdatedAt(yad.order_amount_gefen_updated_at)}` : ""}
-                                        aria-label="גובה הזמנה בגפן"
+                                        aria-label="גובה הזמנה"
                                         className="input-field text-sm w-24"
                                       />
                                     </td>
@@ -2714,16 +2768,16 @@ export default function AdminPage() {
 
                   <div className="glass-card rounded-2xl p-6 mb-6">
                     <h3 className="font-bold text-slate-800 mb-4">הזמן משתמש חדש</h3>
-                    <div className="grid grid-cols-3 gap-4">
-                      <div className="flex flex-col gap-1.5">
-                        <label htmlFor="invite-email" className="text-xs text-slate-800">אימייל *</label>
-                        <input id="invite-email" className="input-field" type="email" dir="ltr" value={inviteForm.email}
-                          onChange={e => setInviteForm(p => ({ ...p, email: e.target.value }))} placeholder="user@example.com" />
-                      </div>
+                    <div className="grid grid-cols-5 gap-4 items-end">
                       <div className="flex flex-col gap-1.5">
                         <label htmlFor="invite-name" className="text-xs text-slate-800">שם מלא *</label>
                         <input id="invite-name" className="input-field" value={inviteForm.full_name}
                           onChange={e => setInviteForm(p => ({ ...p, full_name: e.target.value }))} placeholder="שם מלא" />
+                      </div>
+                      <div className="flex flex-col gap-1.5">
+                        <label htmlFor="invite-email" className="text-xs text-slate-800">אימייל *</label>
+                        <input id="invite-email" className="input-field" type="email" dir="ltr" value={inviteForm.email}
+                          onChange={e => setInviteForm(p => ({ ...p, email: e.target.value }))} placeholder="user@example.com" />
                       </div>
                       <div className="flex flex-col gap-1.5">
                         <label htmlFor="invite-role" className="text-xs text-slate-800">תפקיד</label>
@@ -2734,13 +2788,22 @@ export default function AdminPage() {
                           {myRole === "owner" && <option value="owner">בעלים</option>}
                         </select>
                       </div>
-                    </div>
-                    <div className="flex items-center gap-3 mt-4">
+                      <div className="flex flex-col gap-1.5">
+                        <span className="text-xs text-slate-800">תחומי שליטה</span>
+                        <MultiSelectChips neutral options={DOMAIN_OPTIONS}
+                          selected={inviteForm.control_domains}
+                          onChange={v => setInviteForm(p => ({ ...p, control_domains: v }))}
+                          placeholder="בחר תחומים" />
+                      </div>
                       <button onClick={inviteUser} disabled={!inviteForm.email || !inviteForm.full_name || inviting} className="btn-blue text-sm px-5 py-2">
                         {inviting ? "שולח..." : "שלח הזמנה"}
                       </button>
-                      {inviteMsg && <span className={`text-sm ${inviteMsg.includes("שגיאה") ? "text-red-500" : "text-green-600"}`}>{inviteMsg}</span>}
                     </div>
+                    {inviteMsg && (
+                      <div className="mt-3">
+                        <span className={`text-sm ${inviteMsg.includes("שגיאה") ? "text-red-500" : "text-green-600"}`}>{inviteMsg}</span>
+                      </div>
+                    )}
                   </div>
                 </>
               )}
@@ -2761,17 +2824,18 @@ export default function AdminPage() {
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-slate-100">
-                      <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium">שם</th>
-                      <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium">אימייל</th>
-                      <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium">תפקיד</th>
-                      <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium">סטטוס</th>
-                      <th scope="col" className="px-5 py-3 text-right text-slate-500 font-medium">פעולות</th>
+                      <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium whitespace-nowrap">שם</th>
+                      <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium whitespace-nowrap">אימייל</th>
+                      <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium whitespace-nowrap">תפקיד</th>
+                      <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium whitespace-nowrap">סטטוס</th>
+                      <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium whitespace-nowrap">תחומי שליטה</th>
+                      <th scope="col" className="px-5 py-3 text-center text-slate-500 font-medium whitespace-nowrap">הרשאות בהתאמה אישית</th>
                     </tr>
                   </thead>
                   <tbody>
                     {sortByRole(users).map(u => (
                       <tr key={u.id} className="border-b border-slate-50 hover:bg-slate-50 transition-colors">
-                        <td className="px-5 py-3">
+                        <td className="px-5 py-3 whitespace-nowrap">
                           {editingUser?.id === u.id ? (
                             <div className="flex items-center gap-2">
                               <label htmlFor={`edit-name-${u.id}`} className="sr-only">שם מלא</label>
@@ -2789,8 +2853,8 @@ export default function AdminPage() {
                             <span className="text-slate-900">{u.full_name || "—"}</span>
                           )}
                         </td>
-                        <td className="px-5 py-3 text-slate-600" dir="ltr">{u.email}</td>
-                        <td className="px-5 py-3">
+                        <td className="px-5 py-3 text-slate-600 whitespace-nowrap" dir="ltr">{u.email}</td>
+                        <td className="px-5 py-3 whitespace-nowrap">
                           <div className="flex items-center gap-2">
                             <label htmlFor={`role-${u.id}`} className="sr-only">תפקיד {u.full_name || u.email}</label>
                             <select id={`role-${u.id}`} value={u.role}
@@ -2809,7 +2873,7 @@ export default function AdminPage() {
                             </select>
                           </div>
                         </td>
-                        <td className="px-5 py-3">
+                        <td className="px-5 py-3 whitespace-nowrap">
                           {u.status === "pending" ? (
                             <span className="text-xs px-2.5 py-1 rounded-full font-medium"
                               style={{ background: "rgba(245,158,11,0.12)", color: "#b45309" }}>
@@ -2823,7 +2887,14 @@ export default function AdminPage() {
                           )}
                         </td>
                         <td className="px-5 py-3">
-                          <div className="flex gap-1 items-center justify-end">
+                          <MultiSelectChips compact options={DOMAIN_OPTIONS}
+                            selected={u.control_domains || []}
+                            onChange={v => saveUserDomains(u, v)}
+                            placeholder="בחר תחומים"
+                            emptyIcon />
+                        </td>
+                        <td className="px-5 py-3 whitespace-nowrap relative">
+                          <div className={`flex gap-1 items-center justify-center ${(myRole === "owner" || canDeleteUsers) ? "pl-9" : ""}`}>
                             {u.status === "pending" && (
                               <>
                                 <button
@@ -2849,11 +2920,13 @@ export default function AdminPage() {
                                     {overrideCounts[u.id]}
                                   </span>
                                 )}
-                                הרשאות בהתאמה אישית
+                                הוסף
                               </button>
                             )}
-                            {(myRole === "owner" || canDeleteUsers) && (
-                              <div className="relative" onClick={e => e.stopPropagation()}>
+                          </div>
+                          {(myRole === "owner" || canDeleteUsers) && (
+                            <div className="absolute left-2 top-1/2 -translate-y-1/2" onClick={e => e.stopPropagation()}>
+                              <div className="relative">
                                 <button
                                   onClick={() => setOpenActionsMenu(openActionsMenu === u.id ? null : u.id)}
                                   aria-label="פעולות נוספות"
@@ -2872,8 +2945,8 @@ export default function AdminPage() {
                                   </div>
                                 )}
                               </div>
-                            )}
-                          </div>
+                            </div>
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -2881,42 +2954,6 @@ export default function AdminPage() {
                 </table>
               </div>
 
-              {(myRole === "owner" || myRole === "manager") && (
-                <div className="glass-card rounded-2xl p-6 mt-6">
-                  <h3 className="font-bold text-slate-800 mb-4">שימוש בעוזר ה-AI היום</h3>
-                  {loadingChatbotUsage ? (
-                    <div role="status" aria-label="טוען נתוני שימוש" className="flex justify-center py-6">
-                      <div aria-hidden="true" className="spinner w-6 h-6" />
-                    </div>
-                  ) : chatbotUsage && chatbotUsage.users.length > 0 ? (
-                    <>
-                      <table className="w-full text-sm">
-                        <thead>
-                          <tr className="border-b border-slate-100">
-                            <th scope="col" className="text-right px-3 py-2 text-slate-500 font-medium">משתמש</th>
-                            <th scope="col" className="text-right px-3 py-2 text-slate-500 font-medium">הודעות היום</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {chatbotUsage.users.map(u => (
-                            <tr key={u.user_id} className="border-b border-slate-50">
-                              <td className="px-3 py-2 text-slate-700">{u.name}</td>
-                              <td className="px-3 py-2 text-slate-700">
-                                {u.message_count} / {chatbotUsage.per_user_limit}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                      <p className="text-xs text-slate-500 mt-3">
-                        סה"כ היום: {chatbotUsage.global_count} / {chatbotUsage.global_limit}
-                      </p>
-                    </>
-                  ) : (
-                    <p className="text-sm text-slate-400">אין עדיין שימוש בעוזר ה-AI היום.</p>
-                  )}
-                </div>
-              )}
             </div>
           )}
 
@@ -2982,25 +3019,21 @@ export default function AdminPage() {
             </div>
           )}
 
-          {/* Meetings Tab — wider container to reduce dead space on both sides */}
+          {/* Meetings Tab */}
           {activeTab === "meetings" && (
-            <div className="-mx-24">
-              <AdminMeetingsTab
-                ref={adminMeetingsRef}
-                users={users}
-                loadingUsers={loadingUsers}
-                loadUsers={loadUsers}
-                canDeleteMeetings={canDeleteMeetings}
-                onIncompleteChange={setMeetingsGuardActive}
-              />
-            </div>
+            <AdminMeetingsTab
+              ref={adminMeetingsRef}
+              users={users}
+              loadingUsers={loadingUsers}
+              loadUsers={loadUsers}
+              canDeleteMeetings={canDeleteMeetings}
+              onIncompleteChange={setMeetingsGuardActive}
+            />
           )}
 
           {/* Calls Tab */}
           {activeTab === "calls" && showCallsTab && (
-            <div className="-mx-24">
-              <AdminCallsTab users={users} />
-            </div>
+            <AdminCallsTab users={users} />
           )}
 
           {/* Integrations Tab */}

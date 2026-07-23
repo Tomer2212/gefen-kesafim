@@ -9,7 +9,9 @@ function sortByRole(arr) { return [...arr].sort((a, b) => (ROLE_SORT_ORDER[a.rol
 // calls immediately — this component only ever reports the full new selection.
 // Structurally mirrors AccessSelector (closed chip box + dropdown search + אישור footer) so
 // the two "ליווי" fields look and behave identically.
-export function AdvisorSearch({ schoolId, selectedIds, users, loadingUsers, onChange, onRetry, invalid }) {
+// `compact`: matches the smaller/plain field style used in "פרטי מוסד" (SchoolPage ליווי grid)
+// instead of the default glassy .input-field look used elsewhere (AdminPage, DashboardPage, ...).
+export function AdvisorSearch({ schoolId, selectedIds, users, loadingUsers, onChange, onRetry, invalid, compact = false }) {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const containerRef = useRef(null);
@@ -24,6 +26,15 @@ export function AdvisorSearch({ schoolId, selectedIds, users, loadingUsers, onCh
     onChange(ids.includes(id) ? ids.filter(i => i !== id) : [...ids, id]);
   }
 
+  const boxCls = compact
+    ? `w-full text-sm border rounded-md px-2 py-0.5 bg-transparent flex flex-wrap items-center gap-1 min-h-[26px] cursor-pointer focus-within:border-blue-400 focus-within:ring-1 focus-within:ring-blue-100 ${invalid ? "border-red-400" : "border-slate-300"}`
+    : `input-field flex flex-wrap items-center gap-1.5 min-h-[38px] cursor-pointer ${invalid ? "border-red-400" : ""}`;
+  const chipCls = compact
+    ? "inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-md flex-shrink-0 bg-slate-100 text-slate-700 border border-slate-200"
+    : "inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-0.5 rounded-full flex-shrink-0";
+  const chipStyle = compact ? {} : { background: "rgba(0,112,243,0.08)", color: "#1d4ed8" };
+  const checkedBoxCls = compact ? "bg-slate-500 border-slate-500" : "bg-blue-500 border-blue-500";
+
   return (
     <div
       ref={containerRef}
@@ -31,7 +42,7 @@ export function AdvisorSearch({ schoolId, selectedIds, users, loadingUsers, onCh
       onBlur={e => { if (!containerRef.current?.contains(e.relatedTarget)) setOpen(false); }}
     >
       <div
-        className={`input-field flex flex-wrap items-center gap-1.5 min-h-[38px] cursor-pointer ${invalid ? "border-red-400" : ""}`}
+        className={boxCls}
         role="button"
         tabIndex={0}
         onClick={() => setOpen(o => !o)}
@@ -43,7 +54,7 @@ export function AdvisorSearch({ schoolId, selectedIds, users, loadingUsers, onCh
           <span className="text-sm text-slate-400">{loadingUsers ? "טוען..." : "לחץ לבחירת יועץ..."}</span>
         )}
         {selectedUsers.map(u => (
-          <span key={u.id} className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-0.5 rounded-full flex-shrink-0" style={{ background: "rgba(0,112,243,0.08)", color: "#1d4ed8" }}>
+          <span key={u.id} className={chipCls} style={chipStyle}>
             {u.full_name || u.email}
             <button
               type="button"
@@ -88,7 +99,7 @@ export function AdvisorSearch({ schoolId, selectedIds, users, loadingUsers, onCh
                 onMouseDown={e => { e.preventDefault(); toggle(u.id); }}
                 className="w-full text-right px-4 py-2.5 text-sm text-slate-700 hover:bg-blue-50 transition-colors flex items-center gap-2"
               >
-                <span className={`w-4 h-4 rounded border flex-shrink-0 ${ids.includes(u.id) ? "bg-blue-500 border-blue-500" : "border-slate-300"}`} aria-hidden="true" />
+                <span className={`w-4 h-4 rounded border flex-shrink-0 ${ids.includes(u.id) ? checkedBoxCls : "border-slate-300"}`} aria-hidden="true" />
                 <span>{u.full_name || u.email}</span>
                 <span className="text-xs text-slate-400 mr-auto">{ROLE_LABELS[u.role]}</span>
               </button>
