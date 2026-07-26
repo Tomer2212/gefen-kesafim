@@ -4,6 +4,8 @@ import { MeetingRemindersProvider } from "./context/MeetingRemindersContext";
 import MeetingRemindersOverlay from "./components/MeetingRemindersOverlay";
 import { CompareChecksProvider } from "./context/CompareChecksContext";
 import CompareResultsWindow from "./components/CompareResultsWindow";
+import { TasksProvider } from "./context/TasksContext";
+import TaskPanel from "./components/tasks/TaskPanel";
 import { CallNoteWindowsProvider } from "./context/CallNoteWindowsContext";
 import CallNoteWindows from "./components/calls/CallNoteWindow";
 import { GuideProvider } from "./context/GuideContext";
@@ -69,6 +71,7 @@ function AppLayout() {
       <Outlet />
       <MeetingRemindersOverlay />
       <CompareResultsWindow />
+      <TaskPanel />
       <CallNoteWindows />
       <GuideWindow />
       <ChatWidget />
@@ -135,11 +138,13 @@ export default function App() {
     <SessionContext.Provider value={session}>
       <MeetingRemindersProvider>
         <CompareChecksProvider>
-          <CallNoteWindowsProvider>
-            <GuideProvider>
-              <RouterProvider router={router} />
-            </GuideProvider>
-          </CallNoteWindowsProvider>
+          <TasksProvider>
+            <CallNoteWindowsProvider>
+              <GuideProvider>
+                <RouterProvider router={router} />
+              </GuideProvider>
+            </CallNoteWindowsProvider>
+          </TasksProvider>
         </CompareChecksProvider>
       </MeetingRemindersProvider>
     </SessionContext.Provider>

@@ -168,6 +168,66 @@ def build_booking_request_email_html(recipient_name: str, school_name: str, advi
 </html>"""
 
 
+_SERVICE_TYPE_LABEL_HE = {"gefen": "גפן", "current": "שוטף"}
+
+
+def _format_range_date(iso: str) -> str:
+    y, m, d = iso.split("-")
+    return f"{d}.{m}.{y}"
+
+
+def build_direct_coordination_email_html(recipient_name: str, school_name: str, advisor_names: list[str],
+                                          ranges: list[dict], booking_url: str) -> str:
+    first_name = (recipient_name or "").strip().split(" ")[0]
+    greeting = f"היי {first_name}," if first_name else "היי,"
+    advisors_label = ", ".join(advisor_names) if advisor_names else ""
+    advisor_clause = f" עם {advisors_label}" if advisors_label else ""
+
+    range_rows = ""
+    for r in ranges:
+        type_label = r.get("label") or _SERVICE_TYPE_LABEL_HE.get(r.get("service_type"), "")
+        participants_label = ", ".join(p.get("name", "") for p in (r.get("participants") or []) if p.get("name"))
+        range_rows += f"""
+      <li style="margin-bottom: 10px;">
+        <b>{type_label}</b> — {_format_range_date(r["start_date"])} עד {_format_range_date(r["end_date"])}
+        {f'<br/><span style="color: #64748b; font-size: 12px;">משתתפים: {participants_label}</span>' if participants_label else ""}
+      </li>"""
+
+    return f"""
+<html>
+<body dir="rtl" style="font-family: Arial, sans-serif; font-size: 14px; color: #1e293b;
+                       background: #f8fafc; margin: 0; padding: 24px;">
+  <div style="max-width: 560px; margin: 0 auto; background: white;
+              border-radius: 12px; border: 1px solid #e2e8f0; overflow: hidden;">
+    <div style="background: #0070F3; padding: 20px 24px;">
+      <p style="margin: 0; color: white; font-size: 14px; font-weight: 700;">גפן AI</p>
+      <p style="margin: 4px 0 0 0; color: rgba(255,255,255,0.8); font-size: 12px;">קביעת פגישה</p>
+    </div>
+    <div style="padding: 28px 24px;">
+      <p style="margin: 0 0 16px 0; font-size: 15px;">{greeting}</p>
+      <p style="margin: 0 0 16px 0; color: #334155; line-height: 1.8;">
+        לבית הספר <b>{school_name}</b> מבוקש לתאם{advisor_clause} את הפגישות הבאות.
+        נשמח <b>שתקבעי מועד</b> לכל אחת מהן בקישור המצורף — תוכלי לבחור זמן פנוי ביומן ישירות:
+      </p>
+      <ul style="margin: 0 0 20px 0; padding-inline-start: 20px; color: #334155;">{range_rows}
+      </ul>
+      <div style="text-align: center; margin-bottom: 8px;">
+        <a href="{booking_url}"
+           style="display: inline-block; background: #0070F3; color: white;
+                  font-size: 14px; font-weight: 700; padding: 12px 28px;
+                  border-radius: 8px; text-decoration: none;">
+          קביעת מועדים לפגישות
+        </a>
+      </div>
+    </div>
+    <div style="background: #f1f5f9; padding: 12px 24px; text-align: center;">
+      <p style="margin: 0; font-size: 11px; color: #94a3b8;">נשלח אוטומטית מגפן AI</p>
+    </div>
+  </div>
+</body>
+</html>"""
+
+
 def send_booking_request_email(org_id: str, advisor_id: str, to_email: str, subject: str, html: str) -> None:
     """Raises on failure (unlike the non-fatal calendar-sync functions in graph_client.py) so
     the queue-processing cron can mark the row 'failed' with the real error.

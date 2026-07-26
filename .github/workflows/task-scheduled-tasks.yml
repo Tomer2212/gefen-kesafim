@@ -1,0 +1,23 @@
+name: Process Scheduled Tasks
+
+on:
+  schedule:
+    # Hourly — evaluates tasks that were created ahead of time with a future scheduled_for
+    # date (e.g. "קביעת פגישות רבעון 3" set up at the start of the year), computing which
+    # schools actually match the criteria once that date arrives.
+    - cron: '0 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call process-scheduled-tasks endpoint
+        run: |
+          URL="${BACKEND_URL%/}"
+          curl -sf -X POST "${URL}/tasks/process-scheduled-tasks" \
+            -H "X-Cron-Secret: ${CRON_SECRET}" \
+            --max-time 60
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}

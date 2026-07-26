@@ -2,6 +2,7 @@ import io
 import json
 import logging
 import os
+import secrets
 import smtplib
 import time
 from concurrent.futures import ThreadPoolExecutor, wait as futures_wait, FIRST_COMPLETED
@@ -236,6 +237,7 @@ class MeetingIn(BaseModel):
     advisor_ids: list[str] | None = None  # multi-advisor array
     participants: list[dict] | None = None
     meeting_type: str | None = None
+    meeting_service_type: str | None = None
     actual_duration: str | None = None
     notes: str | None = None
     reminder_enabled: bool | None = False
@@ -248,6 +250,25 @@ class MeetingStatusPatchIn(BaseModel):
     notes: str | None = None
     start_time: str | None = None
     end_time: str | None = None
+
+
+class DirectCoordinationParticipantIn(BaseModel):
+    key: str
+    name: str
+    email: str | None = None
+
+
+class DirectCoordinationRangeIn(BaseModel):
+    start_date: str
+    end_date: str
+    meeting_service_type: str  # "gefen" | "current"
+    duration_minutes: int      # 30..180, step 15
+    participants: list[DirectCoordinationParticipantIn]
+
+
+class DirectCoordinationIn(BaseModel):
+    advisor_ids: list[str]
+    ranges: list[DirectCoordinationRangeIn]
 
 
 class UserInviteIn(BaseModel):
@@ -3874,6 +3895,7 @@ def create_meeting(school_id: str, body: MeetingIn, user: Annotated[dict, Depend
     if body.start_time: data["start_time"] = body.start_time
     if body.end_time: data["end_time"] = body.end_time
     if body.meeting_type: data["meeting_type"] = body.meeting_type
+    if body.meeting_service_type is not None: data["meeting_service_type"] = body.meeting_service_type
     if body.actual_duration: data["actual_duration"] = body.actual_duration
     if body.notes: data["notes"] = body.notes
     if body.primary_contact_key is not None: data["primary_contact_key"] = body.primary_contact_key
@@ -3902,6 +3924,92 @@ def create_meeting(school_id: str, body: MeetingIn, user: Annotated[dict, Depend
     return meeting
 
 
+_DIRECT_COORDINATION_SERVICE_TYPES = {"gefen": "גפן", "current": "שוטף"}
+_DIRECT_COORDINATION_DURATIONS = set(range(30, 181, 15))
+
+
+@router.post("/{school_id}/meetings/direct-coordination")
+def send_direct_coordination_request(
+    school_id: str, body: DirectCoordinationIn, user: Annotated[dict, Depends(get_current_user)],
+):
+    """Sends a 'תיאום ישיר' email to the school's meeting_coordinator with a token-gated
+    booking link covering one or more requested date ranges (one meeting request each),
+    each with its own service type / advisors' availability / participants chosen up front
+    by the manager. Mirrors the AI-agent bulk booking-link flow's building blocks
+    (booking_token_logic.py / booking_logic.py / meeting_booking_router.py) but always mints
+    a fresh token (no reuse) since this is a one-off targeted action, not a recurring batch."""
+    _require_manager(user)
+    if not body.advisor_ids:
+        raise HTTPException(status_code=400, detail="יש לבחור לפחות יועץ אחד")
+    if not body.ranges:
+        raise HTTPException(status_code=400, detail="יש להוסיף לפחות טווח תאריכים אחד")
+
+    db = get_admin_client()
+
+    school_res = db.table("schools").select("*").eq("id", school_id).eq("org_id", user["org_id"]).execute()
+    if not school_res.data:
+        raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
+    school = school_res.data[0]
+
+    coordinator = _resolve_meeting_coordinator(school)
+    if not coordinator or not coordinator.get("email"):
+        raise HTTPException(status_code=400, detail="יש להגדיר אחראי/ת לתיאום פגישות עם כתובת מייל בפרטי בית הספר לפני שליחה")
+
+    advisor_rows = (
+        db.table("profiles").select("id, full_name, email")
+        .eq("org_id", user["org_id"]).in_("id", body.advisor_ids).execute().data or []
+    )
+    if len(advisor_rows) != len(set(body.advisor_ids)):
+        raise HTTPException(status_code=400, detail="אחד או יותר מהיועצים שנבחרו אינם תקינים")
+    advisor_names_map = {a["id"]: (a.get("full_name") or a.get("email") or "") for a in advisor_rows}
+    advisor_names = [advisor_names_map[aid] for aid in body.advisor_ids]
+
+    type_counts: dict[str, int] = {}
+    for r in body.ranges:
+        if r.start_date > r.end_date:
+            raise HTTPException(status_code=400, detail="טווח תאריכים לא תקין: תאריך ההתחלה מאוחר מתאריך הסיום")
+        if r.meeting_service_type not in _DIRECT_COORDINATION_SERVICE_TYPES:
+            raise HTTPException(status_code=400, detail="יש לבחור סוג פגישה (גפן/שוטף) לכל טווח")
+        if r.duration_minutes not in _DIRECT_COORDINATION_DURATIONS:
+            raise HTTPException(status_code=400, detail="משך פגישה לא תקין")
+        if not r.participants:
+            raise HTTPException(status_code=400, detail="יש לבחור לפחות משתתף אחד לכל טווח/פגישה")
+        type_counts[r.meeting_service_type] = type_counts.get(r.meeting_service_type, 0) + 1
+
+    type_seen: dict[str, int] = {}
+    ranges_data = []
+    for i, r in enumerate(body.ranges):
+        type_seen[r.meeting_service_type] = type_seen.get(r.meeting_service_type, 0) + 1
+        base_label = f"פגישת {_DIRECT_COORDINATION_SERVICE_TYPES[r.meeting_service_type]}"
+        label = base_label if type_counts[r.meeting_service_type] == 1 else f"{base_label} ({type_seen[r.meeting_service_type]})"
+        ranges_data.append({
+            "key": f"r{i}-{secrets.token_urlsafe(6)}",
+            "start_date": r.start_date,
+            "end_date": r.end_date,
+            "service_type": r.meeting_service_type,
+            "duration_minutes": r.duration_minutes,
+            "label": label,
+            "participants": [p.model_dump() for p in r.participants],
+        })
+
+    import booking_logic
+    import booking_token_logic
+
+    token_row = booking_token_logic.create_direct_booking_token(db, user["org_id"], school_id, body.advisor_ids, ranges_data)
+    booking_url = f"{os.getenv('APP_URL', '')}/book/{token_row['token']}"
+    html = booking_logic.build_direct_coordination_email_html(
+        coordinator["name"], school["name"], advisor_names, ranges_data, booking_url,
+    )
+    subject = f"בקשה לתיאום פגישה - {school['name']}"
+    try:
+        booking_logic.send_booking_request_email(user["org_id"], body.advisor_ids[0], coordinator["email"], subject, html)
+    except Exception as exc:
+        logger.error("send_direct_coordination_request: email send failed for school %s: %s", school_id, exc, exc_info=True)
+        raise HTTPException(status_code=502, detail="שליחת המייל נכשלה, נסה שוב")
+
+    return {"ok": True, "booking_url": booking_url}
+
+
 @router.put("/{school_id}/meetings/{meeting_id}")
 def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annotated[dict, Depends(get_current_user)]):
     db = get_admin_client()
@@ -3914,6 +4022,7 @@ def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annot
     if body.start_time: data["start_time"] = body.start_time
     if body.end_time: data["end_time"] = body.end_time
     if body.meeting_type: data["meeting_type"] = body.meeting_type
+    if body.meeting_service_type is not None: data["meeting_service_type"] = body.meeting_service_type
     if body.actual_duration: data["actual_duration"] = body.actual_duration
     if body.notes: data["notes"] = body.notes
     if body.academic_year: data["academic_year"] = body.academic_year

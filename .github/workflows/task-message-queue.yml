@@ -1,0 +1,23 @@
+name: Process Task Message Queue
+
+on:
+  schedule:
+    # Every 5 minutes — drains a small batch (15-20) of pending Tasks-feature messages
+    # (email/WhatsApp) so a manager's confirmed send goes out promptly without exceeding
+    # provider per-minute sending rate limits. Mirrors booking-email-queue.yml.
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call task message queue endpoint
+        run: |
+          URL="${BACKEND_URL%/}"
+          curl -sf -X POST "${URL}/tasks/process-message-queue" \
+            -H "X-Cron-Secret: ${CRON_SECRET}" \
+            --max-time 60
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}

@@ -16,6 +16,7 @@ import { useCompareChecks } from "../context/CompareChecksContext";
 import { AdvisorSearch } from "../components/AdvisorSearch";
 import { AccessSelector } from "../components/AccessSelector";
 import { MultiSelectChips } from "../components/MultiSelectChips";
+import { defaultMeetingServiceType } from "../components/meetings/constants";
 import { AdvisorCell } from "../components/meetings/AdvisorCell";
 import { DatePickerPopover } from "../components/meetings/DatePickerPopover";
 import { DeleteMeetingModal } from "../components/meetings/DeleteMeetingModal";
@@ -2649,6 +2650,7 @@ export default function SchoolPage() {
     const payload = {
       status: "scheduled",
       meeting_type: "remote",
+      meeting_service_type: defaultMeetingServiceType(yearAdminData.service_type),
       advisor_ids: defaultAdvisor ? [defaultAdvisor.id] : [],
       participants: [],
       reminder_enabled: false,

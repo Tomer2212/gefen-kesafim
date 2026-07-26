@@ -6,6 +6,7 @@ import { AdvisorCell } from "./AdvisorCell";
 import { DatePickerPopover } from "./DatePickerPopover";
 import { DayScheduleBlocks } from "./DayScheduleBlocks";
 import { MeetingTypeSelect } from "./MeetingTypeSelect";
+import { MeetingServiceTypeSelect } from "./MeetingServiceTypeSelect";
 import { NoParticipantsModal } from "./NoParticipantsModal";
 import { ParticipantsSelector } from "./ParticipantsSelector";
 import { TimeInput, normalizeTimeValue } from "./TimeInput";
@@ -548,9 +549,16 @@ export function MeetingRow({
               }
             }} />
         </td>
-        {/* סוג */}
+        {/* מיקום */}
         <td className="py-2.5 px-2">
           <MeetingTypeSelect value={draft.meeting_type || ""} onChange={v => { const nd = { ...draft, meeting_type: v }; setDraft(nd); saveDraft(nd); }} />
+        </td>
+        {/* סוג */}
+        <td className="py-2.5 px-2">
+          <MeetingServiceTypeSelect
+            value={draft.meeting_service_type || ""}
+            hasError={!draft.meeting_service_type}
+            onChange={v => { const nd = { ...draft, meeting_service_type: v }; setDraft(nd); saveDraft(nd); }} />
         </td>
         {/* הערות */}
         <td className="py-2.5 px-2 text-center">

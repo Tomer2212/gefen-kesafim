@@ -594,7 +594,8 @@ def _check_meeting_conflict(db, org_id: str, advisor_id: str, meeting: dict, exc
     return False
 
 
-def send_mail_as_advisor(db, org_id: str, advisor_id: str, subject: str, html_body: str, to_email: str) -> None:
+def send_mail_as_advisor(db, org_id: str, advisor_id: str, subject: str, html_body: str, to_email: str,
+                          attachments: list[dict] | None = None) -> None:
     """Sends an email as the resolved advisor's real mailbox via Graph application-permission
     Mail.Send (POST /users/{email}/sendMail — same authorization model app-only Calendars.ReadWrite
     already uses for /users/{email}/events, just a different Graph permission).
@@ -603,20 +604,30 @@ def send_mail_as_advisor(db, org_id: str, advisor_id: str, subject: str, html_bo
     sync shouldn't block saving a meeting), this RAISES on failure so callers on a paid-action path
     (the booking-request email queue) can mark the row 'failed' with the real error instead of
     silently losing it.
+
+    attachments: [{"filename": str, "content_b64": str}] — mapped to Graph's fileAttachment shape.
     """
     token = _get_app_only_token(db, org_id)
     email = _resolve_advisor_email(db, advisor_id)
     if not email:
         raise RuntimeError(f"could not resolve mailbox for advisor {advisor_id}")
 
-    payload = {
-        "message": {
-            "subject": subject,
-            "body": {"contentType": "HTML", "content": html_body},
-            "toRecipients": [{"emailAddress": {"address": to_email}}],
-        },
-        "saveToSentItems": True,
+    message = {
+        "subject": subject,
+        "body": {"contentType": "HTML", "content": html_body},
+        "toRecipients": [{"emailAddress": {"address": to_email}}],
     }
+    if attachments:
+        message["attachments"] = [
+            {
+                "@odata.type": "#microsoft.graph.fileAttachment",
+                "name": a["filename"],
+                "contentBytes": a["content_b64"],
+            }
+            for a in attachments
+        ]
+
+    payload = {"message": message, "saveToSentItems": True}
     resp = _request_with_retry(
         "POST", f"{GRAPH_BASE}/users/{email}/sendMail",
         headers=_headers(token), json=payload, timeout=15,

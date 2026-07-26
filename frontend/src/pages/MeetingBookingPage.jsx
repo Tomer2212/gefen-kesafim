@@ -17,12 +17,28 @@ function formatDateDDMMYYYY(iso) {
   return `${d}/${m}/${y}`;
 }
 
+function SlotButton({ selected, disabled, onClick, children }) {
+  return (
+    <button type="button" disabled={disabled} onClick={onClick}
+      aria-pressed={selected}
+      className={`text-xs px-3 py-1.5 rounded-lg border transition-colors disabled:opacity-50 ${
+        selected
+          ? "border-sky-400 bg-sky-200 text-sky-900 font-semibold ring-2 ring-sky-300"
+          : "border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100"
+      }`}>
+      {children}
+    </button>
+  );
+}
+
 function SlotPickerModal({ token, month, onClose, onBooked }) {
   const { ref, handleKeyDown } = useFocusTrap(onClose);
   const [loading, setLoading] = useState(true);
   const [days, setDays] = useState([]);
   const [error, setError] = useState("");
   const [booking, setBooking] = useState(false);
+  const [selected, setSelected] = useState(null); // { date, slot }
+  const [confirmed, setConfirmed] = useState(null); // booked details, once confirmed
 
   useEffect(() => {
     axios.get(`/public/meeting-booking/${token}/freebusy`, { params: { month } })
@@ -34,19 +50,42 @@ function SlotPickerModal({ token, month, onClose, onBooked }) {
       .finally(() => setLoading(false));
   }, [token, month]);
 
-  async function pickSlot(dayIso, slot) {
-    if (booking) return;
+  async function confirmSelection() {
+    if (booking || !selected) return;
     setBooking(true);
     setError("");
     try {
-      const res = await axios.post(`/public/meeting-booking/${token}/book`, {
-        month, meeting_date: dayIso, start_time: slot.start_time, end_time: slot.end_time,
+      await axios.post(`/public/meeting-booking/${token}/book`, {
+        month, meeting_date: selected.date, start_time: selected.slot.start_time, end_time: selected.slot.end_time,
       });
-      onBooked(res.data);
+      setConfirmed(selected);
     } catch (err) {
       setError(err?.response?.data?.detail || "המשבצת הזו כבר אינה פנויה, בחרו מועד אחר.");
+      setSelected(null);
+    } finally {
       setBooking(false);
     }
+  }
+
+  if (confirmed) {
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" dir="rtl">
+        <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="slot-confirmed-title"
+          onKeyDown={handleKeyDown}
+          className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md flex flex-col gap-3">
+          <h2 id="slot-confirmed-title" className="text-base font-bold text-green-700 text-center">הפגישה נקבעה בהצלחה!</h2>
+          <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 flex flex-col gap-1.5 text-sm text-slate-700">
+            <p><span className="font-semibold">חודש:</span> {monthLabel(month)}</p>
+            <p><span className="font-semibold">תאריך:</span> {HEBREW_WEEKDAYS[new Date(confirmed.date + "T00:00:00").getDay()]}, {formatDateDDMMYYYY(confirmed.date)}</p>
+            <p><span className="font-semibold">שעה:</span> {confirmed.slot.start_time} - {confirmed.slot.end_time}</p>
+          </div>
+          <button type="button" onClick={() => onBooked({})}
+            className="mt-2 px-6 py-2.5 rounded-full bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold transition-colors self-center">
+            סגירה
+          </button>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -72,20 +111,134 @@ function SlotPickerModal({ token, month, onClose, onBooked }) {
             </p>
             <div className="flex flex-wrap gap-1.5">
               {d.slots.map(slot => (
-                <button key={slot.start_time} type="button" disabled={booking}
-                  onClick={() => pickSlot(d.date, slot)}
-                  className="text-xs px-3 py-1.5 rounded-lg border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 transition-colors disabled:opacity-50">
+                <SlotButton key={slot.start_time} disabled={booking}
+                  selected={selected?.date === d.date && selected?.slot.start_time === slot.start_time}
+                  onClick={() => setSelected({ date: d.date, slot })}>
                   {slot.start_time}
-                </button>
+                </SlotButton>
               ))}
             </div>
           </div>
         ))}
 
-        <button type="button" onClick={onClose} disabled={booking}
-          className="mt-2 px-6 py-2.5 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-semibold transition-colors self-center">
-          סגירה
-        </button>
+        <div className="flex items-center gap-2 justify-center mt-2">
+          <button type="button" onClick={onClose} disabled={booking}
+            className="px-6 py-2.5 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-semibold transition-colors disabled:opacity-50">
+            סגירה
+          </button>
+          <button type="button" onClick={confirmSelection} disabled={!selected || booking}
+            className="px-6 py-2.5 rounded-full bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+            {booking ? "קובע..." : "אישור"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RangeSlotPickerModal({ token, range, onClose, onBooked }) {
+  const { ref, handleKeyDown } = useFocusTrap(onClose);
+  const [loading, setLoading] = useState(true);
+  const [days, setDays] = useState([]);
+  const [error, setError] = useState("");
+  const [booking, setBooking] = useState(false);
+  const [selected, setSelected] = useState(null); // { date, slot }
+  const [confirmed, setConfirmed] = useState(null);
+
+  useEffect(() => {
+    axios.get(`/public/meeting-booking/${token}/freebusy`, { params: { range_key: range.key } })
+      .then(res => {
+        setDays(res.data.days || []);
+        if (!res.data.ok) setError("לא ניתן היה לבדוק זמינות ביומן כרגע, נסו שוב מאוחר יותר.");
+      })
+      .catch(() => setError("אירעה שגיאה בטעינת המשבצות הפנויות."))
+      .finally(() => setLoading(false));
+  }, [token, range.key]);
+
+  async function confirmSelection() {
+    if (booking || !selected) return;
+    setBooking(true);
+    setError("");
+    try {
+      await axios.post(`/public/meeting-booking/${token}/book`, {
+        range_key: range.key, meeting_date: selected.date, start_time: selected.slot.start_time, end_time: selected.slot.end_time,
+      });
+      setConfirmed(selected);
+    } catch (err) {
+      setError(err?.response?.data?.detail || "המשבצת הזו כבר אינה פנויה, בחרו מועד אחר.");
+      setSelected(null);
+    } finally {
+      setBooking(false);
+    }
+  }
+
+  if (confirmed) {
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" dir="rtl">
+        <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="range-slot-confirmed-title"
+          onKeyDown={handleKeyDown}
+          className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md flex flex-col gap-3">
+          <h2 id="range-slot-confirmed-title" className="text-base font-bold text-green-700 text-center">הפגישה נקבעה בהצלחה!</h2>
+          <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 flex flex-col gap-1.5 text-sm text-slate-700">
+            <p><span className="font-semibold">סוג:</span> {range.label}</p>
+            <p><span className="font-semibold">תאריך:</span> {HEBREW_WEEKDAYS[new Date(confirmed.date + "T00:00:00").getDay()]}, {formatDateDDMMYYYY(confirmed.date)}</p>
+            <p><span className="font-semibold">שעה:</span> {confirmed.slot.start_time} - {confirmed.slot.end_time}</p>
+            {range.participants?.length > 0 && (
+              <p><span className="font-semibold">משתתפים:</span> {range.participants.map(p => p.name).filter(Boolean).join(", ")}</p>
+            )}
+          </div>
+          <button type="button" onClick={() => onBooked({})}
+            className="mt-2 px-6 py-2.5 rounded-full bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold transition-colors self-center">
+            סגירה
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" dir="rtl">
+      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="range-slot-picker-title"
+        onKeyDown={handleKeyDown}
+        className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md max-h-[80vh] overflow-y-auto flex flex-col gap-3">
+        <h2 id="range-slot-picker-title" className="text-base font-bold text-slate-800 text-center">
+          בחירת מועד — {range.label}
+        </h2>
+
+        {loading && <p role="status" aria-label="טוען משבצות פנויות" className="text-sm text-slate-500 text-center py-4">טוען משבצות פנויות...</p>}
+        {error && <p role="alert" className="text-sm text-red-600 text-center">{error}</p>}
+
+        {!loading && days.length === 0 && !error && (
+          <p className="text-sm text-slate-500 text-center py-4">לא נמצאו משבצות פנויות בטווח זה.</p>
+        )}
+
+        {!loading && days.map(d => (
+          <div key={d.date} className="border-t border-slate-100 pt-2 first:border-t-0 first:pt-0">
+            <p className="text-sm font-semibold text-slate-700 mb-1.5">
+              {HEBREW_WEEKDAYS[new Date(d.date + "T00:00:00").getDay()]}, {formatDateDDMMYYYY(d.date)}
+            </p>
+            <div className="flex flex-wrap gap-1.5">
+              {d.slots.map(slot => (
+                <SlotButton key={slot.start_time} disabled={booking}
+                  selected={selected?.date === d.date && selected?.slot.start_time === slot.start_time}
+                  onClick={() => setSelected({ date: d.date, slot })}>
+                  {slot.start_time}
+                </SlotButton>
+              ))}
+            </div>
+          </div>
+        ))}
+
+        <div className="flex items-center gap-2 justify-center mt-2">
+          <button type="button" onClick={onClose} disabled={booking}
+            className="px-6 py-2.5 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-semibold transition-colors disabled:opacity-50">
+            סגירה
+          </button>
+          <button type="button" onClick={confirmSelection} disabled={!selected || booking}
+            className="px-6 py-2.5 rounded-full bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+            {booking ? "קובע..." : "אישור"}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -96,7 +249,7 @@ export default function MeetingBookingPage() {
   const [status, setStatus] = useState("loading"); // loading | invalid | expired | ready
   const [data, setData] = useState(null);
   const [pickerMonth, setPickerMonth] = useState(null);
-  const [bookedToast, setBookedToast] = useState(false);
+  const [pickerRange, setPickerRange] = useState(null);
 
   function load() {
     axios.get(`/public/meeting-booking/${token}`)
@@ -109,9 +262,10 @@ export default function MeetingBookingPage() {
   useEffect(() => { load(); }, [token]);
 
   function handleBooked() {
+    // The picker modal already showed a detailed booking confirmation before calling this —
+    // just close it and refresh the underlying open-items list.
     setPickerMonth(null);
-    setBookedToast(true);
-    setTimeout(() => setBookedToast(false), 4000);
+    setPickerRange(null);
     load();
   }
 
@@ -139,20 +293,53 @@ export default function MeetingBookingPage() {
             </p>
           )}
 
-          {status === "ready" && data && (
+          {status === "ready" && data && data.mode === "ranges" && (
+            <>
+              <h1 className="text-lg font-bold text-slate-800 mb-1 text-center">קביעת מועד לפגישות</h1>
+              <p className="text-sm text-slate-500 mb-6 text-center">
+                {data.school_name}{data.advisor_names?.length ? ` · עם ${data.advisor_names.join(", ")}` : ""}
+              </p>
+
+{data.ranges.every(r => r.booked) ? (
+                <p className="text-sm text-slate-500 text-center py-4">כל הפגישות הנדרשות כבר נקבעו — תודה!</p>
+              ) : (
+                <div className="flex flex-col gap-3">
+                  {data.ranges.map(r => (
+                    <div key={r.key} className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 flex flex-col gap-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-sm font-semibold text-slate-700">{r.label}</span>
+                        {r.booked ? (
+                          <span className="text-xs px-3 py-1 rounded-lg bg-green-100 text-green-700 font-semibold">✓ נקבע</span>
+                        ) : (
+                          <button type="button" onClick={() => setPickerRange(r)}
+                            className="text-xs px-4 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold transition-colors">
+                            בחר מועד
+                          </button>
+                        )}
+                      </div>
+                      <p className="text-xs text-slate-500">
+                        {formatDateDDMMYYYY(r.start_date)} עד {formatDateDDMMYYYY(r.end_date)}
+                      </p>
+                      {r.participants?.length > 0 && (
+                        <p className="text-xs text-slate-500">
+                          משתתפים: {r.participants.map(p => p.name).filter(Boolean).join(", ")}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+
+          {status === "ready" && data && data.mode !== "ranges" && (
             <>
               <h1 className="text-lg font-bold text-slate-800 mb-1 text-center">קביעת מועד לפגישה</h1>
               <p className="text-sm text-slate-500 mb-6 text-center">
                 {data.school_name}{data.advisor_name ? ` · עם ${data.advisor_name}` : ""}
               </p>
 
-              {bookedToast && (
-                <p role="status" className="text-sm text-green-700 bg-green-50 border border-green-200 rounded-lg px-4 py-2 mb-4 text-center">
-                  הפגישה נקבעה בהצלחה!
-                </p>
-              )}
-
-              {data.open_months.length === 0 ? (
+{data.open_months.length === 0 ? (
                 <p className="text-sm text-slate-500 text-center py-4">כל הפגישות הנדרשות כבר נקבעו — תודה!</p>
               ) : (
                 <div className="flex flex-col gap-2">
@@ -183,6 +370,15 @@ export default function MeetingBookingPage() {
           token={token}
           month={pickerMonth}
           onClose={() => setPickerMonth(null)}
+          onBooked={handleBooked}
+        />
+      )}
+
+      {pickerRange && (
+        <RangeSlotPickerModal
+          token={token}
+          range={pickerRange}
+          onClose={() => setPickerRange(null)}
           onBooked={handleBooked}
         />
       )}

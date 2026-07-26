@@ -17,6 +17,7 @@ import { AcademicYearSelector } from "../components/AcademicYearSelector";
 import { DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
 import { AdvisorSearch } from "../components/AdvisorSearch";
 import { AccessSelector } from "../components/AccessSelector";
+import TaskListBar from "../components/tasks/TaskListBar";
 
 // --- Admin schools table (ניהול → בתי ספר) ------------------------------------------------
 
@@ -179,6 +180,12 @@ function parseAmount(raw) {
   const stripped = String(raw).replace(/,/g, "").trim();
   return stripped === "" ? null : Number(stripped);
 }
+
+// Plain/flat field style for the admin table's editable cells (service_type, order_amount_gefen,
+// numeric fields, contract_sent/contract_received) — mirrors SchoolPage's editFieldCls (the thin
+// border-slate-300 look used in "פרטי מוסד"), instead of the heavier rounded/bordered .input-field
+// box, so these columns read like decisive plain values rather than boxy form fields.
+const ADMIN_FIELD_CLS = "text-sm text-slate-700 border rounded-md px-2 py-0.5 bg-transparent border-slate-300 focus:outline-none focus:ring-1 focus:border-blue-400 focus:ring-blue-100";
 
 const DIVISION_OPTIONS = [
   { value: "tikkon", label: "חטיבה עליונה" },
@@ -2392,6 +2399,8 @@ export default function AdminPage() {
               <>
               <input ref={adminContractInputRef} type="file" className="hidden" onChange={handleContractFileChange} aria-label="העלאת קובץ חוזה" />
 
+              <TaskListBar />
+
               <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
                 <div className="flex items-center gap-2 flex-wrap">
                   <label htmlFor="admin-schools-search" className="sr-only">חיפוש בתי ספר</label>
@@ -2456,8 +2465,8 @@ export default function AdminPage() {
                           className="border-b border-slate-200"
                           style={{ position: "sticky", top: 0, background: "rgba(241,245,249,0.97)", zIndex: 10, backdropFilter: "blur(8px)" }}
                         >
-                          <th scope="col" className="text-right px-5 py-3 text-slate-900 font-semibold border-l border-slate-200"
-                            style={{ position: "sticky", right: 0, zIndex: 11, background: "rgba(241,245,249,0.97)" }}>שם מוסד</th>
+                          <th scope="col" className="text-right px-5 py-3 text-slate-900 font-semibold border-l border-slate-200 whitespace-nowrap"
+                            style={{ position: "sticky", right: 0, zIndex: 11, background: "rgba(241,245,249,0.97)", minWidth: "14rem" }}>שם מוסד</th>
                           {visibleAdminColOrder.map((key, i) => {
                             const col = ADMIN_ALL_COLUMNS.find(c => c.key === key);
                             const isLast = i === visibleAdminColOrder.length - 1;
@@ -2466,11 +2475,11 @@ export default function AdminPage() {
                             const isFiltered = adminColumnFilterActiveKeys.includes(key);
                             return (
                               <th key={key} scope="col"
-                                className={`text-right px-4 py-3 font-semibold select-none text-slate-900 ${isLast ? "" : "border-l border-slate-200"}`}>
+                                className={`text-right px-4 py-3 font-semibold select-none text-slate-900 whitespace-nowrap ${isLast ? "" : "border-l border-slate-200"}`}>
                                 <div className="flex items-center gap-1">
                                   <button type="button" onClick={() => toggleAdminSort(key)}
                                     className={`flex items-center gap-1 hover:text-blue-600 ${isSorted ? "text-blue-600" : ""}`}>
-                                    <span>{col.label}</span>
+                                    <span className="whitespace-nowrap">{col.label}</span>
                                     {isSorted && (
                                       <svg aria-hidden="true" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                                         {adminSortDir === "asc" ? <polyline points="18 15 12 9 6 15" /> : <polyline points="6 9 12 15 18 9" />}
@@ -2510,7 +2519,7 @@ export default function AdminPage() {
                               </th>
                             );
                           })}
-                          <th scope="col" className="text-right px-4 py-3 text-slate-900 font-semibold">פעולות</th>
+                          <th scope="col" className="text-right px-4 py-3 text-slate-900 font-semibold whitespace-nowrap">פעולות</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -2520,12 +2529,9 @@ export default function AdminPage() {
                           return (
                             <Fragment key={school.id}>
                               <tr className="group border-b border-slate-100 hover:bg-slate-50 transition-colors">
-                                <td className="px-5 py-3 border-l border-slate-100 bg-white group-hover:bg-slate-50"
-                                  style={{ position: "sticky", right: 0, zIndex: 5 }}>
-                                  <div className="flex items-center gap-2 flex-wrap">
-                                    <span className="font-semibold text-slate-900">{school.name}</span>
-                                    {school.symbol && <span className="text-xs text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">סמל {school.symbol}</span>}
-                                  </div>
+                                <td className="px-5 py-3 border-l border-slate-100 bg-white group-hover:bg-slate-50 whitespace-nowrap"
+                                  style={{ position: "sticky", right: 0, zIndex: 5, minWidth: "14rem" }}>
+                                  <span className="font-semibold text-slate-900">{school.name}</span>
                                 </td>
                                 {visibleAdminColOrder.map((key, i) => {
                                   const isLast = i === visibleAdminColOrder.length - 1;
@@ -2539,7 +2545,7 @@ export default function AdminPage() {
                                   if (key === "service_type") return (
                                     <td key={key} className={tdClass}>
                                       <label htmlFor={`svc-${rowKey}`} className="sr-only">סוג שירות</label>
-                                      <select id={`svc-${rowKey}`} className="input-field text-sm w-32"
+                                      <select id={`svc-${rowKey}`} className={`${ADMIN_FIELD_CLS} w-28`}
                                         value={yad.service_type || ""}
                                         onChange={e => saveYearAdminField(school.id, "service_type", e.target.value || null)}>
                                         <option value="">בחר</option>
@@ -2549,7 +2555,7 @@ export default function AdminPage() {
                                   );
                                   if (key === "order_method") return (
                                     <td key={key} className={tdClass}>
-                                      <MultiSelectChips key={rowKey} className="w-36" options={FUNDING_METHOD_OPTIONS}
+                                      <MultiSelectChips key={rowKey} compact className="w-36" options={FUNDING_METHOD_OPTIONS}
                                         selected={yad.order_method || []}
                                         onChange={v => saveYearAdminField(school.id, "order_method", v.length ? v : null)} />
                                     </td>
@@ -2568,7 +2574,7 @@ export default function AdminPage() {
                                         }}
                                         title={yad.order_amount_gefen_updated_by_name ? `${yad.order_amount_gefen_updated_by_name} - ${formatUpdatedAt(yad.order_amount_gefen_updated_at)}` : ""}
                                         aria-label="גובה הזמנה"
-                                        className="input-field text-sm w-24"
+                                        className={`${ADMIN_FIELD_CLS} w-24`}
                                       />
                                     </td>
                                   );
@@ -2583,14 +2589,14 @@ export default function AdminPage() {
                                           if (v !== (yad[key] ?? null)) saveYearAdminField(school.id, key, v);
                                         }}
                                         aria-label={ADMIN_DATA_COLUMNS.find(c => c.key === key)?.label}
-                                        className="input-field text-sm w-24"
+                                        className={`${ADMIN_FIELD_CLS} no-spinner w-24`}
                                       />
                                     </td>
                                   );
                                   if (key === "contract_sent" || key === "contract_received") return (
                                     <td key={key} className={tdClass}>
                                       <label htmlFor={`${key}-${rowKey}`} className="sr-only">{ADMIN_DATA_COLUMNS.find(c => c.key === key)?.label}</label>
-                                      <select id={`${key}-${rowKey}`} className="input-field text-sm w-20"
+                                      <select id={`${key}-${rowKey}`} className={`${ADMIN_FIELD_CLS} w-20`}
                                         value={yad[key] === true ? "yes" : yad[key] === false ? "no" : ""}
                                         onChange={e => saveYearAdminField(school.id, key, e.target.value === "yes" ? true : e.target.value === "no" ? false : null)}>
                                         <option value="">—</option>
