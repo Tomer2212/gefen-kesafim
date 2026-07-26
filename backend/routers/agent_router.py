@@ -781,7 +781,10 @@ class ChatMessage(BaseModel):
 
 class AgentRequest(BaseModel):
     message: str = Field(max_length=MAX_MESSAGE_CHARS)
-    active_tab: Literal["schools", "meetings"] | None = None
+    # Free-text, not a closed Literal: this is purely a descriptive hint folded into the
+    # system prompt (never branched on), and the set of admin tabs (e.g. "calls"/"שיחות")
+    # keeps growing independently of this file — a Literal here would 422 on any new tab.
+    active_tab: str | None = None
     history: list[ChatMessage] = []
     draft_id: str | None = None
 
