@@ -8,7 +8,7 @@ import { MeetingsTable } from "../components/meetings/MeetingsTable";
 import { MeetingSummaryModal } from "../components/meetings/MeetingSummaryModal";
 import { NotesModal } from "../components/meetings/NotesModal";
 import { SchoolPickerModal, SchoolPickerPopover, schoolLabel } from "../components/meetings/SchoolPickerCell";
-import { MEETING_STATUS_OPTIONS, MEETING_TYPE_OPTIONS, STATUS_MAP, formatMeetingDate } from "../components/meetings/constants";
+import { MEETING_STATUS_OPTIONS, MEETING_TYPE_OPTIONS, MEETING_SERVICE_TYPE_OPTIONS, STATUS_MAP, formatMeetingDate, defaultMeetingServiceType } from "../components/meetings/constants";
 import { AcademicYearSelector } from "../components/AcademicYearSelector";
 import { DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
 import MeetingNavigationGuardModal from "../components/meetings/MeetingNavigationGuardModal";
@@ -172,7 +172,18 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
   }
 
   async function createMeetingForSchool(school) {
-    const payload = { status: "scheduled", meeting_type: "remote", advisor_ids: userId ? [userId] : [], participants: [], reminder_enabled: false, academic_year: academicYear };
+    let schoolServiceType = null;
+    try {
+      const yad = await axios.get(`/schools/${school.id}/year-admin-data`, { params: { academic_year: academicYear } });
+      schoolServiceType = yad.data?.service_type || null;
+    } catch {
+      // non-fatal — meeting creation proceeds without a pre-filled service type
+    }
+    const payload = {
+      status: "scheduled", meeting_type: "remote",
+      meeting_service_type: defaultMeetingServiceType(schoolServiceType),
+      advisor_ids: userId ? [userId] : [], participants: [], reminder_enabled: false, academic_year: academicYear,
+    };
     try {
       const res = await axios.post(`/schools/${school.id}/meetings`, payload);
       const newMeeting = { ...res.data, advisor_profiles: [], school_name: school.name, school_symbol: school.symbol, school_city: school.city, school_district: school.district };
@@ -252,13 +263,14 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
 
   function exportSelectedToExcel() {
     const selected = displayedMeetings.filter(m => selectedIds[m.id]);
-    const headers = ["שם מוסד", "סמל", "תאריך", "שעה", "סטטוס", "מיקום", "עיר"];
+    const headers = ["שם מוסד", "סמל", "תאריך", "שעה", "סטטוס", "מיקום", "סוג", "עיר"];
     const rows = selected.map(m => [
       m.school_name || "", m.school_symbol || "",
       m.meeting_date ? formatMeetingDate(m.meeting_date) : "",
       m.meeting_time || "",
       STATUS_MAP[m.status]?.label || m.status || "",
       MEETING_TYPE_OPTIONS.find(o => o.value === m.meeting_type)?.label || m.meeting_type || "",
+      MEETING_SERVICE_TYPE_OPTIONS.find(o => o.value === m.meeting_service_type)?.label || "",
       m.school_city || "",
     ]);
     const wsData = [headers, ...rows];
@@ -273,13 +285,14 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
 
   async function exportSelectedToPdf() {
     const selected = displayedMeetings.filter(m => selectedIds[m.id]);
-    const headers = ["שם מוסד", "סמל", "תאריך", "שעה", "סטטוס", "מיקום", "עיר"];
+    const headers = ["שם מוסד", "סמל", "תאריך", "שעה", "סטטוס", "מיקום", "סוג", "עיר"];
     const rows = selected.map(m => [
       m.school_name || "", m.school_symbol || "",
       m.meeting_date ? formatMeetingDate(m.meeting_date) : "",
       m.meeting_time || "",
       STATUS_MAP[m.status]?.label || m.status || "",
       MEETING_TYPE_OPTIONS.find(o => o.value === m.meeting_type)?.label || m.meeting_type || "",
+      MEETING_SERVICE_TYPE_OPTIONS.find(o => o.value === m.meeting_service_type)?.label || "",
       m.school_city || "",
     ]);
     try {

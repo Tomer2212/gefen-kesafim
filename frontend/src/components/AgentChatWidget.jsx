@@ -28,7 +28,7 @@ export default function AgentChatWidget({
   const [error, setError] = useState("");
   const [size, setSize] = useState({ width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT });
   const [draftId, setDraftId] = useState(null);
-  const [lastBookingSummary, setLastBookingSummary] = useState(null);
+  const [lastTaskSummary, setLastTaskSummary] = useState(null);
   const listRef = useRef(null);
   const resizeRef = useRef(null);
 
@@ -105,11 +105,11 @@ export default function AgentChatWidget({
         history,
         draft_id: draftId,
       });
-      const { reply_text, filter_instruction, draft_id, booking_summary } = resp.data || {};
+      const { reply_text, filter_instruction, draft_id, task_summary } = resp.data || {};
       setMessages(prev => [...prev, { role: "assistant", content: reply_text || "בוצע." }]);
       applyFilterInstruction(filter_instruction);
       if (draft_id !== undefined) setDraftId(draft_id);
-      setLastBookingSummary(booking_summary || null);
+      setLastTaskSummary(task_summary || null);
     } catch (err) {
       if (err?.response?.status === 429) {
         setError(err.response?.data?.detail || "הגעת למכסת השימוש היומית בעוזר, נסה שוב מחר");
@@ -186,24 +186,32 @@ export default function AgentChatWidget({
         {messages.map((m, i) => (
           <ChatMessage key={i} role={m.role} content={m.content} />
         ))}
-        {lastBookingSummary && lastBookingSummary.schools?.length > 0 && (
+        {lastTaskSummary && lastTaskSummary.schools?.length > 0 && (
           <div className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-xs text-slate-700">
             <p className="font-semibold text-slate-800 mb-1.5">
-              סיכום אצווה{lastBookingSummary.status ? ` (${lastBookingSummary.status})` : ""}:
+              סיכום משימה{lastTaskSummary.status ? ` (${lastTaskSummary.status})` : ""}:
             </p>
-            {lastBookingSummary.default_scheduling_window && (
+            {lastTaskSummary.message_config && (
               <p className="text-slate-500 mb-1.5">
-                חלון ברירת מחדל: {lastBookingSummary.default_scheduling_window.start_hour}:00-{lastBookingSummary.default_scheduling_window.end_hour}:00,
-                {" "}{lastBookingSummary.default_scheduling_window.duration_minutes} דק'
+                נמען: {lastTaskSummary.message_config.recipient_role} · ערוץ: {lastTaskSummary.message_config.channel}
+                {lastTaskSummary.message_config.subject ? ` · "${lastTaskSummary.message_config.subject}"` : ""}
+              </p>
+            )}
+            {lastTaskSummary.needs_booking_link && lastTaskSummary.default_scheduling_window && (
+              <p className="text-slate-500 mb-1.5">
+                חלון שריון: {lastTaskSummary.default_scheduling_window.start_hour}:00-{lastTaskSummary.default_scheduling_window.end_hour}:00,
+                {" "}{lastTaskSummary.default_scheduling_window.duration_minutes} דק'
               </p>
             )}
             <ul className="flex flex-col gap-1">
-              {lastBookingSummary.schools.map(s => (
+              {lastTaskSummary.schools.map(s => (
                 <li key={s.school_id} className="flex items-center justify-between gap-2">
-                  <span>{s.school_name} · {s.missing_months.join(", ")}</span>
-                  <span className={s.resolved_advisor_name ? "text-green-700" : "text-orange-600 font-medium"}>
-                    {s.resolved_advisor_name || "ממתין לפתרון יועץ"}
-                  </span>
+                  <span>{s.school_name}</span>
+                  {lastTaskSummary.needs_booking_link && (
+                    <span className={s.resolved_advisor_name ? "text-green-700" : "text-orange-600 font-medium"}>
+                      {s.resolved_advisor_name || "ממתין לפתרון יועץ"}
+                    </span>
+                  )}
                 </li>
               ))}
             </ul>

@@ -12,6 +12,20 @@ export const MEETING_TYPE_OPTIONS = [
   { value: "remote",   label: "מרחוק" },
 ];
 
+// Same value set as school-level service_type (school_year_admin_data.service_type) — kept
+// identical so a school's default can be copied onto a new meeting without mapping.
+export const MEETING_SERVICE_TYPE_OPTIONS = [
+  { value: "gefen",         label: "גפן" },
+  { value: "current",       label: "שוטף" },
+  { value: "gefen_current", label: "גפן+שוטף" },
+];
+
+// Default for a new meeting's "סוג" field: copy the school's own service_type only when it's
+// unambiguous (gefen/current) — "gefen_current" (or unset) leaves the meeting field empty.
+export function defaultMeetingServiceType(schoolServiceType) {
+  return schoolServiceType === "gefen" || schoolServiceType === "current" ? schoolServiceType : null;
+}
+
 export const STATUS_SORT_ORDER = { completed: 0, scheduled: 1, postponed: 2, other: 3 };
 
 export const HEBREW_MONTHS = ["ינואר","פברואר","מרץ","אפריל","מאי","יוני","יולי","אוגוסט","ספטמבר","אוקטובר","נובמבר","דצמבר"];

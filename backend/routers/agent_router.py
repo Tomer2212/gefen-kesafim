@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import time
@@ -10,8 +11,11 @@ from pydantic import BaseModel, Field
 
 import booking_logic
 import booking_token_logic
+import task_logic
+from academic_years import DEFAULT_ACADEMIC_YEAR
 from auth import get_current_user
-from booking_draft_state import _create_draft, _get_draft, _update_draft
+from org_task_draft_state import _create_draft, _get_draft, _update_draft
+from routers import tasks_router as _tasks_router
 from supabase_client import get_admin_client, reset_admin_client
 
 router = APIRouter()
@@ -52,12 +56,29 @@ ADMIN_COLUMN_LABELS = {
 NUMBER_OPS = {"eq", "ne", "gt", "gte", "lt", "lte"}
 MEETING_STATUSES = ["scheduled", "completed", "cancelled", "postponed", "other"]
 
-# Booking tools require a second round-trip to Claude (tool_result submitted back) so the
-# Hebrew phrasing is produced by the model from structured data, not hard-coded Python strings.
-# The two original filter tools stay single-round — unchanged from the first "סוכן ניהול" round.
-BOOKING_TOOL_NAMES = {
-    "find_schools_missing_meetings", "update_draft_school",
-    "set_booking_defaults", "confirm_send_booking_emails",
+# Every field usable in a find_schools_by_criteria "field" condition — sourced live from the
+# existing Tasks-engine's own field registry (task_logic.py) so the two never drift apart.
+_TASK_FIELD_OPTIONS = task_logic.field_options()
+_TASK_FIELD_KEYS = [f["field"] for f in _TASK_FIELD_OPTIONS]
+_TASK_FIELD_DESC = ", ".join(
+    f["field"] + f" ({f['label']}"
+    + (f": {', '.join(f['options'])}" if f.get("options") else "")
+    + ")"
+    for f in _TASK_FIELD_OPTIONS
+)
+
+RECIPIENT_ROLE_LABELS = {
+    "principal": "מנהל/ת", "secretary": "מנהלנית", "finance_contact": "איש/אשת קשר פיננסי",
+    "meeting_coordinator": "אחראי/ת לתיאום פגישות (לפי הגדרת בית הספר)",
+}
+
+# General-task tools require a second round-trip to Claude (tool_result submitted back) so
+# the Hebrew phrasing is produced by the model from structured data (e.g. naming ambiguous
+# advisors/contacts), not hard-coded Python strings. The two filter tools stay single-round.
+GENERAL_TASK_TOOL_NAMES = {
+    "find_schools_by_criteria", "find_schools_by_contact_name", "start_task_for_schools",
+    "set_task_message", "resolve_task_advisor", "set_task_scheduling_window",
+    "create_and_send_task", "get_task_status",
 }
 
 
@@ -142,6 +163,49 @@ def _profile_names(ids: list[str]) -> dict[str, str]:
         return {}
 
 
+def _resolve_school_names(org_id: str, names: list[str]) -> tuple[list[dict], list[str]]:
+    """Fuzzy-resolve free-text school names to real rows, scoped to the org. Deduplicates
+    across multiple input names that happen to match the same school."""
+    db = get_admin_client()
+    rows = db.table("schools").select("id, name").eq("org_id", org_id).eq("status", "active").execute().data or []
+    found_ids: set[str] = set()
+    found: list[dict] = []
+    not_found: list[str] = []
+    for name in names:
+        needle = (name or "").strip().lower()
+        if not needle:
+            continue
+        matches = [r for r in rows if needle in r["name"].lower()]
+        if not matches:
+            not_found.append(name)
+            continue
+        for m in matches:
+            if m["id"] not in found_ids:
+                found_ids.add(m["id"])
+                found.append({"school_id": m["id"], "school_name": m["name"]})
+    return found, not_found
+
+
+def _build_draft_schools(org_id: str, found: list[dict]) -> list[dict]:
+    """Attaches candidate/resolved-advisor info to a list of {school_id, school_name} —
+    shared by every tool that seeds a new draft (criteria match, contact-name match, direct
+    school-name match)."""
+    schools = []
+    for f in found:
+        candidates = booking_logic.resolve_advisor_candidates(org_id, f["school_id"])
+        candidate_ids = [c["id"] for c in candidates]
+        resolved_id, source = (candidate_ids[0], "auto_single") if len(candidate_ids) == 1 else (None, None)
+        schools.append({
+            "school_id": f["school_id"],
+            "school_name": f["school_name"],
+            "candidate_advisor_ids": candidate_ids,
+            "resolved_advisor_id": resolved_id,
+            "resolution_source": source,
+            "scheduling_window_override": None,
+        })
+    return schools
+
+
 SYSTEM_PROMPT = f"""אתה "סוכן ניהול" — עוזר AI בתוך אזור הניהול של מערכת גפן AI, כלי לחברות ליווי כלכלי של בתי ספר.
 יש לך שתי יכולות נפרדות:
 
@@ -155,17 +219,33 @@ SYSTEM_PROMPT = f"""אתה "סוכן ניהול" — עוזר AI בתוך אזו
 
 טבלת פגישות: status (אחד מ-{", ".join(MEETING_STATUSES)}), date_from/date_to (YYYY-MM-DD), advisor_name (שם חופשי של יועץ — ייפתר ל-ID), search (טקסט חופשי לשם/סמל/עיר בית ספר).
 
-## 2. איתור בתי ספר שחסרות להם פגישות ושליחת בקשת שריון דרך Outlook
-זרימה רב-שלבית שחייבת לעבור דרך `find_schools_missing_meetings` → (במידת הצורך) `update_draft_school`/`set_booking_defaults` → `confirm_send_booking_emails`. **קרא ל-`find_schools_missing_meetings` מיד בהודעה הראשונה של הבקשה** (גם אם עדיין לא ידוע חלון הזמנים) — אל תשאל על חלון זמנים לפני שפתחת טיוטה; אפשר וצריך לשאול על חלון הזמנים **באותה תשובה** יחד עם תוצאת האיתור. כללים נוספים מחייבים:
-- **בית ספר ספציפי**: אם המשתמש מבקש על בית ספר אחד או כמה ספציפיים בשם (ולא "כל בתי הספר"), חובה להעביר את שמותיהם בפרמטר `school_names` של `find_schools_missing_meetings` — אל תסרוק את כל הארגון כשהמשתמש התכוון לבית ספר אחד בלבד.
-- **יועץ מלווה**: אם לבית ספר יש יועץ מלווה יחיד — הוא נבחר אוטומטית. אם יש יותר מאחד — עליך לציין בתשובה בעברית את שמות כל המועמדים ולשאול איזה מהם לשלוח, ולחכות לתשובה. המשתמש יכול גם לבקש יועץ אחר במפורש (למשל אם הרשמי בחופשה) — קבל זאת גם ללא עמימות.
-- **חלון זמנים להצעה**: לפני ששולחים כל מייל, חובה לדעת אילו ימים בשבוע, אילו שעות, ומשך פגישה להציע (יש חריגים אמיתיים — ימי שישי, בתי ספר גדולים שצריכים פגישה ארוכה יותר). אם `default_scheduling_window` עדיין לא נקבע — שאל על כך מפורשות לפני כל דבר אחר (הצעה סבירה לפתוח בה: א'-ה', 8:00-16:00, פגישה בת שעה עם אופציה לחצי שעה נוספת — אך אל תניח זאת בשקט, המשתמש חייב לאשר או לשנות). ניתן גם לקבוע חריגה לבית ספר ספציפי.
-  - **חשוב — זהה הסכמה לפי המשמעות, לא לפי מילים ספציפיות:** אם בהודעה הקודמת שלך הצעת חלון זמנים קונקרטי (ימים/שעות/משך), וההודעה הנוכחית של המשתמש **משמעותה** הסכמה/אישור להצעה — **בכל ניסוח שהוא** (למשל: "כן", "מאשר", "בסדר", "מתאים", "סבבה", "מעולה", "אחלה", "טוב", "נשמע טוב", "בסדר גמור", או כל ביטוי אחר שמביע הסכמה) ובלי שהמשתמש פירט מספרים שונים משלו — התייחס לזה כאישור מדויק להצעה שלך וקרא ל-`set_booking_defaults` עם אותם הערכים בדיוק שהצעת. אל תחפש התאמה למילה ספציפית — הבן את הכוונה. אל תשאיר את `default_scheduling_window` ריק ואל תבקש מהמשתמש לחזור ולפרט את מה שכבר הצעת.
-- **אישור סופי — קבע לפי מצב הטיוטה בפועל, לא לפי ניחוש מהשיחה**: תמיד תבדוק את הסטטוס העדכני שמוחזר בתוצאת הכלי האחרון (`default_scheduling_window` ו-`unresolved_school_names`), לא רק את זיכרון השיחה:
-  - אם `default_scheduling_window` **עדיין ריק** (או שהמשתמש כרגע נותן פרטי זמנים בפעם הראשונה) → קרא ל-`set_booking_defaults`.
-  - אם `default_scheduling_window` **כבר מוגדר** וכל בתי הספר פתורים (`unresolved_school_names` ריק), ואתה כבר שאלת את המשתמש "האם לשלוח בפועל?" בהודעה הקודמת שלך — **כל תגובה חיובית של המשתמש בתור הנוכחי (בכל ניסוח שהוא: "כן", "שלח", "תשלח", "סבבה תשלח", "לשלוח", וכו') פירושה אישור לשליחה בפועל. במקרה הזה קרא ל-`confirm_send_booking_emails` — אסור לקרוא שוב ל-`set_booking_defaults` עם אותם הערכים, זו כבר שאלה שנענתה.**
-  - במילים אחרות: לעולם אל תשאל את אותה שאלה פעמיים ברצף. אם חלון הזמנים כבר מוגדר בתוצאת הכלי, אל תחזור לשאול עליו או לקבוע אותו מחדש — התקדם לשאלת השליחה או לשליחה עצמה.
-- כל קריאה לכלים מהזרימה הזו (מלבד הראשונה) מחייבת `draft_id` — קח אותו מהתשובה הקודמת של הכלים באותה שיחה.
+## 2. איתור בתי ספר, שליחת הודעות, ומעקב משימות
+זרימה כללית: `find_schools_by_criteria` / `find_schools_by_contact_name` / `start_task_for_schools` (איתור בתי הספר) → `set_task_message` (מה לשלוח, למי, באיזה ערוץ) → אם ההודעה מכילה {{booking_link}}: `resolve_task_advisor`/`set_task_scheduling_window` (רק אז נדרש) → `create_and_send_task` (שליחה בפועל, רק אחרי אישור מפורש). מעקב אחר משימות שכבר נוצרו: `get_task_status`.
+
+**איסור מוחלט וללא יוצא מן הכלל: אין לך אף כלי שמסוגל למחוק דבר** (בית ספר, פגישה, משימה, משתמש, כל נתון אחר). לעולם אל תמציא דרך למחוק ואל תרמוז שביכולתך לעשות זאת — אם המשתמש מבקש מפורשות למחוק משהו, סרב בנימוס והפנה אותו לבצע זאת ידנית במערכת עצמה.
+
+**איתור בתי ספר — שלוש דרכים, לפי מה שהמשתמש ביקש:**
+- **`find_schools_by_criteria`** — כשהבקשה מתארת תנאי/תנאים (לא בית ספר ספציפי בשם). מבנה `groups` של קבוצות `conditions` (OR בין קבוצות, AND בין תנאים בתוך קבוצה). כל תנאי הוא `type:"meeting"` (יש/אין פגישה בטווח תאריכים, עם `meeting_service_type` אופציונלי מתוך gefen/current/gefen_current, ו-`negate:true` להיפוך ל"אין") או `type:"field"` (עמודה מתוך: {_TASK_FIELD_DESC}, עם `op` מתוך eq/ne/gt/gte/lt/lte/contains).
+- **`find_schools_by_contact_name`** — כשהמשתמש נוקב בשם של אדם ("מי המנהלנית ששמה רותי?", "שלח לרותי..."). אם יש כמה התאמות — חובה לשאול איזו מהן רלוונטית לפני שממשיכים, אל תנחש.
+- **`start_task_for_schools`** — כשהמשתמש נוקב בשם/שמות בית ספר ספציפיים ישירות ("לבית ספר X").
+
+**הרכבת הודעה (`set_task_message`)**:
+- `recipient_role` אחד מ: principal (מנהל/ת), secretary (מנהלנית), finance_contact (איש/אשת קשר פיננסי), meeting_coordinator (אחראי/ת לתיאום פגישות, כפי שהוגדר לכל בית ספר בנפרד).
+- `channel`: כרגע **Outlook (email_outlook) חסום זמנית** עקב הגבלת שליחה שהטילה Microsoft על הטננט (בטיפול מול התמיכה) — **העדף `email_resend` כברירת מחדל** אלא אם המשתמש מבקש Outlook במפורש ומודע למגבלה. `whatsapp_twilio` עדיין לא זמין בפועל (תשתית בלבד).
+- גוף ההודעה תומך ב-`{{school_name}}` (שם בית הספר) ו-`{{booking_link}}` (לינק אמיתי לקביעת פגישה מהיומן של היועץ הפתור — רק אם צריך).
+
+**אם ובאם ההודעה מכילה `{{booking_link}}`** — לפני שליחה, לכל בית ספר צריך יועץ מלווה פתור וחלון זמנים מוגדר:
+- יועץ מלווה יחיד → נבחר אוטומטית. יותר מאחד → ציין בעברית את שמות כל המועמדים ושאל איזה מהם, וחכה לתשובה. אפשר גם override מפורש (`resolve_task_advisor`) גם כשאין עמימות.
+- חלון זמנים (`set_task_scheduling_window`) — ימים בשבוע, שעות, משך פגישה, **ואילו חודשים קלנדריים להציע לשריון** — אין ברירת מחדל שקטה, חובה לשאול ולקבל אישור/פירוט מפורש לפני שממשיכים (הצעה סבירה לפתוח בה: א'-ה', 8:00-16:00, שעה).
+- **זהה הסכמה לפי משמעות, לא לפי מילים ספציפיות** — "כן"/"מתאים"/"סבבה"/"מעולה"/כל ביטוי הסכמה אחר שמגיע מיד אחרי שהצעת ערכים קונקרטיים = אישור לאותם ערכים בדיוק.
+
+**אישור סופי לשליחה**: לעולם אל תקרא ל-`create_and_send_task` בלי הודעה חיובית מפורשת של המשתמש בתור הנוכחי. קבע איזו שאלה בדיוק המשתמש עונה עליה לפי **מצב הטיוטה בפועל** שחוזר מהכלי האחרון (לא לפי ניחוש מזיכרון השיחה):
+- אם `message_config` **כבר מוגדר** (נמען/ערוץ/תוכן קיימים בתוצאת הכלי), ואם `needs_booking_link` — גם חלון הזמנים כבר מוגדר וכל בתי הספר פתורים, ואתה כבר שאלת "לאשר שליחה בפועל?" — **אישור נוסף מהמשתמש (בכל ניסוח) פירושו קריאה ל-`create_and_send_task` עכשיו, מיד. אל תקרא שוב ל-`set_task_message`/`set_task_scheduling_window` עם אותם ערכים בדיוק — זו שאלה שכבר נענתה.**
+- לעולם אל תשאל את אותה שאלה פעמיים ברצף. אם משהו כבר מוגדר בתוצאת הכלי האחרון, אל תחזור לבקש אותו מחדש — התקדם לשלב הבא בזרימה.
+
+**דוגמה מדויקת (חובה לפעול בדיוק כך במקרה הזה)**: קראת ל-`set_task_message`, קיבלת בחזרה `message_config` מלא (עם recipient_role/channel/subject/body), ושאלת בעצמך "לאשר שליחה בפועל?". המשתמש עונה "כן, תשלח" (או כל ניסוח חיובי דומה). **הפעולה הנכונה היחידה כאן היא לקרוא ל-`create_and_send_task` עם אותו draft_id — לא לקרוא שוב ל-`set_task_message`, לא לשאול שאלה נוספת.**
+
+כל קריאה לכלים האלה (מלבד זו שפותחת טיוטה) מחייבת `draft_id` — קח אותו מהתשובה הקודמת של הכלים באותה שיחה.
 
 אם הבקשה של המשתמש לא קשורה לאף אחת מהיכולות — ענה בקצרה בעברית בלי להפעיל tool.
 אם חסר מידע ברור — שאל להבהרה בטקסט, אל תנחש.
@@ -221,42 +301,94 @@ FILTER_TOOLS = [
     },
 ]
 
-BOOKING_TOOLS = [
+_CONDITION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "type": {"type": "string", "enum": ["meeting", "field"]},
+        "meeting_service_type": {"type": "string", "enum": task_logic.MEETING_SERVICE_TYPE_OPTIONS},
+        "date_from": {"type": "string", "description": "YYYY-MM-DD"},
+        "date_to": {"type": "string", "description": "YYYY-MM-DD"},
+        "negate": {"type": "boolean", "description": "true = 'אין פגישה' במקום 'יש פגישה'"},
+        "field": {"type": "string", "enum": _TASK_FIELD_KEYS},
+        "op": {"type": "string", "enum": ["eq", "ne", "gt", "gte", "lt", "lte", "contains"]},
+        "value": {},
+    },
+    "required": ["type"],
+}
+
+GENERAL_TASK_TOOLS = [
     {
-        "name": "find_schools_missing_meetings",
-        "description": "מזהה בתי ספר שחסרה להם פגישה באחד או יותר מהחודשים שצוינו, ופותח טיוטת אצווה חדשה.",
+        "name": "find_schools_by_criteria",
+        "description": "מאתר בתי ספר לפי קריטריון אחד או ריבוי תנאים (AND/OR) על שדות בתי ספר ו/או תנאי פגישה, ופותח טיוטת משימה חדשה.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "months": {"type": "array", "items": {"type": "string"}, "description": "רשימת חודשים בפורמט YYYY-MM"},
-                "school_names": {
-                    "type": "array", "items": {"type": "string"},
-                    "description": "אופציונלי — אם המשתמש ביקש על בית ספר ספציפי אחד או יותר (לא כל בתי הספר), ציין כאן את שמותיהם (התאמה חלקית). השאר ריק כדי לסרוק את כל בתי הספר בארגון.",
+                "groups": {
+                    "type": "array",
+                    "description": "OR בין קבוצות, AND בין תנאים בכל קבוצה",
+                    "items": {
+                        "type": "object",
+                        "properties": {"conditions": {"type": "array", "items": _CONDITION_SCHEMA}},
+                        "required": ["conditions"],
+                    },
                 },
             },
-            "required": ["months"],
+            "required": ["groups"],
         },
     },
     {
-        "name": "update_draft_school",
-        "description": "מעדכן בית ספר בודד בטיוטה קיימת — פתרון/עקיפה של יועץ, ו/או חריגת חלון זמנים לבית ספר הזה בלבד.",
+        "name": "find_schools_by_contact_name",
+        "description": "מחפש בתי ספר לפי שם פרטי/מלא של איש קשר (מנהל/ת, מנהלנית, איש קשר פיננסי). מחזיר התאמות בלבד, לא פותח טיוטה.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "start_task_for_schools",
+        "description": "פותח טיוטת משימה עבור בית ספר אחד או יותר, לפי שם ישיר (לא לפי קריטריון).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "school_names": {"type": "array", "items": {"type": "string"}},
+                "request_text": {"type": "string", "description": "תיאור קצר של הבקשה המקורית, לתיעוד"},
+            },
+            "required": ["school_names", "request_text"],
+        },
+    },
+    {
+        "name": "set_task_message",
+        "description": "קובע/מעדכן את תוכן ההודעה לשליחה — נמען, ערוץ, נושא, גוף ההודעה, צרופות.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "draft_id": {"type": "string"},
+                "recipient_role": {"type": "string", "enum": list(RECIPIENT_ROLE_LABELS.keys())},
+                "channel": {"type": "string", "enum": ["email_resend", "email_outlook", "whatsapp_twilio"]},
+                "subject": {"type": "string"},
+                "body": {"type": "string", "description": "תומך ב-{school_name} וב-{booking_link}"},
+                "attachment_keys": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["draft_id", "recipient_role", "channel", "body"],
+        },
+    },
+    {
+        "name": "resolve_task_advisor",
+        "description": "פותר/עוקף את היועץ המלווה לבית ספר בודד בטיוטה — רלוונטי רק כשההודעה מכילה {booking_link}.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "draft_id": {"type": "string"},
                 "school_id": {"type": "string"},
-                "advisor_name": {"type": "string", "description": "שם חופשי של היועץ לשריון עבור בית ספר זה"},
-                "days_of_week": {"type": "array", "items": {"type": "integer"}, "description": "0=ראשון..6=שבת"},
-                "start_hour": {"type": "integer"},
-                "end_hour": {"type": "integer"},
-                "duration_minutes": {"type": "integer"},
+                "advisor_name": {"type": "string"},
             },
-            "required": ["draft_id", "school_id"],
+            "required": ["draft_id", "school_id", "advisor_name"],
         },
     },
     {
-        "name": "set_booking_defaults",
-        "description": "קובע את חלון הזמנים המוצע כברירת מחדל לכל בתי הספר בטיוטה (ימים/שעות/משך פגישה).",
+        "name": "set_task_scheduling_window",
+        "description": "קובע את חלון הזמנים (ימים/שעות/משך) ואת החודשים להצעה בלינק השריון — רלוונטי רק כשההודעה מכילה {booking_link}.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -265,22 +397,31 @@ BOOKING_TOOLS = [
                 "start_hour": {"type": "integer"},
                 "end_hour": {"type": "integer"},
                 "duration_minutes": {"type": "integer"},
+                "months": {"type": "array", "items": {"type": "string"}, "description": "חודשים בפורמט YYYY-MM להצעה בעמוד השריון"},
             },
-            "required": ["draft_id", "days_of_week", "start_hour", "end_hour", "duration_minutes"],
+            "required": ["draft_id", "days_of_week", "start_hour", "end_hour", "duration_minutes", "months"],
         },
     },
     {
-        "name": "confirm_send_booking_emails",
-        "description": "שולח בפועל את מיילי בקשת השריון לכל בתי הספר בטיוטה — ורק אחרי אישור מפורש של המשתמש בהודעה הנוכחית.",
+        "name": "create_and_send_task",
+        "description": "יוצר משימה אמיתית במערכת ומכניס את ההודעות לתור השליחה — ורק אחרי אישור מפורש של המשתמש בהודעה הנוכחית.",
         "input_schema": {
             "type": "object",
             "properties": {"draft_id": {"type": "string"}},
             "required": ["draft_id"],
         },
     },
+    {
+        "name": "get_task_status",
+        "description": "בודק את ההתקדמות של משימה קיימת (אם ניתן task_id), או מציג רשימת משימות אחרונות של הארגון.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"task_id": {"type": "string"}},
+        },
+    },
 ]
 
-TOOLS = FILTER_TOOLS + BOOKING_TOOLS
+TOOLS = FILTER_TOOLS + GENERAL_TASK_TOOLS
 
 
 def _build_filter_instruction(org_id: str, tool_name: str, tool_input: dict) -> tuple[dict | None, str | None]:
@@ -345,13 +486,13 @@ def _build_filter_instruction(org_id: str, tool_name: str, tool_input: dict) -> 
 
 
 # ---------------------------------------------------------------------------
-# Booking-tool execution — each returns a JSON-able dict fed back to Claude as
-# a tool_result, plus the (possibly new/updated) draft_id.
+# General-task tool execution — each returns a JSON-able dict fed back to
+# Claude as a tool_result, plus the (possibly new/updated) draft_id.
 # ---------------------------------------------------------------------------
 
-def _draft_summary(draft: dict) -> dict:
+def _task_draft_summary(draft: dict) -> dict:
     """Structured, display-ready summary — used both as the tool_result content sent back
-    to Claude and as the `booking_summary` echoed to the frontend widget."""
+    to Claude and as the `task_summary` echoed to the frontend widget."""
     advisor_ids = []
     for s in draft["schools"]:
         advisor_ids.extend(s.get("candidate_advisor_ids") or [])
@@ -364,56 +505,92 @@ def _draft_summary(draft: dict) -> dict:
         schools_out.append({
             "school_id": s["school_id"],
             "school_name": s["school_name"],
-            "missing_months": s["missing_months"],
             "candidate_advisor_names": [names.get(a, a) for a in (s.get("candidate_advisor_ids") or [])],
             "resolved_advisor_name": names.get(s["resolved_advisor_id"], s["resolved_advisor_id"]) if s.get("resolved_advisor_id") else None,
             "resolution_source": s.get("resolution_source"),
             "scheduling_window_override": s.get("scheduling_window_override"),
         })
 
+    needs_booking_link = bool(draft.get("needs_booking_link"))
     return {
         "draft_id": draft["id"],
         "status": draft["status"],
-        "months": draft["months"],
+        "school_count": len(schools_out),
+        "needs_booking_link": needs_booking_link,
         "default_scheduling_window": draft.get("default_scheduling_window"),
+        "message_config": draft.get("message_config"),
         "schools": schools_out,
-        "unresolved_school_names": [s["school_name"] for s in draft["schools"] if not s.get("resolved_advisor_id")],
+        "unresolved_school_names": (
+            [s["school_name"] for s in draft["schools"] if not s.get("resolved_advisor_id")]
+            if needs_booking_link else []
+        ),
+        "created_org_task_id": draft.get("created_org_task_id"),
     }
 
 
-def _exec_find_schools_missing_meetings(org_id: str, user_id: str, criteria_text: str, tool_input: dict) -> tuple[dict, str | None]:
-    months = tool_input.get("months") or []
-    found = booking_logic.find_schools_missing_meetings(org_id, months)
+def _exec_find_schools_by_criteria(org_id: str, user_id: str, request_text: str, tool_input: dict) -> tuple[dict, str | None]:
+    criteria = {"groups": tool_input.get("groups") or []}
+    found = task_logic.find_matching_schools(org_id, criteria)
+    if not found:
+        return {"message": "לא נמצאו בתי ספר התואמים לקריטריונים.", "schools": []}, None
 
-    name_filters = [n.strip().lower() for n in (tool_input.get("school_names") or []) if n.strip()]
-    if name_filters:
-        found = [f for f in found if any(nf in f["school_name"].lower() for nf in name_filters)]
+    schools = _build_draft_schools(org_id, found)
+    draft = _create_draft(org_id, user_id, request_text, schools, criteria=criteria)
+    return _task_draft_summary(draft), draft["id"]
 
-    schools = []
-    for f in found:
-        candidates = booking_logic.resolve_advisor_candidates(org_id, f["school_id"])
-        candidate_ids = [c["id"] for c in candidates]
-        resolved_id, source = (candidate_ids[0], "auto_single") if len(candidate_ids) == 1 else (None, None)
-        schools.append({
-            "school_id": f["school_id"],
-            "school_name": f["school_name"],
-            "missing_months": f["missing_months"],
-            "candidate_advisor_ids": candidate_ids,
-            "resolved_advisor_id": resolved_id,
-            "resolution_source": source,
-            "scheduling_window_override": None,
-        })
 
-    if not schools:
-        return {"message": "לא נמצאו בתי ספר עם פגישות חסרות בחודשים שצוינו.", "schools": []}, None
+def _exec_find_schools_by_contact_name(org_id: str, tool_input: dict) -> tuple[dict, str | None]:
+    matches = task_logic.find_schools_by_contact_name(org_id, tool_input.get("name") or "")
+    return {
+        "matches": [
+            {
+                "school_id": m["school_id"], "school_name": m["school_name"],
+                "role": RECIPIENT_ROLE_LABELS.get(m["matched_role"], m["matched_role"]),
+                "matched_name": m["matched_name"],
+            }
+            for m in matches
+        ],
+    }, None
 
-    draft = _create_draft(org_id, user_id, criteria_text, months, schools)
-    summary = _draft_summary(draft)
-    summary["scheduling_window_required"] = True
+
+def _exec_start_task_for_schools(org_id: str, user_id: str, tool_input: dict) -> tuple[dict, str | None]:
+    names = tool_input.get("school_names") or []
+    found, not_found = _resolve_school_names(org_id, names)
+    if not found:
+        detail = f' ({", ".join(not_found)})' if not_found else ""
+        return {"error": f"לא נמצאו בתי ספר תואמים{detail}"}, None
+
+    schools = _build_draft_schools(org_id, found)
+    draft = _create_draft(org_id, user_id, tool_input.get("request_text") or "", schools)
+    summary = _task_draft_summary(draft)
+    if not_found:
+        summary["not_found_school_names"] = not_found
     return summary, draft["id"]
 
 
-def _exec_update_draft_school(org_id: str, tool_input: dict) -> tuple[dict, str | None]:
+def _exec_set_task_message(org_id: str, tool_input: dict) -> tuple[dict, str | None]:
+    draft_id = tool_input.get("draft_id")
+    draft = _get_draft(draft_id, org_id)
+    if not draft:
+        return {"error": "טיוטה לא נמצאה או שפגה"}, None
+
+    body = tool_input.get("body") or ""
+    needs_booking_link = "{booking_link}" in body
+    message_config = {
+        "recipient_role": tool_input.get("recipient_role"),
+        "channel": tool_input.get("channel") or "email_resend",
+        "subject": tool_input.get("subject") or "",
+        "body_template": body,
+        "attachment_keys": tool_input.get("attachment_keys") or [],
+    }
+    draft = _update_draft(draft_id, org_id, {"message_config": message_config, "needs_booking_link": needs_booking_link})
+    summary = _task_draft_summary(draft)
+    if needs_booking_link and not draft.get("default_scheduling_window"):
+        summary["scheduling_window_required"] = True
+    return summary, draft_id
+
+
+def _exec_resolve_task_advisor(org_id: str, tool_input: dict) -> tuple[dict, str | None]:
     draft_id = tool_input.get("draft_id")
     school_id = tool_input.get("school_id")
     draft = _get_draft(draft_id, org_id)
@@ -425,24 +602,17 @@ def _exec_update_draft_school(org_id: str, tool_input: dict) -> tuple[dict, str 
     if not entry:
         return {"error": "בית ספר לא נמצא בטיוטה זו"}, draft_id
 
-    if tool_input.get("advisor_name"):
-        advisor_id, error = _resolve_advisor_id(org_id, tool_input["advisor_name"])
-        if error:
-            return {"error": error}, draft_id
-        entry["resolved_advisor_id"] = advisor_id
-        entry["resolution_source"] = "manager_choice" if advisor_id in (entry.get("candidate_advisor_ids") or []) else "manager_override"
-
-    window_fields = {k: tool_input[k] for k in ("days_of_week", "start_hour", "end_hour", "duration_minutes") if tool_input.get(k) is not None}
-    if window_fields:
-        override = entry.get("scheduling_window_override") or {}
-        override.update(window_fields)
-        entry["scheduling_window_override"] = override
+    advisor_id, error = _resolve_advisor_id(org_id, tool_input.get("advisor_name") or "")
+    if error:
+        return {"error": error}, draft_id
+    entry["resolved_advisor_id"] = advisor_id
+    entry["resolution_source"] = "manager_choice" if advisor_id in (entry.get("candidate_advisor_ids") or []) else "manager_override"
 
     draft = _update_draft(draft_id, org_id, {"schools": schools})
-    return _draft_summary(draft), draft_id
+    return _task_draft_summary(draft), draft_id
 
 
-def _exec_set_booking_defaults(org_id: str, tool_input: dict) -> tuple[dict, str | None]:
+def _exec_set_task_scheduling_window(org_id: str, tool_input: dict) -> tuple[dict, str | None]:
     draft_id = tool_input.get("draft_id")
     draft = _get_draft(draft_id, org_id)
     if not draft:
@@ -453,65 +623,154 @@ def _exec_set_booking_defaults(org_id: str, tool_input: dict) -> tuple[dict, str
         "start_hour": tool_input["start_hour"],
         "end_hour": tool_input["end_hour"],
         "duration_minutes": tool_input["duration_minutes"],
+        "months": tool_input.get("months") or [],
     }
     draft = _update_draft(draft_id, org_id, {"default_scheduling_window": window})
-    return _draft_summary(draft), draft_id
+    return _task_draft_summary(draft), draft_id
 
 
-def _exec_confirm_send_booking_emails(org_id: str, tool_input: dict) -> tuple[dict, str | None]:
+def _exec_create_and_send_task(org_id: str, user_id: str, tool_input: dict) -> tuple[dict, str | None]:
     draft_id = tool_input.get("draft_id")
     draft = _get_draft(draft_id, org_id)
     if not draft:
         return {"error": "טיוטה לא נמצאה או שפגה"}, None
 
-    if not draft.get("default_scheduling_window"):
-        summary = _draft_summary(draft)
-        summary["error"] = "עדיין לא נקבע חלון זמנים (ימים/שעות/משך) לאצווה — יש לקבוע לפני שליחה"
+    message_config = draft.get("message_config")
+    if not message_config:
+        summary = _task_draft_summary(draft)
+        summary["error"] = "עדיין לא הוגדרה הודעה לשליחה (נמען/ערוץ/תוכן) — יש להגדיר לפני שליחה"
         return summary, draft_id
 
-    unresolved = [s["school_name"] for s in draft["schools"] if not s.get("resolved_advisor_id")]
-    if unresolved:
-        summary = _draft_summary(draft)
-        summary["error"] = "יש בתי ספר ללא יועץ פתור — לא ניתן לשלוח"
-        return summary, draft_id
-
-    capability = booking_logic.get_org_mailbox_capability(org_id)
-    if not capability["connected"]:
-        return {"error": "הארגון אינו מחובר ל-Outlook. יש להתחבר באזור ניהול → אינטגרציות לפני שליחת בקשות שריון."}, draft_id
+    needs_booking_link = bool(draft.get("needs_booking_link"))
+    if needs_booking_link:
+        if not draft.get("default_scheduling_window"):
+            summary = _task_draft_summary(draft)
+            summary["error"] = "עדיין לא נקבע חלון זמנים/חודשים לשריון — יש לקבוע לפני שליחה"
+            return summary, draft_id
+        unresolved = [s["school_name"] for s in draft["schools"] if not s.get("resolved_advisor_id")]
+        if unresolved:
+            summary = _task_draft_summary(draft)
+            summary["error"] = "יש בתי ספר ללא יועץ פתור — לא ניתן לשלוח"
+            return summary, draft_id
 
     db = get_admin_client()
-    queued = 0
-    for entry in draft["schools"]:
-        window = entry.get("scheduling_window_override") or draft["default_scheduling_window"]
-        token_row = booking_token_logic.get_or_create_booking_token(
-            db, org_id, entry["school_id"], entry["resolved_advisor_id"], draft_id,
-            entry["missing_months"], window,
-        )
-        db.table("meeting_booking_email_queue").insert({
-            "org_id": org_id,
-            "draft_id": draft_id,
-            "school_id": entry["school_id"],
-            "advisor_id": entry["resolved_advisor_id"],
-            "token_id": token_row["id"],
-            "status": "pending",
-        }).execute()
-        queued += 1
+    school_ids = [s["school_id"] for s in draft["schools"]]
 
-    draft = _update_draft(draft_id, org_id, {"status": "sending"})
-    summary = _draft_summary(draft)
-    summary["queued_count"] = queued
+    task_row = (
+        db.table("org_tasks")
+        .insert({
+            "org_id": org_id,
+            "created_by": user_id,
+            "name": (draft.get("request_text") or "משימה מהסוכן")[:120],
+            "status": "active",
+            "criteria": draft.get("criteria") or {"groups": []},
+            "matched_school_ids": school_ids,
+            "message_config": message_config,
+            "academic_year": DEFAULT_ACADEMIC_YEAR,
+        })
+        .execute()
+    ).data[0]
+
+    missing_names: list[str] = []
+    if needs_booking_link:
+        # Bypasses _tasks_router._build_booking_link (which auto-picks the first advisor and a
+        # hardcoded window) — this flow already resolved advisor+window per-school with the
+        # manager's explicit input, so it calls the token machinery directly with those values.
+        schools_full = {s["id"]: s for s in db.table("schools").select("*").in_("id", school_ids).execute().data or []}
+        recipient_role = message_config.get("recipient_role")
+        channel = message_config.get("channel")
+        body_template = message_config.get("body_template") or ""
+        queue_rows = []
+        for entry in draft["schools"]:
+            school = schools_full.get(entry["school_id"])
+            if not school:
+                continue
+            recipient = _tasks_router._resolve_recipient(school, recipient_role)
+            if _tasks_router._channel_missing_contact(channel, recipient):
+                missing_names.append(entry["school_name"])
+                continue
+            window = entry.get("scheduling_window_override") or draft["default_scheduling_window"]
+            months = window.get("months") or []
+            token_row = booking_token_logic.get_or_create_booking_token(
+                db, org_id, entry["school_id"], entry["resolved_advisor_id"], None, months, window,
+            )
+            booking_link = f"{os.getenv('APP_URL', '')}/book/{token_row['token']}"
+            queue_rows.append({
+                "task_id": task_row["id"],
+                "school_id": entry["school_id"],
+                "recipient_name": recipient.get("name"),
+                "recipient_email": recipient.get("email"),
+                "recipient_phone": recipient.get("phone"),
+                "recipient_role": recipient_role,
+                "channel": channel,
+                "subject": _tasks_router._render_template(message_config.get("subject") or "", school),
+                "body": _tasks_router._render_template(body_template, school, booking_link),
+                "attachment_keys": message_config.get("attachment_keys") or [],
+                "status": "pending",
+            })
+        if queue_rows:
+            db.table("org_task_messages").insert(queue_rows).execute()
+    else:
+        missing_ids = _tasks_router._queue_messages_for_schools(db, task_row, org_id, school_ids)
+        name_by_id = {s["school_id"]: s["school_name"] for s in draft["schools"]}
+        missing_names = [name_by_id.get(i, i) for i in missing_ids]
+
+    draft = _update_draft(draft_id, org_id, {"status": "created", "created_org_task_id": task_row["id"]})
+    summary = _task_draft_summary(draft)
+    summary["queued_count"] = len(school_ids) - len(missing_names)
+    if missing_names:
+        summary["missing_contact_school_names"] = missing_names
     return summary, draft_id
 
 
-def _exec_booking_tool(org_id: str, user_id: str, criteria_text: str, tool_name: str, tool_input: dict) -> tuple[dict, str | None]:
-    if tool_name == "find_schools_missing_meetings":
-        return _exec_find_schools_missing_meetings(org_id, user_id, criteria_text, tool_input)
-    if tool_name == "update_draft_school":
-        return _exec_update_draft_school(org_id, tool_input)
-    if tool_name == "set_booking_defaults":
-        return _exec_set_booking_defaults(org_id, tool_input)
-    if tool_name == "confirm_send_booking_emails":
-        return _exec_confirm_send_booking_emails(org_id, tool_input)
+def _exec_get_task_status(org_id: str, tool_input: dict) -> tuple[dict, str | None]:
+    db = get_admin_client()
+    task_id = tool_input.get("task_id")
+    if task_id:
+        rows = db.table("org_tasks").select("*").eq("id", task_id).eq("org_id", org_id).execute().data or []
+        if not rows:
+            return {"error": "משימה לא נמצאה"}, None
+        task = rows[0]
+        progress = task_logic.compute_task_progress(org_id, task)
+        return {"task_id": task_id, "name": task.get("name"), "status": task.get("status"), **progress}, None
+
+    rows = (
+        db.table("org_tasks")
+        .select("id, name, status, created_at, matched_school_ids")
+        .eq("org_id", org_id)
+        .order("created_at", desc=True)
+        .limit(10)
+        .execute()
+        .data or []
+    )
+    return {
+        "recent_tasks": [
+            {
+                "task_id": r["id"], "name": r["name"], "status": r["status"],
+                "school_count": len(r.get("matched_school_ids") or []), "created_at": r["created_at"],
+            }
+            for r in rows
+        ],
+    }, None
+
+
+def _exec_task_tool(org_id: str, user_id: str, request_text: str, tool_name: str, tool_input: dict) -> tuple[dict, str | None]:
+    if tool_name == "find_schools_by_criteria":
+        return _exec_find_schools_by_criteria(org_id, user_id, request_text, tool_input)
+    if tool_name == "find_schools_by_contact_name":
+        return _exec_find_schools_by_contact_name(org_id, tool_input)
+    if tool_name == "start_task_for_schools":
+        return _exec_start_task_for_schools(org_id, user_id, tool_input)
+    if tool_name == "set_task_message":
+        return _exec_set_task_message(org_id, tool_input)
+    if tool_name == "resolve_task_advisor":
+        return _exec_resolve_task_advisor(org_id, tool_input)
+    if tool_name == "set_task_scheduling_window":
+        return _exec_set_task_scheduling_window(org_id, tool_input)
+    if tool_name == "create_and_send_task":
+        return _exec_create_and_send_task(org_id, user_id, tool_input)
+    if tool_name == "get_task_status":
+        return _exec_get_task_status(org_id, tool_input)
     return {"error": "unknown tool"}, None
 
 
@@ -568,7 +827,7 @@ def ask(request: AgentRequest, user: Annotated[dict, Depends(get_current_user)])
     reply_text = "".join(b.text for b in response.content if b.type == "text").strip()
 
     filter_instruction = None
-    booking_summary = None
+    task_summary = None
     draft_id = request.draft_id
 
     if tool_use_block and tool_use_block.name in ("filter_schools_table", "filter_meetings_table"):
@@ -581,22 +840,22 @@ def ask(request: AgentRequest, user: Annotated[dict, Depends(get_current_user)])
         elif not reply_text:
             reply_text = "סיננתי את הטבלה לפי הבקשה שלך."
 
-    elif tool_use_block and tool_use_block.name in BOOKING_TOOL_NAMES:
-        tool_result, new_draft_id = _exec_booking_tool(
+    elif tool_use_block and tool_use_block.name in GENERAL_TASK_TOOL_NAMES:
+        tool_result, new_draft_id = _exec_task_tool(
             user["org_id"], user["id"], request.message, tool_use_block.name, tool_use_block.input
         )
         if new_draft_id:
             draft_id = new_draft_id
-        if "schools" in tool_result:  # a _draft_summary shape — expose it to the widget
-            booking_summary = tool_result
+        if "schools" in tool_result:  # a _task_draft_summary shape — expose it to the widget
+            task_summary = tool_result
 
         # Second round-trip: submit the tool_result so Claude phrases the Hebrew reply
-        # from the structured data (e.g. naming ambiguous advisors), not hard-coded strings.
-        import json as _json
+        # from the structured data (e.g. naming ambiguous advisors/contacts), not
+        # hard-coded strings.
         messages.append({"role": "assistant", "content": response.content})
         messages.append({
             "role": "user",
-            "content": [{"type": "tool_result", "tool_use_id": tool_use_block.id, "content": _json.dumps(tool_result, ensure_ascii=False)}],
+            "content": [{"type": "tool_result", "tool_use_id": tool_use_block.id, "content": json.dumps(tool_result, ensure_ascii=False)}],
         })
         try:
             response2 = client.messages.create(
@@ -613,18 +872,18 @@ def ask(request: AgentRequest, user: Annotated[dict, Depends(get_current_user)])
             reply_text = ""
 
         # Never fall back to a bare "בוצע." — that implies an action (e.g. emails sent)
-        # completed, which is only true for confirm_send_booking_emails, and even then only
-        # when it actually queued something. For the informational tools (find/update/set
-        # defaults) a vague "done" is actively misleading — nothing was sent.
+        # completed, which is only true for create_and_send_task, and even then only when it
+        # actually queued something. For the informational tools a vague "done" is actively
+        # misleading — nothing was sent.
         if not reply_text:
             if "error" in tool_result:
                 reply_text = tool_result["error"]
-            elif tool_use_block.name == "confirm_send_booking_emails" and "queued_count" in tool_result:
-                reply_text = f"נשלחו בקשות שריון ל-{tool_result['queued_count']} בתי ספר (השליחה בפועל תתבצע בתור, בהדרגה)."
+            elif tool_use_block.name == "create_and_send_task" and "queued_count" in tool_result:
+                reply_text = f"נשלחו הודעות ל-{tool_result['queued_count']} בתי ספר (השליחה בפועל תתבצע בתור, בהדרגה)."
             else:
-                reply_text = "הסיכום המעודכן מוצג למטה. לא נשלח שום מייל בשלב זה."
+                reply_text = "הסיכום המעודכן מוצג למטה. לא נשלח שום דבר בשלב זה."
 
-    if not reply_text and not filter_instruction and not booking_summary:
+    if not reply_text and not filter_instruction and not task_summary:
         reply_text = "לא הבנתי את הבקשה — אפשר לנסח מחדש?"
 
     _record_agent_usage(user["id"])
@@ -633,5 +892,5 @@ def ask(request: AgentRequest, user: Annotated[dict, Depends(get_current_user)])
         "reply_text": reply_text,
         "filter_instruction": filter_instruction,
         "draft_id": draft_id,
-        "booking_summary": booking_summary,
+        "task_summary": task_summary,
     }

@@ -7,7 +7,8 @@ import { MeetingsTable } from "../components/meetings/MeetingsTable";
 import { MeetingSummaryModal } from "../components/meetings/MeetingSummaryModal";
 import { NotesModal } from "../components/meetings/NotesModal";
 import { SchoolPickerModal, SchoolPickerPopover, schoolLabel } from "../components/meetings/SchoolPickerCell";
-import { MEETING_STATUS_OPTIONS, MEETING_TYPE_OPTIONS, STATUS_MAP, formatMeetingDate } from "../components/meetings/constants";
+import { DirectCoordinationModal } from "../components/meetings/DirectCoordinationModal";
+import { MEETING_STATUS_OPTIONS, MEETING_TYPE_OPTIONS, MEETING_SERVICE_TYPE_OPTIONS, STATUS_MAP, formatMeetingDate, defaultMeetingServiceType } from "../components/meetings/constants";
 import { AcademicYearSelector } from "../components/AcademicYearSelector";
 import { DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
 import { getMissingCriticalFields, isMeetingIncomplete } from "../components/meetings/meetingCompleteness";
@@ -56,6 +57,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
   const [summaryModalFor, setSummaryModalFor] = useState(null);
   const [showCalendarColumn, setShowCalendarColumn] = useState(false);
   const [schoolPickerFor, setSchoolPickerFor] = useState(null);
+  const [directCoordSchool, setDirectCoordSchool] = useState(null);
   const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false);
 
   // Status reminder states
@@ -297,8 +299,16 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
     } catch {
       // non-fatal — meeting creation proceeds without a pre-filled advisor
     }
+    let schoolServiceType = null;
+    try {
+      const yad = await axios.get(`/schools/${school.id}/year-admin-data`, { params: { academic_year: academicYear } });
+      schoolServiceType = yad.data?.service_type || null;
+    } catch {
+      // non-fatal — meeting creation proceeds without a pre-filled service type
+    }
     const payload = {
       status: "scheduled", meeting_type: "remote",
+      meeting_service_type: defaultMeetingServiceType(schoolServiceType),
       advisor_ids: defaultAdvisor ? [defaultAdvisor.id] : [],
       participants: [], reminder_enabled: false, academic_year: academicYear,
     };
@@ -384,7 +394,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
 
   function exportSelectedToExcel() {
     const selected = displayedMeetings.filter(m => selectedIds[m.id]);
-    const headers = ["שם מוסד", "סמל", "תאריך", "שעה", "סטטוס", "מיקום", "יועצים", "עיר"];
+    const headers = ["שם מוסד", "סמל", "תאריך", "שעה", "סטטוס", "מיקום", "סוג", "יועצים", "עיר"];
     const rows = selected.map(m => [
       m.school_name || "",
       m.school_symbol || "",
@@ -392,6 +402,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
       m.meeting_time || "",
       STATUS_MAP[m.status]?.label || m.status || "",
       MEETING_TYPE_OPTIONS.find(o => o.value === m.meeting_type)?.label || m.meeting_type || "",
+      MEETING_SERVICE_TYPE_OPTIONS.find(o => o.value === m.meeting_service_type)?.label || "",
       (m.advisor_profiles || []).map(p => p?.full_name || p?.email || "").filter(Boolean).join(", "),
       m.school_city || "",
     ]);
@@ -407,7 +418,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
 
   async function exportSelectedToPdf() {
     const selected = displayedMeetings.filter(m => selectedIds[m.id]);
-    const headers = ["שם מוסד", "סמל", "תאריך", "שעה", "סטטוס", "מיקום", "יועצים", "עיר"];
+    const headers = ["שם מוסד", "סמל", "תאריך", "שעה", "סטטוס", "מיקום", "סוג", "יועצים", "עיר"];
     const rows = selected.map(m => [
       m.school_name || "",
       m.school_symbol || "",
@@ -415,6 +426,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
       m.meeting_time || "",
       STATUS_MAP[m.status]?.label || m.status || "",
       MEETING_TYPE_OPTIONS.find(o => o.value === m.meeting_type)?.label || m.meeting_type || "",
+      MEETING_SERVICE_TYPE_OPTIONS.find(o => o.value === m.meeting_service_type)?.label || "",
       (m.advisor_profiles || []).map(p => p?.full_name || p?.email || "").filter(Boolean).join(", "),
       m.school_city || "",
     ]);
@@ -471,12 +483,13 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
       (m.advisor_profiles || []).map(p => p.full_name || p.email).join(", "),
       (m.participants || []).map(p => p.name).join(", "),
       MEETING_TYPE_OPTIONS.find(o => o.value === m.meeting_type)?.label || "",
+      MEETING_SERVICE_TYPE_OPTIONS.find(o => o.value === m.meeting_service_type)?.label || "",
       m.notes || "",
       m.reminder_enabled ? "פעיל" : "כבוי",
     ];
   }
 
-  const EXPORT_HEADERS = ["תאריך", "סטטוס", "שם מוסד", "התחלה", "סיום", "יועץ מבצע", "משתתפים", "מיקום", "הערות", "תזכורת"];
+  const EXPORT_HEADERS = ["תאריך", "סטטוס", "שם מוסד", "התחלה", "סיום", "יועץ מבצע", "משתתפים", "מיקום", "סוג", "הערות", "תזכורת"];
 
   function exportMeetingsToExcel() {
     const rows = displayedMeetings.map(meetingToRow);
@@ -592,6 +605,18 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
         <SchoolPickerModal schools={schools} onConfirm={createMeetingForSchool} onCancel={() => setSchoolPickerFor(null)} />
       )}
 
+      {schoolPickerFor === "direct" && (
+        <SchoolPickerModal schools={schools}
+          onConfirm={school => { setDirectCoordSchool(school); setSchoolPickerFor(null); }}
+          onCancel={() => setSchoolPickerFor(null)} />
+      )}
+
+      {directCoordSchool && (
+        <DirectCoordinationModal school={directCoordSchool} advisors={advisors}
+          onClose={() => setDirectCoordSchool(null)}
+          onSent={() => {}} />
+      )}
+
       {bulkDeleteConfirm && (
         <DeleteMeetingModal
           titleText="מחיקת פגישות"
@@ -611,6 +636,12 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
             <button type="button" onClick={() => setSchoolPickerFor("new")}
               className="btn-ghost flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-xl font-medium">
               <span aria-hidden="true">+</span> הוסף פגישה
+            </button>
+          </div>
+          <div className="relative">
+            <button type="button" onClick={() => setSchoolPickerFor("direct")}
+              className="btn-ghost flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-xl font-medium">
+              <span aria-hidden="true">🔗</span> תיאום ישיר
             </button>
           </div>
           <button type="button" onClick={() => setShowAdvanced(o => !o)} aria-expanded={showAdvanced}
