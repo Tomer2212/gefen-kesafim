@@ -854,7 +854,11 @@ def ask(request: AgentRequest, user: Annotated[dict, Depends(get_current_user)])
 
         # Second round-trip: submit the tool_result so Claude phrases the Hebrew reply
         # from the structured data (e.g. naming ambiguous advisors/contacts), not
-        # hard-coded strings.
+        # hard-coded strings. Deliberately omits `tools`/`tool_choice` — this call must
+        # always produce text (the next question or a summary), never another tool_use.
+        # Passing tools here let Claude sometimes choose to call the next tool instead of
+        # asking in text; that tool_use was silently dropped (only text blocks were read
+        # below), leaving the user with no real next step and a bland fallback message.
         messages.append({"role": "assistant", "content": response.content})
         messages.append({
             "role": "user",
@@ -865,8 +869,6 @@ def ask(request: AgentRequest, user: Annotated[dict, Depends(get_current_user)])
                 model=CLAUDE_MODEL,
                 max_tokens=2048,
                 system=SYSTEM_PROMPT + context_hint,
-                tools=TOOLS,
-                tool_choice={"type": "auto", "disable_parallel_tool_use": True},
                 messages=messages,
             )
             reply_text = "".join(b.text for b in response2.content if b.type == "text").strip()
