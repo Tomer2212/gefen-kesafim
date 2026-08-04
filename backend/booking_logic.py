@@ -176,6 +176,15 @@ def _format_range_date(iso: str) -> str:
     return f"{d}.{m}.{y}"
 
 
+def _format_duration_he(minutes: int) -> str:
+    if not minutes:
+        return ""
+    if minutes < 60:
+        return f"{minutes} דק'"
+    hours, rest = divmod(minutes, 60)
+    return f"{hours} שעות" if rest == 0 else f"{hours}:{rest:02d} שעות"
+
+
 def build_direct_coordination_email_html(recipient_name: str, school_name: str, advisor_names: list[str],
                                           ranges: list[dict], booking_url: str) -> str:
     first_name = (recipient_name or "").strip().split(" ")[0]
@@ -186,10 +195,12 @@ def build_direct_coordination_email_html(recipient_name: str, school_name: str, 
     range_rows = ""
     for r in ranges:
         type_label = r.get("label") or _SERVICE_TYPE_LABEL_HE.get(r.get("service_type"), "")
+        duration_label = _format_duration_he(r.get("duration_minutes"))
         participants_label = ", ".join(p.get("name", "") for p in (r.get("participants") or []) if p.get("name"))
         range_rows += f"""
       <li style="margin-bottom: 10px;">
         <b>{type_label}</b> — {_format_range_date(r["start_date"])} עד {_format_range_date(r["end_date"])}
+        {f' · משך: {duration_label}' if duration_label else ""}
         {f'<br/><span style="color: #64748b; font-size: 12px;">משתתפים: {participants_label}</span>' if participants_label else ""}
       </li>"""
 

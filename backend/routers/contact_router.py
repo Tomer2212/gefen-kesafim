@@ -1,59 +1,59 @@
-import json
+import logging
 import os
 import smtplib
-import threading
-from datetime import datetime
+import time
 from email import encoders
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from pathlib import Path
 from typing import List
 from urllib.parse import quote
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 
+from supabase_client import get_admin_client, reset_admin_client
+
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 GMAIL_USER     = os.getenv("GMAIL_USER", "")
 GMAIL_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
 SUPPORT_EMAIL  = os.getenv("SUPPORT_EMAIL", "")
 
-TICKETS_FILE  = Path(__file__).parent.parent / "tickets.json"
-CONSENTS_FILE = Path(__file__).parent.parent / "consents.json"
-_lock = threading.Lock()
-
-if not TICKETS_FILE.exists():
-    TICKETS_FILE.write_text(json.dumps({"last": 0}), encoding="utf-8")
-if not CONSENTS_FILE.exists():
-    CONSENTS_FILE.write_text(json.dumps([]), encoding="utf-8")
-
 CONSENT_TEXT = "אני מאשר/ת קבלת עדכונים במייל ו/או בטלפון בנוגע לפנייה זו."
 
 
-def next_ticket_number() -> int:
-    with _lock:
-        data = json.loads(TICKETS_FILE.read_text(encoding="utf-8"))
-        data["last"] += 1
-        TICKETS_FILE.write_text(json.dumps(data), encoding="utf-8")
-        return data["last"]
+def create_ticket_and_consent(subject: str, description: str, user_email: str, user_phone: str, ip: str) -> str:
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
 
+            ticket_res = db.table("contact_tickets").insert({
+                "subject":     subject,
+                "description": description,
+                "user_email":  user_email,
+                "user_phone":  user_phone or None,
+            }).execute()
+            ticket_row = ticket_res.data[0]
+            ticket_id = f"#{ticket_row['ticket_number']:04d}"
 
-def log_consent(ticket_id: str, user_email: str, user_phone: str, ip: str):
-    with _lock:
-        records = json.loads(CONSENTS_FILE.read_text(encoding="utf-8"))
-        records.append({
-            "ticket":       ticket_id,
-            "timestamp":    datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "email":        user_email,
-            "phone":        user_phone or "לא צוין",
-            "consent_text": CONSENT_TEXT,
-            "ip":           ip,
-        })
-        CONSENTS_FILE.write_text(
-            json.dumps(records, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+            db.table("user_consents").insert({
+                "ticket_id":    ticket_row["id"],
+                "email":        user_email,
+                "phone":        user_phone or "לא צוין",
+                "consent_text": CONSENT_TEXT,
+                "ip":           ip,
+            }).execute()
+
+            return ticket_id
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("create_ticket_and_consent attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("create_ticket_and_consent failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
 
 def build_email_html(
@@ -213,12 +213,10 @@ async def send_contact(
     if not GMAIL_USER or not GMAIL_PASSWORD:
         raise HTTPException(status_code=500, detail="Email service not configured")
 
-    ticket_num    = next_ticket_number()
-    ticket_id     = f"#{ticket_num:04d}"
     phone_display = user_phone.strip() if user_phone.strip() else "לא צוין"
     client_ip     = request.client.host if request.client else "unknown"
 
-    log_consent(ticket_id, user_email, user_phone.strip(), client_ip)
+    ticket_id = create_ticket_and_consent(subject, description, user_email, user_phone.strip(), client_ip)
 
     attachments: list[tuple[str, bytes]] = []
     for upload in files:

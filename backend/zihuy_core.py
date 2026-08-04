@@ -306,7 +306,7 @@ def identify(doch_paths, plan_fpaths):
         col_desc = row[10]; col_amt = row[11]; col_stat = row[12]; col_file = row[13]
         plan_num = extract_plan_num(str(col_name)) if col_name else None
         sup_num = extract_supplier_num(str(col_sup)) if col_sup else None
-        union_key = f'{sup_num}-{col_inv}-{col_code}-{_norm_key_amount(col_amt)}' if sup_num else ''
+        union_key = f'{sup_num}-{col_inv}-{col_code}-{_norm_key_amount(col_amt)}' if sup_num else f'_unresolved_{len(results)}'
         results.append({
             'row': i, 'budget': None, 'stage': None,
             'col_a': col_a, 'col_type': col_type,
