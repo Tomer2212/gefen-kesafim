@@ -7,6 +7,7 @@ import { MultiSelectChips } from "../components/MultiSelectChips";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { supabase } from "../lib/supabase";
 import AdminCallsTab from "./AdminCallsTab";
+import AdminCollectionTab from "./AdminCollectionTab";
 import AdminIntegrationsTab from "./AdminIntegrationsTab";
 import AdminMeetingsTab from "./AdminMeetingsTab";
 import AgentChatWidget from "../components/AgentChatWidget";
@@ -1824,6 +1825,7 @@ export default function AdminPage() {
   const showBillingTab = myRole === "owner" || (myRole === "manager" && permDefaults?.can_view_billing?.manager === true);
   const showIntegrationsTab = myRole === "owner" || myRole === "manager";
   const showCallsTab = myRole === "owner" || myRole === "manager";
+  const showCollectionTab = myRole === "owner" || myRole === "manager";
   const showAgentWidget = myRole === "owner" || myRole === "manager";
   // null=loading, true=allowed, false=denied
   // owner → always true; manager → depends on permDefaults (null while loading → treat as not-yet-known)
@@ -1902,6 +1904,7 @@ export default function AdminPage() {
     { id: "users", label: "משתמשים" },
     { id: "meetings", label: "פגישות" },
     ...(showCallsTab ? [{ id: "calls", label: "שיחות" }] : []),
+    ...(showCollectionTab ? [{ id: "collection", label: "גבייה" }] : []),
     { id: "permissions", label: "הרשאות" },
     ...(showIntegrationsTab ? [{ id: "integrations", label: "אינטגרציות" }] : []),
     ...(showBillingTab ? [{ id: "billing", label: "חיובים" }] : []),
@@ -1940,7 +1943,7 @@ export default function AdminPage() {
 
         <div className={`mx-auto px-6 pb-10 ${
           activeTab === "users" ? "max-w-[95rem]" :
-          ["schools", "meetings", "calls"].includes(activeTab) ? "max-w-[100rem]" : "max-w-4xl"
+          ["schools", "meetings", "calls", "collection"].includes(activeTab) ? "max-w-[100rem]" : "max-w-4xl"
         }`}>
           {/* Schools Tab */}
           {activeTab === "schools" && (
@@ -3040,6 +3043,11 @@ export default function AdminPage() {
           {/* Calls Tab */}
           {activeTab === "calls" && showCallsTab && (
             <AdminCallsTab users={users} />
+          )}
+
+          {/* Collection Tab */}
+          {activeTab === "collection" && showCollectionTab && (
+            <AdminCollectionTab />
           )}
 
           {/* Integrations Tab */}

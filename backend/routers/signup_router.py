@@ -499,6 +499,67 @@ def update_trial(org_id: str, body: UpdateTrialIn, user: Annotated[dict, Depends
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
 
+@router.delete("/requests/{req_id}")
+def delete_org_request(req_id: str, user: Annotated[dict, Depends(get_current_user)]):
+    """Superadmin only. Deletes a signup request; if it has an associated org
+    (status=approved), performs a full hard-delete of the org and everything
+    that belongs to it (schools, dependent rows, and every user's auth account)."""
+    _require_superadmin(user)
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            req = db.table("org_signup_requests").select("id, org_id").eq("id", req_id).execute()
+            if not req.data:
+                raise HTTPException(status_code=404, detail="הבקשה לא נמצאה")
+            org_id = req.data[0].get("org_id")
+
+            if not org_id:
+                db.table("org_signup_requests").delete().eq("id", req_id).execute()
+                return {"ok": True, "deleted_org": False}
+
+            school_ids = [s["id"] for s in (db.table("schools").select("id").eq("org_id", org_id).execute().data or [])]
+            profile_ids = [p["id"] for p in (db.table("profiles").select("id").eq("org_id", org_id).execute().data or [])]
+
+            if school_ids:
+                for table in ("gefen_accounts", "check_logs", "meetings", "school_update_requests", "partial_row_updates"):
+                    db.table(table).delete().in_("school_id", school_ids).execute()
+                db.table("advisor_schools").delete().in_("school_id", school_ids).execute()
+            if profile_ids:
+                db.table("advisor_schools").delete().in_("advisor_id", profile_ids).execute()
+
+            db.table("schools").delete().eq("org_id", org_id).execute()
+
+            failed_user_ids = []
+            for pid in profile_ids:
+                try:
+                    db.auth.admin.delete_user(pid)
+                except Exception as exc:
+                    logger.warning("delete_org_request: failed deleting user %s: %s", pid, exc)
+                    failed_user_ids.append(pid)
+
+            db.table("org_signup_requests").delete().eq("org_id", org_id).execute()
+            db.table("organizations").delete().eq("id", org_id).execute()
+
+            return {
+                "ok": True,
+                "deleted_org": True,
+                "org_id": org_id,
+                "deleted_schools": len(school_ids),
+                "deleted_users": len(profile_ids) - len(failed_user_ids),
+                "failed_user_ids": failed_user_ids,
+            }
+        except HTTPException:
+            raise
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("delete_org_request attempt 1 failed: %s — resetting", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("delete_org_request failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+
 @router.patch("/unsubscribe")
 def unsubscribe_marketing(body: UnsubscribeIn):
     """Public endpoint — verifies HMAC token and opts the email out of marketing."""

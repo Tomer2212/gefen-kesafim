@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import axios from "axios";
 import Sidebar from "../components/Sidebar";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 
 const STATUS_LABEL = { pending: "ממתין", approved: "אושר", rejected: "נדחה" };
 const STATUS_CLASS = {
@@ -199,6 +200,73 @@ function EditTrialModal({ req, onClose, onUpdated }) {
   );
 }
 
+function DeleteOrgModal({ req, onClose, onDeleted }) {
+  const { ref, handleKeyDown } = useFocusTrap(onClose);
+  const [confirming, setConfirming] = useState(false);
+  const [error, setError] = useState("");
+  const hasOrg = !!req.org_id;
+
+  async function handleDelete() {
+    setConfirming(true);
+    setError("");
+    try {
+      const res = await axios.delete(`/signup/requests/${req.id}`);
+      onDeleted(req, res.data);
+      onClose();
+    } catch (err) {
+      setError(err?.response?.data?.detail || "שגיאה במחיקה — נסה שוב");
+    } finally {
+      setConfirming(false);
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ background: "rgba(15,23,42,0.55)" }}
+      onClick={e => { if (e.target === e.currentTarget) onClose(); }}
+      dir="rtl"
+    >
+      <div
+        ref={ref}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="delete-org-modal-title"
+        onKeyDown={handleKeyDown}
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 flex flex-col gap-4"
+      >
+        <div>
+          <h2 id="delete-org-modal-title" className="text-base font-semibold text-slate-800">מחיקת ארגון</h2>
+          <p className="text-sm text-slate-500 mt-0.5">{req.org_name}</p>
+        </div>
+        <p className="text-sm text-slate-600 leading-relaxed">
+          {hasOrg
+            ? "פעולה זו בלתי הפיכה ותמחק לצמיתות את הארגון, את כל בתי הספר שלו, כל ההיסטוריה, וכל המשתמשים שלו (כולל חשבונות ההתחברות שלהם)."
+            : "הבקשה הזו תימחק לצמיתות."}
+        </p>
+        {error && <p role="alert" className="text-sm text-red-600 font-medium">{error}</p>}
+        <div className="flex gap-2">
+          <button
+            onClick={handleDelete}
+            disabled={confirming}
+            className="flex-1 py-2.5 rounded-xl text-sm font-semibold text-white transition-colors disabled:opacity-60"
+            style={{ background: "#dc2626" }}
+          >
+            {confirming ? "מוחק..." : "מחק בכל זאת"}
+          </button>
+          <button
+            onClick={onClose}
+            disabled={confirming}
+            className="flex-1 py-2.5 rounded-xl text-sm font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 transition-colors"
+          >
+            ביטול
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function SuperAdminPage() {
   const navigate = useNavigate();
   const [user, setUser] = useState(null);
@@ -208,6 +276,20 @@ export default function SuperAdminPage() {
   const [rejectTarget, setRejectTarget] = useState(null);
   const [editTrialTarget, setEditTrialTarget] = useState(null);
   const [activating, setActivating] = useState(null);
+  const [openDotsId, setOpenDotsId] = useState(null);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const dotsMenuRef = useRef(null);
+
+  useEffect(() => {
+    if (!openDotsId) return;
+    function handleOutsideClick(e) {
+      if (dotsMenuRef.current && !dotsMenuRef.current.contains(e.target)) {
+        setOpenDotsId(null);
+      }
+    }
+    document.addEventListener("mousedown", handleOutsideClick);
+    return () => document.removeEventListener("mousedown", handleOutsideClick);
+  }, [openDotsId]);
 
   useEffect(() => {
     async function load() {
@@ -241,6 +323,14 @@ export default function SuperAdminPage() {
     setRequests(prev => prev.map(r =>
       r.id === id ? { ...r, org_trial_ends_at: newTrialEndsAt, org_subscription_status: "trial" } : r
     ));
+  }
+
+  function handleDeleted(req, result) {
+    if (result?.deleted_org && req.org_id) {
+      setRequests(prev => prev.filter(r => r.org_id !== req.org_id));
+    } else {
+      setRequests(prev => prev.filter(r => r.id !== req.id));
+    }
   }
 
   async function handleActivate(orgId) {
@@ -306,44 +396,71 @@ export default function SuperAdminPage() {
                       )}
                     </div>
 
-                    {req.status === "pending" && (
-                      <div className="flex gap-2 flex-shrink-0">
-                        <button
-                          onClick={() => setApproveTarget(req)}
-                          className="px-4 py-2 rounded-xl text-sm font-semibold text-white transition-colors"
-                          style={{ background: "#0070F3" }}
-                        >
-                          אשר
-                        </button>
-                        <button
-                          onClick={() => setRejectTarget(req)}
-                          className="px-4 py-2 rounded-xl text-sm font-semibold text-red-600 bg-red-50 hover:bg-red-100 transition-colors border border-red-200"
-                        >
-                          דחה
-                        </button>
-                      </div>
-                    )}
-
-                    {req.status === "approved" && (
-                      <div className="flex gap-2 flex-shrink-0">
-                        {req.org_id && (
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      {req.status === "pending" && (
+                        <div className="flex gap-2">
                           <button
-                            onClick={() => setEditTrialTarget(req)}
-                            aria-label="עדכן ימי ניסיון"
-                            className="px-4 py-2 rounded-xl text-sm font-semibold text-blue-600 bg-blue-50 hover:bg-blue-100 transition-colors border border-blue-200"
+                            onClick={() => setApproveTarget(req)}
+                            className="px-4 py-2 rounded-xl text-sm font-semibold text-white transition-colors"
+                            style={{ background: "#0070F3" }}
                           >
-                            עדכן ימי ניסיון
+                            אשר
                           </button>
-                        )}
+                          <button
+                            onClick={() => setRejectTarget(req)}
+                            className="px-4 py-2 rounded-xl text-sm font-semibold text-red-600 bg-red-50 hover:bg-red-100 transition-colors border border-red-200"
+                          >
+                            דחה
+                          </button>
+                        </div>
+                      )}
+
+                      {req.status === "approved" && (
+                        <div className="flex gap-2">
+                          {req.org_id && (
+                            <button
+                              onClick={() => setEditTrialTarget(req)}
+                              aria-label="עדכן ימי ניסיון"
+                              className="px-4 py-2 rounded-xl text-sm font-semibold text-blue-600 bg-blue-50 hover:bg-blue-100 transition-colors border border-blue-200"
+                            >
+                              עדכן ימי ניסיון
+                            </button>
+                          )}
+                          <button
+                            onClick={() => handleActivate(req.org_id)}
+                            disabled={activating === req.org_id}
+                            className="px-4 py-2 rounded-xl text-sm font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 transition-colors border border-emerald-200"
+                          >
+                            {activating === req.org_id ? "מעדכן..." : "שדרג למנוי פעיל"}
+                          </button>
+                        </div>
+                      )}
+
+                      <div className="relative" ref={openDotsId === req.id ? dotsMenuRef : null}>
                         <button
-                          onClick={() => handleActivate(req.org_id)}
-                          disabled={activating === req.org_id}
-                          className="px-4 py-2 rounded-xl text-sm font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 transition-colors border border-emerald-200"
+                          type="button"
+                          onClick={() => setOpenDotsId(o => (o === req.id ? null : req.id))}
+                          className="p-1.5 rounded-lg hover:bg-slate-100 transition-colors text-slate-400"
+                          aria-label="אפשרויות נוספות"
+                          aria-expanded={openDotsId === req.id}
                         >
-                          {activating === req.org_id ? "מעדכן..." : "שדרג למנוי פעיל"}
+                          <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                            <circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/>
+                          </svg>
                         </button>
+                        {openDotsId === req.id && (
+                          <div className="absolute left-0 top-full mt-1 z-20 bg-white rounded-xl py-1 shadow-lg border border-slate-100" style={{ minWidth: 140 }} dir="rtl">
+                            <button
+                              type="button"
+                              onClick={() => { setDeleteTarget(req); setOpenDotsId(null); }}
+                              className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-red-500 hover:bg-red-50 text-right transition-colors"
+                            >
+                              מחק ארגון
+                            </button>
+                          </div>
+                        )}
                       </div>
-                    )}
+                    </div>
                   </div>
 
                   {req.reviewer_note && (
@@ -377,6 +494,13 @@ export default function SuperAdminPage() {
           req={editTrialTarget}
           onClose={() => setEditTrialTarget(null)}
           onUpdated={handleTrialUpdated}
+        />
+      )}
+      {deleteTarget && (
+        <DeleteOrgModal
+          req={deleteTarget}
+          onClose={() => setDeleteTarget(null)}
+          onDeleted={handleDeleted}
         />
       )}
     </div>
