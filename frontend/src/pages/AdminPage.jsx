@@ -1826,7 +1826,8 @@ export default function AdminPage() {
   const showIntegrationsTab = myRole === "owner" || myRole === "manager";
   const showCallsTab = myRole === "owner" || myRole === "manager";
   const showCollectionTab = myRole === "owner" || myRole === "manager";
-  const showAgentWidget = myRole === "owner" || myRole === "manager";
+  const AGENT_WIDGET_ENABLED = false; // temporarily hidden from frontend while under improvement — flip to true to restore
+  const showAgentWidget = AGENT_WIDGET_ENABLED && (myRole === "owner" || myRole === "manager");
   // null=loading, true=allowed, false=denied
   // owner → always true; manager → depends on permDefaults (null while loading → treat as not-yet-known)
   const canAddSchool = myRole === "owner"
