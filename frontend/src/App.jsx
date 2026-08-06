@@ -65,6 +65,8 @@ function AdminRoute({ children }) {
   return children;
 }
 
+const CHAT_WIDGET_ENABLED = false; // temporarily hidden from frontend while under improvement — flip to true to restore
+
 function AppLayout() {
   return (
     <>
@@ -74,7 +76,7 @@ function AppLayout() {
       <TaskPanel />
       <CallNoteWindows />
       <GuideWindow />
-      <ChatWidget />
+      {CHAT_WIDGET_ENABLED && <ChatWidget />}
     </>
   );
 }
