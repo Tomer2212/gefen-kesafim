@@ -8,15 +8,20 @@ import FileUpload from "../components/FileUpload";
 import LoadingScreen from "../components/LoadingScreen";
 import ResultsView from "../components/ResultsView";
 import ClassifyModal from "../components/ClassifyModal";
+import { NotesThread } from "../components/SchoolNotesModal";
+import { FilesThread } from "../components/SchoolFilesSection";
 import { GoalsTab } from "../components/GoalsTab";
+import { SchoolYearClosureTab } from "../components/SchoolYearClosureTab";
+import { ControlLetterTab } from "../components/ControlLetterTab";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useMeetingsPolling } from "../hooks/useMeetingsPolling";
 import { mergeMeetingsSilently } from "../components/meetings/mergeMeetings";
 import { useCompareChecks } from "../context/CompareChecksContext";
 import { AdvisorSearch } from "../components/AdvisorSearch";
 import { AccessSelector } from "../components/AccessSelector";
+import HourMinuteInput from "../components/HourMinuteInput";
 import { MultiSelectChips } from "../components/MultiSelectChips";
-import { defaultMeetingServiceType } from "../components/meetings/constants";
+import { defaultMeetingServiceType, resolveDefaultAdvisorIds } from "../components/meetings/constants";
 import { AdvisorCell } from "../components/meetings/AdvisorCell";
 import { DatePickerPopover } from "../components/meetings/DatePickerPopover";
 import { DeleteMeetingModal } from "../components/meetings/DeleteMeetingModal";
@@ -91,16 +96,31 @@ const SERVICE_TYPE_OPTIONS = [
   { value: "gefen", label: "גפן" },
   { value: "current", label: "שוטף" },
   { value: "gefen_current", label: "גפן+שוטף" },
+  { value: "district", label: "מחוז" },
 ];
 
 const FUNDING_METHOD_OPTIONS = [
-  { value: "gefen", label: "גפן" },
-  { value: "tnufa", label: "תנופה" },
-  { value: "tkuma", label: "תקומה" },
-  { value: "dokati", label: "דוקאטי" },
-  { value: "palg", label: 'פל"ג' },
-  { value: "self_managed", label: "ניהול עצמי" },
+  { value: "private", label: "פרטי" },
+  { value: "authority", label: "רשות" },
+  { value: "district", label: "מחוז" },
 ];
+
+// The per-service-type "יועץ מלווה" sub-sections (גפן/שוטף/מחוז) below the ליווי grid.
+const TYPED_SERVICE_TYPES = [
+  { key: "gefen", label: "גפן" },
+  { key: "current", label: "שוטף" },
+  { key: "district", label: "מחוז" },
+];
+
+// Which of the 3 typed advisor lists are mandatory, given the school's own "סוג שירות" value —
+// gefen_current requires both גפן and שוטף advisors to be set.
+function activeServiceTypes(serviceType) {
+  if (serviceType === "gefen") return ["gefen"];
+  if (serviceType === "current") return ["current"];
+  if (serviceType === "district") return ["district"];
+  if (serviceType === "gefen_current") return ["gefen", "current"];
+  return [];
+}
 
 // "סטטוס לקוח" — only shown here, not part of the ניהול → בתי ספר table.
 const CLIENT_STATUS_OPTIONS = [
@@ -216,7 +236,7 @@ function formatContactPhone(phone) {
   return /^05\d{8}$/.test(phone || "") ? `${phone.slice(0, 3)}-${phone.slice(3)}` : phone;
 }
 
-// Thousands-separated (no decimal) display for amount fields like "גובה הזמנה" — "" for empty.
+// Thousands-separated (no decimal) display for amount fields like "מחיר כולל מע"מ" — "" for empty.
 function formatAmount(v) {
   return v === null || v === undefined || v === "" ? "" : Math.round(Number(v)).toLocaleString("he-IL");
 }
@@ -225,6 +245,16 @@ function formatAmount(v) {
 function parseAmount(raw) {
   const stripped = String(raw).replace(/,/g, "").trim();
   return stripped === "" ? null : Number(stripped);
+}
+
+// "זמן לפגישה [סוג]" read-only display — total minutes as "H:MM שעות" / "M דק'".
+function formatDurationHM(minutes) {
+  if (minutes === null || minutes === undefined) return null;
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  if (h === 0) return `${m} דק'`;
+  if (m === 0) return `${h} שעות`;
+  return `${h}:${String(m).padStart(2, "0")} שעות`;
 }
 
 // "תקציב" row — shown only when the budget amount changed between the two checks
@@ -2394,7 +2424,7 @@ export default function SchoolPage() {
   const [activeSubTab, setActiveSubTab] = useState("tikkon");
   const [uploadComparisonMeetingId, setUploadComparisonMeetingId] = useState(null);
 
-  // "גובה הזמנה" — synced with the same admin-table field on AdminPage's schools table
+  // "מחיר כולל מע"מ" — synced with the same admin-table field on AdminPage's schools table
   // (both read/write the school_year_admin_data row for this school_id+academic_year).
   const [yearAdminData, setYearAdminData] = useState({});
 
@@ -2404,12 +2434,15 @@ export default function SchoolPage() {
     if (meetingParam) {
       setActiveTab("meetings");
       setUploadComparisonMeetingId(meetingParam);
-    } else if (["info", "meetings", "goals", "checks"].includes(tabParam)) {
+    } else if (["info", "meetings", "goals", "checks", "closure", "control_letter"].includes(tabParam)) {
       setActiveTab(tabParam);
     }
   }, []);
   const [role, setRole] = useState("advisor");
   const [subscriptionStatus, setSubscriptionStatus] = useState(null);
+  const [currentUser, setCurrentUser] = useState(null);
+  const [notesData, setNotesData] = useState(null); // { general: [...], quarterly: {1:[...],2:[...],3:[...],4:[...]} }
+  const [filesData, setFilesData] = useState(null); // flat array of school_files rows
 
   useEffect(() => {
     if (!schoolId) return;
@@ -2431,7 +2464,7 @@ export default function SchoolPage() {
     }
   }
 
-  // "גובה הזמנה" — editable input (edit mode) rendered in orderAmountEditField below;
+  // "מחיר כולל מע"מ" — editable input (edit mode) rendered in orderAmountEditField below;
   // display mode shows the same value read-only (see the ליווי display grid).
   function saveOrderAmountGefen(v) {
     if (v !== (yearAdminData.order_amount_gefen ?? null)) saveYearAdminField("order_amount_gefen", v);
@@ -2454,10 +2487,17 @@ export default function SchoolPage() {
   const [users, setUsers] = useState([]);
   const [loadingUsers, setLoadingUsers] = useState(false);
 
-  // Draft advisor selection while editing — kept purely local until saveEdit() diffs it
-  // against originalAdvisorIds and only sends the net add/remove calls (and notifications).
-  const [draftAdvisorIds, setDraftAdvisorIds] = useState([]);
-  const [originalAdvisorIds, setOriginalAdvisorIds] = useState([]);
+  // Per-service-type "יועץ מלווה [גפן/שוטף/מחוז]" draft selection while editing — kept purely
+  // local until saveEdit() diffs each list against originalTypedAdvisorIds and only sends the
+  // net add/remove calls (and notifications), same pattern the old single general list used.
+  const emptyTypedAdvisorIds = { gefen: [], current: [], district: [] };
+  const [typedAdvisors, setTypedAdvisors] = useState({
+    gefen: location.state?.school?.advisors_gefen || [],
+    current: location.state?.school?.advisors_current || [],
+    district: location.state?.school?.advisors_district || [],
+  });
+  const [draftTypedAdvisorIds, setDraftTypedAdvisorIds] = useState(emptyTypedAdvisorIds);
+  const [originalTypedAdvisorIds, setOriginalTypedAdvisorIds] = useState(emptyTypedAdvisorIds);
 
   const [isEditing, setIsEditing] = useState(false);
   const [originalForm, setOriginalForm] = useState(null);
@@ -2551,6 +2591,7 @@ export default function SchoolPage() {
 
       try {
         const meRes = await axios.get("/schools/users/me");
+        setCurrentUser(meRes.data || null);
         if (meRes.data?.org?.subscription_status) {
           setSubscriptionStatus(meRes.data.org.subscription_status);
         }
@@ -2573,6 +2614,11 @@ export default function SchoolPage() {
           setSchoolAdvisors(
             (schoolRes.data?.advisor_schools || []).map(as => as.profiles).filter(Boolean)
           );
+          setTypedAdvisors({
+            gefen: schoolRes.data?.advisors_gefen || [],
+            current: schoolRes.data?.advisors_current || [],
+            district: schoolRes.data?.advisors_district || [],
+          });
         } catch {
           // non-fatal — page still usable without info tab data
         }
@@ -2607,6 +2653,80 @@ export default function SchoolPage() {
     load();
   }, [schoolId, academicYear]);
 
+  useEffect(() => {
+    let cancelled = false;
+    axios.get(`/schools/${schoolId}/notes`).then(({ data }) => {
+      if (!cancelled) setNotesData(data);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [schoolId]);
+
+  async function createSchoolNote(noteType, quarter, content) {
+    const { data: created } = await axios.post(`/schools/${schoolId}/notes`, { note_type: noteType, quarter, content });
+    const segment = {
+      id: created.id, author_id: created.author_id, author_name: currentUser?.full_name, author_role: currentUser?.role,
+      content: created.content, created_at: created.created_at, updated_at: created.updated_at,
+    };
+    const newGroup = { group_id: created.group_id, segments: [segment] };
+    setNotesData(d => noteType === "general"
+      ? { ...d, general: [newGroup, ...(d?.general || [])] }
+      : { ...d, quarterly: { ...d?.quarterly, [quarter]: [newGroup, ...(d?.quarterly?.[quarter] || [])] } });
+  }
+
+  async function editSchoolNote(noteType, quarter, segmentId, groupId, content) {
+    await axios.patch(`/schools/${schoolId}/notes/segments/${segmentId}`, { content });
+    const apply = groups => groups.map(g => g.group_id !== groupId ? g : { ...g, segments: g.segments.map(s => s.id === segmentId ? { ...s, content } : s) });
+    setNotesData(d => noteType === "general"
+      ? { ...d, general: apply(d?.general || []) }
+      : { ...d, quarterly: { ...d?.quarterly, [quarter]: apply(d?.quarterly?.[quarter] || []) } });
+  }
+
+  async function deleteSchoolNote(noteType, quarter, groupId, segmentId) {
+    await axios.delete(`/schools/${schoolId}/notes/segments/${segmentId}`);
+    const apply = groups => groups.map(g => g.group_id !== groupId ? g : { ...g, segments: g.segments.filter(s => s.id !== segmentId) }).filter(g => g.segments.length > 0);
+    setNotesData(d => noteType === "general"
+      ? { ...d, general: apply(d?.general || []) }
+      : { ...d, quarterly: { ...d?.quarterly, [quarter]: apply(d?.quarterly?.[quarter] || []) } });
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    axios.get(`/schools/${schoolId}/files`).then(({ data }) => {
+      if (!cancelled) setFilesData(Array.isArray(data) ? data : []);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [schoolId]);
+
+  async function uploadSchoolFile(file, description) {
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("description", description || "");
+    const { data: created } = await axios.post(`/schools/${schoolId}/files`, formData);
+    setFilesData(prev => [created, ...(prev || [])]);
+  }
+
+  async function editSchoolFileDescription(fileId, description) {
+    await axios.patch(`/schools/${schoolId}/files/${fileId}`, { description });
+    setFilesData(prev => (prev || []).map(f => f.id === fileId ? { ...f, description } : f));
+  }
+
+  async function deleteSchoolFile(fileId) {
+    await axios.delete(`/schools/${schoolId}/files/${fileId}`);
+    setFilesData(prev => (prev || []).filter(f => f.id !== fileId));
+  }
+
+  async function downloadSchoolFile(fileId, fileName) {
+    const res = await axios.get(`/schools/${schoolId}/files/${fileId}/download`, { responseType: "blob" });
+    const url = URL.createObjectURL(res.data);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fileName || "file";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
   async function loadMeetings({ silent } = {}) {
     if (!silent) setMeetingsLoading(true);
     setMeetingsError("");
@@ -2639,26 +2759,39 @@ export default function SchoolPage() {
 
   useMeetingsPolling(() => loadMeetings({ silent: true }), activeTab === "meetings", [schoolId, academicYear]);
 
+  // Union of the 3 per-service-type advisor drafts — replaces the old single general
+  // "יועץ מלווה" list for the "גישה" convenience selector and its "linked to advisors" mode.
+  const draftLinkedAdvisorIds = [...new Set([
+    ...draftTypedAdvisorIds.gefen, ...draftTypedAdvisorIds.current, ...draftTypedAdvisorIds.district,
+  ])];
+
   // When "היועצים המלווים שנבחרו" mode is active, keep restrict_access_to in sync
   useEffect(() => {
     if (!accessLinkedToAdvisors) return;
-    setEditForm(p => ({ ...p, restrict_access_to: draftAdvisorIds.length > 0 ? draftAdvisorIds : null }));
-  }, [draftAdvisorIds, accessLinkedToAdvisors]);
+    setEditForm(p => ({ ...p, restrict_access_to: draftLinkedAdvisorIds.length > 0 ? draftLinkedAdvisorIds : null }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftTypedAdvisorIds, accessLinkedToAdvisors]);
 
   async function startNewMeeting() {
-    const defaultAdvisor = schoolAdvisors[0] || null;
+    const meetingServiceType = defaultMeetingServiceType(yearAdminData.service_type);
+    const defaultAdvisorIds = resolveDefaultAdvisorIds(meetingServiceType, {
+      gefenAdvisors: typedAdvisors.gefen, currentAdvisors: typedAdvisors.current, districtAdvisors: typedAdvisors.district,
+    });
+    const defaultAdvisorProfiles = [typedAdvisors.gefen, typedAdvisors.current, typedAdvisors.district]
+      .flat().filter(p => defaultAdvisorIds.includes(p.id))
+      .filter((p, i, arr) => arr.findIndex(x => x.id === p.id) === i);
     const payload = {
       status: "scheduled",
       meeting_type: "remote",
-      meeting_service_type: defaultMeetingServiceType(yearAdminData.service_type),
-      advisor_ids: defaultAdvisor ? [defaultAdvisor.id] : [],
+      meeting_service_type: meetingServiceType,
+      advisor_ids: defaultAdvisorIds,
       participants: [],
       reminder_enabled: false,
       academic_year: academicYear,
     };
     try {
       const res = await axios.post(`/schools/${schoolId}/meetings`, payload);
-      const newMeeting = { ...res.data, advisor_profiles: defaultAdvisor ? [defaultAdvisor] : [] };
+      const newMeeting = { ...res.data, advisor_profiles: defaultAdvisorProfiles };
       setMeetings(prev => [newMeeting, ...prev]);
       sessionCreatedMeetingIdsRef.current.add(newMeeting.id);
     } catch (err) {
@@ -2701,6 +2834,7 @@ export default function SchoolPage() {
       advisor_ids: draft.advisor_ids || [],
       participants: draft.participants || [],
       meeting_type: draft.meeting_type || null,
+      meeting_service_type: draft.meeting_service_type || null,
       actual_duration: draft.actual_duration || null,
       notes: draft.notes || null,
       reminder_enabled: draft.reminder_enabled || false,
@@ -2814,12 +2948,27 @@ export default function SchoolPage() {
     setAccessLinkedToAdvisors(false);
     if (role === "owner" || role === "manager") {
       axios.get(`/schools/${schoolId}/advisors`).then(res => {
-        const advisors = res.data || [];
-        setSchoolAdvisors(advisors);
-        const ids = advisors.map(a => a.id);
-        setDraftAdvisorIds(ids);
-        setOriginalAdvisorIds(ids);
+        setSchoolAdvisors(res.data || []);
       }).catch(() => {});
+      Promise.allSettled([
+        axios.get(`/schools/${schoolId}/advisors/gefen`),
+        axios.get(`/schools/${schoolId}/advisors/current`),
+        axios.get(`/schools/${schoolId}/advisors/district`),
+      ]).then(([g, c, d]) => {
+        const next = {
+          gefen: g.status === "fulfilled" ? (g.value.data || []) : [],
+          current: c.status === "fulfilled" ? (c.value.data || []) : [],
+          district: d.status === "fulfilled" ? (d.value.data || []) : [],
+        };
+        setTypedAdvisors(next);
+        const ids = {
+          gefen: next.gefen.map(a => a.id),
+          current: next.current.map(a => a.id),
+          district: next.district.map(a => a.id),
+        };
+        setDraftTypedAdvisorIds(ids);
+        setOriginalTypedAdvisorIds(ids);
+      });
       loadUsers();
     }
     setIsEditing(true);
@@ -2885,31 +3034,50 @@ export default function SchoolPage() {
       return false;
     }
     const managingAdvisors = role === "owner" || role === "manager";
-    if (managingAdvisors && draftAdvisorIds.length === 0) {
-      setSaveError("יש לבחור לפחות יועץ מלווה אחד.");
+    const requiredServiceTypes = activeServiceTypes(yearAdminData.service_type);
+    if (managingAdvisors && requiredServiceTypes.some(t => draftTypedAdvisorIds[t].length === 0)) {
+      setSaveError("יש לבחור לפחות יועץ מלווה אחד עבור כל סוג שירות פעיל (גפן/שוטף/מחוז).");
       return false;
     }
     setSaving(true);
     try {
-      // Apply only the net advisor changes (adds before removes, so the backend's
-      // "last advisor" guard never sees a false zero-advisor state) — this is what
-      // keeps notifications limited to real, saved changes instead of every click.
+      // Apply only the net advisor changes per type (adds before removes, so the backend's
+      // "last advisor" guard never sees a false zero-advisor state) — this is what keeps
+      // notifications limited to real, saved changes instead of every click. Each typed
+      // assign/unassign call also keeps the general advisor_schools access table in sync
+      // server-side, so there's no separate general diff to send from here anymore.
       if (managingAdvisors) {
-        const added = draftAdvisorIds.filter(id => !originalAdvisorIds.includes(id));
-        const removed = originalAdvisorIds.filter(id => !draftAdvisorIds.includes(id));
-        for (const id of added) {
-          await axios.post(`/schools/${schoolId}/advisors`, { advisor_id: id });
-        }
-        for (const id of removed) {
-          await axios.delete(`/schools/${schoolId}/advisors/${id}`);
+        for (const t of ["gefen", "current", "district"]) {
+          const addedT = draftTypedAdvisorIds[t].filter(id => !originalTypedAdvisorIds[t].includes(id));
+          const removedT = originalTypedAdvisorIds[t].filter(id => !draftTypedAdvisorIds[t].includes(id));
+          for (const id of addedT) {
+            await axios.post(`/schools/${schoolId}/advisors/${t}`, { advisor_id: id });
+          }
+          for (const id of removedT) {
+            await axios.delete(`/schools/${schoolId}/advisors/${t}/${id}`);
+          }
         }
       }
       await axios.put(`/schools/${schoolId}`, editForm);
-      const updatedAdvisors = managingAdvisors
-        ? draftAdvisorIds.map(id => users.find(u => u.id === id)).filter(Boolean)
-        : schoolAdvisors;
-      setSchoolAdvisors(updatedAdvisors);
-      setOriginalAdvisorIds(draftAdvisorIds);
+      let updatedAdvisors = schoolAdvisors;
+      if (managingAdvisors) {
+        const updatedTyped = {
+          gefen: draftTypedAdvisorIds.gefen.map(id => users.find(u => u.id === id)).filter(Boolean),
+          current: draftTypedAdvisorIds.current.map(id => users.find(u => u.id === id)).filter(Boolean),
+          district: draftTypedAdvisorIds.district.map(id => users.find(u => u.id === id)).filter(Boolean),
+        };
+        setTypedAdvisors(updatedTyped);
+        setOriginalTypedAdvisorIds(draftTypedAdvisorIds);
+        // Refresh the general advisor list from the server — it was just auto-synced by the
+        // typed assign/unassign calls above (upsert on assign, cascade-delete on unassign).
+        try {
+          const res = await axios.get(`/schools/${schoolId}/advisors`);
+          updatedAdvisors = res.data || [];
+          setSchoolAdvisors(updatedAdvisors);
+        } catch {
+          // non-fatal — schoolAdvisors just stays at its previous value until next reload
+        }
+      }
       setSchool(prev => ({
         ...prev,
         ...editForm,
@@ -3008,7 +3176,6 @@ export default function SchoolPage() {
   const symbolError = validateSymbol(editForm.symbol);
   const schoolPhoneError = validateSchoolPhone(editForm.school_phone);
 
-  const displayAdvisors = (school?.advisor_schools || []).map(as => as.profiles).filter(Boolean);
   const accessIsAll = school?.restrict_access_to === null || school?.restrict_access_to === undefined;
 
   const colGridStyle = {
@@ -3126,7 +3293,7 @@ export default function SchoolPage() {
           onDiscard={() => {
             setIsEditing(false);
             setOriginalForm(null);
-            setDraftAdvisorIds(originalAdvisorIds);
+            setDraftTypedAdvisorIds(originalTypedAdvisorIds);
             blocker.proceed();
           }}
           onCancel={() => blocker.reset()}
@@ -3181,7 +3348,7 @@ export default function SchoolPage() {
       )}
 
       <div style={{ marginRight: "var(--sidebar-w, 240px)", transition: "margin-right 0.25s cubic-bezier(0.4,0,0.2,1)" }}>
-        <div className={`mx-auto px-6 py-10 ${activeTab === "checks" ? "max-w-6xl" : "max-w-4xl"}`}>
+        <div className={`mx-auto px-6 py-10 ${["checks", "meetings", "info", "closure", "control_letter"].includes(activeTab) ? "max-w-[100rem]" : "max-w-4xl"}`}>
 
           {/* Page header */}
           <div className="mb-5 flex items-center justify-between">
@@ -3205,6 +3372,8 @@ export default function SchoolPage() {
               { id: "meetings", label: "פגישות" },
               { id: "goals",    label: "יעדים" },
               { id: "checks",   label: "בדיקות" },
+              { id: "closure",  label: "סגירת שנה" },
+              { id: "control_letter", label: "מכתב בקרה" },
             ].map(t => (
               <button
                 key={t.id}
@@ -3416,7 +3585,7 @@ export default function SchoolPage() {
                               </td>
                               <td className="py-1.5 px-2">
                                 <label htmlFor={`edit-ce-${row.emailField}`} className="sr-only">{row.label} מייל</label>
-                                <input id={`edit-ce-${row.emailField}`} className={editFieldCls(!!(editForm[row.emailField] && emailErr), !editForm[row.emailField])}
+                                <input id={`edit-ce-${row.emailField}`} className={`${editFieldCls(!!(editForm[row.emailField] && emailErr), !editForm[row.emailField])} text-center`}
                                   value={editForm[row.emailField]}
                                   onChange={e => setEditForm(p => ({ ...p, [row.emailField]: e.target.value }))}
                                   dir="ltr" type="email" autoComplete="off" />
@@ -3461,7 +3630,7 @@ export default function SchoolPage() {
                             <td className="py-1.5 px-2">
                               <div className="flex items-center gap-1">
                                 <label htmlFor={`edit-extra-email-${i}`} className="sr-only">מייל</label>
-                                <input id={`edit-extra-email-${i}`} className={editFieldCls(false)} value={ec.email}
+                                <input id={`edit-extra-email-${i}`} className={`${editFieldCls(false)} text-center`} value={ec.email}
                                   onChange={e => updateExtra(i, "email", e.target.value)}
                                   dir="ltr" type="email" autoComplete="off" />
                                 <button type="button" onClick={() => removeExtra(i)}
@@ -3551,7 +3720,7 @@ export default function SchoolPage() {
                             </div>
                           </>
                         )}
-                        <label htmlFor="order-amount-gefen" className={editLabelCls}>גובה הזמנה:</label>
+                        <label htmlFor="order-amount-gefen" className={editLabelCls}>מחיר כולל מע"מ:</label>
                         <div className="py-0.5">
                           <input
                             id="order-amount-gefen"
@@ -3581,19 +3750,6 @@ export default function SchoolPage() {
                       <div style={editColGridStyle}>
                         {(role === "owner" || role === "manager") && (
                           <>
-                            <span className={editLabelCls}>יועץ מלווה:</span>
-                            <div className="py-0.5">
-                              <AdvisorSearch compact schoolId={schoolId} selectedIds={draftAdvisorIds} users={users}
-                                loadingUsers={loadingUsers} onChange={setDraftAdvisorIds} onRetry={loadUsers}
-                                invalid={triedSave && draftAdvisorIds.length === 0} />
-                              {triedSave && draftAdvisorIds.length === 0 && (
-                                <span className="text-xs text-red-500 mt-1 block" role="alert">יש לבחור לפחות יועץ אחד</span>
-                              )}
-                            </div>
-                          </>
-                        )}
-                        {(role === "owner" || role === "manager") && (
-                          <>
                             <span className={`${editLabelCls} inline-flex items-center gap-1`}>
                               <QuestionTooltip text="בחר למי תהיה גישה לנתוני בית הספר." />
                               גישה:
@@ -3603,12 +3759,59 @@ export default function SchoolPage() {
                                 loadingUsers={loadingUsers}
                                 onChange={val => { setAccessLinkedToAdvisors(false); setEditForm(p => ({ ...p, restrict_access_to: val })); }}
                                 onSelectAdvisors={() => setAccessLinkedToAdvisors(true)}
-                                schoolAdvisors={draftAdvisorIds.map(id => users.find(u => u.id === id)).filter(Boolean)} />
+                                schoolAdvisors={draftLinkedAdvisorIds.map(id => users.find(u => u.id === id)).filter(Boolean)} />
                             </div>
                           </>
                         )}
                       </div>
                     </div>
+
+                    {/* Per-service-type sub-sections: 3 columns side by side (גפן/שוטף/מחוז),
+                        each with יועץ מלווה / הקצאת פגישות / זמן לפגישה stacked below its
+                        header — replaces the old single general "יועץ מלווה" field above. */}
+                    {(role === "owner" || role === "manager") && (
+                      <div className="mt-5 pt-4 border-t border-slate-100 grid grid-cols-3">
+                        {TYPED_SERVICE_TYPES.map(({ key, label }, idx) => {
+                          const isRequired = activeServiceTypes(yearAdminData.service_type).includes(key);
+                          const invalid = triedSave && isRequired && draftTypedAdvisorIds[key].length === 0;
+                          return (
+                            <div key={key} className={`px-4 first:pr-0 last:pl-0 ${idx < TYPED_SERVICE_TYPES.length - 1 ? "border-l border-slate-100" : ""}`}>
+                              <p className="text-sm font-semibold text-slate-700 text-center mb-3">{label}{isRequired && <span className="text-red-500"> *</span>}</p>
+                              <div style={editColGridStyle}>
+                                <span className={editLabelCls}>יועץ מלווה:</span>
+                                <div className="py-0.5">
+                                  <AdvisorSearch compact schoolId={schoolId} selectedIds={draftTypedAdvisorIds[key]} users={users}
+                                    loadingUsers={loadingUsers}
+                                    onChange={ids => setDraftTypedAdvisorIds(p => ({ ...p, [key]: ids }))}
+                                    onRetry={loadUsers} invalid={invalid} />
+                                  {invalid && (
+                                    <span className="text-xs text-red-500 mt-1 block" role="alert">יש לבחור לפחות יועץ אחד</span>
+                                  )}
+                                </div>
+
+                                <label htmlFor={`meeting-allocation-${key}`} className={editLabelCls}>הקצאת פגישות:</label>
+                                <div className="py-0.5">
+                                  <input id={`meeting-allocation-${key}`} type="number" min="0"
+                                    className={editFieldCls(false, false)}
+                                    defaultValue={yearAdminData[`meeting_allocation_${key}`] ?? ""}
+                                    onBlur={e => {
+                                      const v = e.target.value === "" ? null : Number(e.target.value);
+                                      if (v !== (yearAdminData[`meeting_allocation_${key}`] ?? null)) saveYearAdminField(`meeting_allocation_${key}`, v);
+                                    }} />
+                                </div>
+
+                                <span className={editLabelCls}>זמן לפגישה:</span>
+                                <div className="py-0.5">
+                                  <HourMinuteInput idPrefix={`meeting-duration-${key}`} label={`זמן לפגישה [${label}]`}
+                                    minutes={yearAdminData[`meeting_duration_${key}`] ?? null}
+                                    onChange={v => saveYearAdminField(`meeting_duration_${key}`, v)} />
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>}
 
                   {/* Bottom actions */}
@@ -3616,7 +3819,7 @@ export default function SchoolPage() {
                     <button onClick={isRequestMode ? submitFullRequest : saveEdit} disabled={saving} className="btn-green-light text-sm px-5 py-2">
                       {saving ? (isRequestMode ? "שולח..." : "שומר...") : (isRequestMode ? "הגש בקשה" : "שמור שינויים")}
                     </button>
-                    <button onClick={() => { setIsEditing(false); setIsRequestMode(false); setOriginalForm(null); setSaveError(""); setAccessLinkedToAdvisors(false); setDraftAdvisorIds(originalAdvisorIds); }} disabled={saving} className="btn-ghost text-sm px-5 py-2">ביטול</button>
+                    <button onClick={() => { setIsEditing(false); setIsRequestMode(false); setOriginalForm(null); setSaveError(""); setAccessLinkedToAdvisors(false); setDraftTypedAdvisorIds(originalTypedAdvisorIds); }} disabled={saving} className="btn-ghost text-sm px-5 py-2">ביטול</button>
                   </div>
                 </div>
 
@@ -3628,7 +3831,7 @@ export default function SchoolPage() {
                     <p className="text-sm font-semibold text-slate-700">פרטי מוסד</p>
                     <div className="flex items-center gap-2 flex-wrap">
                       {(role === "owner" || role === "manager" || (role === "advisor" && canEditDirectly)) && (
-                        <button onClick={() => startEdit(false)} className="btn-ghost text-sm px-4 py-2">✏️ ערוך פרטים</button>
+                        <button onClick={() => startEdit(false)} className="btn-ghost text-sm px-4 py-2 min-w-[120px] inline-flex items-center justify-center gap-1.5">✏️ ערוך פרטים</button>
                       )}
                       {role === "advisor" && !canEditDirectly && canRequestUpdate && (
                         <button onClick={() => startEdit(true)} className="btn-ghost text-sm px-4 py-2">📝 בקש עדכון פרטים</button>
@@ -3713,7 +3916,7 @@ export default function SchoolPage() {
                               </span>
                             </td>
                             <td className="py-2.5 px-2 overflow-hidden">
-                              <span className={`text-sm whitespace-nowrap overflow-hidden text-ellipsis block ${school?.[row.emailField] ? "font-medium text-slate-800" : "text-slate-400 font-normal"}`}
+                              <span className={`text-sm text-center whitespace-nowrap overflow-hidden text-ellipsis block ${school?.[row.emailField] ? "font-medium text-slate-800" : "text-slate-400 font-normal"}`}
                                 dir={school?.[row.emailField] ? "ltr" : undefined} style={contactValStyle(school?.[row.emailField])}
                                 title={school?.[row.emailField] || undefined}>
                                 {school?.[row.emailField] || "—"}
@@ -3757,7 +3960,7 @@ export default function SchoolPage() {
                               </span>
                             </td>
                             <td className="py-2.5 px-2 overflow-hidden">
-                              <span className={`text-sm whitespace-nowrap overflow-hidden text-ellipsis block ${ec.email ? "font-medium text-slate-800" : "text-slate-400 font-normal"}`}
+                              <span className={`text-sm text-center whitespace-nowrap overflow-hidden text-ellipsis block ${ec.email ? "font-medium text-slate-800" : "text-slate-400 font-normal"}`}
                                 dir={ec.email ? "ltr" : undefined} style={contactValStyle(ec.email)}
                                 title={ec.email || undefined}>
                                 {ec.email || "—"}
@@ -3816,7 +4019,7 @@ export default function SchoolPage() {
                             </span>
                           ))}
                         </div>
-                        <span className={labelCls}>גובה הזמנה:</span>
+                        <span className={labelCls}>מחיר כולל מע"מ:</span>
                         <span className={valCls(yearAdminData.order_amount_gefen)} style={valStyle(yearAdminData.order_amount_gefen)}
                           title={yearAdminData.order_amount_gefen_updated_by_name
                             ? `${yearAdminData.order_amount_gefen_updated_by_name} - ${formatDate(yearAdminData.order_amount_gefen_updated_at)}`
@@ -3827,17 +4030,6 @@ export default function SchoolPage() {
 
                       {/* Left column */}
                       <div style={colGridStyle}>
-                        <span className={labelCls}>יועץ מלווה:</span>
-                        <div className="py-1.5 flex flex-wrap gap-1">
-                          {displayAdvisors.length === 0 ? (
-                            <span className={valCls()} style={valStyle()}>—</span>
-                          ) : displayAdvisors.map(p => (
-                            <span key={p.id} className="inline-flex items-center text-xs font-medium px-2.5 py-1 rounded-md bg-slate-100 text-slate-700 border border-slate-200">
-                              {p.full_name || p.email}
-                            </span>
-                          ))}
-                        </div>
-
                         <span className={`${labelCls} inline-flex items-center gap-1`}>
                           <QuestionTooltip text="בחר למי תהיה גישה לנתוני בית הספר." />
                           גישה:
@@ -3860,6 +4052,93 @@ export default function SchoolPage() {
                         </div>
                       </div>
                     </div>
+
+                    {/* Per-service-type read-only columns: 3 columns side by side (גפן/שוטף/
+                        מחוז), each with יועץ מלווה / הקצאת פגישות / זמן לפגישה stacked below. */}
+                    <div className="mt-5 pt-4 border-t border-slate-100 grid grid-cols-3">
+                      {TYPED_SERVICE_TYPES.map(({ key, label }, idx) => (
+                        <div key={key} className={`px-4 first:pr-0 last:pl-0 ${idx < TYPED_SERVICE_TYPES.length - 1 ? "border-l border-slate-100" : ""}`}>
+                          <p className="text-sm font-semibold text-slate-700 text-center mb-3">{label}</p>
+                          <div style={colGridStyle}>
+                            <span className={labelCls}>יועץ מלווה:</span>
+                            <div className="py-1.5 flex flex-wrap gap-1">
+                              {(typedAdvisors[key] || []).length === 0 ? (
+                                <span className={valCls()} style={valStyle()}>—</span>
+                              ) : typedAdvisors[key].map(p => (
+                                <span key={p.id} className="inline-flex items-center text-xs font-medium px-2.5 py-1 rounded-md bg-slate-100 text-slate-700 border border-slate-200">
+                                  {p.full_name || p.email}
+                                </span>
+                              ))}
+                            </div>
+
+                            <span className={labelCls}>הקצאת פגישות:</span>
+                            <span className={valCls(yearAdminData[`meeting_allocation_${key}`])} style={valStyle(yearAdminData[`meeting_allocation_${key}`])}>
+                              {yearAdminData[`meeting_allocation_${key}`] ?? "—"}
+                            </span>
+
+                            <span className={labelCls}>זמן לפגישה:</span>
+                            <span className={valCls(formatDurationHM(yearAdminData[`meeting_duration_${key}`]))} style={valStyle(formatDurationHM(yearAdminData[`meeting_duration_${key}`]))}>
+                              {formatDurationHM(yearAdminData[`meeting_duration_${key}`]) || "—"}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* הערות — visible to everyone (including advisors) */}
+                    <div className="mt-5 pt-4 border-t border-slate-100">
+                      {notesData && (
+                        <NotesThread
+                          title="הערות"
+                          groups={notesData.general || []}
+                          currentUser={currentUser}
+                          onCreate={content => createSchoolNote("general", null, content)}
+                          onEdit={(segmentId, groupId, content) => editSchoolNote("general", null, segmentId, groupId, content)}
+                          onDelete={(groupId, segmentId) => deleteSchoolNote("general", null, groupId, segmentId)}
+                        />
+                      )}
+                    </div>
+
+                    {/* קבצים — visible to everyone (including advisors) */}
+                    <div className="mt-5 pt-4 border-t border-slate-100">
+                      {filesData && (
+                        <FilesThread
+                          title="קבצים"
+                          files={filesData}
+                          currentUser={currentUser}
+                          onUpload={uploadSchoolFile}
+                          onEditDescription={editSchoolFileDescription}
+                          onDelete={deleteSchoolFile}
+                          onDownload={downloadSchoolFile}
+                        />
+                      )}
+                    </div>
+
+                    {/* הערות רבעוניות — manager/owner only */}
+                    {(role === "owner" || role === "manager") && (
+                      <div className="mt-5 pt-4 border-t border-slate-100">
+                        <p className="text-sm font-semibold text-slate-700 mb-3 text-center">הערות רבעוניות</p>
+                        {notesData && (
+                          <div className="overflow-x-auto">
+                            <div className="grid grid-cols-4 gap-3" style={{ minWidth: "980px" }}>
+                              {[1, 2, 3, 4].map(q => (
+                                <div key={q} className="border border-slate-200 rounded-xl p-2 bg-white/60">
+                                  <NotesThread
+                                    compact
+                                    title={`רבעון ${q}`}
+                                    groups={notesData.quarterly?.[q] || []}
+                                    currentUser={currentUser}
+                                    onCreate={content => createSchoolNote("quarterly", q, content)}
+                                    onEdit={(segmentId, groupId, content) => editSchoolNote("quarterly", q, segmentId, groupId, content)}
+                                    onDelete={(groupId, segmentId) => deleteSchoolNote("quarterly", q, groupId, segmentId)}
+                                  />
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
@@ -4017,6 +4296,7 @@ export default function SchoolPage() {
                   onSendStatusReminder={sendStatusReminderFromSchool}
                   showCalendarColumn={showCalendarColumn}
                   onOpenSummary={setSummaryModalFor}
+                  typedAdvisorsFor={() => typedAdvisors}
                 />
                 </>
               )}
@@ -4049,6 +4329,18 @@ export default function SchoolPage() {
               setActiveSubTab={setActiveSubTab}
               academicYear={academicYear}
             />
+          )}
+
+          {activeTab === "closure" && (
+            <SchoolYearClosureTab
+              yearAdminData={yearAdminData}
+              saveYearAdminField={saveYearAdminField}
+              academicYear={academicYear}
+            />
+          )}
+
+          {activeTab === "control_letter" && (
+            <ControlLetterTab schoolId={schoolId} schoolStage={school?.stage} />
           )}
         </div>
       </div>

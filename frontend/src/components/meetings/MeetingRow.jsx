@@ -10,7 +10,22 @@ import { MeetingServiceTypeSelect } from "./MeetingServiceTypeSelect";
 import { NoParticipantsModal } from "./NoParticipantsModal";
 import { ParticipantsSelector } from "./ParticipantsSelector";
 import { TimeInput, normalizeTimeValue } from "./TimeInput";
-import { MEETING_STATUS_OPTIONS, STATUS_MAP, formatMeetingDate } from "./constants";
+import { AdvisorReassignModal } from "./AdvisorReassignModal";
+import { MEETING_STATUS_OPTIONS, MEETING_SERVICE_TYPE_OPTIONS, STATUS_MAP, formatMeetingDate } from "./constants";
+
+// Resolves the deduplicated list of advisor profiles that "belong" to a given meeting service
+// type, from the school's three per-service-type advisor lists (gefen_current = union of both).
+function typedAdvisorsForServiceType(serviceType, typedAdvisors) {
+  if (!typedAdvisors) return [];
+  let list;
+  if (serviceType === "gefen") list = typedAdvisors.gefen || [];
+  else if (serviceType === "current") list = typedAdvisors.current || [];
+  else if (serviceType === "district") list = typedAdvisors.district || [];
+  else if (serviceType === "gefen_current") list = [...(typedAdvisors.gefen || []), ...(typedAdvisors.current || [])];
+  else list = [];
+  const seen = new Set();
+  return list.filter(p => (seen.has(p.id) ? false : (seen.add(p.id), true)));
+}
 import { computeFreeWindows, computeSegments, fetchDayBusy, findNextEvent, invalidateFreebusyCache, toMinutes } from "./dayScheduleUtils";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
 
@@ -160,7 +175,7 @@ export function MeetingRow({
   contacts, onRequestAccess, onReminderOn,
   showSchoolColumn, schoolLabel, onOpenSchoolPicker,
   selectable, selected, onToggleSelect, onSendStatusReminder, hideAdvisorColumn,
-  showCalendarColumn, onOpenSummary,
+  showCalendarColumn, onOpenSummary, typedAdvisors,
 }) {
   const navigate = useNavigate();
   const [draft, setDraft] = useState({ ...meeting });
@@ -174,6 +189,7 @@ export function MeetingRow({
   const [busyLoading, setBusyLoading] = useState(true);
   const [busyFailed, setBusyFailed] = useState(false);
   const [conflictModal, setConflictModal] = useState(null);
+  const [advisorReassignPrompt, setAdvisorReassignPrompt] = useState(null);
   const [contactPickerOptions, setContactPickerOptions] = useState(null);
   const [dateHovered, setDateHovered] = useState(false);
   const [startHovered, setStartHovered] = useState(false);
@@ -185,6 +201,12 @@ export function MeetingRow({
   const actionsMenuRef = useRef(null);
   // Track what was last sent so blur doesn't double-save after an immediate save
   const lastSentRef = useRef(null);
+  // Serializes saveDraft calls for this row so their PUT requests always reach the backend
+  // in the order they were triggered. Without this, two saves fired close together (e.g. the
+  // "סוג" change followed almost immediately by the advisor-reassign modal's choice) can
+  // resolve out of order over the network — an earlier request completing *after* a later one
+  // silently overwrites the newer, correct data with stale values.
+  const saveQueueRef = useRef(Promise.resolve());
 
   useEffect(() => { setDraft({ ...meeting }); lastSentRef.current = null; }, [meeting.id]);
 
@@ -282,27 +304,50 @@ export function MeetingRow({
     setDraft(p => ({ ...p, [field]: val }));
   }
 
-  async function saveDraft(draftToSave) {
+  function saveDraft(draftToSave) {
+    // Chain onto the queue so this save's PUT never races an earlier one still in flight —
+    // see saveQueueRef above. `.catch(() => {})` on the queue itself (not on what we return)
+    // keeps one failed save from permanently wedging the chain for subsequent saves.
+    const run = () => performSave(draftToSave);
+    const result = saveQueueRef.current.then(run, run);
+    saveQueueRef.current = result.catch(() => {});
+    return result;
+  }
+
+  async function performSave(draftToSave) {
     const advisorId = draftToSave.advisor_ids?.[0];
-    // Re-fetch fresh busy ranges right before checking — the reactive `advisorBusy`
-    // state is populated asynchronously and can lag behind rapid edits (e.g. setting
-    // date → start → end back-to-back), which would otherwise show a stale (non-red)
-    // warning state for a moment. A live check right before saving avoids that.
-    // Fetched locally for an accurate conflict check right at save time — deliberately
-    // NOT written into the shared `advisorBusy` display state. That state already has its
-    // own effect (with proper stale-response guarding via the `cancelled` flag) that
-    // refetches once the save completes and syncs; if this snapshot — taken *before* the
-    // save/sync even started — were also allowed to call setAdvisorBusy, whichever of the
-    // two resolves last would win, and this earlier one sometimes did, intermittently
-    // clobbering the correct post-sync picture with a stale pre-save one.
-    let liveBusy = advisorBusy;
-    if (advisorId && draftToSave.meeting_date && draftToSave.start_time && draftToSave.end_time) {
+    // Only worth live-checking when this save is actually introducing a *new* time —
+    // if start/end/date match what's already saved, no new slot is being claimed, so
+    // there's nothing new to conflict with (the backend's persisted calendar_sync.conflict,
+    // shown via persistedConflict above, already covers that case). This also sidesteps a
+    // real bug: excluding "this meeting's own event" from the live-fetched busy list relies
+    // on `meeting.calendar_sync[advisorId].external_event_id`, which can be stale relative
+    // to the *current* save (e.g. a save firing right after this row's own event was just
+    // created, before the fresh `meeting` prop with its real calendar_sync has propagated
+    // back down) — a stale/undefined id fails to exclude the meeting's own real event from
+    // its own live-fetched busy list, so it gets flagged as "conflicting with itself".
+    const timeUnchanged = draftToSave.start_time === meeting.start_time
+      && draftToSave.end_time === meeting.end_time
+      && draftToSave.meeting_date === meeting.meeting_date;
+    let conflict = { startConflict: false, endConflict: false, conflictingRange: null };
+    if (!timeUnchanged && advisorId && draftToSave.meeting_date && draftToSave.start_time && draftToSave.end_time) {
+      // Re-fetch fresh busy ranges right before checking — the reactive `advisorBusy`
+      // state is populated asynchronously and can lag behind rapid edits (e.g. setting
+      // date → start → end back-to-back), which would otherwise show a stale (non-red)
+      // warning state for a moment. A live check right before saving avoids that.
+      // Fetched locally for an accurate conflict check right at save time — deliberately
+      // NOT written into the shared `advisorBusy` display state. That state already has its
+      // own effect (with proper stale-response guarding via the `cancelled` flag) that
+      // refetches once the save completes and syncs; if this snapshot — taken *before* the
+      // save/sync even started — were also allowed to call setAdvisorBusy, whichever of the
+      // two resolves last would win, and this earlier one sometimes did, intermittently
+      // clobbering the correct post-sync picture with a stale pre-save one.
       // null means the live check failed — fall back to the last known-good state
       // rather than treating a failed check as "nothing booked".
-      liveBusy = await fetchDayBusy(advisorId, draftToSave.meeting_date) ?? advisorBusy;
+      const liveBusy = await fetchDayBusy(advisorId, draftToSave.meeting_date) ?? advisorBusy;
+      const ownEventIdForSave = meeting.calendar_sync?.[advisorId]?.external_event_id;
+      conflict = computeTimeConflict(draftToSave.start_time, draftToSave.end_time, liveBusy.filter(b => b.id !== ownEventIdForSave));
     }
-    const ownEventIdForSave = meeting.calendar_sync?.[advisorId]?.external_event_id;
-    const conflict = computeTimeConflict(draftToSave.start_time, draftToSave.end_time, liveBusy.filter(b => b.id !== ownEventIdForSave));
     if (conflict.startConflict || conflict.endConflict) {
       // Warn, but still let the save go through — the advisor may genuinely need two
       // overlapping commitments (e.g. a "day off" alongside a meeting); we just make
@@ -360,6 +405,21 @@ export function MeetingRow({
           existingEvent={conflictModal.existingEvent}
           newEvent={conflictModal.newEvent}
           onClose={() => setConflictModal(null)}
+        />
+      )}
+      {advisorReassignPrompt && (
+        <AdvisorReassignModal
+          oldTypeLabel={MEETING_SERVICE_TYPE_OPTIONS.find(o => o.value === advisorReassignPrompt.oldType)?.label || "—"}
+          newTypeLabel={MEETING_SERVICE_TYPE_OPTIONS.find(o => o.value === advisorReassignPrompt.newType)?.label || "—"}
+          existingAdvisors={advisorReassignPrompt.existing}
+          newAdvisors={advisorReassignPrompt.typed}
+          onCancel={() => setAdvisorReassignPrompt(null)}
+          onChoose={profiles => {
+            const nd = { ...advisorReassignPrompt.base, advisor_ids: profiles.map(p => p.id), advisor_profiles: profiles };
+            setDraft(nd);
+            saveDraft(nd);
+            setAdvisorReassignPrompt(null);
+          }}
         />
       )}
       {contactPickerOptions && (
@@ -558,7 +618,30 @@ export function MeetingRow({
           <MeetingServiceTypeSelect
             value={draft.meeting_service_type || ""}
             hasError={!draft.meeting_service_type}
-            onChange={v => { const nd = { ...draft, meeting_service_type: v }; setDraft(nd); saveDraft(nd); }} />
+            onChange={v => {
+              const oldType = draft.meeting_service_type;
+              const nd = { ...draft, meeting_service_type: v };
+              const existing = draft.advisor_profiles || [];
+              const typed = typedAdvisorsForServiceType(v, typedAdvisors);
+              if (existing.length === 0) {
+                // Advisor field empty — fill it in automatically, no need to ask.
+                nd.advisor_ids = typed.map(p => p.id);
+                nd.advisor_profiles = typed;
+                setDraft(nd);
+                saveDraft(nd);
+                return;
+              }
+              // Must be the *same set*, not just "typed contained in existing" — a shrinking
+              // transition (e.g. גפן+שוטף → גפן) has typed ⊆ existing but existing also holds
+              // an extra, no-longer-relevant advisor (the שוטף one), which a subset check alone
+              // would miss and silently leave in place.
+              const sameSet = existing.length === typed.length && typed.every(z => existing.some(w => w.id === z.id));
+              setDraft(nd);
+              saveDraft(nd);
+              if (typed.length > 0 && !sameSet) {
+                setAdvisorReassignPrompt({ oldType, newType: v, existing, typed, base: nd });
+              }
+            }} />
         </td>
         {/* הערות */}
         <td className="py-2.5 px-2 text-center">

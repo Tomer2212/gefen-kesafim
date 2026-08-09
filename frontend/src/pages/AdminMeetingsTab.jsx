@@ -8,7 +8,7 @@ import { MeetingSummaryModal } from "../components/meetings/MeetingSummaryModal"
 import { NotesModal } from "../components/meetings/NotesModal";
 import { SchoolPickerModal, SchoolPickerPopover, schoolLabel } from "../components/meetings/SchoolPickerCell";
 import { DirectCoordinationModal } from "../components/meetings/DirectCoordinationModal";
-import { MEETING_STATUS_OPTIONS, MEETING_TYPE_OPTIONS, MEETING_SERVICE_TYPE_OPTIONS, STATUS_MAP, formatMeetingDate, defaultMeetingServiceType } from "../components/meetings/constants";
+import { MEETING_STATUS_OPTIONS, MEETING_TYPE_OPTIONS, MEETING_SERVICE_TYPE_OPTIONS, STATUS_MAP, formatMeetingDate, defaultMeetingServiceType, resolveDefaultAdvisorIds } from "../components/meetings/constants";
 import { AcademicYearSelector } from "../components/AcademicYearSelector";
 import { DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
 import { getMissingCriticalFields, isMeetingIncomplete } from "../components/meetings/meetingCompleteness";
@@ -262,6 +262,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
       advisor_ids: draft.advisor_ids || [],
       participants: draft.participants || [],
       meeting_type: draft.meeting_type || null,
+      meeting_service_type: draft.meeting_service_type || null,
       actual_duration: draft.actual_duration || null,
       notes: draft.notes || null,
       reminder_enabled: draft.reminder_enabled || false,
@@ -289,16 +290,9 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
   }
 
   async function createMeetingForSchool(school) {
-    // Same default-advisor convenience already used on the school card (SchoolPage.jsx):
-    // pre-fill the first linked advisor, still editable — just saves a click in the
-    // common case of one advisor per school.
-    let defaultAdvisor = null;
-    try {
-      const advisorsRes = await axios.get(`/schools/${school.id}/advisors`);
-      defaultAdvisor = (advisorsRes.data || [])[0] || null;
-    } catch {
-      // non-fatal — meeting creation proceeds without a pre-filled advisor
-    }
+    // Default advisor(s) now come from the school's per-service-type "יועץ מלווה" lists
+    // (same convenience already used on the school card, SchoolPage.jsx) — resolved via the
+    // meeting's default service type, which may pull in more than one advisor (gefen_current).
     let schoolServiceType = null;
     try {
       const yad = await axios.get(`/schools/${school.id}/year-admin-data`, { params: { academic_year: academicYear } });
@@ -306,17 +300,25 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
     } catch {
       // non-fatal — meeting creation proceeds without a pre-filled service type
     }
+    const meetingServiceType = defaultMeetingServiceType(schoolServiceType);
+    const typed = typedAdvisorsFor({ school_id: school.id });
+    const defaultAdvisorIds = resolveDefaultAdvisorIds(meetingServiceType, {
+      gefenAdvisors: typed.gefen, currentAdvisors: typed.current, districtAdvisors: typed.district,
+    });
+    const defaultAdvisorProfiles = [typed.gefen, typed.current, typed.district]
+      .flat().filter(p => defaultAdvisorIds.includes(p.id))
+      .filter((p, i, arr) => arr.findIndex(x => x.id === p.id) === i);
     const payload = {
       status: "scheduled", meeting_type: "remote",
-      meeting_service_type: defaultMeetingServiceType(schoolServiceType),
-      advisor_ids: defaultAdvisor ? [defaultAdvisor.id] : [],
+      meeting_service_type: meetingServiceType,
+      advisor_ids: defaultAdvisorIds,
       participants: [], reminder_enabled: false, academic_year: academicYear,
     };
     try {
       const res = await axios.post(`/schools/${school.id}/meetings`, payload);
       const newMeeting = {
         ...res.data,
-        advisor_profiles: defaultAdvisor ? [defaultAdvisor] : [],
+        advisor_profiles: defaultAdvisorProfiles,
         school_name: school.name, school_symbol: school.symbol, school_city: school.city,
       };
       setMeetings(prev => [newMeeting, ...prev]);
@@ -325,6 +327,17 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
       console.error("Failed to create meeting:", err);
     }
     setSchoolPickerFor(null);
+  }
+
+  // Resolves the { gefen, current, district } advisor-profile lists for the school a given
+  // meeting belongs to, from the already-loaded `schools` list (list_schools attaches these).
+  function typedAdvisorsFor(meeting) {
+    const school = schools.find(s => s.id === meeting.school_id);
+    return {
+      gefen: school?.advisors_gefen || [],
+      current: school?.advisors_current || [],
+      district: school?.advisors_district || [],
+    };
   }
 
   async function reassignSchool(meetingId, school) {
@@ -800,6 +813,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
             onSendStatusReminder={sendStatusReminder}
             showCalendarColumn={showCalendarColumn}
             onOpenSummary={setSummaryModalFor}
+            typedAdvisorsFor={typedAdvisorsFor}
           />
           {currentSchoolPickerMeeting && (
             <SchoolPickerPopover

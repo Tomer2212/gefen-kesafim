@@ -47,7 +47,7 @@ ADMIN_ALL_COLUMN_KEYS = ADMIN_TEXT_COLUMNS + ADMIN_NUMBER_COLUMNS + list(ADMIN_S
 ADMIN_COLUMN_LABELS = {
     "symbol": "סמל מוסד", "city": "עיר", "authority": "בעלות", "contract_file": "קובץ חוזה",
     "meetings_completed": 'סה"כ פגישות שבוצעו', "meetings_hours": 'סה"כ שעות שבוצעו',
-    "requested_price": "מחיר מבוקש", "order_amount_gefen": "גובה הזמנה",
+    "requested_price": "מחיר מבוקש", "order_amount_gefen": 'מחיר כולל מע"מ',
     "hours_ordered": "מספר שעות שהוזמנו", "rate": "תעריף", "payment_received": "תשלום שהתקבל",
     "payment_requests_sent": "דרישות תשלום שנשלחו", "receipts_sent": "אסמכתאות שנשלחו",
     "stage": "שלב מוסד", "service_type": "סוג שירות", "order_method": "אמצעי הזמנה",

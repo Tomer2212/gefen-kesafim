@@ -8,6 +8,7 @@ import Sidebar from "../components/Sidebar";
 import OnboardingToast from "../components/OnboardingToast";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { ACADEMIC_YEARS, DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
+import { CONTROL_LETTER_STATUS_MAP, CONTROL_LETTER_STATUS_OPTIONS } from "../components/controlLetter/constants";
 
 // Fallback list so "סוג תקציב" has real options even before check_metrics has any rows
 // for the org (brand-new table, only populated going forward by new checks) — matches
@@ -69,14 +70,16 @@ const FINANCE_SOFTWARE_LABEL = {
 const EMPTY_FILTERS = {
   names: [], symbols: [], stages: [], divisions: [],
   cities: [], authorities: [], financeSoftwares: [], addresses: [],
-  principals: [], secretaries: [], financeContacts: [], advisors: [],
+  principals: [], secretaries: [], financeContacts: [],
+  advisorGefen: [], advisorCurrent: [], advisorDistrict: [],
   accessAdvisors: [],
 };
 
 const EMPTY_QUERIES = {
   names: "", symbols: "", stages: "", divisions: "",
   cities: "", authorities: "", financeSoftwares: "", addresses: "",
-  principals: "", secretaries: "", financeContacts: "", advisors: "",
+  principals: "", secretaries: "", financeContacts: "",
+  advisorGefen: "", advisorCurrent: "", advisorDistrict: "",
   accessAdvisors: "",
 };
 
@@ -96,7 +99,9 @@ const FILTER_CONFIG = [
   { key: "principals",      label: "מנהל/ת",         openOnFocus: false, getOptions: s => uniq(s.map(x => x.principal_name)).map(v => ({ value: v, label: v })) },
   { key: "secretaries",     label: "מנהלנ/ית",       openOnFocus: false, getOptions: s => uniq(s.map(x => x.secretary_name)).map(v => ({ value: v, label: v })) },
   { key: "financeContacts", label: "אחראי/ת כספים",  openOnFocus: false, getOptions: s => uniq(s.map(x => x.finance_contact_name)).map(v => ({ value: v, label: v })) },
-  { key: "advisors",        label: "יועץ מלווה",     checkbox: true,                            getOptions: () => [] },
+  { key: "advisorGefen",    label: "יועץ מלווה [גפן]",   checkbox: true,                          getOptions: () => [] },
+  { key: "advisorCurrent",  label: "יועץ מלווה [שוטף]",  checkbox: true,                          getOptions: () => [] },
+  { key: "advisorDistrict", label: "יועץ מלווה [מחוז]",  checkbox: true,                          getOptions: () => [] },
   { key: "accessAdvisors", label: "גישה",            checkbox: true, showAllOption: true,       getOptions: () => [] },
 ];
 
@@ -428,13 +433,21 @@ function GoalConditionRow({ condition, index, label, onChangeMet, onChangeConnec
 }
 
 const MOVABLE_COLUMNS = [
-  { key: "advisor",             label: "יועץ מלווה" },
   { key: "symbol",              label: "סמל מוסד" },
   { key: "city",                label: "עיר" },
   { key: "authority",           label: "בעלות" },
   { key: "stage",               label: "שלב מוסד" },
   { key: "meetings_completed",  label: 'סה"כ פגישות שבוצעו' },
   { key: "meetings_hours",      label: 'סה"כ שעות שבוצעו' },
+  { key: "meeting_allocation_gefen",    label: "הקצאת פגישות [גפן]" },
+  { key: "meeting_allocation_current",  label: "הקצאת פגישות [שוטף]" },
+  { key: "meeting_allocation_district", label: "הקצאת פגישות [מחוז]" },
+  { key: "meeting_duration_gefen",      label: "זמן לפגישה [גפן]" },
+  { key: "meeting_duration_current",    label: "זמן לפגישה [שוטף]" },
+  { key: "meeting_duration_district",   label: "זמן לפגישה [מחוז]" },
+  { key: "advisor_gefen",       label: "יועץ מלווה [גפן]" },
+  { key: "advisor_current",     label: "יועץ מלווה [שוטף]" },
+  { key: "advisor_district",    label: "יועץ מלווה [מחוז]" },
 ];
 
 // Optional columns showing summary data from the last real check run (check_metrics),
@@ -462,7 +475,32 @@ const SUMMARY_COLUMNS = [
   { key: "summary_gefen_not_finance_sum",    label: "קיים בגפן לא בכספים סכום",        field: "gefen_not_finance_sum",   fmt: "money" },
 ];
 
-const ALL_COLUMNS = [...MOVABLE_COLUMNS, ...SUMMARY_COLUMNS];
+// "סגירת שנה" columns — closure status/notes toward parents and toward the authority, per
+// school+academic_year (school_year_admin_data). Grouped under the "בדיקות" column-picker
+// category (at the end), like SUMMARY_COLUMNS, but not part of SUMMARY_COLUMNS itself since
+// they're flat per-school fields, not per-division/budget — they must never trigger the
+// "split into one row per budget combo" behavior that a visible SUMMARY_COLUMNS column does.
+const CLOSURE_COLUMNS = [
+  { key: "closure_parents_status",   label: "סגירת שנה-הורים",       field: "closure_parents_status",   fmt: "closure" },
+  { key: "closure_parents_notes",    label: "הערות סגירה-הורים",     field: "closure_parents_notes",    fmt: "text"     },
+  { key: "closure_authority_status", label: "סגירת שנה-רשות",        field: "closure_authority_status", fmt: "closure" },
+  { key: "closure_authority_notes",  label: "הערות סגירה-רשות",      field: "closure_authority_notes",  fmt: "text"     },
+];
+
+// "מכתב בקרה" columns — one fixed row per division_type (school_id, division). A school
+// may have up to 2 rows (שש-שנתי); the single value shown here is picked by
+// pickPrimaryControlLetter (open status first, otherwise most recent received_date).
+const CONTROL_LETTER_COLUMNS = [
+  { key: "control_letter_received_date",  label: "מכתב בקרה - תאריך קבלה",   field: "received_date",             fmt: "date" },
+  { key: "control_letter_days_to_answer", label: "מכתב בקרה - ימים לתשובה",  field: "days_to_answer",            fmt: "int"  },
+  { key: "control_letter_target_date",    label: "מכתב בקרה - תאריך יעד",    field: "target_date",               fmt: "date" },
+  { key: "control_letter_status",         label: "מכתב בקרה - סטטוס",        field: "status",                    fmt: "controlLetterStatus" },
+  { key: "control_letter_notes",          label: "מכתב בקרה - הערות",        field: "notes",                     fmt: "text" },
+  { key: "control_letter_original_file",  label: "מכתב בקרה - מכתב מקורי",   field: "original_letter_file_name", fmt: "file" },
+  { key: "control_letter_response_file",  label: "מכתב בקרה - מכתב תשובה",   field: "response_letter_file_name", fmt: "file" },
+];
+
+const ALL_COLUMNS = [...MOVABLE_COLUMNS, ...SUMMARY_COLUMNS, ...CLOSURE_COLUMNS, ...CONTROL_LETTER_COLUMNS];
 const DEFAULT_COL_ORDER = ALL_COLUMNS.map(c => c.key);
 
 // Goal columns ("goal_<goalKey>") are built dynamically from an async-loaded endpoint, so
@@ -479,8 +517,36 @@ const FILTER_COLUMN_META = [
   { key: "meetings_completed", label: 'סה"כ פגישות שבוצעו', fmt: "int" },
   { key: "meetings_hours", label: 'סה"כ שעות שבוצעו', fmt: "hours" },
   ...SUMMARY_COLUMNS,
+  { key: "closure_parents_status",   label: "סגירת שנה-הורים", fmt: "closure" },
+  { key: "closure_authority_status", label: "סגירת שנה-רשות",  fmt: "closure" },
+  { key: "meeting_allocation_gefen",    label: "הקצאת פגישות [גפן]",  fmt: "int" },
+  { key: "meeting_allocation_current",  label: "הקצאת פגישות [שוטף]", fmt: "int" },
+  { key: "meeting_allocation_district", label: "הקצאת פגישות [מחוז]", fmt: "int" },
+  { key: "meeting_duration_gefen",      label: "זמן לפגישה [גפן]",   fmt: "hours" },
+  { key: "meeting_duration_current",    label: "זמן לפגישה [שוטף]",  fmt: "hours" },
+  { key: "meeting_duration_district",   label: "זמן לפגישה [מחוז]",  fmt: "hours" },
+  { key: "control_letter_received_date",  label: "מכתב בקרה - תאריך קבלה",  fmt: "date" },
+  { key: "control_letter_target_date",    label: "מכתב בקרה - תאריך יעד",   fmt: "date" },
+  { key: "control_letter_days_to_answer", label: "מכתב בקרה - ימים לתשובה", fmt: "int"  },
+  { key: "control_letter_status",         label: "מכתב בקרה - סטטוס",       fmt: "controlLetterStatus" },
 ];
 const FILTER_COLUMN_KEYS = new Set(FILTER_COLUMN_META.map(c => c.key));
+
+// Non-empty status values in a fixed order, used to ordinally encode control_letter_status
+// for sort/filter (like closure/goal columns' true/false/null → 2/1/0 encoding) — the empty
+// "בחר" placeholder is never a real value, so it's excluded and maps to blank (null) instead.
+const CONTROL_LETTER_STATUS_FILTER_ORDER = CONTROL_LETTER_STATUS_OPTIONS.filter(o => o.value).map(o => o.value);
+
+function dateToNum(iso) {
+  if (!iso) return null;
+  const n = Number(iso.replaceAll("-", ""));
+  return Number.isNaN(n) ? null : n;
+}
+
+function numToISO(n) {
+  const s = String(n).padStart(8, "0");
+  return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
+}
 
 const NUMBER_FILTER_OPERATORS = [
   { op: "eq", label: "שווה ל..." },
@@ -538,6 +604,12 @@ function formatMeetingHours(totalMinutes) {
 
 function formatFilterValueLabel(raw, fmt) {
   if (fmt === "goal") return raw === 2 ? "כן" : raw === 1 ? "לא" : "טרם הוגדר";
+  if (fmt === "closure") return raw === 2 ? "סגור" : raw === 1 ? "לא סגור" : "טרם סומן";
+  if (fmt === "controlLetterStatus") {
+    const value = CONTROL_LETTER_STATUS_FILTER_ORDER[raw - 1];
+    return CONTROL_LETTER_STATUS_MAP[value]?.label || "";
+  }
+  if (fmt === "date") return raw ? formatDDMMYY(numToISO(raw)) : "";
   if (fmt === "hours") return formatMeetingHours(raw);
   if (fmt === "pct") return fmtPct2(raw);
   if (fmt === "int") return fmtInt(raw);
@@ -583,6 +655,18 @@ function computeFilterValues(school, combo, meetingsStats, activeSummaryBudget, 
     const met = getGoalStatus(school, combo, gc.goalKey, activeSummaryBudget);
     out[gc.key] = met === true ? 2 : met === false ? 1 : 0;
   }
+  const closure = school.year_closure || {};
+  out.closure_parents_status = closure.closure_parents_status === true ? 2 : closure.closure_parents_status === false ? 1 : 0;
+  out.closure_authority_status = closure.closure_authority_status === true ? 2 : closure.closure_authority_status === false ? 1 : 0;
+  for (const k of ["meeting_allocation_gefen", "meeting_allocation_current", "meeting_allocation_district",
+                    "meeting_duration_gefen", "meeting_duration_current", "meeting_duration_district"]) {
+    out[k] = closure[k] ?? null;
+  }
+  out.control_letter_received_date = dateToNum(controlLetterFieldValue(school, "received_date"));
+  out.control_letter_target_date = dateToNum(controlLetterFieldValue(school, "target_date"));
+  out.control_letter_days_to_answer = controlLetterFieldValue(school, "days_to_answer");
+  const clStatus = controlLetterFieldValue(school, "status");
+  out.control_letter_status = clStatus ? CONTROL_LETTER_STATUS_FILTER_ORDER.indexOf(clStatus) + 1 : null;
   return out;
 }
 
@@ -591,6 +675,7 @@ function computeFilterValues(school, combo, meetingsStats, activeSummaryBudget, 
 // "hours" columns store raw minutes (user types decimal hours, e.g. 5.5 → 330).
 function parseFilterInput(rawInput, fmt) {
   if (rawInput === "" || rawInput === null || rawInput === undefined) return null;
+  if (fmt === "date") return dateToNum(String(rawInput));
   const n = Number(String(rawInput).replace(/,/g, "").trim());
   if (Number.isNaN(n)) return null;
   if (fmt === "pct") return n / 100;
@@ -880,7 +965,7 @@ function ColumnHeaderFilter({ colDef, columnFilters, setColumnFilters, sortSpecs
                 )}
               </div>
 
-              {fmt !== "goal" && (
+              {fmt !== "goal" && fmt !== "closure" && fmt !== "controlLetterStatus" && (
                 <div className="border-b border-slate-100">
                   <button
                     type="button"
@@ -888,7 +973,7 @@ function ColumnHeaderFilter({ colDef, columnFilters, setColumnFilters, sortSpecs
                     aria-expanded={numberFiltersOpen}
                     className="w-full flex items-center justify-between px-3 py-1.5 text-sm text-slate-700 hover:bg-blue-50"
                   >
-                    מסנני מספרים
+                    {fmt === "date" ? "מסנני תאריכים" : "מסנני מספרים"}
                     <svg aria-hidden="true" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"
                       style={{ transform: numberFiltersOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s" }}>
                       <polyline points="9 18 15 12 9 6" />
@@ -959,7 +1044,7 @@ function ColumnHeaderFilter({ colDef, columnFilters, setColumnFilters, sortSpecs
                 <select value={customCond1.op} onChange={e => setCustomCond1(c => ({ ...c, op: e.target.value }))} className="input-field text-xs flex-shrink-0" style={{ width: 120 }} aria-label="אופרטור תנאי 1">
                   {NUMBER_FILTER_OPERATORS.map(o => <option key={o.op} value={o.op}>{o.label}</option>)}
                 </select>
-                <input type="text" value={customCond1.value} onChange={e => setCustomCond1(c => ({ ...c, value: e.target.value }))} className="input-field text-xs flex-1" placeholder={valuePlaceholder} aria-label="ערך תנאי 1" />
+                <input type={fmt === "date" ? "date" : "text"} value={customCond1.value} onChange={e => setCustomCond1(c => ({ ...c, value: e.target.value }))} className="input-field text-xs flex-1" placeholder={valuePlaceholder} aria-label="ערך תנאי 1" />
               </div>
               <div className="inline-flex self-center rounded-lg border border-slate-200 overflow-hidden text-xs font-semibold" style={{ direction: "ltr" }}>
                 <button type="button" onClick={() => setCustomJoiner("AND")} className={`px-3 py-1 transition-colors ${customJoiner === "AND" ? "bg-blue-600 text-white" : "bg-white text-slate-500 hover:bg-slate-50"}`}>וגם</button>
@@ -969,7 +1054,7 @@ function ColumnHeaderFilter({ colDef, columnFilters, setColumnFilters, sortSpecs
                 <select value={customCond2.op} onChange={e => setCustomCond2(c => ({ ...c, op: e.target.value }))} className="input-field text-xs flex-shrink-0" style={{ width: 120 }} aria-label="אופרטור תנאי 2">
                   {NUMBER_FILTER_OPERATORS.map(o => <option key={o.op} value={o.op}>{o.label}</option>)}
                 </select>
-                <input type="text" value={customCond2.value} onChange={e => setCustomCond2(c => ({ ...c, value: e.target.value }))} className="input-field text-xs flex-1" placeholder={valuePlaceholder} aria-label="ערך תנאי 2" />
+                <input type={fmt === "date" ? "date" : "text"} value={customCond2.value} onChange={e => setCustomCond2(c => ({ ...c, value: e.target.value }))} className="input-field text-xs flex-1" placeholder={valuePlaceholder} aria-label="ערך תנאי 2" />
               </div>
               {fmt === "hours" && <p className="text-xs text-slate-400">לדוגמה: 5.5 (5 שעות ו-30 דק')</p>}
               {fmt === "pct" && <p className="text-xs text-slate-400">הזן אחוז, לדוגמה: 75</p>}
@@ -986,6 +1071,53 @@ function ColumnHeaderFilter({ colDef, columnFilters, setColumnFilters, sortSpecs
   );
 }
 
+function formatDDMMYY(iso) {
+  if (!iso) return "";
+  const [y, m, d] = iso.split("-");
+  return `${d}/${m}/${y.slice(2)}`;
+}
+
+// Calendar-day addition (not business days) — received_date + days_to_answer.
+function addDaysISO(iso, days) {
+  if (!iso || days === null || days === undefined || days === "") return "";
+  const d = new Date(`${iso}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return "";
+  d.setDate(d.getDate() + Number(days));
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${dd}`;
+}
+
+// A school may have up to 2 control_letters rows (one per division, שש-שנתי). The dashboard/
+// admin tables show a single value per school: prefer a row whose status is still "open"
+// (בתהליך/בעיה/תיקון נוסף), otherwise the row with the most recent received_date.
+function pickPrimaryControlLetter(rows) {
+  if (!rows || rows.length === 0) return null;
+  const openStatuses = new Set(["in_progress", "problem", "further_fix"]);
+  const open = rows.filter(r => openStatuses.has(r.status));
+  const pool = open.length ? open : rows;
+  return pool.reduce((latest, r) => {
+    if (!latest) return r;
+    if (!r.received_date) return latest;
+    if (!latest.received_date) return r;
+    return r.received_date > latest.received_date ? r : latest;
+  }, null);
+}
+
+function controlLetterFieldValue(school, field) {
+  const primary = pickPrimaryControlLetter(school.control_letters);
+  if (!primary) return null;
+  if (field === "target_date") return addDaysISO(primary.received_date, primary.days_to_answer);
+  return primary[field] ?? null;
+}
+
+function renderClosureStatusBadge(value) {
+  if (value === true) return <span className="text-green-600 font-semibold">סגור</span>;
+  if (value === false) return <span className="text-red-600 font-semibold">לא סגור</span>;
+  return "—";
+}
+
 function renderCell(school, key, meetingsStats = {}, combo = null, activeSummaryBudget = "גפן", goalColumnsByKey = {}) {
   const summaryCol = SUMMARY_COLUMNS.find(c => c.key === key);
   if (summaryCol) return renderSummaryValue(school, summaryCol, combo, activeSummaryBudget, "—");
@@ -993,9 +1125,64 @@ function renderCell(school, key, meetingsStats = {}, combo = null, activeSummary
     const met = getGoalStatus(school, combo, goalColumnsByKey[key], activeSummaryBudget);
     return met === true ? "כן" : met === false ? "לא" : "טרם הוגדר";
   }
+  const closure = school.year_closure || {};
   switch (key) {
-    case "advisor":
-      return (school.advisor_schools || []).map(as => as.profiles).filter(Boolean).map(p => p.full_name || p.email).join(", ") || "—";
+    case "closure_parents_status":
+      return renderClosureStatusBadge(closure.closure_parents_status);
+    case "closure_authority_status":
+      return renderClosureStatusBadge(closure.closure_authority_status);
+    case "closure_parents_notes":
+    case "closure_authority_notes": {
+      const text = closure[key] || "";
+      if (!text) return "—";
+      const truncated = text.length > 40 ? `${text.slice(0, 40)}…` : text;
+      return <span title={text}>{truncated}</span>;
+    }
+    case "meeting_allocation_gefen": case "meeting_allocation_current": case "meeting_allocation_district":
+      return closure[key] ?? "—";
+    case "meeting_duration_gefen": case "meeting_duration_current": case "meeting_duration_district":
+      return formatMeetingHours(closure[key]);
+    default: break;
+  }
+  switch (key) {
+    case "control_letter_received_date": case "control_letter_target_date": {
+      const iso = controlLetterFieldValue(school, key === "control_letter_target_date" ? "target_date" : "received_date");
+      return iso ? formatDDMMYY(iso) : "—";
+    }
+    case "control_letter_days_to_answer": {
+      const v = controlLetterFieldValue(school, "days_to_answer");
+      return v ?? "—";
+    }
+    case "control_letter_status": {
+      const v = controlLetterFieldValue(school, "status");
+      const s = CONTROL_LETTER_STATUS_MAP[v || ""] || CONTROL_LETTER_STATUS_MAP[""];
+      if (!v) return "—";
+      return (
+        <span className="inline-flex items-center gap-1.5 text-xs font-semibold px-2 py-0.5 rounded-full" style={{ background: s.bg, color: s.color }}>
+          <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: s.dot }} aria-hidden="true" />
+          {s.label}
+        </span>
+      );
+    }
+    case "control_letter_notes": {
+      const text = controlLetterFieldValue(school, "notes") || "";
+      if (!text) return "—";
+      const truncated = text.length > 40 ? `${text.slice(0, 40)}…` : text;
+      return <span title={text}>{truncated}</span>;
+    }
+    case "control_letter_original_file":
+      return controlLetterFieldValue(school, "original_letter_file_name") || "—";
+    case "control_letter_response_file":
+      return controlLetterFieldValue(school, "response_letter_file_name") || "—";
+    default: break;
+  }
+  switch (key) {
+    case "advisor_gefen":
+      return (school.advisors_gefen || []).map(p => p.full_name || p.email).join(", ") || "—";
+    case "advisor_current":
+      return (school.advisors_current || []).map(p => p.full_name || p.email).join(", ") || "—";
+    case "advisor_district":
+      return (school.advisors_district || []).map(p => p.full_name || p.email).join(", ") || "—";
     case "symbol":
       return <span className="font-mono">{school.symbol || "—"}</span>;
     case "city":
@@ -1024,9 +1211,49 @@ function renderCellText(school, key, meetingsStats = {}, combo = null, activeSum
     const met = getGoalStatus(school, combo, goalColumnsByKey[key], activeSummaryBudget);
     return met === true ? "כן" : met === false ? "לא" : "טרם הוגדר";
   }
+  const closure = school.year_closure || {};
   switch (key) {
-    case "advisor":
-      return (school.advisor_schools || []).map(as => as.profiles).filter(Boolean).map(p => p.full_name || p.email).join(", ") || "";
+    case "closure_parents_status":
+      return closure.closure_parents_status === true ? "סגור" : closure.closure_parents_status === false ? "לא סגור" : "";
+    case "closure_authority_status":
+      return closure.closure_authority_status === true ? "סגור" : closure.closure_authority_status === false ? "לא סגור" : "";
+    case "closure_parents_notes":
+    case "closure_authority_notes":
+      return closure[key] || "";
+    case "meeting_allocation_gefen": case "meeting_allocation_current": case "meeting_allocation_district":
+      return closure[key] ?? "";
+    case "meeting_duration_gefen": case "meeting_duration_current": case "meeting_duration_district":
+      return closure[key] ? formatMeetingHours(closure[key]) : "";
+    default: break;
+  }
+  switch (key) {
+    case "control_letter_received_date": case "control_letter_target_date": {
+      const iso = controlLetterFieldValue(school, key === "control_letter_target_date" ? "target_date" : "received_date");
+      return iso ? formatDDMMYY(iso) : "";
+    }
+    case "control_letter_days_to_answer": {
+      const v = controlLetterFieldValue(school, "days_to_answer");
+      return v === null || v === undefined ? "" : String(v);
+    }
+    case "control_letter_status": {
+      const v = controlLetterFieldValue(school, "status");
+      return v ? (CONTROL_LETTER_STATUS_MAP[v]?.label || v) : "";
+    }
+    case "control_letter_notes":
+      return controlLetterFieldValue(school, "notes") || "";
+    case "control_letter_original_file":
+      return controlLetterFieldValue(school, "original_letter_file_name") || "";
+    case "control_letter_response_file":
+      return controlLetterFieldValue(school, "response_letter_file_name") || "";
+    default: break;
+  }
+  switch (key) {
+    case "advisor_gefen":
+      return (school.advisors_gefen || []).map(p => p.full_name || p.email).join(", ") || "";
+    case "advisor_current":
+      return (school.advisors_current || []).map(p => p.full_name || p.email).join(", ") || "";
+    case "advisor_district":
+      return (school.advisors_district || []).map(p => p.full_name || p.email).join(", ") || "";
     case "symbol":
       return school.symbol || "";
     case "city":
@@ -1080,11 +1307,13 @@ function applyFilters(school, filters, queries) {
     if (!divValues.some(v => (DIVISION_LABEL[v] || v).toLowerCase().includes(q))) return false;
   }
 
-  // Advisors — compare by UUID (advisor_id in advisor_schools)
-  const advisorIds = (school.advisor_schools || []).map(as => as.advisor_id).filter(Boolean);
-  if (filters.advisors.length > 0) {
-    if (!filters.advisors.some(f => advisorIds.includes(f.value))) return false;
-  }
+  // Advisors — compare by UUID, per service type (school_advisors_gefen/current/district)
+  const advisorGefenIds = (school.advisors_gefen || []).map(a => a.id);
+  if (filters.advisorGefen.length > 0 && !filters.advisorGefen.some(f => advisorGefenIds.includes(f.value))) return false;
+  const advisorCurrentIds = (school.advisors_current || []).map(a => a.id);
+  if (filters.advisorCurrent.length > 0 && !filters.advisorCurrent.some(f => advisorCurrentIds.includes(f.value))) return false;
+  const advisorDistrictIds = (school.advisors_district || []).map(a => a.id);
+  if (filters.advisorDistrict.length > 0 && !filters.advisorDistrict.some(f => advisorDistrictIds.includes(f.value))) return false;
 
   // Access (גישה) — null=open to all; specific UUID=restricted access
   // "כולם" option matches schools with null (open to all)
@@ -1404,6 +1633,8 @@ export default function DashboardPage() {
   const [colVisible, setColVisible] = useState(() => ({
     ...Object.fromEntries(MOVABLE_COLUMNS.map(c => [c.key, true])),
     ...Object.fromEntries(SUMMARY_COLUMNS.map(c => [c.key, false])),
+    ...Object.fromEntries(CLOSURE_COLUMNS.map(c => [c.key, false])),
+    ...Object.fromEntries(CONTROL_LETTER_COLUMNS.map(c => [c.key, false])),
   }));
   const [dragIndex, setDragIndex] = useState(null);
   const [dragOverIndex, setDragOverIndex] = useState(null);
@@ -1642,17 +1873,23 @@ export default function DashboardPage() {
   const allFilterColumnKeys = useMemo(() => new Set(allFilterColumnMeta.map(c => c.key)), [allFilterColumnMeta]);
   const columnCategories = useMemo(() => [
     { title: "כללי", cols: MOVABLE_COLUMNS },
-    { title: "בדיקות", cols: SUMMARY_COLUMNS },
+    { title: "בדיקות", cols: [...SUMMARY_COLUMNS, ...CLOSURE_COLUMNS] },
     { title: "יעדים", cols: goalColumns },
+    { title: "מכתב בקרה", cols: CONTROL_LETTER_COLUMNS },
   ], [goalColumns]);
 
-  // Goal columns only become known once goalDefinitions loads (after mount) — back-fill any
-  // missing keys into colOrder/colVisible (hidden by default, like SUMMARY_COLUMNS) so they
-  // show up in "עמודות להצגה" without disturbing already-restored user preferences.
+  // Goal columns only become known once goalDefinitions loads (after mount); CLOSURE_COLUMNS
+  // are static but a user with previously-saved col_order/col_visible (from before this
+  // feature existed) has a restored colOrder that doesn't contain them either — in both cases
+  // back-fill any missing keys into colOrder/colVisible (hidden by default, like
+  // SUMMARY_COLUMNS) so they show up in "עמודות להצגה" without disturbing already-restored
+  // user preferences. colOrder/colVisible are deps (not just goalColumns) specifically so this
+  // also re-runs once right after restoration overwrites them — the missing-check guard makes
+  // this converge after one extra render instead of looping.
   useEffect(() => {
-    if (goalColumns.length === 0) return;
-    const missingOrder = goalColumns.map(c => c.key).filter(k => !colOrder.includes(k));
-    const missingVisible = goalColumns.filter(c => !(c.key in colVisible));
+    const candidates = [...CLOSURE_COLUMNS, ...CONTROL_LETTER_COLUMNS, ...goalColumns];
+    const missingOrder = candidates.map(c => c.key).filter(k => !colOrder.includes(k));
+    const missingVisible = candidates.filter(c => !(c.key in colVisible));
     if (missingOrder.length === 0 && missingVisible.length === 0) return;
     const nextOrder = missingOrder.length ? [...colOrder, ...missingOrder] : colOrder;
     const nextVisible = missingVisible.length
@@ -1661,9 +1898,7 @@ export default function DashboardPage() {
     setColOrder(nextOrder);
     setColVisible(nextVisible);
     saveColPrefs(nextOrder, nextVisible);
-    // Only re-run when the known goal columns change, not on every colOrder/colVisible tweak.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [goalColumns]);
+  }, [goalColumns, colOrder, colVisible]);
 
   useEffect(() => {
     async function init() {
@@ -1782,7 +2017,7 @@ export default function DashboardPage() {
   const filterOptions = Object.fromEntries(
     FILTER_CONFIG.map(cfg => [
       cfg.key,
-      (cfg.key === "accessAdvisors" || cfg.key === "advisors")
+      (cfg.key === "accessAdvisors" || cfg.key === "advisorGefen" || cfg.key === "advisorCurrent" || cfg.key === "advisorDistrict")
         ? orgUserOptions
         : cfg.getOptions(schools),
     ])
@@ -1811,9 +2046,9 @@ export default function DashboardPage() {
       const q = searchQuery.toLowerCase();
       const matchName = school.name?.toLowerCase().includes(q);
       const matchSymbol = school.symbol?.includes(q);
-      const matchAdvisor = (school.advisor_schools || []).some(
-        as => as.profiles?.full_name?.toLowerCase().includes(q)
-      );
+      const matchAdvisor = [
+        ...(school.advisors_gefen || []), ...(school.advisors_current || []), ...(school.advisors_district || []),
+      ].some(p => p.full_name?.toLowerCase().includes(q));
       if (!matchName && !matchSymbol && !matchAdvisor) return false;
     }
     return applyFilters(school, filters, queries);
@@ -1990,7 +2225,7 @@ export default function DashboardPage() {
             </div>
           );
         })()}
-        <div className="max-w-5xl mx-auto px-6 py-10">
+        <div className="max-w-[100rem] mx-auto px-6 py-10">
           <div className="flex items-center justify-between mb-8">
             <div>
               <h1 className="text-2xl font-bold text-slate-900">בתי הספר שלי</h1>

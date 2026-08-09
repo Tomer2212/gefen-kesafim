@@ -249,10 +249,12 @@ def book_meeting_slot(token: str, body: dict):
 
     calendar_synced = False
     try:
-        sync_map = graph_client.sync_meeting_create(db, token_row["org_id"], meeting, subject=f"פגישת ליווי כלכלי - {school['name']}")
-        if sync_map:
-            graph_client.persist_calendar_sync(db, meeting["id"], sync_map)
-            calendar_synced = any(v.get("status") == "synced" for v in sync_map.values())
+        with graph_client.calendar_sync_lock(db, meeting["id"]) as acquired:
+            if acquired:
+                sync_map = graph_client.sync_meeting_create(db, token_row["org_id"], meeting, subject=f"פגישת ליווי כלכלי - {school['name']}")
+                if sync_map:
+                    graph_client.persist_calendar_sync(db, meeting["id"], sync_map)
+                    calendar_synced = any(v.get("status") == "synced" for v in sync_map.values())
     except Exception as exc:
         logger.warning("calendar sync failed for booked meeting %s (non-fatal): %s", meeting.get("id"), exc)
 
@@ -319,11 +321,13 @@ def _book_range_slot(db, token_row: dict, range_key: str, body: dict) -> dict:
 
     calendar_synced = False
     try:
-        subject = f"{range_row.get('label') or 'פגישה'} - {school['name']}"
-        sync_map = graph_client.sync_meeting_create(db, token_row["org_id"], meeting, subject=subject)
-        if sync_map:
-            graph_client.persist_calendar_sync(db, meeting["id"], sync_map)
-            calendar_synced = any(v.get("status") == "synced" for v in sync_map.values())
+        with graph_client.calendar_sync_lock(db, meeting["id"]) as acquired:
+            if acquired:
+                subject = f"{range_row.get('label') or 'פגישה'} - {school['name']}"
+                sync_map = graph_client.sync_meeting_create(db, token_row["org_id"], meeting, subject=subject)
+                if sync_map:
+                    graph_client.persist_calendar_sync(db, meeting["id"], sync_map)
+                    calendar_synced = any(v.get("status") == "synced" for v in sync_map.values())
     except Exception as exc:
         logger.warning("calendar sync failed for range-booked meeting %s (non-fatal): %s", meeting.get("id"), exc)
 
