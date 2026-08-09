@@ -18,12 +18,28 @@ export const MEETING_SERVICE_TYPE_OPTIONS = [
   { value: "gefen",         label: "גפן" },
   { value: "current",       label: "שוטף" },
   { value: "gefen_current", label: "גפן+שוטף" },
+  { value: "district",      label: "מחוז" },
 ];
 
-// Default for a new meeting's "סוג" field: copy the school's own service_type only when it's
-// unambiguous (gefen/current) — "gefen_current" (or unset) leaves the meeting field empty.
+// Default for a new meeting's "סוג" field: copy the school's own service_type as-is. All four
+// values now map cleanly to a default advisor (see resolveDefaultAdvisorIds below), so there's
+// no more ambiguous case to leave blank.
 export function defaultMeetingServiceType(schoolServiceType) {
-  return schoolServiceType === "gefen" || schoolServiceType === "current" ? schoolServiceType : null;
+  return schoolServiceType || null;
+}
+
+// Given a meeting's service type and the school's three per-service-type advisor lists
+// (arrays of profile objects, as returned by GET /schools/{id}/advisors/{service_type}),
+// returns the deduplicated union of advisor IDs that should default into "יועץ מבצע".
+// gefen_current merges both the gefen and current lists (same advisor in both counted once).
+export function resolveDefaultAdvisorIds(serviceType, { gefenAdvisors = [], currentAdvisors = [], districtAdvisors = [] }) {
+  let list;
+  if (serviceType === "gefen") list = gefenAdvisors;
+  else if (serviceType === "current") list = currentAdvisors;
+  else if (serviceType === "district") list = districtAdvisors;
+  else if (serviceType === "gefen_current") list = [...gefenAdvisors, ...currentAdvisors];
+  else list = [];
+  return [...new Set(list.map(a => a.id))];
 }
 
 export const STATUS_SORT_ORDER = { completed: 0, scheduled: 1, postponed: 2, other: 3 };

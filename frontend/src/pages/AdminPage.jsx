@@ -12,11 +12,14 @@ import AdminIntegrationsTab from "./AdminIntegrationsTab";
 import AdminMeetingsTab from "./AdminMeetingsTab";
 import AgentChatWidget from "../components/AgentChatWidget";
 import UserMeetingsConflictModal from "./UserMeetingsConflictModal";
+import { SchoolNotesModal } from "../components/SchoolNotesModal";
 import UserSchoolsConflictModal from "./UserSchoolsConflictModal";
 import MeetingNavigationGuardModal from "../components/meetings/MeetingNavigationGuardModal";
 import { AcademicYearSelector } from "../components/AcademicYearSelector";
 import { DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
+import { CONTROL_LETTER_STATUS_MAP } from "../components/controlLetter/constants";
 import { AdvisorSearch } from "../components/AdvisorSearch";
+import HourMinuteInput from "../components/HourMinuteInput";
 import { AccessSelector } from "../components/AccessSelector";
 import TaskListBar from "../components/tasks/TaskListBar";
 
@@ -46,17 +49,23 @@ const SERVICE_TYPE_OPTIONS = [
   { value: "gefen", label: "גפן" },
   { value: "current", label: "שוטף" },
   { value: "gefen_current", label: "גפן+שוטף" },
+  { value: "district", label: "מחוז" },
+];
+
+// The 3 per-service-type "יועץ מלווה [גפן/שוטף/מחוז]" lists (school_advisors_gefen/current/
+// district) — same set used on SchoolPage's ליווי sub-sections.
+const SERVICE_TYPE_TABS = [
+  { key: "gefen", label: "גפן" },
+  { key: "current", label: "שוטף" },
+  { key: "district", label: "מחוז" },
 ];
 
 // "אמצעי הזמנה" — multi-select from a closed list (same field shown in ליווי on SchoolPage,
 // backed by school_year_admin_data.order_method as a text[] column).
 const FUNDING_METHOD_OPTIONS = [
-  { value: "gefen", label: "גפן" },
-  { value: "tnufa", label: "תנופה" },
-  { value: "tkuma", label: "תקומה" },
-  { value: "dokati", label: "דוקאטי" },
-  { value: "palg", label: 'פל"ג' },
-  { value: "self_managed", label: "ניהול עצמי" },
+  { value: "private", label: "פרטי" },
+  { value: "authority", label: "רשות" },
+  { value: "district", label: "מחוז" },
 ];
 
 const DOMAIN_OPTIONS = [
@@ -71,7 +80,7 @@ const ADMIN_DATA_COLUMNS = [
   { key: "service_type",          label: "סוג שירות" },
   { key: "requested_price",       label: "מחיר מבוקש" },
   { key: "order_method",          label: "אמצעי הזמנה" },
-  { key: "order_amount_gefen",    label: "גובה הזמנה" },
+  { key: "order_amount_gefen",    label: 'מחיר כולל מע"מ' },
   { key: "hours_ordered",         label: "מספר שעות שהוזמנו" },
   { key: "rate",                  label: "תעריף" },
   { key: "payment_received",      label: "תשלום שהתקבל" },
@@ -80,30 +89,111 @@ const ADMIN_DATA_COLUMNS = [
   { key: "contract_received",     label: "חוזה התקבל" },
   { key: "contract_file",         label: "קובץ חוזה" },
   { key: "receipts_sent",         label: "אסמכתאות שנשלחו" },
+  { key: "closure_parents_status",   label: "סגירת שנה-הורים" },
+  { key: "closure_parents_notes",    label: "הערות סגירה-הורים" },
+  { key: "closure_authority_status", label: "סגירת שנה-רשות" },
+  { key: "closure_authority_notes",  label: "הערות סגירה-רשות" },
+  { key: "advisor_gefen",              label: "יועץ מלווה [גפן]" },
+  { key: "advisor_current",            label: "יועץ מלווה [שוטף]" },
+  { key: "advisor_district",           label: "יועץ מלווה [מחוז]" },
+  { key: "meeting_allocation_gefen",   label: "הקצאת פגישות [גפן]" },
+  { key: "meeting_allocation_current", label: "הקצאת פגישות [שוטף]" },
+  { key: "meeting_allocation_district", label: "הקצאת פגישות [מחוז]" },
+  { key: "meeting_duration_gefen",     label: "זמן לפגישה [גפן]" },
+  { key: "meeting_duration_current",   label: "זמן לפגישה [שוטף]" },
+  { key: "meeting_duration_district",  label: "זמן לפגישה [מחוז]" },
+  { key: "quarterly_notes_1", label: "הערות רבעוניות - רבעון 1" },
+  { key: "quarterly_notes_2", label: "הערות רבעוניות - רבעון 2" },
+  { key: "quarterly_notes_3", label: "הערות רבעוניות - רבעון 3" },
+  { key: "quarterly_notes_4", label: "הערות רבעוניות - רבעון 4" },
 ];
 
-const ADMIN_ALL_COLUMNS = [...ADMIN_IDENTITY_COLUMNS, ...ADMIN_DATA_COLUMNS];
+// "מכתב בקרה" columns — sourced from school.control_letters (one fixed row per division,
+// embedded on the schools list, same as year_closure). A school may have 2 rows (שש-שנתי);
+// this compact table shows a single picked value (see pickPrimaryControlLetter in
+// DashboardPage.jsx) and is read-only here — editing happens per-division from the school's
+// own "מכתב בקרה" tab, where each division has its own row.
+const ADMIN_CONTROL_LETTER_COLUMNS = [
+  { key: "control_letter_received_date",  label: "מכתב בקרה - תאריך קבלה" },
+  { key: "control_letter_days_to_answer", label: "מכתב בקרה - ימים לתשובה" },
+  { key: "control_letter_target_date",    label: "מכתב בקרה - תאריך יעד" },
+  { key: "control_letter_status",         label: "מכתב בקרה - סטטוס" },
+  { key: "control_letter_notes",          label: "מכתב בקרה - הערות" },
+  { key: "control_letter_original_file",  label: "מכתב בקרה - מכתב מקורי" },
+  { key: "control_letter_response_file",  label: "מכתב בקרה - מכתב תשובה" },
+];
+
+function formatDDMMYY(iso) {
+  if (!iso) return "";
+  const [y, m, d] = iso.split("-");
+  return `${d}/${m}/${y.slice(2)}`;
+}
+
+function addDaysISO(iso, days) {
+  if (!iso || days === null || days === undefined || days === "") return "";
+  const d = new Date(`${iso}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return "";
+  d.setDate(d.getDate() + Number(days));
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${dd}`;
+}
+
+// Same picking rule as DashboardPage.jsx's pickPrimaryControlLetter — a school may have up
+// to 2 control_letters rows (one per division); prefer an "open" one, else the most recent.
+function pickPrimaryControlLetter(rows) {
+  if (!rows || rows.length === 0) return null;
+  const openStatuses = new Set(["in_progress", "problem", "further_fix"]);
+  const open = rows.filter(r => openStatuses.has(r.status));
+  const pool = open.length ? open : rows;
+  return pool.reduce((latest, r) => {
+    if (!latest) return r;
+    if (!r.received_date) return latest;
+    if (!latest.received_date) return r;
+    return r.received_date > latest.received_date ? r : latest;
+  }, null);
+}
+
+function controlLetterFieldValue(school, field) {
+  const primary = pickPrimaryControlLetter(school.control_letters);
+  if (!primary) return null;
+  if (field === "target_date") return addDaysISO(primary.received_date, primary.days_to_answer);
+  return primary[field] ?? null;
+}
+
+const ADMIN_ALL_COLUMNS = [...ADMIN_IDENTITY_COLUMNS, ...ADMIN_DATA_COLUMNS, ...ADMIN_CONTROL_LETTER_COLUMNS];
 const ADMIN_DEFAULT_COL_ORDER = ADMIN_ALL_COLUMNS.map(c => c.key);
 const ADMIN_DEFAULT_COL_VISIBLE = Object.fromEntries(ADMIN_ALL_COLUMNS.map(c => [c.key, true]));
 function isKnownAdminColumnKey(k) { return ADMIN_DEFAULT_COL_ORDER.includes(k); }
 
 // Column-filter type map for the admin schools table (ניהול → בתי ספר). "select" columns use
 // raw underlying values (not display labels) so the agent/tool layer can target them directly.
-const ADMIN_TEXT_FILTER_COLS = new Set(["symbol", "city", "authority", "contract_file"]);
+const ADMIN_TEXT_FILTER_COLS = new Set([
+  "symbol", "city", "authority", "contract_file",
+  "quarterly_notes_1", "quarterly_notes_2", "quarterly_notes_3", "quarterly_notes_4",
+]);
 const ADMIN_NUMBER_FILTER_COLS = new Set([
   "meetings_completed", "meetings_hours", "requested_price", "order_amount_gefen",
   "hours_ordered", "rate", "payment_received", "payment_requests_sent", "receipts_sent",
+  "meeting_allocation_gefen", "meeting_allocation_current", "meeting_allocation_district",
 ]);
+// Advisor-name multi-select filter columns — options are populated dynamically at render
+// time from the currently-loaded schools/users (see ADMIN_SELECT_FILTER_OPTIONS usage below).
+const ADMIN_ADVISOR_FILTER_COLS = new Set(["advisor_gefen", "advisor_current", "advisor_district"]);
 const ADMIN_SELECT_FILTER_OPTIONS = {
   stage: Object.entries(ADMIN_SCHOOL_STAGE_LABEL).map(([value, label]) => ({ value, label })),
   service_type: SERVICE_TYPE_OPTIONS,
   order_method: FUNDING_METHOD_OPTIONS,
   contract_sent: [{ value: "yes", label: "כן" }, { value: "no", label: "לא" }],
   contract_received: [{ value: "yes", label: "כן" }, { value: "no", label: "לא" }],
+  closure_parents_status: [{ value: "yes", label: "סגור" }, { value: "no", label: "לא סגור" }],
+  closure_authority_status: [{ value: "yes", label: "סגור" }, { value: "no", label: "לא סגור" }],
 };
 function getAdminColumnFilterType(key) {
   if (ADMIN_TEXT_FILTER_COLS.has(key)) return "text";
   if (ADMIN_NUMBER_FILTER_COLS.has(key)) return "number";
+  if (ADMIN_ADVISOR_FILTER_COLS.has(key)) return "select";
   if (ADMIN_SELECT_FILTER_OPTIONS[key]) return "select";
   return null;
 }
@@ -114,7 +204,11 @@ function getAdminRawFilterValue(school, yad, key) {
     case "stage": return school.stage || null;
     case "service_type": return yad.service_type || null;
     case "order_method": return yad.order_method || [];
+    case "advisor_gefen": return (school.advisors_gefen || []).map(a => a.id);
+    case "advisor_current": return (school.advisors_current || []).map(a => a.id);
+    case "advisor_district": return (school.advisors_district || []).map(a => a.id);
     case "contract_sent": case "contract_received":
+    case "closure_parents_status": case "closure_authority_status":
       return yad[key] === true ? "yes" : yad[key] === false ? "no" : null;
     default: return null;
   }
@@ -171,7 +265,7 @@ function formatUpdatedAt(iso) {
   }
 }
 
-// Thousands-separated (no decimal) display for amount fields like "גובה הזמנה" — "" for empty.
+// Thousands-separated (no decimal) display for amount fields like "מחיר כולל מע"מ" — "" for empty.
 function formatAmount(v) {
   return v === null || v === undefined || v === "" ? "" : Math.round(Number(v)).toLocaleString("he-IL");
 }
@@ -793,7 +887,7 @@ const ADMIN_NUMBER_FILTER_OPS = [
   { value: "lte", label: "קטן או שווה ל" },
 ];
 
-function AdminColumnFilterPopover({ colKey, colLabel, filterType, spec, onChange, onClear, onClose }) {
+function AdminColumnFilterPopover({ colKey, colLabel, filterType, spec, onChange, onClear, onClose, options: optionsProp }) {
   if (filterType === "text") {
     const value = spec?.value || "";
     return (
@@ -832,7 +926,7 @@ function AdminColumnFilterPopover({ colKey, colLabel, filterType, spec, onChange
     );
   }
   if (filterType === "select") {
-    const options = ADMIN_SELECT_FILTER_OPTIONS[colKey] || [];
+    const options = optionsProp || ADMIN_SELECT_FILTER_OPTIONS[colKey] || [];
     const values = spec?.values || [];
     function toggleValue(v) {
       const next = values.includes(v) ? values.filter(x => x !== v) : [...values, v];
@@ -908,6 +1002,10 @@ export default function AdminPage() {
   const [adminColumnFilters, setAdminColumnFilters] = useState({}); // {[colKey]: FilterSpec}
   const [openAdminFilterKey, setOpenAdminFilterKey] = useState(null); // only one column's filter popover open at a time
   const [uploadingContractFor, setUploadingContractFor] = useState(null);
+  const [editingAdminNotesKey, setEditingAdminNotesKey] = useState(null); // `${schoolId}:${field}` of the notes cell currently in edit mode
+  const [quarterlyNotesSummary, setQuarterlyNotesSummary] = useState({}); // school_id -> {"1":{count,latest_segment}, "2":..., "3":..., "4":...}
+  const [showSchoolNotesModalFor, setShowSchoolNotesModalFor] = useState(null); // {schoolId, quarter} | null — focused-quarter notes modal
+  const [myFullName, setMyFullName] = useState("");
   const adminContractInputRef = useRef(null);
   const adminColPickerRef = useRef(null);
   const adminFilterPopoverRef = useRef(null);
@@ -924,6 +1022,10 @@ export default function AdminPage() {
 
   // Advisors per school in expanded panel
   const [schoolAdvisors, setSchoolAdvisors] = useState({});
+
+  // Per-service-type "יועץ מלווה [גפן/שוטף/מחוז]" advisors in the expanded panel — replaces
+  // the old single general list there, one independent set per service type per school.
+  const [typedSchoolAdvisors, setTypedSchoolAdvisors] = useState({});
 
   // Draft advisor selection while editing an existing school — kept purely local until
   // saveSchool() diffs it against originalAdvisorIds and only sends the net add/remove
@@ -1120,6 +1222,7 @@ export default function AdminPage() {
       // Confirm role from server — JWT user_metadata can be stale after role changes
       axios.get("/schools/users/me").then(res => {
         if (res.data?.role) setMyRole(res.data.role);
+        setMyFullName(res.data?.full_name || "");
         setCanDeleteSchool(!!res.data?.can_delete_schools);
         setCanInviteUsers(!!res.data?.can_invite_users);
         setCanDeleteUsers(!!res.data?.can_delete_users);
@@ -1148,6 +1251,14 @@ export default function AdminPage() {
     if (myRole === "owner" || myRole === "manager") loadYearAdminData(adminAcademicYear);
   }, [adminAcademicYear, myRole]);
 
+  // Quarterly notes have no academic-year dimension (perpetual per-school bucket), so this
+  // only needs to (re)load when the schools list itself changes, not per selected year.
+  useEffect(() => {
+    if ((myRole === "owner" || myRole === "manager") && schools.length > 0) {
+      loadQuarterlyNotesSummary(schools.map(s => s.id));
+    }
+  }, [schools, myRole]);
+
   // Restore admin-table column prefs (mirrors DashboardPage's col_order/col_visible pattern,
   // stored under separate keys/columns so the two tables' layouts don't collide).
   useEffect(() => {
@@ -1167,6 +1278,25 @@ export default function AdminPage() {
       }
     }).catch(() => {});
   }, [myUserId]);
+
+  // A user with previously-saved admin_col_order/admin_col_visible (from before the closure
+  // columns existed) has a restored adminColOrder that doesn't contain those keys — toggling
+  // their visibility checkbox would flip adminColVisible but the column still wouldn't render,
+  // since the render list is `adminColOrder.filter(k => adminColVisible[k] && ...)`. Back-fill
+  // any missing ADMIN_ALL_COLUMNS keys in (hidden by default) once restoration settles. The
+  // missing-check guard makes this converge after one extra render instead of looping.
+  useEffect(() => {
+    const missingOrder = ADMIN_DEFAULT_COL_ORDER.filter(k => !adminColOrder.includes(k));
+    const missingVisible = ADMIN_ALL_COLUMNS.filter(c => !(c.key in adminColVisible));
+    if (missingOrder.length === 0 && missingVisible.length === 0) return;
+    const nextOrder = missingOrder.length ? [...adminColOrder, ...missingOrder] : adminColOrder;
+    const nextVisible = missingVisible.length
+      ? { ...adminColVisible, ...Object.fromEntries(missingVisible.map(c => [c.key, false])) }
+      : adminColVisible;
+    setAdminColOrder(nextOrder);
+    setAdminColVisible(nextVisible);
+    saveAdminColPrefs(nextOrder, nextVisible);
+  }, [adminColOrder, adminColVisible]);
 
   useEffect(() => {
     if (!showAdminColPicker) return;
@@ -1234,9 +1364,68 @@ export default function AdminPage() {
     }
   }
 
+  async function loadQuarterlyNotesSummary(schoolIds) {
+    if (!schoolIds || schoolIds.length === 0) return;
+    try {
+      const { data } = await axios.post("/schools/notes/quarterly-summary/batch", { school_ids: schoolIds });
+      setQuarterlyNotesSummary(data && typeof data === "object" ? data : {});
+    } catch {
+      setQuarterlyNotesSummary({});
+    }
+  }
+
+  async function createQuarterlyNote(schoolId, quarter, content) {
+    try {
+      const { data } = await axios.post(`/schools/${schoolId}/notes`, { note_type: "quarterly", quarter: Number(quarter), content });
+      setQuarterlyNotesSummary(prev => ({
+        ...prev,
+        [schoolId]: {
+          ...(prev[schoolId] || {}),
+          [quarter]: { count: 1, latest_segment: { ...data, author_name: myFullName, author_role: myRole } },
+        },
+      }));
+    } catch {
+      alert("שמירת ההערה נכשלה — נסה שוב");
+    }
+  }
+
+  async function saveQuarterlyNoteEdit(schoolId, segmentId, quarter, content) {
+    try {
+      await axios.patch(`/schools/${schoolId}/notes/segments/${segmentId}`, { content });
+      setQuarterlyNotesSummary(prev => ({
+        ...prev,
+        [schoolId]: {
+          ...(prev[schoolId] || {}),
+          [quarter]: {
+            ...(prev[schoolId]?.[quarter] || { count: 1 }),
+            latest_segment: { ...(prev[schoolId]?.[quarter]?.latest_segment || {}), content },
+          },
+        },
+      }));
+    } catch {
+      alert("עריכת ההערה נכשלה — אין הרשאה או שגיאה זמנית");
+    }
+  }
+
   function openContractUpload(schoolId) {
     setUploadingContractFor(schoolId);
     adminContractInputRef.current?.click();
+  }
+
+  async function downloadControlLetterFile(schoolId, divisionType, kind, fileName) {
+    try {
+      const res = await axios.get(`/schools/${schoolId}/control-letters/${divisionType}/${kind}-file`, {
+        responseType: "blob",
+      });
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = fileName || "control-letter.pdf";
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      /* non-fatal */
+    }
   }
 
   async function handleContractFileChange(e) {
@@ -1481,6 +1670,12 @@ export default function AdminPage() {
     }
     const aRes = await axios.get(`/schools/${school.id}/advisors`);
     setSchoolAdvisors(prev => ({ ...prev, [school.id]: aRes.data }));
+    const [g, c, d] = await Promise.all([
+      axios.get(`/schools/${school.id}/advisors/gefen`),
+      axios.get(`/schools/${school.id}/advisors/current`),
+      axios.get(`/schools/${school.id}/advisors/district`),
+    ]);
+    setTypedSchoolAdvisors(prev => ({ ...prev, [school.id]: { gefen: g.data || [], current: c.data || [], district: d.data || [] } }));
     if (users.length === 0) loadUsers();
   }
 
@@ -1509,6 +1704,27 @@ export default function AdminPage() {
     const removed = current.filter(id => !newIds.includes(id));
     for (const id of added) await addAdvisorToSchool(schoolId, id);
     for (const id of removed) await removeAdvisorFromSchool(schoolId, id);
+  }
+
+  // Same pattern as handleExpandedAdvisorChange, per service type (gefen/current/district).
+  async function handleExpandedTypedAdvisorChange(schoolId, serviceType, newIds) {
+    const current = (typedSchoolAdvisors[schoolId]?.[serviceType] || []).map(a => a.id);
+    const added = newIds.filter(id => !current.includes(id));
+    const removed = current.filter(id => !newIds.includes(id));
+    for (const id of added) await axios.post(`/schools/${schoolId}/advisors/${serviceType}`, { advisor_id: id });
+    for (const id of removed) {
+      try {
+        await axios.delete(`/schools/${schoolId}/advisors/${serviceType}/${id}`);
+      } catch (err) {
+        window.alert(err.response?.data?.detail || "שגיאה בהסרת היועץ");
+      }
+    }
+    const [tRes, gRes] = await Promise.all([
+      axios.get(`/schools/${schoolId}/advisors/${serviceType}`),
+      axios.get(`/schools/${schoolId}/advisors`),
+    ]);
+    setTypedSchoolAdvisors(prev => ({ ...prev, [schoolId]: { ...(prev[schoolId] || {}), [serviceType]: tRes.data } }));
+    setSchoolAdvisors(prev => ({ ...prev, [schoolId]: gRes.data }));
   }
 
   async function addAccount(schoolId) {
@@ -1861,8 +2077,19 @@ export default function AdminPage() {
       case "meetings_completed": return school.meetings_stats?.completed ?? -1;
       case "meetings_hours": return school.meetings_stats?.total_minutes ?? -1;
       case "contract_sent": case "contract_received":
+      case "closure_parents_status": case "closure_authority_status":
         return yad[key] === true ? 2 : yad[key] === false ? 1 : 0;
       case "contract_file": return yad.contract_file_name || "";
+      case "control_letter_received_date": return formatDDMMYY(controlLetterFieldValue(school, "received_date"));
+      case "control_letter_target_date": return formatDDMMYY(controlLetterFieldValue(school, "target_date"));
+      case "control_letter_days_to_answer": return controlLetterFieldValue(school, "days_to_answer") ?? -1;
+      case "control_letter_status": {
+        const v = controlLetterFieldValue(school, "status");
+        return v ? (CONTROL_LETTER_STATUS_MAP[v]?.label || v) : "";
+      }
+      case "control_letter_notes": return controlLetterFieldValue(school, "notes") || "";
+      case "control_letter_original_file": return controlLetterFieldValue(school, "original_letter_file_name") || "";
+      case "control_letter_response_file": return controlLetterFieldValue(school, "response_letter_file_name") || "";
       case "service_type": {
         const opt = SERVICE_TYPE_OPTIONS.find(o => o.value === yad.service_type);
         return opt ? opt.label : (yad.service_type || "");
@@ -1871,6 +2098,15 @@ export default function AdminPage() {
         return (yad.order_method || [])
           .map(v => FUNDING_METHOD_OPTIONS.find(o => o.value === v)?.label || v)
           .join(", ");
+      }
+      case "advisor_gefen": return (school.advisors_gefen || []).map(a => a.full_name || a.email).join(", ");
+      case "advisor_current": return (school.advisors_current || []).map(a => a.full_name || a.email).join(", ");
+      case "advisor_district": return (school.advisors_district || []).map(a => a.full_name || a.email).join(", ");
+      case "quarterly_notes_1": case "quarterly_notes_2": case "quarterly_notes_3": case "quarterly_notes_4": {
+        const q = key.slice(-1);
+        const summary = quarterlyNotesSummary[school.id]?.[q];
+        if (!summary || !summary.count) return "";
+        return summary.latest_segment?.content || `(${summary.count} הערות)`;
       }
       default: {
         const v = yad[key];
@@ -1894,6 +2130,16 @@ export default function AdminPage() {
         return adminSortDir === "asc" ? cmp : -cmp;
       })
     : columnFilteredAdminSchools;
+  // Dynamic filter options for the 3 advisor-name columns — deduplicated {id, name} pairs
+  // collected from every school's already-loaded advisors_gefen/current/district list.
+  function adminAdvisorFilterOptions(key) {
+    const field = key === "advisor_gefen" ? "advisors_gefen" : key === "advisor_current" ? "advisors_current" : "advisors_district";
+    const map = new Map();
+    for (const s of schools) {
+      for (const a of (s[field] || [])) map.set(a.id, a.full_name || a.email);
+    }
+    return [...map.entries()].map(([value, label]) => ({ value, label })).sort((a, b) => a.label.localeCompare(b.label, "he"));
+  }
   const visibleAdminColOrder = adminColOrder.filter(k => adminColVisible[k] && ADMIN_ALL_COLUMNS.some(c => c.key === k));
   const adminColumnCategories = [
     { title: "כללי", cols: ADMIN_IDENTITY_COLUMNS },
@@ -2514,6 +2760,7 @@ export default function AdminPage() {
                                             onChange={spec => setAdminColumnFilters(prev => ({ ...prev, [key]: spec }))}
                                             onClear={() => setAdminColumnFilters(prev => { const next = { ...prev }; delete next[key]; return next; })}
                                             onClose={() => setOpenAdminFilterKey(null)}
+                                            options={ADMIN_ADVISOR_FILTER_COLS.has(key) ? adminAdvisorFilterOptions(key) : undefined}
                                           />
                                         </div>
                                       )}
@@ -2577,12 +2824,15 @@ export default function AdminPage() {
                                           if (v !== (yad.order_amount_gefen ?? null)) saveYearAdminField(school.id, "order_amount_gefen", v);
                                         }}
                                         title={yad.order_amount_gefen_updated_by_name ? `${yad.order_amount_gefen_updated_by_name} - ${formatUpdatedAt(yad.order_amount_gefen_updated_at)}` : ""}
-                                        aria-label="גובה הזמנה"
+                                        aria-label='מחיר כולל מע"מ'
                                         className={`${ADMIN_FIELD_CLS} w-24`}
                                       />
                                     </td>
                                   );
-                                  if (["requested_price", "hours_ordered", "rate", "payment_received", "payment_requests_sent", "receipts_sent"].includes(key)) return (
+                                  if ([
+                                    "requested_price", "hours_ordered", "rate", "payment_received", "payment_requests_sent", "receipts_sent",
+                                    "meeting_allocation_gefen", "meeting_allocation_current", "meeting_allocation_district",
+                                  ].includes(key)) return (
                                     <td key={key} className={tdClass}>
                                       <input
                                         key={rowKey}
@@ -2597,6 +2847,29 @@ export default function AdminPage() {
                                       />
                                     </td>
                                   );
+                                  if (key === "meeting_duration_gefen" || key === "meeting_duration_current" || key === "meeting_duration_district") return (
+                                    <td key={key} className={tdClass}>
+                                      <HourMinuteInput idPrefix={`${key}-${rowKey}`} label={ADMIN_DATA_COLUMNS.find(c => c.key === key)?.label}
+                                        minutes={yad[key] ?? null}
+                                        onChange={v => saveYearAdminField(school.id, key, v)} />
+                                    </td>
+                                  );
+                                  if (key === "advisor_gefen" || key === "advisor_current" || key === "advisor_district") {
+                                    const list = school[key === "advisor_gefen" ? "advisors_gefen" : key === "advisor_current" ? "advisors_current" : "advisors_district"] || [];
+                                    return (
+                                      <td key={key} className={tdClass}>
+                                        {list.length === 0 ? "—" : (
+                                          <div className="flex flex-wrap gap-1">
+                                            {list.map(a => (
+                                              <span key={a.id} className="inline-flex items-center text-xs font-medium px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 border border-slate-200">
+                                                {a.full_name || a.email}
+                                              </span>
+                                            ))}
+                                          </div>
+                                        )}
+                                      </td>
+                                    );
+                                  }
                                   if (key === "contract_sent" || key === "contract_received") return (
                                     <td key={key} className={tdClass}>
                                       <label htmlFor={`${key}-${rowKey}`} className="sr-only">{ADMIN_DATA_COLUMNS.find(c => c.key === key)?.label}</label>
@@ -2623,6 +2896,152 @@ export default function AdminPage() {
                                       )}
                                     </td>
                                   );
+                                  if (key === "closure_parents_status" || key === "closure_authority_status") {
+                                    const val = yad[key];
+                                    const colorCls = val === true ? "text-green-600" : val === false ? "text-red-600" : "text-slate-400";
+                                    return (
+                                      <td key={key} className={tdClass}>
+                                        <label htmlFor={`${key}-${rowKey}`} className="sr-only">{ADMIN_DATA_COLUMNS.find(c => c.key === key)?.label}</label>
+                                        <select id={`${key}-${rowKey}`} className={`${ADMIN_FIELD_CLS} w-24 font-semibold ${colorCls}`}
+                                          value={val === true ? "yes" : val === false ? "no" : ""}
+                                          onChange={e => saveYearAdminField(school.id, key, e.target.value === "yes" ? true : e.target.value === "no" ? false : null)}>
+                                          <option value="">—</option>
+                                          <option value="yes">סגור</option>
+                                          <option value="no">לא סגור</option>
+                                        </select>
+                                      </td>
+                                    );
+                                  }
+                                  if (key === "closure_parents_notes" || key === "closure_authority_notes") {
+                                    const notesKey = `${school.id}:${key}`;
+                                    const isEditing = editingAdminNotesKey === notesKey;
+                                    const text = yad[key] || "";
+                                    return (
+                                      <td key={key} className={tdClass}>
+                                        {isEditing ? (
+                                          <label>
+                                            <span className="sr-only">{ADMIN_DATA_COLUMNS.find(c => c.key === key)?.label}</span>
+                                            <textarea
+                                              autoFocus
+                                              rows={2}
+                                              className={`${ADMIN_FIELD_CLS} w-48 resize-y`}
+                                              defaultValue={text}
+                                              onBlur={e => {
+                                                const v = e.target.value.trim() || null;
+                                                setEditingAdminNotesKey(null);
+                                                if (v !== (text || null)) saveYearAdminField(school.id, key, v);
+                                              }}
+                                            />
+                                          </label>
+                                        ) : (
+                                          <button type="button" onClick={() => setEditingAdminNotesKey(notesKey)}
+                                            className="text-right text-slate-600 hover:text-blue-600 truncate max-w-[160px] block">
+                                            {text ? (text.length > 30 ? `${text.slice(0, 30)}…` : text) : "—"}
+                                          </button>
+                                        )}
+                                      </td>
+                                    );
+                                  }
+                                  if (key === "quarterly_notes_1" || key === "quarterly_notes_2" || key === "quarterly_notes_3" || key === "quarterly_notes_4") {
+                                    const q = key.slice(-1);
+                                    const summary = quarterlyNotesSummary[school.id]?.[q] || { count: 0, latest_segment: null };
+                                    const notesKey = `${school.id}:${key}`;
+                                    const isEditing = editingAdminNotesKey === notesKey;
+
+                                    if (summary.count >= 2) {
+                                      return (
+                                        <td key={key} className={tdClass}>
+                                          <button type="button"
+                                            onClick={() => setShowSchoolNotesModalFor({ schoolId: school.id, quarter: Number(q) })}
+                                            className="text-slate-400 hover:text-blue-600 transition-colors text-base leading-none" aria-label="פתח הערות">
+                                            📝
+                                          </button>
+                                        </td>
+                                      );
+                                    }
+
+                                    const text = summary.latest_segment?.content || "";
+                                    return (
+                                      <td key={key} className={tdClass}>
+                                        {isEditing ? (
+                                          <label>
+                                            <span className="sr-only">{ADMIN_DATA_COLUMNS.find(c => c.key === key)?.label}</span>
+                                            <textarea
+                                              autoFocus
+                                              rows={2}
+                                              className={`${ADMIN_FIELD_CLS} w-48 resize-y`}
+                                              defaultValue={text}
+                                              onBlur={e => {
+                                                const v = e.target.value.trim();
+                                                setEditingAdminNotesKey(null);
+                                                if (v === text) return;
+                                                if (summary.count === 1) {
+                                                  if (v) saveQuarterlyNoteEdit(school.id, summary.latest_segment.id, q, v);
+                                                } else if (v) {
+                                                  createQuarterlyNote(school.id, q, v);
+                                                }
+                                              }}
+                                            />
+                                          </label>
+                                        ) : (
+                                          <button type="button" onClick={() => setEditingAdminNotesKey(notesKey)}
+                                            className="text-right text-slate-600 hover:text-blue-600 truncate max-w-[160px] block">
+                                            {text ? (text.length > 30 ? `${text.slice(0, 30)}…` : text) : "—"}
+                                          </button>
+                                        )}
+                                      </td>
+                                    );
+                                  }
+                                  if (key === "control_letter_received_date" || key === "control_letter_target_date") {
+                                    const iso = controlLetterFieldValue(school, key === "control_letter_target_date" ? "target_date" : "received_date");
+                                    return <td key={key} className={tdClass}>{iso ? formatDDMMYY(iso) : "—"}</td>;
+                                  }
+                                  if (key === "control_letter_days_to_answer") {
+                                    const v = controlLetterFieldValue(school, "days_to_answer");
+                                    return <td key={key} className={tdClass}>{v ?? "—"}</td>;
+                                  }
+                                  if (key === "control_letter_status") {
+                                    const v = controlLetterFieldValue(school, "status");
+                                    const s = CONTROL_LETTER_STATUS_MAP[v || ""] || CONTROL_LETTER_STATUS_MAP[""];
+                                    return (
+                                      <td key={key} className={tdClass}>
+                                        {v ? (
+                                          <span className="inline-flex items-center gap-1.5 text-xs font-semibold px-2 py-0.5 rounded-full" style={{ background: s.bg, color: s.color }}>
+                                            <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: s.dot }} aria-hidden="true" />
+                                            {s.label}
+                                          </span>
+                                        ) : "—"}
+                                      </td>
+                                    );
+                                  }
+                                  if (key === "control_letter_notes") {
+                                    const text = controlLetterFieldValue(school, "notes") || "";
+                                    return (
+                                      <td key={key} className={tdClass}>
+                                        <span title={text} className="truncate max-w-[160px] block">
+                                          {text ? (text.length > 30 ? `${text.slice(0, 30)}…` : text) : "—"}
+                                        </span>
+                                      </td>
+                                    );
+                                  }
+                                  if (key === "control_letter_original_file" || key === "control_letter_response_file") {
+                                    const kind = key === "control_letter_original_file" ? "original" : "response";
+                                    const fileName = controlLetterFieldValue(school, `${kind}_letter_file_name`);
+                                    const primary = pickPrimaryControlLetter(school.control_letters);
+                                    return (
+                                      <td key={key} className={tdClass}>
+                                        {fileName && primary ? (
+                                          <button
+                                            type="button"
+                                            onClick={() => downloadControlLetterFile(school.id, primary.division_type, kind, fileName)}
+                                            className="text-xs text-blue-600 hover:underline truncate max-w-[100px]"
+                                          >
+                                            {fileName}
+                                          </button>
+                                        ) : "—"}
+                                      </td>
+                                    );
+                                  }
                                   return <td key={key} className={tdClass}>—</td>;
                                 })}
                                 <td className="px-4 py-2">
@@ -2690,16 +3109,20 @@ export default function AdminPage() {
                                       <button onClick={() => addAccount(school.id)} className="btn-blue text-sm px-4 py-2">+ הוסף</button>
                                     </div>
 
-                                    <div className="mt-4 pt-3 border-t border-slate-100">
-                                      <p className="text-xs text-slate-800 mb-2 font-medium">יועצים מוקצים</p>
-                                      <AdvisorSearch
-                                        schoolId={school.id}
-                                        selectedIds={(schoolAdvisors[school.id] || []).map(a => a.id)}
-                                        users={users}
-                                        loadingUsers={loadingUsers}
-                                        onChange={newIds => handleExpandedAdvisorChange(school.id, newIds)}
-                                        onRetry={loadUsers}
-                                      />
+                                    <div className="mt-4 pt-3 border-t border-slate-100 flex flex-col gap-3">
+                                      {SERVICE_TYPE_TABS.map(({ key, label }) => (
+                                        <div key={key}>
+                                          <p className="text-xs text-slate-800 mb-2 font-medium">יועץ מלווה [{label}]</p>
+                                          <AdvisorSearch
+                                            schoolId={school.id}
+                                            selectedIds={(typedSchoolAdvisors[school.id]?.[key] || []).map(a => a.id)}
+                                            users={users}
+                                            loadingUsers={loadingUsers}
+                                            onChange={newIds => handleExpandedTypedAdvisorChange(school.id, key, newIds)}
+                                            onRetry={loadUsers}
+                                          />
+                                        </div>
+                                      ))}
                                     </div>
                                   </td>
                                 </tr>
@@ -3233,6 +3656,14 @@ export default function AdminPage() {
             setUserSchoolsConflict(null);
             setUserToDelete(u);
           }}
+        />
+      )}
+      {showSchoolNotesModalFor && (
+        <SchoolNotesModal
+          schoolId={showSchoolNotesModalFor.schoolId}
+          currentUser={{ id: myUserId, role: myRole, full_name: myFullName }}
+          focusQuarter={showSchoolNotesModalFor.quarter}
+          onClose={() => setShowSchoolNotesModalFor(null)}
         />
       )}
       {blocker.state === "blocked" && meetingsGuardActive && (

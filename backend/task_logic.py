@@ -46,7 +46,7 @@ ORDER_METHOD_OPTIONS = ["gefen", "tnufa", "tkuma", "dokati", "palg", "self_manag
 FIELD_LABELS = {
     "symbol": "סמל מוסד", "city": "עיר", "authority": "בעלות", "stage": "שלב מוסד",
     "district": "מחוז", "service_type": "סוג שירות", "requested_price": "מחיר מבוקש",
-    "order_method": "אמצעי הזמנה", "order_amount_gefen": "גובה הזמנה",
+    "order_method": "אמצעי הזמנה", "order_amount_gefen": 'מחיר כולל מע"מ',
     "hours_ordered": "מספר שעות שהוזמנו", "rate": "תעריף",
     "payment_received": "תשלום שהתקבל", "payment_requests_sent": "דרישות תשלום שנשלחו",
     "contract_sent": "חוזה נשלח", "contract_received": "חוזה התקבל",

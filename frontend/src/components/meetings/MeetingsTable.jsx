@@ -50,7 +50,7 @@ export function MeetingsTable({
   showSchoolColumn, schoolLabelFor, onOpenSchoolPicker,
   selectable, selectedIds, onToggleSelect, onToggleSelectAll,
   onSendStatusReminder, hideAdvisorColumn,
-  showCalendarColumn, onOpenSummary,
+  showCalendarColumn, onOpenSummary, typedAdvisorsFor,
 }) {
   const [sortField, setSortField] = useState(null); // null | "date" | "status" | "advisor" | "type"
   const [sortDir, setSortDir]   = useState("asc");
@@ -187,6 +187,7 @@ export function MeetingsTable({
                   hideAdvisorColumn={hideAdvisorColumn}
                   showCalendarColumn={showCalendarColumn}
                   onOpenSummary={onOpenSummary}
+                  typedAdvisors={typedAdvisorsFor ? typedAdvisorsFor(m) : null}
                 />
               ))}
             </tbody>

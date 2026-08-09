@@ -6,10 +6,12 @@ non-fatal from the caller's perspective: failures are logged and reflected
 in the returned sync-status map, never raised, so a calendar outage never
 blocks meeting scheduling in the app itself.
 """
+import contextlib
 import json
 import logging
 import os
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -417,6 +419,79 @@ def persist_calendar_sync(db, meeting_id: str, sync_map: dict) -> None:
             db.table("calendar_event_index").upsert(rows, on_conflict="external_event_id").execute()
     except Exception as exc:
         logger.warning("calendar_event_index update failed for meeting %s (non-fatal): %s", meeting_id, exc)
+
+
+_LOCK_STALE_SECONDS = 60   # worst case: token fetch + per-advisor Graph calls + persist retry
+_LOCK_POLL_INTERVAL = 0.2  # seconds between poll attempts
+_LOCK_MAX_WAIT = 4.0       # total bounded wait before giving up
+
+
+@contextlib.contextmanager
+def calendar_sync_lock(db, meeting_id: str):
+    """Serializes the read-previous-sync -> Graph call -> persist_calendar_sync
+    critical section per meeting_id, across all workers, via a Postgres-backed
+    lock (never in-process — two concurrent requests for the same meeting, e.g.
+    MeetingRow's onChange + onBlur autosaves, must not both independently decide
+    "no event yet, create one", which is what caused real duplicate Outlook
+    events in production).
+
+    Yields True if the lock was acquired (caller should run its sync normally)
+    or False if it couldn't be acquired within _LOCK_MAX_WAIT (caller must skip
+    its own calendar sync for this attempt — the meeting's own DB save is
+    unaffected either way, since this lock only ever wraps the calendar-sync
+    side effect, never the meeting row's save itself). A future edit or the
+    existing poll/webhook reconciler will catch up the sync later.
+
+    Never raises: lock acquire/release failures are logged and treated as
+    "lock unavailable", never fatal to the HTTP request.
+    """
+    token = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    acquired = False
+    deadline = time.monotonic() + _LOCK_MAX_WAIT
+    try:
+        while time.monotonic() < deadline:
+            try:
+                db = get_admin_client()
+                db.table("calendar_sync_locks").insert(
+                    {"meeting_id": meeting_id, "locked_by": token}
+                ).execute()
+                acquired = True
+                break
+            except Exception:
+                # Row already exists (PK conflict) — check whether it's stale enough to steal.
+                try:
+                    db = get_admin_client()
+                    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=_LOCK_STALE_SECONDS)).isoformat()
+                    stolen = (
+                        db.table("calendar_sync_locks")
+                        .update({"locked_at": datetime.now(timezone.utc).isoformat(), "locked_by": token})
+                        .eq("meeting_id", meeting_id)
+                        .lt("locked_at", cutoff)
+                        .execute()
+                    )
+                    if stolen.data:
+                        acquired = True
+                        break
+                except Exception as exc:
+                    logger.warning("calendar_sync_lock: steal check failed for meeting %s: %s", meeting_id, exc)
+            time.sleep(_LOCK_POLL_INTERVAL)
+
+        if not acquired:
+            logger.warning(
+                "calendar_sync_lock: could not acquire for meeting %s within %.1fs, skipping sync",
+                meeting_id, _LOCK_MAX_WAIT,
+            )
+        yield acquired
+    finally:
+        if acquired:
+            try:
+                db = get_admin_client()
+                db.table("calendar_sync_locks").delete().eq("meeting_id", meeting_id).eq("locked_by", token).execute()
+            except Exception as exc:
+                logger.warning(
+                    "calendar_sync_lock: release failed for meeting %s (will self-expire via stale-lock steal): %s",
+                    meeting_id, exc,
+                )
 
 
 # ---------------------------------------------------------------------------

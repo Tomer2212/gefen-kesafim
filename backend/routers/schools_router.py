@@ -13,9 +13,9 @@ from typing import Annotated
 
 import httpx
 from bidi.algorithm import get_display
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import Response
-from openpyxl import load_workbook
+from openpyxl import load_workbook, Workbook
 from pydantic import BaseModel
 from reportlab.lib import colors as rl_colors
 from reportlab.lib.pagesizes import A4, landscape as rl_landscape
@@ -207,6 +207,21 @@ class SchoolYearAdminDataIn(BaseModel):
     contract_sent: bool | None = None
     contract_received: bool | None = None
     receipts_sent: float | None = None
+    closure_parents_status: bool | None = None
+    closure_parents_notes: str | None = None
+    closure_authority_status: bool | None = None
+    closure_authority_notes: str | None = None
+    meeting_allocation_gefen: float | None = None
+    meeting_allocation_current: float | None = None
+    meeting_allocation_district: float | None = None
+    meeting_duration_gefen: int | None = None
+    meeting_duration_current: int | None = None
+    meeting_duration_district: int | None = None
+    invoice_transaction_status: str | None = None
+    payment_method: str | None = None
+    invoice_numbers: list[str] | None = None
+    deposit_dates: list[str] | None = None
+    amount_paid: float | None = None
 
 
 class GefenAccountIn(BaseModel):
@@ -222,6 +237,13 @@ class GoalStatusIn(BaseModel):
     goal_key: str
     academic_year: str
     met: bool | None = None
+
+
+class ControlLetterIn(BaseModel):
+    received_date: str | None = None
+    days_to_answer: int | None = None
+    status: str | None = None
+    notes: str | None = None
 
 
 class AdvisorAssignIn(BaseModel):
@@ -528,10 +550,85 @@ def list_schools(
         except Exception as exc:
             logger.warning("school_goals enrichment failed (non-fatal): %s", exc)
 
+    # Enrich Q7 ("סגירת שנה" — closure status/notes with parents and with the authority) for
+    # the dashboard and admin schools tables. Only the 4 closure fields are selected here
+    # (not the whole school_year_admin_data row) so advisors never receive financial fields
+    # (pricing, payment status, etc.) they aren't otherwise granted access to.
+    closure_by_school: dict = {}
+    if school_ids:
+        try:
+            closure_rows = (
+                db.table("school_year_admin_data")
+                .select("school_id, closure_parents_status, closure_parents_notes, "
+                        "closure_authority_status, closure_authority_notes, "
+                        "meeting_allocation_gefen, meeting_allocation_current, meeting_allocation_district, "
+                        "meeting_duration_gefen, meeting_duration_current, meeting_duration_district")
+                .eq("academic_year", academic_year)
+                .in_("school_id", school_ids)
+                .execute()
+            )
+            closure_by_school = {r["school_id"]: r for r in (closure_rows.data or [])}
+        except Exception as exc:
+            logger.warning("year_closure enrichment failed (non-fatal): %s", exc)
+
+    # Enrich Q7b ("מכתב בקרה" — control letters, one fixed row per division_type) for the
+    # dashboard and admin schools tables.
+    control_letters_by_school: dict = {}
+    if school_ids:
+        try:
+            cl_rows = (
+                db.table("control_letters")
+                .select("school_id, division_type, received_date, days_to_answer, status, notes, "
+                        "original_letter_file_name, response_letter_file_name")
+                .in_("school_id", school_ids)
+                .execute()
+            )
+            for r in (cl_rows.data or []):
+                control_letters_by_school.setdefault(r["school_id"], []).append(r)
+        except Exception as exc:
+            logger.warning("control_letters enrichment failed (non-fatal): %s", exc)
+
+    # Enrich Q8 (per-service-type advisor lists — school_advisors_gefen/current/district) for
+    # the dashboard/admin "יועץ מלווה [גפן/שוטף/מחוז]" columns. Non-fatal: on failure schools
+    # still return, just without these lists populated.
+    typed_advisors_by_school: dict = {"gefen": {}, "current": {}, "district": {}}
+    if school_ids:
+        for service_type, table_name in (
+            ("gefen", "school_advisors_gefen"),
+            ("current", "school_advisors_current"),
+            ("district", "school_advisors_district"),
+        ):
+            try:
+                rows = db.table(table_name).select("school_id, advisor_id").in_("school_id", school_ids).execute()
+                for r in (rows.data or []):
+                    typed_advisors_by_school[service_type].setdefault(r["school_id"], []).append(r["advisor_id"])
+            except Exception as exc:
+                logger.warning("%s enrichment failed (non-fatal): %s", table_name, exc)
+
+        typed_advisor_ids = list({
+            aid
+            for by_school in typed_advisors_by_school.values()
+            for ids in by_school.values()
+            for aid in ids
+        })
+        if typed_advisor_ids:
+            try:
+                tp_rows = db.table("profiles").select("id, full_name, email").in_("id", typed_advisor_ids).execute()
+                for p in (tp_rows.data or []):
+                    if p["id"] not in profiles_map:
+                        profiles_map[p["id"]] = p
+            except Exception as exc:
+                logger.warning("typed advisors profile enrichment failed (non-fatal): %s", exc)
+
     for school in schools:
         school["check_metrics"] = metrics_by_school.get(school["id"], [])
         school["goal_statuses"] = goals_by_school.get(school["id"], [])
+        school["year_closure"] = closure_by_school.get(school["id"]) or {}
+        school["control_letters"] = control_letters_by_school.get(school["id"], [])
         school["meeting_coordinator_contact"] = _resolve_meeting_coordinator(school)
+        for service_type in ("gefen", "current", "district"):
+            advisor_ids = typed_advisors_by_school[service_type].get(school["id"], [])
+            school[f"advisors_{service_type}"] = [profiles_map[aid] for aid in advisor_ids if aid in profiles_map]
 
     return schools
 
@@ -690,8 +787,10 @@ def delete_school(
         future = db.table("meetings").select("id, calendar_sync").eq("school_id", school_id).gte("meeting_date", today).eq("status", "scheduled").execute()
         for m in (future.data or []):
             if m.get("calendar_sync"):
-                graph_client.sync_meeting_cancel(db, user["org_id"], m["calendar_sync"])
-                graph_client.persist_calendar_sync(db, m["id"], {})
+                with graph_client.calendar_sync_lock(db, m["id"]) as acquired:
+                    if acquired:
+                        graph_client.sync_meeting_cancel(db, user["org_id"], m["calendar_sync"])
+                        graph_client.persist_calendar_sync(db, m["id"], {})
     except Exception as exc:
         logger.warning("calendar cancel-sync failed for deleted school %s (non-fatal): %s", school_id, exc)
 
@@ -766,10 +865,12 @@ def restore_school(
         for m in (future.data or []):
             if m.get("calendar_sync"):
                 continue  # already synced (wasn't touched by the delete flow)
-            subject = _build_meeting_subject(db, school_id, m.get("participants"), m.get("primary_contact_key"))
-            sync_map = graph_client.sync_meeting_create(db, user["org_id"], m, subject)
-            if sync_map:
-                graph_client.persist_calendar_sync(db, m["id"], sync_map)
+            with graph_client.calendar_sync_lock(db, m["id"]) as acquired:
+                if acquired:
+                    subject = _build_meeting_subject(db, school_id, m.get("participants"), m.get("primary_contact_key"))
+                    sync_map = graph_client.sync_meeting_create(db, user["org_id"], m, subject)
+                    if sync_map:
+                        graph_client.persist_calendar_sync(db, m["id"], sync_map)
     except Exception as exc:
         logger.warning("calendar re-sync failed for restored school %s (non-fatal): %s", school_id, exc)
 
@@ -889,9 +990,13 @@ def upsert_year_admin_data(
     if not is_manager:
         if not _advisor_has_school_access(db, user, school_id):
             raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
-        # Advisors (non-manager) may only update the Gefen order amount from the school card —
-        # every other admin-table field is manager+ only.
-        allowed_fields = {"order_amount_gefen"}
+        # Advisors (non-manager) may only update the Gefen order amount and the "סגירת שנה"
+        # fields from the school card — every other admin-table field is manager+ only.
+        allowed_fields = {
+            "order_amount_gefen",
+            "closure_parents_status", "closure_parents_notes",
+            "closure_authority_status", "closure_authority_notes",
+        }
         submitted_fields = set(body.model_fields_set)
         if submitted_fields - allowed_fields:
             raise HTTPException(status_code=403, detail="אין הרשאה לעדכן שדות אלו")
@@ -992,6 +1097,326 @@ def download_contract_file(
         content=content,
         media_type="application/octet-stream",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/{school_id}/control-letters")
+def list_control_letters(
+    school_id: str,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            if user["role"] not in ("owner", "manager") and not _advisor_has_school_access(db, user, school_id):
+                raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
+            rows = db.table("control_letters").select("*").eq("school_id", school_id).execute()
+            return rows.data or []
+        except HTTPException:
+            raise
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("list_control_letters attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("list_control_letters failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+
+@router.put("/{school_id}/control-letters/{division_type}")
+def upsert_control_letter(
+    school_id: str,
+    division_type: str,
+    body: ControlLetterIn,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    db = get_admin_client()
+    if user["role"] not in ("owner", "manager") and not _advisor_has_school_access(db, user, school_id):
+        raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
+
+    update_data = body.model_dump(exclude_unset=True)
+    update_data["school_id"] = school_id
+    update_data["division_type"] = division_type
+
+    row = (
+        db.table("control_letters")
+        .upsert(update_data, on_conflict="school_id,division_type")
+        .execute()
+    )
+    return row.data[0] if row.data else update_data
+
+
+def _upload_control_letter_file(school_id: str, division_type: str, user: dict, file: UploadFile, kind: str):
+    import shutil
+    import tempfile
+
+    db = get_admin_client()
+    if user["role"] not in ("owner", "manager") and not _advisor_has_school_access(db, user, school_id):
+        raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
+
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix != ".pdf":
+        raise HTTPException(status_code=400, detail="ניתן להעלות קובצי PDF בלבד")
+
+    run_dir = Path(tempfile.mkdtemp(prefix=f"control_letter_{school_id}_"))
+    try:
+        dest = run_dir / f"{kind}.pdf"
+        content = file.file.read()
+        dest.write_bytes(content)
+        storage_key = f"control-letters/{school_id}/{division_type}/{kind}/{secrets.token_hex(8)}.pdf"
+        db.storage.from_("check-files").upload(storage_key, dest.read_bytes())
+    finally:
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+    update_data = {
+        "school_id": school_id,
+        "division_type": division_type,
+        f"{kind}_letter_storage_key": storage_key,
+        f"{kind}_letter_file_name": file.filename,
+    }
+    row = (
+        db.table("control_letters")
+        .upsert(update_data, on_conflict="school_id,division_type")
+        .execute()
+    )
+    return row.data[0] if row.data else update_data
+
+
+def _download_control_letter_file(school_id: str, division_type: str, user: dict, kind: str):
+    db = get_admin_client()
+    if user["role"] not in ("owner", "manager") and not _advisor_has_school_access(db, user, school_id):
+        raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
+
+    row = (
+        db.table("control_letters")
+        .select(f"{kind}_letter_storage_key, {kind}_letter_file_name")
+        .eq("school_id", school_id)
+        .eq("division_type", division_type)
+        .execute()
+    )
+    storage_key = row.data[0].get(f"{kind}_letter_storage_key") if row.data else None
+    if not storage_key:
+        raise HTTPException(status_code=404, detail="לא הועלה קובץ")
+
+    filename = row.data[0].get(f"{kind}_letter_file_name") or f"{kind}.pdf"
+    content = db.storage.from_("check-files").download(storage_key)
+    return Response(
+        content=content,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _delete_control_letter_file(school_id: str, division_type: str, user: dict, kind: str):
+    db = get_admin_client()
+    if user["role"] not in ("owner", "manager") and not _advisor_has_school_access(db, user, school_id):
+        raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
+
+    row = (
+        db.table("control_letters")
+        .update({f"{kind}_letter_storage_key": None, f"{kind}_letter_file_name": None})
+        .eq("school_id", school_id)
+        .eq("division_type", division_type)
+        .execute()
+    )
+    return row.data[0] if row.data else {}
+
+
+@router.post("/{school_id}/control-letters/{division_type}/original-file")
+async def upload_control_letter_original_file(
+    school_id: str,
+    division_type: str,
+    user: Annotated[dict, Depends(get_current_user)],
+    file: UploadFile = File(...),
+):
+    return _upload_control_letter_file(school_id, division_type, user, file, "original")
+
+
+@router.get("/{school_id}/control-letters/{division_type}/original-file")
+def download_control_letter_original_file(
+    school_id: str,
+    division_type: str,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    return _download_control_letter_file(school_id, division_type, user, "original")
+
+
+@router.delete("/{school_id}/control-letters/{division_type}/original-file")
+def delete_control_letter_original_file(
+    school_id: str,
+    division_type: str,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    return _delete_control_letter_file(school_id, division_type, user, "original")
+
+
+@router.post("/{school_id}/control-letters/{division_type}/response-file")
+async def upload_control_letter_response_file(
+    school_id: str,
+    division_type: str,
+    user: Annotated[dict, Depends(get_current_user)],
+    file: UploadFile = File(...),
+):
+    return _upload_control_letter_file(school_id, division_type, user, file, "response")
+
+
+@router.get("/{school_id}/control-letters/{division_type}/response-file")
+def download_control_letter_response_file(
+    school_id: str,
+    division_type: str,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    return _download_control_letter_file(school_id, division_type, user, "response")
+
+
+@router.delete("/{school_id}/control-letters/{division_type}/response-file")
+def delete_control_letter_response_file(
+    school_id: str,
+    division_type: str,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    return _delete_control_letter_file(school_id, division_type, user, "response")
+
+
+@router.post("/collection/gefen-organized-check")
+async def gefen_organized_check(
+    user: Annotated[dict, Depends(get_current_user)],
+    file: UploadFile = File(...),
+    academic_year: str = DEFAULT_ACADEMIC_YEAR,
+):
+    """Parse a "גפן-ספקים" export, sum ordered amounts per school symbol (column F),
+    and compare against each relevant school's order_amount_gefen ("מחיר כולל מע"מ").
+    Relevant = client_status == "active" and "private" in order_method.
+    """
+    import shutil
+    import tempfile
+    from datetime import datetime, timezone
+
+    _require_manager(user)
+
+    run_dir = Path(tempfile.mkdtemp(prefix="gefen_organized_"))
+    try:
+        dest = run_dir / (file.filename or "gefen_suppliers.xlsx")
+        dest.write_bytes(await file.read())
+        wb = load_workbook(dest, data_only=True, read_only=True)
+        ws = wb.active
+
+        totals: dict[str, float] = {}
+        for row in ws.iter_rows(min_row=2):
+            symbol_cell = row[5].value if len(row) > 5 else None  # column F
+            amount_cell = row[31].value if len(row) > 31 else None  # column AF
+            status_cell = row[34].value if len(row) > 34 else None  # column AI — "סטטוס הזמנה"
+            if symbol_cell is None:
+                continue
+            if isinstance(status_cell, str) and status_cell.strip() == 'ההזמנה בוטלה ע"י המוסד':
+                continue
+            try:
+                symbol = str(int(float(symbol_cell))).strip()
+            except (TypeError, ValueError):
+                continue
+            try:
+                amount = float(amount_cell) if amount_cell not in (None, "") else 0.0
+            except (TypeError, ValueError):
+                amount = 0.0
+            totals[symbol] = totals.get(symbol, 0.0) + amount
+        wb.close()
+    finally:
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            schools_rows = db.table("schools").select("id, symbol").eq("status", "active").execute()
+            yad_rows = (
+                db.table("school_year_admin_data")
+                .select("school_id, client_status, order_method, order_amount_gefen")
+                .eq("academic_year", academic_year)
+                .execute()
+            )
+            break
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("gefen_organized_check attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("gefen_organized_check failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    yad_by_school = {r["school_id"]: r for r in (yad_rows.data or [])}
+    now_iso = datetime.now(timezone.utc).isoformat()
+    result_map: dict[str, dict] = {}
+
+    for school in (schools_rows.data or []):
+        yad = yad_by_school.get(school["id"], {})
+        if yad.get("client_status") != "active" or "private" not in (yad.get("order_method") or []):
+            continue
+
+        symbol = str(school.get("symbol") or "").strip()
+        checked_amount = totals.get(symbol, 0.0)
+        order_amount = yad.get("order_amount_gefen")
+        matched = bool(order_amount) and order_amount > 0 and checked_amount == order_amount
+
+        update_data = {
+            "school_id": school["id"],
+            "academic_year": academic_year,
+            "gefen_organized_matched": matched,
+            "gefen_organized_checked_amount": checked_amount,
+            "gefen_organized_checked_at": now_iso,
+            "gefen_organized_uploaded_file_name": file.filename,
+        }
+        row = db.table("school_year_admin_data").upsert(update_data, on_conflict="school_id,academic_year").execute()
+        result_map[school["id"]] = row.data[0] if row.data else update_data
+
+    return result_map
+
+
+class GefenOrganizedMismatchRow(BaseModel):
+    name: str
+    authority: str | None = None
+    symbol: str | None = None
+    order_amount: float = 0
+    checked_amount: float = 0
+
+
+class GefenOrganizedMismatchExportIn(BaseModel):
+    rows: list[GefenOrganizedMismatchRow]
+    academic_year: str = DEFAULT_ACADEMIC_YEAR
+
+
+@router.post("/collection/gefen-organized-mismatches-export")
+def export_gefen_organized_mismatches(
+    body: GefenOrganizedMismatchExportIn,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    _require_manager(user)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "גפן מסודר - אי התאמות"
+    ws.sheet_view.rightToLeft = True
+    ws.append(["שם מוסד", "סמל מוסד", "בעלות", 'מחיר כולל מע"מ', "גובה הזמנה בפועל", "פער"])
+    for r in body.rows:
+        ws.append([r.name, r.symbol, r.authority, r.order_amount, r.checked_amount, r.checked_amount - r.order_amount])
+    for row in ws.iter_rows(min_row=2, min_col=4, max_col=6):
+        for cell in row:
+            cell.number_format = "#,##0"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    # HTTP headers must be ASCII — the Hebrew academic year breaks Content-Disposition
+    # entirely if embedded raw. RFC 5987's filename* handles non-ASCII names correctly
+    # (with an ASCII fallback for older clients).
+    import urllib.parse
+    filename = f"gefen-organized-mismatches-{body.academic_year}.xlsx"
+    encoded_name = urllib.parse.quote(filename)
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=\"gefen-organized-mismatches.xlsx\"; filename*=UTF-8''{encoded_name}"},
     )
 
 
@@ -1284,6 +1709,142 @@ def unassign_advisor(
         }], pref_key="notify_advisor_assignment")
     except Exception as exc:
         logger.warning("advisor_removed notification failed (non-fatal): %s", exc)
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Per-service-type advisor assignments ("יועץ מלווה [גפן/שוטף/מחוז]") — school_advisors_gefen/
+# current/district. These are the "default advisor for this service type" lists, separate from
+# advisor_schools (which stays the general access-control table). Assigning to a typed list also
+# upserts into advisor_schools (so the advisor keeps/gains access); unassigning from a typed list
+# only removes from advisor_schools if the advisor isn't left in any other typed list.
+# ---------------------------------------------------------------------------
+
+_TYPED_ADVISOR_TABLES = {
+    "gefen": "school_advisors_gefen",
+    "current": "school_advisors_current",
+    "district": "school_advisors_district",
+}
+
+
+def _typed_advisor_table(service_type: str) -> str:
+    table = _TYPED_ADVISOR_TABLES.get(service_type)
+    if not table:
+        raise HTTPException(status_code=400, detail="סוג שירות לא תקין")
+    return table
+
+
+@router.get("/{school_id}/advisors/{service_type}")
+def list_typed_advisors(
+    school_id: str,
+    service_type: str,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    _require_manager(user)
+    table = _typed_advisor_table(service_type)
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            rows = (
+                db.table(table)
+                .select("advisor_id, profiles(id, email, full_name, role)")
+                .eq("school_id", school_id)
+                .execute()
+            )
+            return [r["profiles"] for r in rows.data if r.get("profiles")]
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("list_typed_advisors attempt 1 failed: %s — resetting client and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.error("list_typed_advisors failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+
+@router.post("/{school_id}/advisors/{service_type}")
+def assign_typed_advisor(
+    school_id: str,
+    service_type: str,
+    body: AdvisorAssignIn,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    _require_manager(user)
+    table = _typed_advisor_table(service_type)
+    db = get_admin_client()
+    db.table(table).upsert({"advisor_id": body.advisor_id, "school_id": school_id}).execute()
+    db.table("advisor_schools").upsert({"advisor_id": body.advisor_id, "school_id": school_id}).execute()
+    try:
+        school_row = db.table("schools").select("name").eq("id", school_id).execute()
+        school_name = school_row.data[0]["name"] if school_row.data else "בית ספר"
+        _create_notifications(db, [{
+            "recipient_id": body.advisor_id,
+            "type": "advisor_assigned",
+            "school_id": school_id,
+            "data": {
+                "title": f"שויכת לבית הספר {school_name}",
+                "school_name": school_name,
+                "sender_name": user.get("full_name", ""),
+                "deeplink": f"/school/{school_id}",
+            }
+        }], pref_key="notify_advisor_assignment")
+    except Exception as exc:
+        logger.warning("advisor_assigned (typed) notification failed (non-fatal): %s", exc)
+    return {"ok": True}
+
+
+@router.delete("/{school_id}/advisors/{service_type}/{advisor_id}")
+def unassign_typed_advisor(
+    school_id: str,
+    service_type: str,
+    advisor_id: str,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    _require_manager(user)
+    table = _typed_advisor_table(service_type)
+    db = get_admin_client()
+
+    db.table(table).delete().eq("advisor_id", advisor_id).eq("school_id", school_id).execute()
+
+    # Only drop the advisor from the general advisor_schools access table if they're no longer
+    # in ANY of the three typed lists for this school, and never if they're the school's last
+    # advisor overall (mirrors the guard in unassign_advisor).
+    still_typed = False
+    for other_table in _TYPED_ADVISOR_TABLES.values():
+        rows = (
+            db.table(other_table)
+            .select("advisor_id")
+            .eq("school_id", school_id)
+            .eq("advisor_id", advisor_id)
+            .execute()
+        )
+        if rows.data:
+            still_typed = True
+            break
+
+    if not still_typed:
+        existing = db.table("advisor_schools").select("advisor_id").eq("school_id", school_id).execute()
+        current_ids = [r["advisor_id"] for r in (existing.data or [])]
+        if advisor_id in current_ids and len(current_ids) > 1:
+            db.table("advisor_schools").delete().eq("advisor_id", advisor_id).eq("school_id", school_id).execute()
+            try:
+                school_row = db.table("schools").select("name").eq("id", school_id).execute()
+                school_name = school_row.data[0]["name"] if school_row.data else "בית ספר"
+                _create_notifications(db, [{
+                    "recipient_id": advisor_id,
+                    "type": "advisor_removed",
+                    "data": {
+                        "title": f"הוסרת מבית הספר {school_name}",
+                        "school_name": school_name,
+                        "sender_name": user.get("full_name", ""),
+                    }
+                }], pref_key="notify_advisor_assignment")
+            except Exception as exc:
+                logger.warning("advisor_removed (typed) notification failed (non-fatal): %s", exc)
+        # If they're the last advisor overall, we silently leave them in advisor_schools —
+        # the frontend's own "at least one advisor per active service type" validation is what
+        # actually prevents unassigning someone required by the currently-selected service_type.
+
     return {"ok": True}
 
 
@@ -2740,6 +3301,23 @@ def get_school(
             logger.warning("get_school profiles enrichment failed (non-fatal): %s", exc)
 
     school_data["meeting_coordinator_contact"] = _resolve_meeting_coordinator(school_data)
+
+    # Per-service-type advisor lists ("יועץ מלווה [גפן/שוטף/מחוז]") — needed by every role (not
+    # just manager+) since meetings-tab default-advisor logic reads these regardless of who's
+    # viewing the school. Non-fatal: on failure the lists are simply empty.
+    for service_type, table_name in _TYPED_ADVISOR_TABLES.items():
+        try:
+            rows = (
+                db.table(table_name)
+                .select("advisor_id, profiles(id, email, full_name, role)")
+                .eq("school_id", school_id)
+                .execute()
+            )
+            school_data[f"advisors_{service_type}"] = [r["profiles"] for r in rows.data if r.get("profiles")]
+        except Exception as exc:
+            logger.warning("%s enrichment failed on get_school (non-fatal): %s", table_name, exc)
+            school_data[f"advisors_{service_type}"] = []
+
     return school_data
 
 
@@ -3239,14 +3817,17 @@ def transfer_user_meetings(user_id: str, body: TransferMeetingsIn, user: Annotat
     results = []
     for m in meetings:
         new_ids = [body.new_advisor_id if aid == user_id else aid for aid in (m.get("advisor_ids") or [])]
-        previous_sync = m.get("calendar_sync") or {}
         conflict = False
         try:
             db.table("meetings").update({"advisor_ids": new_ids}).eq("id", m["id"]).execute()
-            subject = _build_meeting_subject(db, m["school_id"], m.get("participants"), m.get("primary_contact_key"))
-            sync_map = graph_client.sync_meeting_update(db, user["org_id"], {**m, "advisor_ids": new_ids}, previous_sync, subject)
-            graph_client.persist_calendar_sync(db, m["id"], sync_map)
-            conflict = bool(sync_map.get(body.new_advisor_id, {}).get("conflict"))
+            with graph_client.calendar_sync_lock(db, m["id"]) as acquired:
+                if acquired:
+                    fresh = db.table("meetings").select("calendar_sync").eq("id", m["id"]).execute()
+                    previous_sync = (fresh.data[0].get("calendar_sync") or {}) if fresh.data else {}
+                    subject = _build_meeting_subject(db, m["school_id"], m.get("participants"), m.get("primary_contact_key"))
+                    sync_map = graph_client.sync_meeting_update(db, user["org_id"], {**m, "advisor_ids": new_ids}, previous_sync, subject)
+                    graph_client.persist_calendar_sync(db, m["id"], sync_map)
+                    conflict = bool(sync_map.get(body.new_advisor_id, {}).get("conflict"))
         except Exception as exc:
             logger.warning("transfer meeting %s failed (non-fatal): %s", m["id"], exc)
         results.append({
@@ -3280,7 +3861,9 @@ def cancel_user_future_meetings(user_id: str, user: Annotated[dict, Depends(get_
     for m in meetings:
         try:
             if m.get("calendar_sync"):
-                graph_client.sync_meeting_cancel(db, user["org_id"], m["calendar_sync"])
+                with graph_client.calendar_sync_lock(db, m["id"]) as acquired:
+                    if acquired:
+                        graph_client.sync_meeting_cancel(db, user["org_id"], m["calendar_sync"])
         except Exception as exc:
             logger.warning("cancel meeting %s failed (non-fatal): %s", m["id"], exc)
         db.table("meetings").delete().eq("id", m["id"]).execute()
@@ -3686,6 +4269,465 @@ def delete_partial_update_segment(
 
 
 # ---------------------------------------------------------------------------
+# School notes ("הערות" + "הערות רבעוניות" — accessed from the school card's
+# "הערות" button, and quarterly notes additionally surfaced as columns in
+# "ניהול בתי ספר"). Modeled directly on the partial_row_updates pattern above,
+# with note_type/quarter as the discriminator instead of division/row_key.
+# Quarterly notes are hidden entirely from advisors (server-side, not just UI).
+# ---------------------------------------------------------------------------
+
+def _group_school_note_rows(rows: list[dict], profiles_map: dict) -> list[dict]:
+    by_group: dict = {}
+    for r in rows:
+        author_profile = profiles_map.get(r["author_id"]) or {}
+        segment = {
+            "id": r["id"],
+            "author_id": r["author_id"],
+            "author_name": author_profile.get("full_name"),
+            "author_role": author_profile.get("role"),
+            "content": r["content"],
+            "created_at": r["created_at"],
+            "updated_at": r["updated_at"],
+        }
+        by_group.setdefault(r["group_id"], []).append(segment)
+    group_list = []
+    for group_id, segments in by_group.items():
+        segments.sort(key=lambda s: s["created_at"])  # oldest segment first within a record
+        group_list.append({"group_id": group_id, "segments": segments})
+    group_list.sort(key=lambda g: g["segments"][0]["created_at"], reverse=True)  # newest record first
+    return group_list
+
+
+@router.get("/{school_id}/notes")
+def get_school_notes(
+    school_id: str,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    rows = []
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            rows = db.table("school_notes").select("*").eq("school_id", school_id).order("created_at").execute().data or []
+            break
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("get_school_notes attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.error("get_school_notes failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    author_ids = list({r["author_id"] for r in rows if r.get("author_id")})
+    profiles_map = {}
+    if author_ids:
+        try:
+            db = get_admin_client()
+            p_rows = db.table("profiles").select("id, full_name, role").in_("id", author_ids).execute()
+            profiles_map = {p["id"]: p for p in (p_rows.data or [])}
+        except Exception as exc:
+            logger.warning("get_school_notes profile enrichment failed (non-fatal): %s", exc)
+
+    general_rows = [r for r in rows if r["note_type"] == "general"]
+    result = {"general": _group_school_note_rows(general_rows, profiles_map), "quarterly": {"1": [], "2": [], "3": [], "4": []}}
+
+    # Quarterly notes are entirely inaccessible to advisors — enforced server-side, not just UI
+    if user["role"] != "advisor":
+        for q in (1, 2, 3, 4):
+            q_rows = [r for r in rows if r["note_type"] == "quarterly" and r["quarter"] == q]
+            result["quarterly"][str(q)] = _group_school_note_rows(q_rows, profiles_map)
+
+    return result
+
+
+class SchoolNoteCreateIn(BaseModel):
+    note_type: str
+    quarter: int | None = None
+    content: str
+
+
+@router.post("/{school_id}/notes")
+def create_school_note(
+    school_id: str,
+    body: SchoolNoteCreateIn,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    import uuid
+
+    if body.note_type not in ("general", "quarterly"):
+        raise HTTPException(status_code=400, detail="סוג הערה לא תקין")
+    if body.note_type == "quarterly":
+        if body.quarter not in (1, 2, 3, 4):
+            raise HTTPException(status_code=400, detail="יש לבחור רבעון בין 1 ל-4")
+        if user["role"] == "advisor":
+            raise HTTPException(status_code=403, detail="אין הרשאה להוסיף הערה רבעונית")
+    elif body.quarter is not None:
+        raise HTTPException(status_code=400, detail="הערה כללית לא יכולה להיות משויכת לרבעון")
+
+    content = body.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="לא ניתן לשמור הערה ריקה")
+    db = get_admin_client()
+    row = db.table("school_notes").insert({
+        "school_id": school_id,
+        "note_type": body.note_type,
+        "quarter": body.quarter,
+        "group_id": str(uuid.uuid4()),
+        "author_id": user["id"],
+        "content": content,
+    }).execute()
+    return row.data[0]
+
+
+class SchoolNoteSegmentIn(BaseModel):
+    content: str
+
+
+def _get_school_note_author(db, school_id: str, segment_id: str) -> tuple[str, str | None, str]:
+    existing = db.table("school_notes").select("author_id, note_type").eq("id", segment_id).eq("school_id", school_id).execute()
+    if not existing.data:
+        raise HTTPException(status_code=404, detail="ההערה לא נמצאה")
+    author_id = existing.data[0]["author_id"]
+    note_type = existing.data[0]["note_type"]
+    author_role = None
+    try:
+        prof = db.table("profiles").select("role").eq("id", author_id).execute()
+        if prof.data:
+            author_role = prof.data[0].get("role")
+    except Exception as exc:
+        logger.warning("school-notes author role lookup failed (fails closed on cross-user actions): %s", exc)
+    return author_id, author_role, note_type
+
+
+def _can_edit_school_note(user: dict, author_id: str, author_role: str | None) -> bool:
+    if user["id"] == author_id:
+        return True
+    if not author_role:
+        return False
+    return _PARTIAL_UPDATE_ROLE_RANK.get(user["role"], 0) > _PARTIAL_UPDATE_ROLE_RANK.get(author_role, 0)
+
+
+def _can_delete_school_note(user: dict, author_id: str, author_role: str | None) -> bool:
+    if user["role"] not in ("owner", "manager"):
+        return False
+    if user["id"] == author_id:
+        return True
+    if not author_role:
+        return False
+    return _PARTIAL_UPDATE_ROLE_RANK.get(user["role"], 0) > _PARTIAL_UPDATE_ROLE_RANK.get(author_role, 0)
+
+
+@router.patch("/{school_id}/notes/segments/{segment_id}")
+def edit_school_note_segment(
+    school_id: str,
+    segment_id: str,
+    body: SchoolNoteSegmentIn,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    content = body.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="לא ניתן לשמור הערה ריקה")
+    db = get_admin_client()
+    author_id, author_role, note_type = _get_school_note_author(db, school_id, segment_id)
+    if note_type == "quarterly" and user["role"] == "advisor":
+        raise HTTPException(status_code=403, detail="אין הרשאה לערוך הערה רבעונית")
+    if not _can_edit_school_note(user, author_id, author_role):
+        raise HTTPException(status_code=403, detail="אין הרשאה לערוך הערה זו")
+    from datetime import datetime, timezone
+
+    db.table("school_notes").update({
+        "content": content,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", segment_id).execute()
+    return {"ok": True}
+
+
+@router.delete("/{school_id}/notes/segments/{segment_id}")
+def delete_school_note_segment(
+    school_id: str,
+    segment_id: str,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    db = get_admin_client()
+    author_id, author_role, note_type = _get_school_note_author(db, school_id, segment_id)
+    if note_type == "quarterly" and user["role"] == "advisor":
+        raise HTTPException(status_code=403, detail="אין הרשאה למחוק הערה רבעונית")
+    if not _can_delete_school_note(user, author_id, author_role):
+        raise HTTPException(status_code=403, detail="אין הרשאה למחוק הערה זו")
+    db.table("school_notes").delete().eq("id", segment_id).eq("school_id", school_id).execute()
+    return {"ok": True}
+
+
+class QuarterlyNotesSummaryBatchIn(BaseModel):
+    school_ids: list[str]
+
+
+@router.post("/notes/quarterly-summary/batch")
+def batch_get_quarterly_notes_summary(
+    body: QuarterlyNotesSummaryBatchIn,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    if not body.school_ids or user["role"] == "advisor":
+        return {}
+    rows = []
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            rows = (
+                db.table("school_notes")
+                .select("*")
+                .eq("note_type", "quarterly")
+                .in_("school_id", body.school_ids)
+                .order("created_at")
+                .execute()
+                .data or []
+            )
+            break
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("batch_get_quarterly_notes_summary attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.error("batch_get_quarterly_notes_summary failed after 2 attempts: %s", exc, exc_info=True)
+                return {}
+
+    author_ids = list({r["author_id"] for r in rows if r.get("author_id")})
+    profiles_map = {}
+    if author_ids:
+        try:
+            db = get_admin_client()
+            p_rows = db.table("profiles").select("id, full_name, role").in_("id", author_ids).execute()
+            profiles_map = {p["id"]: p for p in (p_rows.data or [])}
+        except Exception as exc:
+            logger.warning("batch_get_quarterly_notes_summary profile enrichment failed (non-fatal): %s", exc)
+
+    # Group by school_id -> quarter -> group_id (a "record"), so the count reflects
+    # distinct notes rather than raw segments.
+    by_school: dict = {}
+    for r in rows:
+        by_school.setdefault(r["school_id"], {}).setdefault(r["quarter"], {}).setdefault(r["group_id"], []).append(r)
+
+    result = {}
+    for school_id, quarters in by_school.items():
+        result[school_id] = {}
+        for q, groups in quarters.items():
+            group_ids = list(groups.keys())
+            count = len(group_ids)
+            latest_segment = None
+            if count == 1:
+                only_group_rows = groups[group_ids[0]]
+                latest_row = max(only_group_rows, key=lambda r: r["created_at"])
+                author_profile = profiles_map.get(latest_row["author_id"]) or {}
+                latest_segment = {
+                    "id": latest_row["id"],
+                    "author_id": latest_row["author_id"],
+                    "author_name": author_profile.get("full_name"),
+                    "author_role": author_profile.get("role"),
+                    "content": latest_row["content"],
+                    "created_at": latest_row["created_at"],
+                    "updated_at": latest_row["updated_at"],
+                }
+            result[school_id][str(q)] = {"count": count, "latest_segment": latest_segment}
+    return result
+
+
+# ---------------------------------------------------------------------------
+# School files ("קבצים" — file attachments with a description, shown right
+# below "הערות" on the school card). One row = one file; unlike school_notes
+# there's no group/segment threading since a file is replaced only via
+# delete+re-upload, not edited in place. Visible to everyone (no advisor
+# restriction), matching "הערות".
+# ---------------------------------------------------------------------------
+
+def _enrich_school_files_authors(db, rows: list[dict]) -> list[dict]:
+    author_ids = list({r["author_id"] for r in rows if r.get("author_id")})
+    profiles_map = {}
+    if author_ids:
+        try:
+            p_rows = db.table("profiles").select("id, full_name, role").in_("id", author_ids).execute()
+            profiles_map = {p["id"]: p for p in (p_rows.data or [])}
+        except Exception as exc:
+            logger.warning("school-files profile enrichment failed (non-fatal): %s", exc)
+    for r in rows:
+        author_profile = profiles_map.get(r["author_id"]) or {}
+        r["author_name"] = author_profile.get("full_name")
+        r["author_role"] = author_profile.get("role")
+    return rows
+
+
+@router.get("/{school_id}/files")
+def get_school_files(
+    school_id: str,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    rows = []
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            rows = (
+                db.table("school_files")
+                .select("*")
+                .eq("school_id", school_id)
+                .order("created_at", desc=True)
+                .execute()
+                .data or []
+            )
+            break
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("get_school_files attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.error("get_school_files failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    db = get_admin_client()
+    return _enrich_school_files_authors(db, rows)
+
+
+@router.post("/{school_id}/files")
+async def upload_school_file(
+    school_id: str,
+    user: Annotated[dict, Depends(get_current_user)],
+    file: UploadFile = File(...),
+    description: str = Form(""),
+):
+    import secrets
+    import shutil
+    import tempfile
+
+    db = get_admin_client()
+    run_dir = Path(tempfile.mkdtemp(prefix=f"school_file_{school_id}_"))
+    try:
+        suffix = Path(file.filename or "").suffix
+        dest = run_dir / f"upload{suffix}"
+        dest.write_bytes(await file.read())
+        storage_key = f"school-files/{school_id}/{secrets.token_hex(8)}{suffix}"
+        db.storage.from_("check-files").upload(storage_key, dest.read_bytes())
+    finally:
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+    row = db.table("school_files").insert({
+        "school_id": school_id,
+        "author_id": user["id"],
+        "description": description.strip() or None,
+        "storage_key": storage_key,
+        "file_name": file.filename or "file",
+    }).execute()
+    created = row.data[0]
+    created["author_name"] = user.get("full_name")
+    created["author_role"] = user.get("role")
+    return created
+
+
+class SchoolFileUpdateIn(BaseModel):
+    description: str
+
+
+def _get_school_file_author(db, school_id: str, file_id: str) -> tuple[str, str | None, str, str]:
+    existing = db.table("school_files").select("author_id, storage_key, file_name").eq("id", file_id).eq("school_id", school_id).execute()
+    if not existing.data:
+        raise HTTPException(status_code=404, detail="הקובץ לא נמצא")
+    author_id = existing.data[0]["author_id"]
+    storage_key = existing.data[0]["storage_key"]
+    file_name = existing.data[0]["file_name"]
+    author_role = None
+    try:
+        prof = db.table("profiles").select("role").eq("id", author_id).execute()
+        if prof.data:
+            author_role = prof.data[0].get("role")
+    except Exception as exc:
+        logger.warning("school-files author role lookup failed (fails closed on cross-user actions): %s", exc)
+    return author_id, author_role, storage_key, file_name
+
+
+def _can_edit_school_file(user: dict, author_id: str, author_role: str | None) -> bool:
+    if user["id"] == author_id:
+        return True
+    if not author_role:
+        return False
+    return _PARTIAL_UPDATE_ROLE_RANK.get(user["role"], 0) > _PARTIAL_UPDATE_ROLE_RANK.get(author_role, 0)
+
+
+def _can_delete_school_file(user: dict, author_id: str, author_role: str | None) -> bool:
+    if user["role"] not in ("owner", "manager"):
+        return False
+    if user["id"] == author_id:
+        return True
+    if not author_role:
+        return False
+    return _PARTIAL_UPDATE_ROLE_RANK.get(user["role"], 0) > _PARTIAL_UPDATE_ROLE_RANK.get(author_role, 0)
+
+
+@router.patch("/{school_id}/files/{file_id}")
+def edit_school_file(
+    school_id: str,
+    file_id: str,
+    body: SchoolFileUpdateIn,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    db = get_admin_client()
+    author_id, author_role, _storage_key, _file_name = _get_school_file_author(db, school_id, file_id)
+    if not _can_edit_school_file(user, author_id, author_role):
+        raise HTTPException(status_code=403, detail="אין הרשאה לערוך קובץ זה")
+    from datetime import datetime, timezone
+
+    db.table("school_files").update({
+        "description": body.description.strip() or None,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", file_id).execute()
+    return {"ok": True}
+
+
+@router.delete("/{school_id}/files/{file_id}")
+def delete_school_file(
+    school_id: str,
+    file_id: str,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    db = get_admin_client()
+    author_id, author_role, storage_key, _file_name = _get_school_file_author(db, school_id, file_id)
+    if not _can_delete_school_file(user, author_id, author_role):
+        raise HTTPException(status_code=403, detail="אין הרשאה למחוק קובץ זה")
+    db.table("school_files").delete().eq("id", file_id).eq("school_id", school_id).execute()
+    try:
+        db.storage.from_("check-files").remove([storage_key])
+    except Exception as exc:
+        logger.warning("school-files storage cleanup failed (non-fatal, DB row already removed): %s", exc)
+    return {"ok": True}
+
+
+@router.get("/{school_id}/files/{file_id}/download")
+def download_school_file(
+    school_id: str,
+    file_id: str,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    db = get_admin_client()
+    row = db.table("school_files").select("storage_key, file_name").eq("id", file_id).eq("school_id", school_id).execute()
+    if not row.data:
+        raise HTTPException(status_code=404, detail="הקובץ לא נמצא")
+    storage_key = row.data[0]["storage_key"]
+    file_name = row.data[0]["file_name"] or "file"
+    content = db.storage.from_("check-files").download(storage_key)
+
+    # RFC 5987 filename* — Hebrew filenames render as gibberish or get dropped
+    # entirely if embedded raw in a plain filename= parameter.
+    import urllib.parse
+
+    ext = Path(file_name).suffix or ""
+    ascii_fallback = f"file{ext}"
+    encoded_name = urllib.parse.quote(file_name)
+    return Response(
+        content=content,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{encoded_name}"},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Bulk import from Excel
 # ---------------------------------------------------------------------------
 
@@ -3913,11 +4955,13 @@ def create_meeting(school_id: str, body: MeetingIn, user: Annotated[dict, Depend
         raise HTTPException(status_code=500, detail=f"שגיאת DB: {str(e)}")
 
     try:
-        subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"))
-        sync_map = graph_client.sync_meeting_create(db, user["org_id"], meeting, subject)
-        if sync_map:
-            graph_client.persist_calendar_sync(db, meeting["id"], sync_map)
-            meeting["calendar_sync"] = sync_map
+        with graph_client.calendar_sync_lock(db, meeting["id"]) as acquired:
+            if acquired:
+                subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"))
+                sync_map = graph_client.sync_meeting_create(db, user["org_id"], meeting, subject)
+                if sync_map:
+                    graph_client.persist_calendar_sync(db, meeting["id"], sync_map)
+                    meeting["calendar_sync"] = sync_map
     except Exception as exc:
         logger.warning("calendar sync failed for new meeting %s (non-fatal): %s", meeting.get("id"), exc)
 
@@ -4036,26 +5080,24 @@ def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annot
         data["advisor_ids"] = []
 
     try:
-        existing = db.table("meetings").select("calendar_sync").eq("id", meeting_id).execute()
-        previous_sync = (existing.data[0].get("calendar_sync") or {}) if existing.data else {}
-    except Exception:
-        previous_sync = {}
-
-    try:
         res = db.table("meetings").update(data).eq("id", meeting_id).eq("school_id", school_id).execute()
         meeting = res.data[0] if res.data else {}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"שגיאת DB: {str(e)}")
 
     try:
-        if meeting.get("status") == "cancelled":
-            graph_client.sync_meeting_cancel(db, user["org_id"], previous_sync)
-            sync_map = {}
-        else:
-            subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"))
-            sync_map = graph_client.sync_meeting_update(db, user["org_id"], {**meeting, "id": meeting_id}, previous_sync, subject)
-        graph_client.persist_calendar_sync(db, meeting_id, sync_map)
-        meeting["calendar_sync"] = sync_map
+        with graph_client.calendar_sync_lock(db, meeting_id) as acquired:
+            if acquired:
+                existing = db.table("meetings").select("calendar_sync").eq("id", meeting_id).execute()
+                previous_sync = (existing.data[0].get("calendar_sync") or {}) if existing.data else {}
+                if meeting.get("status") == "cancelled":
+                    graph_client.sync_meeting_cancel(db, user["org_id"], previous_sync)
+                    sync_map = {}
+                else:
+                    subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"))
+                    sync_map = graph_client.sync_meeting_update(db, user["org_id"], {**meeting, "id": meeting_id}, previous_sync, subject)
+                graph_client.persist_calendar_sync(db, meeting_id, sync_map)
+                meeting["calendar_sync"] = sync_map
     except Exception as exc:
         logger.warning("calendar sync failed for updated meeting %s (non-fatal): %s", meeting_id, exc)
 
@@ -4079,17 +5121,19 @@ def patch_meeting(school_id: str, meeting_id: str, body: MeetingStatusPatchIn, u
         raise HTTPException(status_code=500, detail="שגיאה בעדכון פגישה")
 
     try:
-        row = db.table("meetings").select("*").eq("id", meeting_id).execute()
-        meeting = row.data[0] if row.data else None
-        if meeting:
-            previous_sync = meeting.get("calendar_sync") or {}
-            if meeting.get("status") == "cancelled":
-                graph_client.sync_meeting_cancel(db, user["org_id"], previous_sync)
-                sync_map = {}
-            else:
-                subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"))
-                sync_map = graph_client.sync_meeting_update(db, user["org_id"], meeting, previous_sync, subject)
-            graph_client.persist_calendar_sync(db, meeting_id, sync_map)
+        with graph_client.calendar_sync_lock(db, meeting_id) as acquired:
+            if acquired:
+                row = db.table("meetings").select("*").eq("id", meeting_id).execute()
+                meeting = row.data[0] if row.data else None
+                if meeting:
+                    previous_sync = meeting.get("calendar_sync") or {}
+                    if meeting.get("status") == "cancelled":
+                        graph_client.sync_meeting_cancel(db, user["org_id"], previous_sync)
+                        sync_map = {}
+                    else:
+                        subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"))
+                        sync_map = graph_client.sync_meeting_update(db, user["org_id"], meeting, previous_sync, subject)
+                    graph_client.persist_calendar_sync(db, meeting_id, sync_map)
     except Exception as exc:
         logger.warning("calendar sync failed for patched meeting %s (non-fatal): %s", meeting_id, exc)
 
@@ -4102,9 +5146,11 @@ def delete_meeting(school_id: str, meeting_id: str, user: Annotated[dict, Depend
     if not _check_permission(db, user, "can_delete_own_meetings"):
         raise HTTPException(status_code=403, detail="אין הרשאה למחוק פגישות")
     try:
-        row = db.table("meetings").select("calendar_sync").eq("id", meeting_id).execute()
-        previous_sync = (row.data[0].get("calendar_sync") or {}) if row.data else {}
-        graph_client.sync_meeting_cancel(db, user["org_id"], previous_sync)
+        with graph_client.calendar_sync_lock(db, meeting_id) as acquired:
+            if acquired:
+                row = db.table("meetings").select("calendar_sync").eq("id", meeting_id).execute()
+                previous_sync = (row.data[0].get("calendar_sync") or {}) if row.data else {}
+                graph_client.sync_meeting_cancel(db, user["org_id"], previous_sync)
     except Exception as exc:
         logger.warning("calendar cancel-sync failed before deleting meeting %s (non-fatal): %s", meeting_id, exc)
     db.table("meetings").delete().eq("id", meeting_id).eq("school_id", school_id).execute()
@@ -4128,15 +5174,12 @@ def reassign_meeting_school(meeting_id: str, body: MeetingReassignSchoolIn, user
     _require_manager(user)
     db = None
     meeting = None
-    previous_sync = {}
     for attempt in range(2):
         try:
             db = get_admin_client()
             sch = db.table("schools").select("id").eq("id", body.new_school_id).eq("org_id", user["org_id"]).execute()
             if not sch.data:
                 raise HTTPException(status_code=404, detail="בית ספר לא נמצא")
-            existing = db.table("meetings").select("calendar_sync").eq("id", meeting_id).execute()
-            previous_sync = (existing.data[0].get("calendar_sync") or {}) if existing.data else {}
             res = db.table("meetings").update({
                 "school_id": body.new_school_id,
                 "participants": [],
@@ -4156,9 +5199,13 @@ def reassign_meeting_school(meeting_id: str, body: MeetingReassignSchoolIn, user
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
     try:
-        subject = _build_meeting_subject(db, body.new_school_id, [], None)
-        sync_map = graph_client.sync_meeting_update(db, user["org_id"], {**meeting, "id": meeting_id}, previous_sync, subject)
-        graph_client.persist_calendar_sync(db, meeting_id, sync_map)
+        with graph_client.calendar_sync_lock(db, meeting_id) as acquired:
+            if acquired:
+                existing = db.table("meetings").select("calendar_sync").eq("id", meeting_id).execute()
+                previous_sync = (existing.data[0].get("calendar_sync") or {}) if existing.data else {}
+                subject = _build_meeting_subject(db, body.new_school_id, [], None)
+                sync_map = graph_client.sync_meeting_update(db, user["org_id"], {**meeting, "id": meeting_id}, previous_sync, subject)
+                graph_client.persist_calendar_sync(db, meeting_id, sync_map)
     except Exception as exc:
         logger.warning("calendar sync failed for reassigned meeting %s (non-fatal): %s", meeting_id, exc)
 
