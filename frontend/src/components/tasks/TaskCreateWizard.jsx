@@ -1123,6 +1123,9 @@ function ScheduleCriteriaModal({ value, onChange, onClose }) {
         <p className="text-xs text-slate-400">
           אם לא נבחר תאריך — המשימה תיווצר מיד וההודעות יישלחו לכל מי שתואם כרגע. אם נבחר תאריך עתידי — המשימה תיווצר במצב "מתוזמן", ורשימת בתי הספר תיקבע וההודעות יישלחו אוטומטית רק בתאריך שנבחר, לפי מי שיעמוד בקריטריונים אז.
         </p>
+        <p className="text-xs text-amber-600">
+          לתשומת לבך: ההפעלה בפועל עשויה להתרחש עד כשעה לאחר המועד שנבחר (בהתאם לתדירות הבדיקה האוטומטית של המערכת) — מתאים לתזמון פגישות עתידיות, לא לזמן מדויק לדקה.
+        </p>
         <div className="flex justify-end gap-2 pt-1">
           {value && (
             <button type="button" onClick={() => onChange("")} className="text-xs text-slate-500 hover:underline px-2 py-1.5">
