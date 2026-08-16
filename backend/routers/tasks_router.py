@@ -194,12 +194,17 @@ class ConditionsIn(BaseModel):
     groups: list[dict] = []
 
 
+class AttachmentKeyIn(BaseModel):
+    key: str
+    filename: str | None = None
+
+
 class MessageConfigIn(BaseModel):
     recipient_role: str
     channel: str  # 'email_resend' | 'email_outlook' | 'whatsapp_twilio'
     subject: str | None = None
     body_template: str = ""
-    attachment_keys: list[str] = []
+    attachment_keys: list[AttachmentKeyIn] = []
 
 
 class TaskCreateIn(BaseModel):
@@ -1403,19 +1408,23 @@ def _fetch_school_notes_map(db, task_id: str, school_ids: list[str]) -> dict[str
 
 def _send_message_now(db, org_id: str, school_id: str, channel: str, subject: str, body: str,
                        recipient_email: str | None, recipient_phone: str | None,
-                       attachment_keys: list[str] | None) -> tuple[str, str | None]:
+                       attachment_keys: list[dict] | None) -> tuple[str, str | None]:
     """Round-7 — actually dispatches one message through its channel. Shared by
     process_message_queue's cron-drained batches AND _queue_messages_for_schools' own
     immediate-send path below (email_resend/whatsapp no longer wait for the cron at all — see
     that call site's comment for why). Returns ("sent", None) or ("failed", error_str); never
-    raises, so callers can always safely write the returned status straight into a row."""
+    raises, so callers can always safely write the returned status straight into a row.
+
+    attachment_keys: list of {"key": storage_key, "filename": original_filename} — the display
+    filename travels alongside the (ASCII-only) storage key rather than being derived from it
+    (round 13.1 — see upload_task_attachment's docstring for why the key can't carry it)."""
     try:
         attachments = None
         if attachment_keys:
             attachments = []
-            for key in attachment_keys:
-                content = db.storage.from_("check-files").download(key)
-                attachments.append({"filename": key.rsplit("/", 1)[-1], "content_b64": base64.b64encode(content).decode("ascii")})
+            for a in attachment_keys:
+                content = db.storage.from_("check-files").download(a["key"])
+                attachments.append({"filename": a.get("filename") or a["key"].rsplit("/", 1)[-1], "content_b64": base64.b64encode(content).decode("ascii")})
 
         if channel == "email_outlook":
             capability = get_org_mailbox_capability(org_id)
@@ -1740,18 +1749,23 @@ async def upload_task_attachment(
     /{task_id}/attachments this replaces, the only caller of which was TaskCreateWizard.jsx).
     Task creation queues/sends the first wave of messages immediately (round 2), so the wizard
     must be able to upload attachments and get real storage_keys *before* POST /tasks/ — otherwise
-    that first wave goes out with an empty attachment_keys list. Storage key keeps the real
-    filename as its last path segment (tasks/pending/<random>/<filename>) so _send_message_now's
-    `key.rsplit("/", 1)[-1]` attachment-name derivation shows the original name, not a random one."""
+    that first wave goes out with an empty attachment_keys list.
+
+    Round 13.1 fix: the storage_key itself must stay ASCII-only — Supabase Storage rejects keys
+    containing non-ASCII characters (confirmed directly: a Hebrew filename raised
+    storage3.exceptions.StorageApiError 400 "Invalid key"), which is exactly what a filename in
+    Hebrew (routine in this app) produces. The real filename is returned separately in the
+    response and threaded through as message_config.attachment_keys' own {key, filename} shape
+    (see _send_message_now) instead of being embedded in the storage path."""
     _require_manager(user)
     db = get_admin_client()
 
     run_dir = Path(tempfile.mkdtemp(prefix="task_attachment_"))
     try:
-        safe_filename = Path(file.filename or "attachment").name
-        dest = run_dir / safe_filename
+        suffix = Path(file.filename or "").suffix
+        dest = run_dir / f"attachment{suffix}"
         dest.write_bytes(await file.read())
-        storage_key = f"tasks/pending/{secrets.token_hex(8)}/{safe_filename}"
+        storage_key = f"tasks/pending/{secrets.token_hex(8)}{suffix}"
         db.storage.from_("check-files").upload(storage_key, dest.read_bytes())
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)

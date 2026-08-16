@@ -456,7 +456,7 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
           channel: effectiveChannel,
           subject,
           body_template: bodyTemplate,
-          attachment_keys: attachments.map(a => a.storageKey),
+          attachment_keys: attachments.map(a => ({ key: a.storageKey, filename: a.filename })),
         },
         scheduled_for: scheduledFor ? new Date(scheduledFor).toISOString() : null,
         confirm_outlook_limit: confirmOutlook,
