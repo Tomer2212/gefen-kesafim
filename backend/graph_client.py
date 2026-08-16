@@ -718,6 +718,52 @@ def send_mail_as_advisor(db, org_id: str, advisor_id: str, subject: str, html_bo
     resp.raise_for_status()
 
 
+def find_bounce_for_subject(db, org_id: str, advisor_id: str, original_subject: str, since_iso: str) -> bool | None:
+    """Round 15 — checks the advisor's own mailbox Inbox for a non-delivery report (NDR)
+    matching a specific send, so a failed Outlook send (a bounce arriving asynchronously,
+    minutes after send_mail_as_advisor already returned success) can trigger an automatic
+    Resend fallback in the caller (tasks_router._send_message_now's process_message_queue
+    follow-up check).
+
+    Confirmed empirically against 3 real bounces: the NDR subject always *contains* the English
+    "Undeliverable: <original subject>" marker, but is NOT a plain prefix — a mailbox with a
+    Hebrew display language gets a localized prefix first (e.g. "לא ניתן למסירה: Undeliverable:
+    <subject>"), so this matches via contains(), not startswith().
+
+    Mail.Read (application permission) — confirmed already granted/consented on this tenant's
+    app registration (a live read against a real inbox succeeded), so this needs no separate
+    admin-consent step here.
+
+    Returns True if a bounce was found, False if confirmed none exists yet, or None if the
+    check itself could not be performed (missing permission / transient error) — callers must
+    NOT treat None as "no bounce", since that would wrongly finalize a message we never
+    actually confirmed."""
+    email = _resolve_advisor_email(db, advisor_id)
+    if not email:
+        return None
+    try:
+        token = _get_app_only_token(db, org_id)
+    except Exception as exc:
+        logger.info("find_bounce_for_subject: no token for advisor %s (non-fatal): %s", advisor_id, exc)
+        return None
+
+    bounce_marker = f"Undeliverable: {original_subject}"
+    escaped = bounce_marker.replace("'", "''")
+    filter_q = f"receivedDateTime ge {since_iso} and contains(subject,'{escaped}')"
+    try:
+        resp = _request_with_retry(
+            "GET", f"{GRAPH_BASE}/users/{email}/mailFolders/inbox/messages",
+            headers=_headers(token),
+            params={"$filter": filter_q, "$top": "1", "$select": "id,subject"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return bool(resp.json().get("value"))
+    except Exception as exc:
+        logger.warning("find_bounce_for_subject failed for advisor %s (non-fatal, treated as unknown): %s", advisor_id, exc)
+        return None
+
+
 def sync_meeting_create(db, org_id: str, meeting: dict, subject: str | None = None) -> dict:
     """Creates one event per advisor in meeting['advisor_ids']. Returns the calendar_sync map."""
     sync_map: dict = {}
