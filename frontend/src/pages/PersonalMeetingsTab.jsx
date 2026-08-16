@@ -8,6 +8,7 @@ import { MeetingsTable } from "../components/meetings/MeetingsTable";
 import { MeetingSummaryModal } from "../components/meetings/MeetingSummaryModal";
 import { NotesModal } from "../components/meetings/NotesModal";
 import { SchoolPickerModal, SchoolPickerPopover, schoolLabel } from "../components/meetings/SchoolPickerCell";
+import { StageScopeModal } from "../components/meetings/StageScopeModal";
 import { MEETING_STATUS_OPTIONS, MEETING_TYPE_OPTIONS, MEETING_SERVICE_TYPE_OPTIONS, STATUS_MAP, formatMeetingDate, defaultMeetingServiceType } from "../components/meetings/constants";
 import { AcademicYearSelector } from "../components/AcademicYearSelector";
 import { DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
@@ -54,6 +55,7 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
   const [summaryModalFor, setSummaryModalFor] = useState(null);
   const [showCalendarColumn, setShowCalendarColumn] = useState(false);
   const [schoolPickerFor, setSchoolPickerFor] = useState(null);
+  const [pendingScopeSchool, setPendingScopeSchool] = useState(null);
   const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false);
   const [reminderToasts, setReminderToasts] = useState([]);
   const [alreadySentModal, setAlreadySentModal] = useState(null);
@@ -171,7 +173,7 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
     } catch { /* silent */ }
   }
 
-  async function createMeetingForSchool(school) {
+  async function createMeetingRow(school, stageScope) {
     let schoolServiceType = null;
     try {
       const yad = await axios.get(`/schools/${school.id}/year-admin-data`, { params: { academic_year: academicYear } });
@@ -179,10 +181,24 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
     } catch {
       // non-fatal — meeting creation proceeds without a pre-filled service type
     }
+    // For a six-year school, "תיכון בלבד"/"חט"ב בלבד" pre-fill the relevant principal as
+    // the default participant; "שניהם יחד" leaves participants empty for manual selection.
+    const contacts = buildSchoolContacts(school);
+    let participants = [];
+    if (stageScope === "tichon") {
+      const c = contacts.find(x => x.key === "principal");
+      if (c) participants = [c];
+    } else if (stageScope === "chativa") {
+      const c = contacts.find(x => x.key === "principal_chativa") || contacts.find(x => x.key === "principal");
+      if (c) participants = [c];
+    }
     const payload = {
       status: "scheduled", meeting_type: "remote",
       meeting_service_type: defaultMeetingServiceType(schoolServiceType),
-      advisor_ids: userId ? [userId] : [], participants: [], reminder_enabled: false, academic_year: academicYear,
+      advisor_ids: userId ? [userId] : [], participants,
+      primary_contact_key: participants.length === 1 ? participants[0].key : null,
+      reminder_enabled: false, academic_year: academicYear,
+      ...(stageScope === "tichon" || stageScope === "chativa" || stageScope === "both" ? { stage_scope: stageScope } : {}),
     };
     try {
       const res = await axios.post(`/schools/${school.id}/meetings`, payload);
@@ -190,7 +206,28 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
       setMeetings(prev => [newMeeting, ...prev]);
       sessionCreatedMeetingIdsRef.current.add(newMeeting.id);
     } catch { /* silent */ }
+  }
+
+  async function createMeetingForSchool(school) {
+    if (school.stage === "sheshshnati") {
+      setPendingScopeSchool(school);
+      setSchoolPickerFor(null);
+      return;
+    }
+    await createMeetingRow(school, null);
     setSchoolPickerFor(null);
+  }
+
+  async function handleStageScopeChoice(scope) {
+    const school = pendingScopeSchool;
+    setPendingScopeSchool(null);
+    if (!school) return;
+    if (scope === "separate") {
+      await createMeetingRow(school, "tichon");
+      await createMeetingRow(school, "chativa");
+    } else {
+      await createMeetingRow(school, scope);
+    }
   }
 
   async function reassignSchool(meetingId, school) {
@@ -396,6 +433,11 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
       {schoolPickerFor === "new" && (
         <SchoolPickerModal schools={schools} onConfirm={createMeetingForSchool} onCancel={() => setSchoolPickerFor(null)} />
       )}
+      {pendingScopeSchool && (
+        <StageScopeModal schoolName={pendingScopeSchool.name}
+          onChoose={handleStageScopeChoice}
+          onCancel={() => setPendingScopeSchool(null)} />
+      )}
       {bulkDeleteConfirm && (
         <DeleteMeetingModal
           titleText="מחיקת פגישות"
@@ -553,6 +595,7 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
             usersWithAccess={users || []}
             usersWithoutAccess={[]}
             contactsFor={m => buildSchoolContacts(schools.find(s => s.id === m.school_id))}
+            schoolStageFor={m => schools.find(s => s.id === m.school_id)?.stage}
             onSave={updateMeeting}
             onDelete={deleteMeeting}
             onOpenNotes={(meetingId, notes, onSave) => setNotesModal({ meetingId, notes, onSave })}

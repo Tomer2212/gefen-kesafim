@@ -58,11 +58,11 @@ MEETING_STATUSES = ["scheduled", "completed", "cancelled", "postponed", "other"]
 
 # Every field usable in a find_schools_by_criteria "field" condition — sourced live from the
 # existing Tasks-engine's own field registry (task_logic.py) so the two never drift apart.
-_TASK_FIELD_OPTIONS = task_logic.field_options()
+_TASK_FIELD_OPTIONS = task_logic.field_options()["fields"]
 _TASK_FIELD_KEYS = [f["field"] for f in _TASK_FIELD_OPTIONS]
 _TASK_FIELD_DESC = ", ".join(
     f["field"] + f" ({f['label']}"
-    + (f": {', '.join(f['options'])}" if f.get("options") else "")
+    + (f": {', '.join(o['value'] for o in f['options'])}" if f.get("options") else "")
     + ")"
     for f in _TASK_FIELD_OPTIONS
 )

@@ -1,8 +1,36 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import axios from "axios";
+import * as XLSX from "xlsx";
 import { useTasks } from "../../context/TasksContext";
 import TaskMissingContactModal from "./TaskMissingContactModal";
-import { describeCondition, firstDisplayGroupConditions } from "./taskShared";
+import TaskDateTimeInput from "./TaskDateTimeInput";
+import OutlookLimitModal from "./OutlookLimitModal";
+import { describeCondition, describeConditionColumn, firstDisplayGroupConditions } from "./taskShared";
+
+// "DD/MM/YY בשעה HH:MM", bidi-isolated like taskShared.js's own date formatting — used only for
+// the round-7 send-status tooltip (full timestamps, unlike formatDateDMY's date-only ISO input).
+function formatDateTimeDMY(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const yy = String(d.getFullYear()).slice(2);
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mi = String(d.getMinutes()).padStart(2, "0");
+  return `⁦${dd}/${mm}/${yy} בשעה ${hh}:${mi}⁩`;
+}
+
+// Round 7 — only the two 100%-reliable signals (link actually visited / meeting actually
+// booked), deliberately no "email opened" pixel-tracking state (declined for its structural
+// unreliability — many mail clients block remote images by default).
+function meetingLinkStatusLabel(sendStatus) {
+  const mp = sendStatus?.meeting_progress;
+  if (!mp) return null; // not a meeting-scheduling task message — nothing to show
+  if (mp.total > 0 && mp.done >= mp.total) return `נקבעו כל הפגישות (${mp.done}/${mp.total})`;
+  if (sendStatus.link_viewed_at) return `נפתח הקישור ${formatDateTimeDMY(sendStatus.link_viewed_at)}`;
+  return "טרם נפתח הקישור";
+}
 
 const MIN_WIDTH = 520;
 const MIN_HEIGHT = 380;
@@ -46,6 +74,17 @@ function TaskWindowItem({ taskId, minimized, minimizedOrder }) {
   const [missingContact, setMissingContact] = useState(null); // {schoolIds, channel, recipientRole}
   const [scheduleSendAt, setScheduleSendAt] = useState(""); // datetime-local string, empty = send now
   const [lastSendWasScheduled, setLastSendWasScheduled] = useState(false);
+  const [exclusionEditFor, setExclusionEditFor] = useState(null); // school_id or null
+  const [exclusionInput, setExclusionInput] = useState("");
+  const [rowFilterText, setRowFilterText] = useState("");
+  const [rowStatusFilter, setRowStatusFilter] = useState(""); // "" | "done" | "not_done"
+  const [sortSpec, setSortSpec] = useState(null); // {key: "school_name"|"symbol"|"authority", dir: "asc"|"desc"}
+  const [outlookLimitWarning, setOutlookLimitWarning] = useState(null); // {message, count, threshold} or null
+  const [switchingChannel, setSwitchingChannel] = useState(false);
+  const [fieldOptions, setFieldOptions] = useState([]);
+  const [goalOptions, setGoalOptions] = useState([]);
+  const [divisionOptions, setDivisionOptions] = useState([]);
+  const [controlLetterFields, setControlLetterFields] = useState([]);
   const dragRef = useRef(null);
   const resizeRef = useRef(null);
 
@@ -58,6 +97,19 @@ function TaskWindowItem({ taskId, minimized, minimizedOrder }) {
   }
 
   useEffect(() => { loadTask(); }, [taskId]);
+
+  // For resolving field/goal/control-letter condition values (e.g. "gefen", a goal_key, a
+  // division_type) to their Hebrew label in column headers/exports — same payload
+  // TaskCreateWizard already fetches.
+  useEffect(() => {
+    axios.get("/tasks/field-options").then(r => {
+      setFieldOptions(r.data?.fields || []);
+      setGoalOptions(r.data?.goal_options || []);
+      setDivisionOptions(r.data?.division_options || []);
+      setControlLetterFields(r.data?.control_letter_fields || []);
+    }).catch(() => {});
+  }, []);
+  const taskFieldMeta = { fieldOptions, goalOptions, divisionOptions, controlLetterFields };
 
   useEffect(() => {
     if (pos === null) {
@@ -118,18 +170,22 @@ function TaskWindowItem({ taskId, minimized, minimizedOrder }) {
     document.removeEventListener("mouseup", stopResize);
   }, []);
 
-  async function handleBulkSend() {
+  async function handleBulkSend(confirmOutlookLimit = false) {
     setSending(true);
     setLastSendWasScheduled(!!scheduleSendAt);
     try {
       await axios.post(`/tasks/${taskId}/send`, {
         scheduled_at: scheduleSendAt ? new Date(scheduleSendAt).toISOString() : null,
+        confirm_outlook_limit: confirmOutlookLimit,
       });
       setScheduleSendAt("");
+      setOutlookLimitWarning(null);
       loadTask();
     } catch (err) {
       const detail = err?.response?.data?.detail;
-      if (err?.response?.status === 409 && detail?.missing_contact_school_ids) {
+      if (err?.response?.status === 409 && detail?.outlook_limit_exceeded) {
+        setOutlookLimitWarning(detail);
+      } else if (err?.response?.status === 409 && detail?.missing_contact_school_ids) {
         setMissingContact({
           schoolIds: detail.missing_contact_school_ids,
           channel: task.message_config?.channel,
@@ -139,6 +195,19 @@ function TaskWindowItem({ taskId, minimized, minimizedOrder }) {
     } finally {
       setSending(false);
       loadTask();
+    }
+  }
+
+  async function switchToResendAndSend() {
+    setSwitchingChannel(true);
+    try {
+      await axios.patch(`/tasks/${taskId}`, {
+        message_config: { ...task.message_config, channel: "email_resend" },
+      });
+      setOutlookLimitWarning(null);
+      await handleBulkSend(false);
+    } finally {
+      setSwitchingChannel(false);
     }
   }
 
@@ -159,6 +228,27 @@ function TaskWindowItem({ taskId, minimized, minimizedOrder }) {
       setSendingRow(null);
       loadTask();
     }
+  }
+
+  async function saveExclusions(schoolId, nextEmails) {
+    await axios.put(`/tasks/${taskId}/schools/${schoolId}/note`, { excluded_emails: nextEmails });
+    loadTask();
+  }
+
+  async function saveNote(schoolId, note) {
+    await axios.put(`/tasks/${taskId}/schools/${schoolId}/note`, { note });
+    loadTask();
+  }
+
+  function addExclusion(schoolId, currentEmails) {
+    const email = exclusionInput.trim().toLowerCase();
+    if (!email) return;
+    setExclusionInput("");
+    saveExclusions(schoolId, [...new Set([...currentEmails, email])]);
+  }
+
+  function removeExclusion(schoolId, currentEmails, email) {
+    saveExclusions(schoolId, currentEmails.filter(e => e !== email));
   }
 
   if (!pos) return null;
@@ -190,8 +280,59 @@ function TaskWindowItem({ taskId, minimized, minimizedOrder }) {
     );
   }
 
-  const conditions = task ? firstDisplayGroupConditions(task.criteria) : [];
+  const trackSuccess = task?.progress?.track_success !== false;
+  // Round-2 redesign: success_criteria is an independent tree from task.criteria (targeting) —
+  // describing columns from task.criteria would show the wrong conditions once the two trees
+  // diverge (see get_task's effective_success_criteria). Empty when track_success is off —
+  // there's no success tree to describe, so the per-condition columns are hidden entirely
+  // rather than rendered empty (see displayRows/table below).
+  const conditions = (task && trackSuccess) ? firstDisplayGroupConditions(task.effective_success_criteria) : [];
   const rows = task?.progress?.schools || [];
+
+  const displayRows = rows
+    .filter(r => {
+      if (rowStatusFilter === "done" && !r.done) return false;
+      if (rowStatusFilter === "not_done" && r.done) return false;
+      if (!rowFilterText.trim()) return true;
+      const q = rowFilterText.trim().toLowerCase();
+      return [r.school_name, r.symbol, r.authority].some(v => (v || "").toLowerCase().includes(q));
+    })
+    .sort((a, b) => {
+      if (!sortSpec) return 0;
+      const av = (a[sortSpec.key] || "").toString();
+      const bv = (b[sortSpec.key] || "").toString();
+      const cmp = av.localeCompare(bv, "he");
+      return sortSpec.dir === "asc" ? cmp : -cmp;
+    });
+
+  function toggleSort(key) {
+    setSortSpec(prev => {
+      if (!prev || prev.key !== key) return { key, dir: "asc" };
+      if (prev.dir === "asc") return { key, dir: "desc" };
+      return null;
+    });
+  }
+
+  function exportToExcel() {
+    const colLabels = ["בית ספר", "סמל מוסד", "בעלות", ...conditions.map(c => describeCondition(c, taskFieldMeta)), "שליחה", "הערות"];
+    const wsData = [colLabels, ...displayRows.map(r => [
+      r.school_name || "", r.symbol || "", r.authority || "",
+      ...r.condition_results.map((res, i) => (
+        conditions[i]?.type === "meeting"
+          ? (res.meeting_exists ? "יש" : "אין")
+          : (res.ok ? "בוצע" : "טרם בוצע")
+      )),
+      r.send_status?.status === "sent" ? "נשלח" : r.send_status?.status === "failed" ? "נכשל" : r.send_status?.status === "skipped" ? "דולג" : r.send_status ? "ממתין" : "—",
+      r.note || "",
+    ])];
+    const ws = XLSX.utils.aoa_to_sheet(wsData);
+    ws["!cols"] = colLabels.map(() => ({ wch: 20 }));
+    ws["!views"] = [{ rightToLeft: true, workbookViewId: 0 }];
+    const wb = XLSX.utils.book_new();
+    wb.Workbook = { Views: [{ RTL: true }] };
+    XLSX.utils.book_append_sheet(wb, ws, "משימה");
+    XLSX.writeFile(wb, `${task?.name || "משימה"}.xlsx`);
+  }
 
   return (
     <div
@@ -232,7 +373,7 @@ function TaskWindowItem({ taskId, minimized, minimizedOrder }) {
         <div className="flex-1 flex items-center justify-center px-6 text-center">
           <p className="text-sm text-slate-500">
             המשימה מתוזמנת — רשימת בתי הספר תיקבע אוטומטית ב-
-            <b className="text-slate-700">{task.scheduled_for ? new Date(task.scheduled_for).toLocaleString("he-IL") : ""}</b>,
+            <b className="text-slate-700"><bdi>{task.scheduled_for ? new Date(task.scheduled_for).toLocaleString("he-IL") : ""}</bdi></b>,
             לפי מי שיעמוד בקריטריונים באותו מועד.
           </p>
         </div>
@@ -240,39 +381,184 @@ function TaskWindowItem({ taskId, minimized, minimizedOrder }) {
         <>
           <div className="px-4 py-3 border-b border-slate-100 flex-shrink-0 flex items-center gap-4 flex-wrap text-xs text-slate-500">
             <span>סה"כ בתי ספר: <b className="text-slate-700">{task.progress.total}</b></span>
-            <span>הושלמו: <b className="text-emerald-600">{task.progress.completed}</b></span>
-            <span>טרם הושלמו: <b className="text-amber-600">{task.progress.total - task.progress.completed}</b></span>
-            <span className="mr-auto font-semibold text-blue-700">{task.progress.progress_pct}% התקדמות</span>
+            {trackSuccess ? (
+              <>
+                <span>הושלמו: <b className="text-emerald-600">{task.progress.completed}</b></span>
+                <span>טרם הושלמו: <b className="text-amber-600">{task.progress.total - task.progress.completed}</b></span>
+                {task.progress.action_progress && (
+                  <span>
+                    פעולות: <b className="text-slate-700">{task.progress.action_progress.completed}</b> מתוך <b className="text-slate-700">{task.progress.action_progress.required}</b>
+                  </span>
+                )}
+                <span className="mr-auto font-semibold text-blue-700">
+                  {task.progress.action_progress ? task.progress.action_progress.pct : task.progress.progress_pct}% התקדמות
+                </span>
+              </>
+            ) : (
+              <>
+                <span>נשלחו: <b className="text-emerald-600">{task.message_summary?.sent ?? 0}</b></span>
+                <span className="mr-auto text-slate-400">משימה זו עוקבת אחרי שליחה בלבד, ללא מדד הצלחה</span>
+              </>
+            )}
+          </div>
+
+          {task.needs_outlook_confirmation && (
+            <div role="alert" className="px-4 py-2.5 border-b border-slate-100 flex-shrink-0 flex items-center justify-between gap-3 flex-wrap text-xs bg-amber-50">
+              <span className="text-amber-800 font-medium">המשימה חורגת מסף האזהרה לשליחה דרך Outlook — נדרש אישור ידני לפני שההודעות ייצאו.</span>
+              <button
+                type="button"
+                onClick={() => handleBulkSend(true)}
+                disabled={sending}
+                className="text-xs px-3 py-1.5 rounded-lg font-medium bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-60 whitespace-nowrap"
+              >
+                {sending ? "שולח..." : "אשר שליחה"}
+              </button>
+            </div>
+          )}
+
+          {task.message_summary?.queued > 0 && (
+            <div role="status" className="px-4 py-2 border-b border-slate-100 flex-shrink-0 flex items-center gap-3 flex-wrap text-xs bg-slate-50">
+              <span className="font-semibold text-slate-600">סטטוס שליחת הודעות:</span>
+              <span className="text-emerald-600">נשלחו בפועל: <b>{task.message_summary.sent}</b></span>
+              {task.message_summary.failed > 0 && (
+                <span className="text-red-600">נכשלו: <b>{task.message_summary.failed}</b></span>
+              )}
+              {task.message_summary.pending > 0 && (
+                <span className="text-amber-600">ממתינות: <b>{task.message_summary.pending}</b></span>
+              )}
+            </div>
+          )}
+
+          <div className="px-4 py-2 border-b border-slate-100 flex-shrink-0 flex items-center gap-2 flex-wrap text-xs">
+            <label htmlFor={`task-row-filter-${taskId}`} className="sr-only">חיפוש בטבלה</label>
+            <input
+              id={`task-row-filter-${taskId}`}
+              type="text"
+              value={rowFilterText}
+              onChange={e => setRowFilterText(e.target.value)}
+              placeholder="חיפוש בית ספר / סמל / בעלות..."
+              className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 flex-1 min-w-[10rem]"
+            />
+            <label htmlFor={`task-row-status-${taskId}`} className="sr-only">סינון לפי סטטוס</label>
+            <select
+              id={`task-row-status-${taskId}`}
+              value={rowStatusFilter}
+              onChange={e => setRowStatusFilter(e.target.value)}
+              className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white"
+            >
+              <option value="">הכל</option>
+              <option value="done">הושלמו</option>
+              <option value="not_done">טרם הושלמו</option>
+            </select>
+            <button
+              type="button"
+              onClick={exportToExcel}
+              className="text-xs px-3 py-1.5 rounded-lg font-medium bg-emerald-50 text-emerald-700 hover:bg-emerald-100 whitespace-nowrap mr-auto"
+            >
+              ייצוא לאקסל
+            </button>
           </div>
 
           <div className="flex-1 overflow-auto">
             <table className="w-full text-sm">
               <thead className="sticky top-0 bg-white border-b border-slate-200">
                 <tr>
-                  <th scope="col" className="text-right px-4 py-2 font-semibold text-slate-600">בית ספר</th>
-                  {conditions.map((c, i) => (
-                    <th key={i} scope="col" className="text-center px-3 py-2 font-semibold text-slate-600 whitespace-nowrap">
-                      {describeCondition(c)}
-                    </th>
-                  ))}
+                  <th scope="col" className="text-right px-4 py-2 font-semibold text-slate-600">
+                    <button type="button" onClick={() => toggleSort("school_name")} className="hover:text-blue-700 flex items-center gap-1">
+                      בית ספר {sortSpec?.key === "school_name" && (sortSpec.dir === "asc" ? "▲" : "▼")}
+                    </button>
+                  </th>
+                  <th scope="col" className="text-right px-3 py-2 font-semibold text-slate-600 whitespace-nowrap">
+                    <button type="button" onClick={() => toggleSort("symbol")} className="hover:text-blue-700 flex items-center gap-1">
+                      סמל מוסד {sortSpec?.key === "symbol" && (sortSpec.dir === "asc" ? "▲" : "▼")}
+                    </button>
+                  </th>
+                  <th scope="col" className="text-right px-3 py-2 font-semibold text-slate-600 whitespace-nowrap">
+                    <button type="button" onClick={() => toggleSort("authority")} className="hover:text-blue-700 flex items-center gap-1">
+                      בעלות {sortSpec?.key === "authority" && (sortSpec.dir === "asc" ? "▲" : "▼")}
+                    </button>
+                  </th>
+                  <th scope="col" className="text-right px-3 py-2 font-semibold text-slate-600 whitespace-nowrap">הערות</th>
+                  {conditions.map((c, i) => {
+                    const { title, range } = describeConditionColumn(c, taskFieldMeta);
+                    return (
+                      <th key={i} scope="col" className="text-center px-3 py-2 font-semibold text-slate-600 whitespace-nowrap">
+                        <div>{title}</div>
+                        {range && <div className="font-normal text-slate-400 text-[11px] mt-0.5"><bdi>{range}</bdi></div>}
+                      </th>
+                    );
+                  })}
+                  <th scope="col" className="text-center px-3 py-2 font-semibold text-slate-600 whitespace-nowrap">שליחה</th>
+                  <th scope="col" className="text-center px-3 py-2 font-semibold text-slate-600 whitespace-nowrap">החרגות</th>
                   <th scope="col" className="px-3 py-2" />
                 </tr>
               </thead>
               <tbody>
-                {rows.map(r => (
-                  <tr key={r.school_id} className="border-b border-slate-50">
+                {displayRows.map(r => (
+                  <Fragment key={r.school_id}>
+                  <tr className="border-b border-slate-50">
                     <td className="px-4 py-2 text-slate-800">{r.school_name}</td>
-                    {r.condition_results.map((ok, i) => (
-                      <td key={i} className="text-center px-3 py-2" aria-label={ok ? "בוצע" : "טרם בוצע"}>
-                        {ok ? (
+                    <td className="px-3 py-2 text-slate-600"><bdi>{r.symbol || "—"}</bdi></td>
+                    <td className="px-3 py-2 text-slate-600">{r.authority || "—"}</td>
+                    <td className="px-2 py-1.5">
+                      <label htmlFor={`task-note-${r.school_id}`} className="sr-only">הערה עבור {r.school_name}</label>
+                      <input
+                        id={`task-note-${r.school_id}`}
+                        key={`${r.school_id}-${r.note || ""}`}
+                        type="text"
+                        defaultValue={r.note || ""}
+                        onBlur={e => { if (e.target.value !== (r.note || "")) saveNote(r.school_id, e.target.value); }}
+                        placeholder="הערה..."
+                        className="w-32 text-xs border border-transparent hover:border-slate-200 focus:border-blue-400 rounded-lg px-2 py-1 outline-none bg-transparent focus:bg-white"
+                      />
+                    </td>
+                    {r.condition_results.map((res, i) => (
+                      <td key={i} className="text-center px-3 py-2" aria-label={res.ok ? "בוצע" : "טרם בוצע"}>
+                        {conditions[i]?.type === "meeting" && res.required_count ? (
+                          <span className={`font-bold text-xs rounded-full px-2 py-0.5 ${res.actual_count >= res.required_count ? "text-emerald-600 bg-emerald-50" : "text-amber-600 bg-amber-50"}`}>
+                            {res.actual_count}/{res.required_count}
+                          </span>
+                        ) : res.ok ? (
                           <span aria-hidden="true" className="text-emerald-600 font-bold">✓</span>
                         ) : (
                           <span aria-hidden="true" className="text-red-500 font-bold">✕</span>
                         )}
                       </td>
                     ))}
+                    <td className="text-center px-3 py-2 whitespace-nowrap">
+                      {!r.send_status ? (
+                        <span className="text-slate-300 text-xs">—</span>
+                      ) : r.send_status.status === "sent" ? (
+                        <span className="relative group inline-block">
+                          <span className="text-emerald-600 font-bold text-xs cursor-default">✓ נשלח</span>
+                          <div className="pointer-events-none absolute -top-2 right-full mr-1 opacity-0 group-hover:opacity-100 transition-opacity bg-amber-400 text-amber-950 text-[11px] font-medium px-2 py-1.5 rounded-md shadow-lg whitespace-nowrap z-10 text-right space-y-0.5">
+                            <div>זמן שליחה: {formatDateTimeDMY(r.send_status.sent_at)}</div>
+                            {meetingLinkStatusLabel(r.send_status) && <div>סטטוס: {meetingLinkStatusLabel(r.send_status)}</div>}
+                          </div>
+                        </span>
+                      ) : r.send_status.status === "failed" ? (
+                        <span className="text-red-600 font-bold text-xs" title={r.send_status.error || ""}>✕ נכשל</span>
+                      ) : r.send_status.status === "skipped" ? (
+                        <span className="text-slate-400 font-bold text-xs">דולג</span>
+                      ) : (
+                        <span className="text-amber-600 font-bold text-xs">⏳ ממתין</span>
+                      )}
+                    </td>
+                    <td className="text-center px-3 py-2 whitespace-nowrap">
+                      <button
+                        type="button"
+                        onClick={() => setExclusionEditFor(exclusionEditFor === r.school_id ? null : r.school_id)}
+                        className="text-xs text-slate-500 hover:text-slate-700 underline decoration-dotted"
+                      >
+                        {r.excluded_emails?.length ? `${r.excluded_emails.length} מוחרגים` : "אין"}
+                      </button>
+                    </td>
                     <td className="px-3 py-2 text-left">
-                      {!r.done && (
+                      {/* r.done is null (not false) when track_success is off — always show
+                          the resend button then, since there's no "done" concept to hide it
+                          behind. Written explicitly rather than relying on `null` being
+                          falsy, so the intent survives the next reader. */}
+                      {(!trackSuccess || !r.done) && (
                         <button
                           type="button"
                           onClick={() => handleRowSend(r.school_id)}
@@ -284,6 +570,42 @@ function TaskWindowItem({ taskId, minimized, minimizedOrder }) {
                       )}
                     </td>
                   </tr>
+                  {exclusionEditFor === r.school_id && (
+                    <tr className="border-b border-slate-100 bg-slate-50">
+                      <td colSpan={conditions.length + 7} className="px-4 py-2.5">
+                        <div className="flex items-center gap-2 flex-wrap text-xs">
+                          <span className="text-slate-500 font-medium whitespace-nowrap">כתובות מוחרגות מהמשימה הזו:</span>
+                          {(r.excluded_emails || []).map(email => (
+                            <span key={email} className="bg-white border border-slate-200 rounded-full px-2 py-0.5 flex items-center gap-1">
+                              {email}
+                              <button
+                                type="button"
+                                onClick={() => removeExclusion(r.school_id, r.excluded_emails, email)}
+                                aria-label={`הסר החרגה עבור ${email}`}
+                                className="text-slate-400 hover:text-red-600"
+                              >×</button>
+                            </span>
+                          ))}
+                          <label htmlFor={`exclude-email-${r.school_id}`} className="sr-only">כתובת מייל להחרגה</label>
+                          <input
+                            id={`exclude-email-${r.school_id}`}
+                            type="email"
+                            value={exclusionInput}
+                            onChange={e => setExclusionInput(e.target.value)}
+                            onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addExclusion(r.school_id, r.excluded_emails || []); } }}
+                            placeholder="כתובת מייל להחרגה"
+                            className="text-xs border border-slate-200 rounded-lg px-2 py-1 outline-none focus:border-blue-400"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => addExclusion(r.school_id, r.excluded_emails || [])}
+                            className="text-xs px-2 py-1 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-700 font-medium"
+                          >הוסף</button>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
                 ))}
               </tbody>
             </table>
@@ -293,17 +615,16 @@ function TaskWindowItem({ taskId, minimized, minimizedOrder }) {
             <label htmlFor={`schedule-send-${taskId}`} className="text-xs text-slate-500">
               תזמון שליחה (אופציונלי)
             </label>
-            <input
+            <TaskDateTimeInput
               id={`schedule-send-${taskId}`}
-              type="datetime-local"
               value={scheduleSendAt}
-              onChange={e => setScheduleSendAt(e.target.value)}
-              className="text-xs border border-slate-200 rounded-lg px-2 py-1.5"
+              onChange={setScheduleSendAt}
+              className="text-xs"
             />
             <button
               type="button"
-              onClick={handleBulkSend}
-              disabled={sending || task.progress.total === task.progress.completed}
+              onClick={() => handleBulkSend()}
+              disabled={sending || (trackSuccess && task.progress.total === task.progress.completed)}
               className="px-4 py-2 rounded-xl text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60"
             >
               {sending
@@ -327,6 +648,16 @@ function TaskWindowItem({ taskId, minimized, minimizedOrder }) {
         </svg>
       </div>
 
+      {outlookLimitWarning && (
+        <OutlookLimitModal
+          warning={outlookLimitWarning}
+          primaryLoading={sending}
+          secondaryLoading={switchingChannel}
+          onConfirm={() => handleBulkSend(true)}
+          onSwitchChannel={switchToResendAndSend}
+          onClose={() => setOutlookLimitWarning(null)}
+        />
+      )}
       {missingContact && task && (
         <TaskMissingContactModal
           taskId={taskId}

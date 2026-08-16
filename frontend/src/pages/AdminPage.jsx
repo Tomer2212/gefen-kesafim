@@ -21,7 +21,7 @@ import { CONTROL_LETTER_STATUS_MAP } from "../components/controlLetter/constants
 import { AdvisorSearch } from "../components/AdvisorSearch";
 import HourMinuteInput from "../components/HourMinuteInput";
 import { AccessSelector } from "../components/AccessSelector";
-import TaskListBar from "../components/tasks/TaskListBar";
+import AdminTasksTab from "./AdminTasksTab";
 
 // --- Admin schools table (ניהול → בתי ספר) ------------------------------------------------
 
@@ -322,8 +322,11 @@ const FINANCE_SOFTWARE_OPTIONS = [
   { value: "schoolcash", label: "סקולקאש" },
 ];
 
+const PRINCIPAL_TICHON_ROW  = { label: "מנהל/ת חט\"ע", nameField: "principal_name",         phoneField: "principal_phone",         emailField: "principal_email",         dayOffField: "principal_day_off",         coordValue: "principal" };
+const PRINCIPAL_SINGLE_ROW  = { label: "מנהל/ת",       nameField: "principal_name",         phoneField: "principal_phone",         emailField: "principal_email",         dayOffField: "principal_day_off",         coordValue: "principal" };
+const PRINCIPAL_CHATIVA_ROW = { label: "מנהל/ת חט\"ב", nameField: "principal_chativa_name", phoneField: "principal_chativa_phone", emailField: "principal_chativa_email", dayOffField: "principal_chativa_day_off", coordValue: "principal_chativa" };
+
 const CONTACT_ROWS = [
-  { label: "מנהל/ת",        nameField: "principal_name",       phoneField: "principal_phone",       emailField: "principal_email",       dayOffField: "principal_day_off",       coordValue: "principal" },
   { label: "מנהלנ/ית",      nameField: "secretary_name",       phoneField: "secretary_phone",       emailField: "secretary_email",       dayOffField: "secretary_day_off",       coordValue: "secretary" },
   { label: "אחראי/ת כספים", nameField: "finance_contact_name", phoneField: "finance_contact_phone", emailField: "finance_contact_email", dayOffField: "finance_contact_day_off", coordValue: "finance_contact" },
 ];
@@ -424,7 +427,7 @@ function validateSymbol(val) {
   return "";
 }
 
-const EMPTY_FORM = { name: "", symbol: "", city: "", authority: "", stage: "", finance_software: "", principal_name: "", principal_phone: "", principal_email: "", secretary_name: "", secretary_phone: "", secretary_email: "", finance_contact_name: "", finance_contact_phone: "", finance_contact_email: "", school_phone: "", address: "", district: "", restrict_access_to: [], extra_contacts: [], principal_day_off: [], secretary_day_off: [], finance_contact_day_off: [], meeting_coordinator: null };
+const EMPTY_FORM = { name: "", symbol: "", city: "", authority: "", stage: "", finance_software: "", principal_name: "", principal_phone: "", principal_email: "", secretary_name: "", secretary_phone: "", secretary_email: "", finance_contact_name: "", finance_contact_phone: "", finance_contact_email: "", school_phone: "", address: "", district: "", restrict_access_to: [], extra_contacts: [], principal_day_off: [], secretary_day_off: [], finance_contact_day_off: [], meeting_coordinator: null, principal_chativa_name: "", principal_chativa_phone: "", principal_chativa_email: "", principal_chativa_day_off: [], principal_same_person: true };
 
 const IMPORT_FIELD_CONFIG = [
   { key: "name",                  label: "שם בית ספר",          required: true },
@@ -1072,6 +1075,8 @@ export default function AdminPage() {
     editingSchool !== null ||
     !!(schoolForm.name || schoolForm.symbol || schoolStage || selectedAdvisors.length > 0)
   );
+
+  const effectiveSchoolFormStage = editingSchool ? schoolForm.stage : schoolStage;
   const adminMeetingsRef = useRef(null);
   const [meetingsGuardActive, setMeetingsGuardActive] = useState(false);
   const [meetingGuardBusy, setMeetingGuardBusy] = useState(false);
@@ -1523,8 +1528,20 @@ export default function AdminPage() {
     if (schoolForm.principal_phone && validateSecretaryPhone(schoolForm.principal_phone)) return;
     if (schoolForm.secretary_phone && validateSecretaryPhone(schoolForm.secretary_phone)) return;
     if (schoolForm.finance_contact_phone && validateSecretaryPhone(schoolForm.finance_contact_phone)) return;
+    if (effectiveSchoolFormStage === "sheshshnati" && !schoolForm.principal_same_person
+        && schoolForm.principal_chativa_phone && validateSecretaryPhone(schoolForm.principal_chativa_phone)) return;
     if (schoolForm.school_phone && validateSchoolPhone(schoolForm.school_phone)) return;
     if (!schoolForm.meeting_coordinator) return;
+    // "אותו מנהל/ת לשתי החטיבות" — the חט"ב fields are hidden in the UI, so keep them
+    // in sync with the חט"ע ones rather than sending stale/blank data.
+    const chativaSync = (effectiveSchoolFormStage === "sheshshnati" && schoolForm.principal_same_person)
+      ? {
+          principal_chativa_name: schoolForm.principal_name,
+          principal_chativa_phone: schoolForm.principal_phone,
+          principal_chativa_email: schoolForm.principal_email,
+          principal_chativa_day_off: schoolForm.principal_day_off,
+        }
+      : {};
     setSavingSchool(true);
     try {
       if (editingSchool) {
@@ -1544,12 +1561,12 @@ export default function AdminPage() {
           window.alert(err.response?.data?.detail || "שגיאה בעדכון היועצים המלווים");
           return false;
         }
-        await axios.put(`/schools/${editingSchool.id}`, schoolForm);
+        await axios.put(`/schools/${editingSchool.id}`, { ...schoolForm, ...chativaSync });
         const updatedAdvisors = draftAdvisorIds.map(id => users.find(u => u.id === id)).filter(Boolean);
         setSchoolAdvisors(prev => ({ ...prev, [editingSchool.id]: updatedAdvisors }));
         setOriginalAdvisorIds(draftAdvisorIds);
       } else {
-        const res = await axios.post("/schools/", { ...schoolForm, stage: schoolStage });
+        const res = await axios.post("/schools/", { ...schoolForm, ...chativaSync, stage: schoolStage });
         const newId = res.data.id;
         const stageOption = SCHOOL_STAGE_OPTIONS.find(s => s.value === schoolStage);
         if (stageOption?.divisionType) {
@@ -1615,6 +1632,11 @@ export default function AdminPage() {
       secretary_day_off: school.secretary_day_off || [],
       finance_contact_day_off: school.finance_contact_day_off || [],
       meeting_coordinator: school.meeting_coordinator || null,
+      principal_chativa_name: school.principal_chativa_name || "",
+      principal_chativa_phone: school.principal_chativa_phone || "",
+      principal_chativa_email: school.principal_chativa_email || "",
+      principal_chativa_day_off: school.principal_chativa_day_off || [],
+      principal_same_person: school.principal_same_person !== false,
     });
     setTriedSave(false);
     setShowSchoolForm(true);
@@ -2148,6 +2170,7 @@ export default function AdminPage() {
 
   const tabs = [
     { id: "schools", label: "בתי ספר" },
+    { id: "tasks", label: "משימות" },
     { id: "users", label: "משתמשים" },
     { id: "meetings", label: "פגישות" },
     ...(showCallsTab ? [{ id: "calls", label: "שיחות" }] : []),
@@ -2190,7 +2213,7 @@ export default function AdminPage() {
 
         <div className={`mx-auto px-6 pb-10 ${
           activeTab === "users" ? "max-w-[95rem]" :
-          ["schools", "meetings", "calls", "collection"].includes(activeTab) ? "max-w-[100rem]" : "max-w-4xl"
+          ["schools", "meetings", "calls", "collection", "tasks"].includes(activeTab) ? "max-w-[100rem]" : "max-w-4xl"
         }`}>
           {/* Schools Tab */}
           {activeTab === "schools" && (
@@ -2417,7 +2440,11 @@ export default function AdminPage() {
                         </tr>
                       </thead>
                       <tbody>
-                        {CONTACT_ROWS.map(row => (
+                        {[
+                          effectiveSchoolFormStage === "sheshshnati" ? PRINCIPAL_TICHON_ROW : PRINCIPAL_SINGLE_ROW,
+                          ...(effectiveSchoolFormStage === "sheshshnati" && !schoolForm.principal_same_person ? [PRINCIPAL_CHATIVA_ROW] : []),
+                          ...CONTACT_ROWS,
+                        ].map(row => (
                           <tr key={row.nameField} className="border-t border-slate-100">
                             <td className="py-2 pr-1 text-xs text-slate-700 font-medium whitespace-nowrap">{row.label}</td>
                             <td className="py-2 px-2">
@@ -2478,6 +2505,20 @@ export default function AdminPage() {
                             </td>
                           </tr>
                         ))}
+
+                        {effectiveSchoolFormStage === "sheshshnati" && (
+                          <tr className="border-t border-slate-100">
+                            <td></td>
+                            <td colSpan={5} className="py-2 px-2">
+                              <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
+                                <input type="checkbox" className="w-3.5 h-3.5 rounded accent-blue-600"
+                                  checked={!!schoolForm.principal_same_person}
+                                  onChange={e => setSchoolForm(p => ({ ...p, principal_same_person: e.target.checked }))} />
+                                אותו מנהל/ת לשתי החטיבות
+                              </label>
+                            </td>
+                          </tr>
+                        )}
 
                         {/* Extra contact rows */}
                         {(schoolForm.extra_contacts || []).map((ec, i) => (
@@ -2648,8 +2689,6 @@ export default function AdminPage() {
               {!showSchoolForm && (
               <>
               <input ref={adminContractInputRef} type="file" className="hidden" onChange={handleContractFileChange} aria-label="העלאת קובץ חוזה" />
-
-              <TaskListBar />
 
               <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
                 <div className="flex items-center gap-2 flex-wrap">
@@ -3450,6 +3489,11 @@ export default function AdminPage() {
                 </>
               )}
             </div>
+          )}
+
+          {/* Tasks Tab */}
+          {activeTab === "tasks" && (
+            <AdminTasksTab />
           )}
 
           {/* Meetings Tab */}

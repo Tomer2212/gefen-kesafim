@@ -7,6 +7,7 @@ import { MeetingsTable } from "../components/meetings/MeetingsTable";
 import { MeetingSummaryModal } from "../components/meetings/MeetingSummaryModal";
 import { NotesModal } from "../components/meetings/NotesModal";
 import { SchoolPickerModal, SchoolPickerPopover, schoolLabel } from "../components/meetings/SchoolPickerCell";
+import { StageScopeModal } from "../components/meetings/StageScopeModal";
 import { DirectCoordinationModal } from "../components/meetings/DirectCoordinationModal";
 import { MEETING_STATUS_OPTIONS, MEETING_TYPE_OPTIONS, MEETING_SERVICE_TYPE_OPTIONS, STATUS_MAP, formatMeetingDate, defaultMeetingServiceType, resolveDefaultAdvisorIds } from "../components/meetings/constants";
 import { AcademicYearSelector } from "../components/AcademicYearSelector";
@@ -57,6 +58,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
   const [summaryModalFor, setSummaryModalFor] = useState(null);
   const [showCalendarColumn, setShowCalendarColumn] = useState(false);
   const [schoolPickerFor, setSchoolPickerFor] = useState(null);
+  const [pendingScopeSchool, setPendingScopeSchool] = useState(null);
   const [directCoordSchool, setDirectCoordSchool] = useState(null);
   const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false);
 
@@ -266,6 +268,8 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
       actual_duration: draft.actual_duration || null,
       notes: draft.notes || null,
       reminder_enabled: draft.reminder_enabled || false,
+      primary_contact_key: draft.primary_contact_key || null,
+      stage_scope: draft.stage_scope || null,
     };
     try {
       const res = await axios.put(`/schools/${draft.school_id}/meetings/${draft.id}`, payload);
@@ -289,7 +293,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
     }
   }
 
-  async function createMeetingForSchool(school) {
+  async function createMeetingRow(school, stageScope) {
     // Default advisor(s) now come from the school's per-service-type "יועץ מלווה" lists
     // (same convenience already used on the school card, SchoolPage.jsx) — resolved via the
     // meeting's default service type, which may pull in more than one advisor (gefen_current).
@@ -308,11 +312,25 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
     const defaultAdvisorProfiles = [typed.gefen, typed.current, typed.district]
       .flat().filter(p => defaultAdvisorIds.includes(p.id))
       .filter((p, i, arr) => arr.findIndex(x => x.id === p.id) === i);
+    // For a six-year school, "תיכון בלבד"/"חט"ב בלבד" pre-fill the relevant principal as
+    // the default participant; "שניהם יחד" leaves participants empty for manual selection.
+    const contacts = buildSchoolContacts(school);
+    let participants = [];
+    if (stageScope === "tichon") {
+      const c = contacts.find(x => x.key === "principal");
+      if (c) participants = [c];
+    } else if (stageScope === "chativa") {
+      const c = contacts.find(x => x.key === "principal_chativa") || contacts.find(x => x.key === "principal");
+      if (c) participants = [c];
+    }
     const payload = {
       status: "scheduled", meeting_type: "remote",
       meeting_service_type: meetingServiceType,
       advisor_ids: defaultAdvisorIds,
-      participants: [], reminder_enabled: false, academic_year: academicYear,
+      participants,
+      primary_contact_key: participants.length === 1 ? participants[0].key : null,
+      reminder_enabled: false, academic_year: academicYear,
+      ...(stageScope === "tichon" || stageScope === "chativa" || stageScope === "both" ? { stage_scope: stageScope } : {}),
     };
     try {
       const res = await axios.post(`/schools/${school.id}/meetings`, payload);
@@ -326,7 +344,28 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
     } catch (err) {
       console.error("Failed to create meeting:", err);
     }
+  }
+
+  async function createMeetingForSchool(school) {
+    if (school.stage === "sheshshnati") {
+      setPendingScopeSchool(school);
+      setSchoolPickerFor(null);
+      return;
+    }
+    await createMeetingRow(school, null);
     setSchoolPickerFor(null);
+  }
+
+  async function handleStageScopeChoice(scope) {
+    const school = pendingScopeSchool;
+    setPendingScopeSchool(null);
+    if (!school) return;
+    if (scope === "separate") {
+      await createMeetingRow(school, "tichon");
+      await createMeetingRow(school, "chativa");
+    } else {
+      await createMeetingRow(school, scope);
+    }
   }
 
   // Resolves the { gefen, current, district } advisor-profile lists for the school a given
@@ -618,6 +657,12 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
         <SchoolPickerModal schools={schools} onConfirm={createMeetingForSchool} onCancel={() => setSchoolPickerFor(null)} />
       )}
 
+      {pendingScopeSchool && (
+        <StageScopeModal schoolName={pendingScopeSchool.name}
+          onChoose={handleStageScopeChoice}
+          onCancel={() => setPendingScopeSchool(null)} />
+      )}
+
       {schoolPickerFor === "direct" && (
         <SchoolPickerModal schools={schools}
           onConfirm={school => { setDirectCoordSchool(school); setSchoolPickerFor(null); }}
@@ -798,6 +843,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
             usersWithAccess={users || []}
             usersWithoutAccess={[]}
             contactsFor={m => buildSchoolContacts(schools.find(s => s.id === m.school_id))}
+            schoolStageFor={m => schools.find(s => s.id === m.school_id)?.stage}
             onSave={updateMeeting}
             onDelete={deleteMeeting}
             onOpenNotes={(meetingId, notes, onSave) => setNotesModal({ meetingId, notes, onSave })}

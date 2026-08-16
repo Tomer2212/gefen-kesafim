@@ -3,6 +3,9 @@ import { useBlocker, useNavigate } from "react-router-dom";
 import axios from "axios";
 import Sidebar from "../components/Sidebar";
 import { MultiSelectChips } from "../components/MultiSelectChips";
+import { AdvisorSearch } from "../components/AdvisorSearch";
+import HourMinuteInput from "../components/HourMinuteInput";
+import { DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 
 // ---- constants (mirrored from AdminPage) ----
@@ -35,8 +38,11 @@ const FINANCE_SOFTWARE_OPTIONS = [
   { value: "schoolcash", label: "סקולקאש" },
 ];
 
+const PRINCIPAL_TICHON_ROW  = { label: "מנהל/ת חט\"ע", nameField: "principal_name",         phoneField: "principal_phone",         emailField: "principal_email",         dayOffField: "principal_day_off",         coordValue: "principal" };
+const PRINCIPAL_SINGLE_ROW  = { label: "מנהל/ת",       nameField: "principal_name",         phoneField: "principal_phone",         emailField: "principal_email",         dayOffField: "principal_day_off",         coordValue: "principal" };
+const PRINCIPAL_CHATIVA_ROW = { label: "מנהל/ת חט\"ב", nameField: "principal_chativa_name", phoneField: "principal_chativa_phone", emailField: "principal_chativa_email", dayOffField: "principal_chativa_day_off", coordValue: "principal_chativa" };
+
 const CONTACT_ROWS = [
-  { label: "מנהל/ת",        nameField: "principal_name",       phoneField: "principal_phone",       emailField: "principal_email",       dayOffField: "principal_day_off",       coordValue: "principal" },
   { label: "מנהלנ/ית",      nameField: "secretary_name",       phoneField: "secretary_phone",       emailField: "secretary_email",       dayOffField: "secretary_day_off",       coordValue: "secretary" },
   { label: "אחראי/ת כספים", nameField: "finance_contact_name", phoneField: "finance_contact_phone", emailField: "finance_contact_email", dayOffField: "finance_contact_day_off", coordValue: "finance_contact" },
 ];
@@ -56,6 +62,55 @@ function sortByRole(arr) { return [...arr].sort((a, b) => (ROLE_SORT_ORDER[a.rol
 
 const DISTRICT_OPTIONS = ["צפון", "דרום", "מרכז", "ירושלים", "תל-אביב", "חיפה", "חינוך התיישבותי", "חרדי"];
 
+// "ליווי" section fields — mirrored from SchoolPage.jsx (same project convention: no shared
+// constants source for these label maps, duplicated per page like everything else here).
+const SERVICE_TYPE_OPTIONS = [
+  { value: "gefen", label: "גפן" },
+  { value: "current", label: "שוטף" },
+  { value: "gefen_current", label: "גפן+שוטף" },
+  { value: "district", label: "מחוז" },
+];
+
+const FUNDING_METHOD_OPTIONS = [
+  { value: "private", label: "פרטי" },
+  { value: "authority", label: "רשות" },
+  { value: "district", label: "מחוז" },
+];
+
+const TYPED_SERVICE_TYPES = [
+  { key: "gefen", label: "גפן" },
+  { key: "current", label: "שוטף" },
+  { key: "district", label: "מחוז" },
+];
+
+// Which of the 3 typed advisor lists are mandatory, given the school's own "סוג שירות" value —
+// gefen_current requires both גפן and שוטף advisors to be set.
+function activeServiceTypes(serviceType) {
+  if (serviceType === "gefen") return ["gefen"];
+  if (serviceType === "current") return ["current"];
+  if (serviceType === "district") return ["district"];
+  if (serviceType === "gefen_current") return ["gefen", "current"];
+  return [];
+}
+
+const CLIENT_STATUS_OPTIONS = [
+  { value: "active", label: "פעיל" },
+  { value: "inactive", label: "לא פעיל" },
+  { value: "in_progress", label: "בתהליך" },
+  { value: "former", label: "לקוח עבר" },
+];
+
+// Thousands-separated (no decimal) display for "מחיר כולל מע\"מ" — "" for empty.
+function formatAmount(v) {
+  return v === null || v === undefined || v === "" ? "" : Math.round(Number(v)).toLocaleString("he-IL");
+}
+
+// Strips thousands separators back to a plain number (or null if empty) for saving.
+function parseAmount(raw) {
+  const stripped = String(raw).replace(/,/g, "").trim();
+  return stripped === "" ? null : Number(stripped);
+}
+
 const EMPTY_FORM = {
   name: "", symbol: "", city: "", authority: "", stage: "",
   finance_software: "", principal_name: "", principal_phone: "",
@@ -65,6 +120,8 @@ const EMPTY_FORM = {
   restrict_access_to: [], extra_contacts: [],
   principal_day_off: [], secretary_day_off: [], finance_contact_day_off: [],
   meeting_coordinator: null,
+  principal_chativa_name: "", principal_chativa_phone: "", principal_chativa_email: "",
+  principal_chativa_day_off: [], principal_same_person: true,
 };
 
 function validateSymbol(val) {
@@ -227,9 +284,12 @@ export default function AddSchoolPage() {
   const [schoolForm, setSchoolForm]           = useState(EMPTY_FORM);
   const [schoolStage, setSchoolStage]         = useState("");
   const [customDivisions, setCustomDivisions] = useState(DEFAULT_CUSTOM_DIVISIONS);
-  const [selectedAdvisors, setSelectedAdvisors] = useState([]);
-  const [advisorSearchQuery, setAdvisorSearchQuery] = useState("");
-  const [advisorListOpen, setAdvisorListOpen]       = useState(false);
+  const [typedAdvisorIds, setTypedAdvisorIds] = useState({ gefen: [], current: [], district: [] });
+  const [yearAdminForm, setYearAdminForm] = useState({
+    client_status: null, service_type: null, order_method: [], order_amount_gefen: null,
+    meeting_allocation_gefen: null, meeting_allocation_current: null, meeting_allocation_district: null,
+    meeting_duration_gefen: null, meeting_duration_current: null, meeting_duration_district: null,
+  });
   const [accessLinkedToAdvisors, setAccessLinked]   = useState(false);
   const [triedSave, setTriedSave]   = useState(false);
   const [savingSchool, setSaving]   = useState(false);
@@ -240,20 +300,21 @@ export default function AddSchoolPage() {
   const [loadingUsers, setLoadingUsers]     = useState(false);
   const [existingSymbols, setExistingSymbols] = useState([]);
 
-  const advisorContainerRef = useRef(null);
-  const advisorInputRef     = useRef(null);
+  // Union of the 3 typed advisor lists — source for "גישה" when linked to "היועצים המלווים".
+  const draftLinkedAdvisorIds = [...new Set([...typedAdvisorIds.gefen, ...typedAdvisorIds.current, ...typedAdvisorIds.district])];
 
   const symbolError      = validateSymbol(schoolForm.symbol);
   const schoolPhoneError = validateSchoolPhone(schoolForm.school_phone);
 
-  const isDirty = !!(schoolForm.name || schoolForm.symbol || schoolStage || selectedAdvisors.length > 0);
+  const isDirty = !!(schoolForm.name || schoolForm.symbol || schoolStage || draftLinkedAdvisorIds.length > 0);
   const blocker = useBlocker(isDirty && !savingSchool);
 
   // Keep restrict_access_to in sync when "היועצים המלווים" is selected
   useEffect(() => {
     if (!accessLinkedToAdvisors) return;
-    setSchoolForm(p => ({ ...p, restrict_access_to: selectedAdvisors.length > 0 ? selectedAdvisors : [] }));
-  }, [selectedAdvisors, accessLinkedToAdvisors]);
+    setSchoolForm(p => ({ ...p, restrict_access_to: draftLinkedAdvisorIds.length > 0 ? draftLinkedAdvisorIds : [] }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [typedAdvisorIds, accessLinkedToAdvisors]);
 
   // On mount: verify permission, load users and existing symbols
   useEffect(() => {
@@ -318,17 +379,35 @@ export default function AddSchoolPage() {
     if (!schoolForm.name || validateSymbol(schoolForm.symbol)) return;
     if (existingSymbols.includes(schoolForm.symbol)) return;
     if (!schoolStage) return;
-    if (canSeeAllUsers && selectedAdvisors.length === 0) return;
+    if (canSeeAllUsers) {
+      const requiredTypes = activeServiceTypes(yearAdminForm.service_type);
+      if (requiredTypes.some(t => typedAdvisorIds[t].length === 0)) {
+        setSaveError("יש לבחור לפחות יועץ מלווה אחד עבור כל סוג שירות פעיל (גפן/שוטף/מחוז).");
+        return;
+      }
+    }
     if ((schoolStage === "sheshshnati" || schoolStage === "other") && customDivisions.length === 0) return;
     if (schoolForm.principal_phone    && validateSecretaryPhone(schoolForm.principal_phone))    return;
     if (schoolForm.secretary_phone    && validateSecretaryPhone(schoolForm.secretary_phone))    return;
     if (schoolForm.finance_contact_phone && validateSecretaryPhone(schoolForm.finance_contact_phone)) return;
+    if (schoolStage === "sheshshnati" && !schoolForm.principal_same_person
+        && schoolForm.principal_chativa_phone && validateSecretaryPhone(schoolForm.principal_chativa_phone)) return;
     if (schoolForm.school_phone       && validateSchoolPhone(schoolForm.school_phone))          return;
     if (!schoolForm.meeting_coordinator) return;
 
     setSaving(true);
     try {
-      const res    = await axios.post("/schools/", { ...schoolForm, stage: schoolStage });
+      // "אותו מנהל/ת לשתי החטיבות" — the חט"ב fields are hidden in the UI, so keep them
+      // in sync with the חט"ע ones rather than sending stale/blank data.
+      const chativaSync = (schoolStage === "sheshshnati" && schoolForm.principal_same_person)
+        ? {
+            principal_chativa_name: schoolForm.principal_name,
+            principal_chativa_phone: schoolForm.principal_phone,
+            principal_chativa_email: schoolForm.principal_email,
+            principal_chativa_day_off: schoolForm.principal_day_off,
+          }
+        : {};
+      const res    = await axios.post("/schools/", { ...schoolForm, ...chativaSync, stage: schoolStage });
       const newId  = res.data.id;
       const option = SCHOOL_STAGE_OPTIONS.find(s => s.value === schoolStage);
 
@@ -340,11 +419,19 @@ export default function AddSchoolPage() {
         }
       }
 
-      // Advisors are auto-assigned by the backend; managers/owners need explicit assignment
+      // Advisors are auto-assigned by the backend for the advisor role; managers/owners assign
+      // explicitly, per service type — the typed endpoint also upserts the general access row.
       if (canSeeAllUsers) {
-        for (const advisorId of selectedAdvisors) {
-          await axios.post(`/schools/${newId}/advisors`, { advisor_id: advisorId });
+        for (const type of ["gefen", "current", "district"]) {
+          for (const advisorId of typedAdvisorIds[type]) {
+            await axios.post(`/schools/${newId}/advisors/${type}`, { advisor_id: advisorId });
+          }
         }
+        await axios.put(`/schools/${newId}/year-admin-data`, { ...yearAdminForm, academic_year: DEFAULT_ACADEMIC_YEAR });
+      } else if (yearAdminForm.order_amount_gefen != null) {
+        // Advisor role: only "מחיר כולל מע\"מ" is editable, matching the backend's allowlist
+        // for non-manager callers of PUT .../year-admin-data.
+        await axios.put(`/schools/${newId}/year-admin-data`, { order_amount_gefen: yearAdminForm.order_amount_gefen, academic_year: DEFAULT_ACADEMIC_YEAR });
       }
 
       navigate(`/school/${newId}`);
@@ -371,7 +458,7 @@ export default function AddSchoolPage() {
       <Sidebar dark />
 
       <div style={{ marginRight: "var(--sidebar-w, 240px)", transition: "margin-right 0.25s cubic-bezier(0.4,0,0.2,1)" }}>
-        <div className="max-w-4xl mx-auto px-6 py-10">
+        <div className="max-w-[100rem] mx-auto px-6 py-10">
 
           {/* Header */}
           <div className="mb-8 flex items-center gap-3">
@@ -382,7 +469,7 @@ export default function AddSchoolPage() {
           </div>
 
           {/* Form card */}
-          <div className="glass-card rounded-2xl p-6">
+          <div className="glass-card rounded-2xl px-6 py-5">
             <p className="text-sm font-semibold text-slate-700 mb-3">פרטי בית הספר</p>
 
             {/* 3-column grid identical to AdminPage */}
@@ -526,7 +613,11 @@ export default function AddSchoolPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {CONTACT_ROWS.map(row => (
+                  {[
+                    schoolStage === "sheshshnati" ? PRINCIPAL_TICHON_ROW : PRINCIPAL_SINGLE_ROW,
+                    ...(schoolStage === "sheshshnati" && !schoolForm.principal_same_person ? [PRINCIPAL_CHATIVA_ROW] : []),
+                    ...CONTACT_ROWS,
+                  ].map(row => (
                     <tr key={row.nameField} className="border-t border-slate-100">
                       <td className="py-2 pr-1 text-xs text-slate-700 font-medium whitespace-nowrap">{row.label}</td>
                       <td className="py-2 px-2">
@@ -569,6 +660,20 @@ export default function AddSchoolPage() {
                       </td>
                     </tr>
                   ))}
+
+                  {schoolStage === "sheshshnati" && (
+                    <tr className="border-t border-slate-100">
+                      <td></td>
+                      <td colSpan={5} className="py-2 px-2">
+                        <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
+                          <input type="checkbox" className="w-3.5 h-3.5 rounded accent-blue-600"
+                            checked={!!schoolForm.principal_same_person}
+                            onChange={e => setSchoolForm(p => ({ ...p, principal_same_person: e.target.checked }))} />
+                          אותו מנהל/ת לשתי החטיבות
+                        </label>
+                      </td>
+                    </tr>
+                  )}
 
                   {(schoolForm.extra_contacts || []).map((ec, i) => (
                     <tr key={`extra-${i}`} className="border-t border-slate-100">
@@ -644,98 +749,60 @@ export default function AddSchoolPage() {
               )}
             </div>
 
-            {/* ליווי */}
+            {/* ליווי — mirrors SchoolPage.jsx's ליווי section (school_year_admin_data fields) */}
             <div className="mt-4 pt-4 border-t border-slate-100">
               <p className="text-sm font-semibold text-slate-700 mb-4">ליווי</p>
-              <div className={`grid gap-6 ${canSeeAllUsers ? "grid-cols-2" : "grid-cols-1"}`}>
-                {/* יועצים אחראיים */}
-                <div>
-                  <p className="text-xs text-slate-800 mb-2 font-medium">
-                    יועצים אחראיים {canSeeAllUsers && <span className="text-red-500">*</span>}
-                  </p>
-                  {canSeeAllUsers ? (
+              <div className={`grid gap-6 ${canSeeAllUsers ? "grid-cols-3" : "grid-cols-1"}`}>
+                {/* Right column */}
+                {canSeeAllUsers && (
+                  <div style={{ display: "grid", gridTemplateColumns: "max-content 1fr", columnGap: 10, alignItems: "start" }}>
+                    <label htmlFor="ys-client-status" className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">סטטוס לקוח:</label>
+                    <div className="py-0.5">
+                      <select id="ys-client-status" className="input-field text-sm"
+                        value={yearAdminForm.client_status || ""}
+                        onChange={e => setYearAdminForm(p => ({ ...p, client_status: e.target.value || null }))}>
+                        <option value="">בחר</option>
+                        {CLIENT_STATUS_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                      </select>
+                    </div>
+
+                    <label htmlFor="ys-service-type" className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">סוג שירות:</label>
+                    <div className="py-0.5">
+                      <select id="ys-service-type" className="input-field text-sm"
+                        value={yearAdminForm.service_type || ""}
+                        onChange={e => setYearAdminForm(p => ({ ...p, service_type: e.target.value || null }))}>
+                        <option value="">בחר</option>
+                        {SERVICE_TYPE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                      </select>
+                    </div>
+                  </div>
+                )}
+
+                {/* Middle column */}
+                <div style={{ display: "grid", gridTemplateColumns: "max-content 1fr", columnGap: 10, alignItems: "start" }}>
+                  {canSeeAllUsers && (
                     <>
-                      {loadingUsers ? (
-                        <p className="text-sm text-slate-400 py-1" role="status" aria-label="טוען יועצים">טוען...</p>
-                      ) : (
-                        <div
-                          ref={advisorContainerRef}
-                          onBlur={e => { if (!advisorContainerRef.current?.contains(e.relatedTarget)) setAdvisorListOpen(false); }}
-                          className="relative"
-                        >
-                          <label htmlFor="new-school-advisor-search" className="sr-only">חיפוש יועץ</label>
-                          <div
-                            className={`input-field flex flex-wrap items-center gap-1.5 min-h-[38px] cursor-text ${triedSave && selectedAdvisors.length === 0 ? "border-red-400" : ""}`}
-                            onClick={() => { setAdvisorListOpen(true); advisorInputRef.current?.focus(); }}
-                          >
-                            {selectedAdvisors.map(id => {
-                              const u = users.find(u => u.id === id);
-                              return u ? (
-                                <span key={id} className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full" style={{ background: "rgba(0,112,243,0.08)", color: "#1d4ed8" }}>
-                                  {u.full_name || u.email}
-                                  <button type="button"
-                                    onMouseDown={e => {
-                                      e.stopPropagation(); e.preventDefault();
-                                      const newList = selectedAdvisors.filter(i => i !== id);
-                                      setSelectedAdvisors(newList);
-                                      if (newList.length === 0) {
-                                        setAccessLinked(false);
-                                        setSchoolForm(p => ({ ...p, restrict_access_to: [] }));
-                                      }
-                                    }}
-                                    className="hover:text-red-500 leading-none text-base"
-                                    aria-label={`הסר ${u.full_name || u.email}`}>×</button>
-                                </span>
-                              ) : null;
-                            })}
-                            <input ref={advisorInputRef} id="new-school-advisor-search" type="search"
-                              className="flex-1 min-w-[80px] text-sm outline-none bg-transparent"
-                              placeholder={selectedAdvisors.length === 0 ? "לחץ לבחירת יועץ..." : ""}
-                              value={advisorSearchQuery}
-                              onFocus={() => setAdvisorListOpen(true)}
-                              onChange={e => setAdvisorSearchQuery(e.target.value)} />
-                          </div>
-                          {advisorListOpen && (
-                            <div className="absolute z-20 right-0 left-0 border border-slate-200 rounded-xl overflow-y-auto max-h-44 bg-white divide-y divide-slate-50 mt-1 shadow-lg">
-                              {users.length === 0 && <p className="text-sm text-slate-400 px-3 py-2">אין משתמשים</p>}
-                              {sortByRole(users)
-                                .filter(u => !advisorSearchQuery.trim() || (u.full_name || u.email || "").toLowerCase().includes(advisorSearchQuery.toLowerCase()))
-                                .map(u => (
-                                  <button key={u.id} type="button"
-                                    onMouseDown={e => {
-                                      e.preventDefault();
-                                      if (selectedAdvisors.includes(u.id)) {
-                                        const newList = selectedAdvisors.filter(id => id !== u.id);
-                                        setSelectedAdvisors(newList);
-                                        if (newList.length === 0) {
-                                          setAccessLinked(false);
-                                          setSchoolForm(p => ({ ...p, restrict_access_to: [] }));
-                                        }
-                                      } else {
-                                        setSelectedAdvisors(prev => [...prev, u.id]);
-                                        if (selectedAdvisors.length === 0) setAccessLinked(true);
-                                      }
-                                    }}
-                                    className="w-full text-right flex items-center gap-2 px-2.5 py-1.5 hover:bg-slate-50 cursor-pointer">
-                                    <span className={`w-3.5 h-3.5 rounded border flex-shrink-0 ${selectedAdvisors.includes(u.id) ? "bg-blue-500 border-blue-500" : "border-slate-300"}`} aria-hidden="true" />
-                                    <span className="text-xs text-slate-700 flex-1">{u.full_name || u.email}</span>
-                                    <span className="text-xs text-slate-400">{ROLE_LABELS[u.role]}</span>
-                                  </button>
-                                ))}
-                            </div>
-                          )}
-                        </div>
-                      )}
-                      {triedSave && selectedAdvisors.length === 0 && (
-                        <span className="text-xs text-red-500 mt-1 block" role="alert">יש לבחור לפחות יועץ אחד</span>
-                      )}
+                      <span className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">אמצעי הזמנה:</span>
+                      <div className="py-0.5">
+                        <MultiSelectChips compact options={FUNDING_METHOD_OPTIONS}
+                          selected={yearAdminForm.order_method || []}
+                          onChange={v => setYearAdminForm(p => ({ ...p, order_method: v.length ? v : [] }))} />
+                      </div>
                     </>
-                  ) : (
-                    <p className="text-sm text-slate-500 py-1">אתה תוקצה אוטומטית לבית הספר</p>
                   )}
+                  <label htmlFor="ys-order-amount" className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">מחיר כולל מע"מ:</label>
+                  <div className="py-0.5">
+                    <input id="ys-order-amount" className="input-field text-sm" type="text" inputMode="numeric" autoComplete="off"
+                      defaultValue={formatAmount(yearAdminForm.order_amount_gefen)}
+                      onBlur={e => {
+                        const v = parseAmount(e.target.value);
+                        e.target.value = formatAmount(v);
+                        setYearAdminForm(p => ({ ...p, order_amount_gefen: v }));
+                      }} />
+                  </div>
                 </div>
 
-                {/* גישה — only for managers/owners */}
+                {/* Left column — גישה, managers/owners only */}
                 {canSeeAllUsers && (
                   <div>
                     <div className="flex items-center gap-1.5 mb-2">
@@ -750,11 +817,61 @@ export default function AddSchoolPage() {
                       loadingUsers={loadingUsers}
                       onChange={val => { setAccessLinked(false); setSchoolForm(p => ({ ...p, restrict_access_to: val })); }}
                       onSelectAdvisors={() => setAccessLinked(true)}
-                      schoolAdvisors={selectedAdvisors.map(id => users.find(u => u.id === id)).filter(Boolean)}
+                      schoolAdvisors={draftLinkedAdvisorIds.map(id => users.find(u => u.id === id)).filter(Boolean)}
                     />
                   </div>
                 )}
               </div>
+
+              {!canSeeAllUsers && (
+                <p className="text-sm text-slate-500 py-1 mt-2">אתה תוקצה אוטומטית לבית הספר</p>
+              )}
+
+              {/* Per-service-type sub-sections: יועץ מלווה / הקצאת פגישות / זמן לפגישה, per
+                  גפן/שוטף/מחוז — replaces the old single flat "יועצים אחראיים" field. */}
+              {canSeeAllUsers && (
+                <div className="mt-5 pt-4 border-t border-slate-100 grid grid-cols-3 gap-4">
+                  {TYPED_SERVICE_TYPES.map(({ key, label }, idx) => {
+                    const isRequired = activeServiceTypes(yearAdminForm.service_type).includes(key);
+                    const invalid = triedSave && isRequired && typedAdvisorIds[key].length === 0;
+                    return (
+                      <div key={key} className={idx < TYPED_SERVICE_TYPES.length - 1 ? "border-l border-slate-100 pl-4" : ""}>
+                        <p className="text-sm font-semibold text-slate-700 text-center mb-3">
+                          {label}{isRequired && <span className="text-red-500"> *</span>}
+                        </p>
+                        <div style={{ display: "grid", gridTemplateColumns: "max-content 1fr", columnGap: 10, alignItems: "start" }}>
+                          <span className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">יועץ מלווה:</span>
+                          <div className="py-0.5">
+                            <AdvisorSearch compact schoolId="new" selectedIds={typedAdvisorIds[key]} users={users} loadingUsers={loadingUsers}
+                              onChange={ids => setTypedAdvisorIds(p => ({ ...p, [key]: ids }))}
+                              invalid={invalid} />
+                            {invalid && (
+                              <span className="text-xs text-red-500 mt-1 block" role="alert">יש לבחור לפחות יועץ אחד</span>
+                            )}
+                          </div>
+
+                          <label htmlFor={`ys-alloc-${key}`} className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">הקצאת פגישות:</label>
+                          <div className="py-0.5">
+                            <input id={`ys-alloc-${key}`} type="number" min="0" className="input-field text-sm"
+                              value={yearAdminForm[`meeting_allocation_${key}`] ?? ""}
+                              onChange={e => {
+                                const v = e.target.value === "" ? null : Number(e.target.value);
+                                setYearAdminForm(p => ({ ...p, [`meeting_allocation_${key}`]: v }));
+                              }} />
+                          </div>
+
+                          <span className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">זמן לפגישה:</span>
+                          <div className="py-0.5">
+                            <HourMinuteInput idPrefix={`ys-duration-${key}`} label={`זמן לפגישה [${label}]`}
+                              minutes={yearAdminForm[`meeting_duration_${key}`] ?? null}
+                              onChange={v => setYearAdminForm(p => ({ ...p, [`meeting_duration_${key}`]: v }))} />
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
             {/* Actions */}

@@ -30,6 +30,7 @@ import SetPasswordPage from "./pages/SetPasswordPage";
 import RegisterPage from "./pages/RegisterPage";
 import SuperAdminPage from "./pages/SuperAdminPage";
 import UnsubscribePage from "./pages/UnsubscribePage";
+import TaskOptOutPage from "./pages/TaskOptOutPage";
 import ProfilePage from "./pages/ProfilePage";
 import AddSchoolPage from "./pages/AddSchoolPage";
 import MeetingUploadPage from "./pages/MeetingUploadPage";
@@ -105,6 +106,7 @@ const router = createBrowserRouter([
       { path: "/super-admin", element: <PrivateRoute><SuperAdminPage /></PrivateRoute> },
       { path: "/set-password", element: <SetPasswordPage /> },
       { path: "/unsubscribe", element: <UnsubscribePage /> },
+      { path: "/tasks/opt-out", element: <TaskOptOutPage /> },
       { path: "/upload/:token", element: <MeetingUploadPage /> },
       { path: "/book/:token", element: <MeetingBookingPage /> },
       { path: "*", element: <Navigate to="/" replace /> },

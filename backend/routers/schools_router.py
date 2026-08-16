@@ -192,6 +192,11 @@ class SchoolIn(BaseModel):
     secretary_day_off: list[str] | None = None
     finance_contact_day_off: list[str] | None = None
     meeting_coordinator: str | None = None
+    principal_chativa_name: str | None = None
+    principal_chativa_phone: str | None = None
+    principal_chativa_email: str | None = None
+    principal_chativa_day_off: list[str] | None = None
+    principal_same_person: bool | None = None
 
 
 class SchoolYearAdminDataIn(BaseModel):
@@ -265,6 +270,7 @@ class MeetingIn(BaseModel):
     reminder_enabled: bool | None = False
     academic_year: str | None = None
     primary_contact_key: str | None = None  # which participant's phone to use in the Outlook event subject
+    stage_scope: str | None = None  # six-year schools only: 'tichon' | 'chativa' | 'both'
 
 
 class MeetingStatusPatchIn(BaseModel):
@@ -356,6 +362,7 @@ class NotificationPreferencesIn(BaseModel):
 
 _MEETING_COORDINATOR_ROLE_LABEL = {
     "principal": "מנהל/ת",
+    "principal_chativa": "מנהל/ת חט\"ב",
     "secretary": "מנהלנ/ית",
     "finance_contact": "אחראי/ת כספים",
 }
@@ -985,49 +992,62 @@ def upsert_year_admin_data(
 ):
     from datetime import datetime, timezone
 
-    db = get_admin_client()
-    is_manager = user["role"] in ("owner", "manager")
-    if not is_manager:
-        if not _advisor_has_school_access(db, user, school_id):
-            raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
-        # Advisors (non-manager) may only update the Gefen order amount and the "סגירת שנה"
-        # fields from the school card — every other admin-table field is manager+ only.
-        allowed_fields = {
-            "order_amount_gefen",
-            "closure_parents_status", "closure_parents_notes",
-            "closure_authority_status", "closure_authority_notes",
-        }
-        submitted_fields = set(body.model_fields_set)
-        if submitted_fields - allowed_fields:
-            raise HTTPException(status_code=403, detail="אין הרשאה לעדכן שדות אלו")
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            is_manager = user["role"] in ("owner", "manager")
+            if not is_manager:
+                if not _advisor_has_school_access(db, user, school_id):
+                    raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
+                # Advisors (non-manager) may only update the Gefen order amount and the
+                # "סגירת שנה" fields from the school card — every other admin-table field is
+                # manager+ only.
+                allowed_fields = {
+                    "order_amount_gefen",
+                    "closure_parents_status", "closure_parents_notes",
+                    "closure_authority_status", "closure_authority_notes",
+                }
+                submitted_fields = set(body.model_fields_set)
+                if submitted_fields - allowed_fields:
+                    raise HTTPException(status_code=403, detail="אין הרשאה לעדכן שדות אלו")
 
-    update_data = body.model_dump(exclude_unset=True)
+            update_data = body.model_dump(exclude_unset=True)
 
-    old_row = (
-        db.table("school_year_admin_data")
-        .select("order_amount_gefen")
-        .eq("school_id", school_id)
-        .eq("academic_year", academic_year)
-        .execute()
-    )
-    old_amount = old_row.data[0]["order_amount_gefen"] if old_row.data else None
+            old_row = (
+                db.table("school_year_admin_data")
+                .select("order_amount_gefen")
+                .eq("school_id", school_id)
+                .eq("academic_year", academic_year)
+                .execute()
+            )
+            old_amount = old_row.data[0]["order_amount_gefen"] if old_row.data else None
 
-    if "order_amount_gefen" in update_data and update_data["order_amount_gefen"] != old_amount:
-        update_data["order_amount_gefen_updated_by"] = user["id"]
-        update_data["order_amount_gefen_updated_at"] = datetime.now(timezone.utc).isoformat()
+            if "order_amount_gefen" in update_data and update_data["order_amount_gefen"] != old_amount:
+                update_data["order_amount_gefen_updated_by"] = user["id"]
+                update_data["order_amount_gefen_updated_at"] = datetime.now(timezone.utc).isoformat()
 
-    update_data["school_id"] = school_id
-    update_data["academic_year"] = academic_year
-    update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+            update_data["school_id"] = school_id
+            update_data["academic_year"] = academic_year
+            update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
 
-    row = (
-        db.table("school_year_admin_data")
-        .upsert(update_data, on_conflict="school_id,academic_year")
-        .execute()
-    )
-    data = row.data[0] if row.data else update_data
-    _attach_updater_names(db, [data])
-    return data
+            row = (
+                db.table("school_year_admin_data")
+                .upsert(update_data, on_conflict="school_id,academic_year")
+                .execute()
+            )
+            data = row.data[0] if row.data else update_data
+            _attach_updater_names(db, [data])
+            return data
+        except HTTPException:
+            raise
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("upsert_year_admin_data attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("upsert_year_admin_data failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
 
 @router.post("/{school_id}/year-admin-data/contract-file")
@@ -4813,16 +4833,18 @@ async def import_schools(
 def _build_meeting_subject(db, school_id: str, participants: list[dict] | None, primary_contact_key: str | None) -> str:
     """Outlook event subject: "<school>, <city> - <contact name> - <contact phone>".
 
-    The contact is resolved from `participants` (selected in the meeting row): the
-    principal always wins if present among them; otherwise `primary_contact_key`
-    (explicitly chosen by the user via a disambiguation dialog on the frontend when
-    there are multiple participants and no principal) picks which one. Falls back to
+    The contact is resolved from `participants` (selected in the meeting row): if exactly
+    one principal-like contact (principal / principal_chativa) is among them, it wins;
+    otherwise `primary_contact_key` (explicitly chosen by the user via a disambiguation
+    dialog on the frontend — e.g. multiple participants with no single principal, or both
+    principals selected together for a six-year school) picks which one. Falls back to
     just "<school>, <city>" if there's no participant to resolve.
     """
     try:
         row = (
             db.table("schools")
-            .select("name, city, principal_name, principal_phone, secretary_name, secretary_phone, "
+            .select("name, city, principal_name, principal_phone, principal_chativa_name, "
+                     "principal_chativa_phone, secretary_name, secretary_phone, "
                      "finance_contact_name, finance_contact_phone, extra_contacts")
             .eq("id", school_id)
             .execute()
@@ -4837,6 +4859,7 @@ def _build_meeting_subject(db, school_id: str, participants: list[dict] | None, 
 
     contact_map = {
         "principal": (school.get("principal_name"), school.get("principal_phone")),
+        "principal_chativa": (school.get("principal_chativa_name"), school.get("principal_chativa_phone")),
         "secretary": (school.get("secretary_name"), school.get("secretary_phone")),
         "finance": (school.get("finance_contact_name"), school.get("finance_contact_phone")),
     }
@@ -4846,8 +4869,9 @@ def _build_meeting_subject(db, school_id: str, participants: list[dict] | None, 
     participants = participants or []
     key = primary_contact_key
     if not key:
-        if any(p.get("key") == "principal" for p in participants):
-            key = "principal"
+        principal_matches = [p.get("key") for p in participants if p.get("key") in ("principal", "principal_chativa")]
+        if len(principal_matches) == 1:
+            key = principal_matches[0]
         elif len(participants) == 1:
             key = participants[0].get("key")
 
@@ -4941,6 +4965,7 @@ def create_meeting(school_id: str, body: MeetingIn, user: Annotated[dict, Depend
     if body.actual_duration: data["actual_duration"] = body.actual_duration
     if body.notes: data["notes"] = body.notes
     if body.primary_contact_key is not None: data["primary_contact_key"] = body.primary_contact_key
+    if body.stage_scope is not None: data["stage_scope"] = body.stage_scope
     # advisor_ids takes precedence; fall back to legacy advisor_id
     if body.advisor_ids is not None:
         data["advisor_ids"] = body.advisor_ids
@@ -4968,7 +4993,7 @@ def create_meeting(school_id: str, body: MeetingIn, user: Annotated[dict, Depend
     return meeting
 
 
-_DIRECT_COORDINATION_SERVICE_TYPES = {"gefen": "גפן", "current": "שוטף"}
+_DIRECT_COORDINATION_SERVICE_TYPES = {"gefen": "גפן", "current": "שוטף", "district": "מחוז"}
 _DIRECT_COORDINATION_DURATIONS = set(range(30, 181, 15))
 
 
@@ -5013,7 +5038,7 @@ def send_direct_coordination_request(
         if r.start_date > r.end_date:
             raise HTTPException(status_code=400, detail="טווח תאריכים לא תקין: תאריך ההתחלה מאוחר מתאריך הסיום")
         if r.meeting_service_type not in _DIRECT_COORDINATION_SERVICE_TYPES:
-            raise HTTPException(status_code=400, detail="יש לבחור סוג פגישה (גפן/שוטף) לכל טווח")
+            raise HTTPException(status_code=400, detail="יש לבחור סוג פגישה (גפן/שוטף/מחוז) לכל טווח")
         if r.duration_minutes not in _DIRECT_COORDINATION_DURATIONS:
             raise HTTPException(status_code=400, detail="משך פגישה לא תקין")
         if not r.participants:
@@ -5071,6 +5096,7 @@ def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annot
     if body.notes: data["notes"] = body.notes
     if body.academic_year: data["academic_year"] = body.academic_year
     if body.primary_contact_key is not None: data["primary_contact_key"] = body.primary_contact_key
+    if body.stage_scope is not None: data["stage_scope"] = body.stage_scope
     # advisor_ids takes precedence; fall back to legacy advisor_id
     if body.advisor_ids is not None:
         data["advisor_ids"] = body.advisor_ids

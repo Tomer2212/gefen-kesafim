@@ -538,8 +538,16 @@ def _ensure_subscription(db, org_id: str, advisor_id: str) -> None:
 
         client_state = Fernet.generate_key().decode()
         expiration = now + timedelta(minutes=SUBSCRIPTION_MAX_MINUTES)
-        resp = httpx.post(
-            f"{GRAPH_BASE}/subscriptions",
+        # Unlike every other Graph call in this file, this one had zero retry — a single
+        # transient blip (Graph 5xx, network hiccup) silently left an advisor's calendar
+        # with no real-time sync until their next lucky edit re-triggered this function
+        # (confirmed in production: a freshly-licensed advisor's subscription failed to
+        # create on both the meeting-creation call AND a follow-up edit, yet the exact
+        # same POST succeeded immediately when retried manually — a transient failure,
+        # not a permission/mailbox-provisioning issue). Matches this file's established
+        # one-retry-with-backoff pattern (_request_with_retry) used everywhere else.
+        resp = _request_with_retry(
+            "POST", f"{GRAPH_BASE}/subscriptions",
             headers=_headers(token),
             json={
                 "changeType": "created,updated,deleted",

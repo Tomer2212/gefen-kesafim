@@ -35,6 +35,7 @@ import { NoParticipantsModal } from "../components/meetings/NoParticipantsModal"
 import MeetingUploadComparisonModal from "../components/meetings/MeetingUploadComparisonModal";
 import { NotesModal } from "../components/meetings/NotesModal";
 import { ParticipantsSelector } from "../components/meetings/ParticipantsSelector";
+import { StageScopeModal } from "../components/meetings/StageScopeModal";
 import { TimeInput } from "../components/meetings/TimeInput";
 import { AcademicYearSelector } from "../components/AcademicYearSelector";
 import { ACADEMIC_YEARS, DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
@@ -52,8 +53,11 @@ const FINANCE_SOFTWARE_LABEL = {
   schoolcash: "סקולקאש",
 };
 
+const PRINCIPAL_TICHON_ROW  = { label: "מנהל/ת חט\"ע", nameField: "principal_name",         phoneField: "principal_phone",         emailField: "principal_email",         dayOffField: "principal_day_off",         coordValue: "principal" };
+const PRINCIPAL_SINGLE_ROW  = { label: "מנהל/ת",       nameField: "principal_name",         phoneField: "principal_phone",         emailField: "principal_email",         dayOffField: "principal_day_off",         coordValue: "principal" };
+const PRINCIPAL_CHATIVA_ROW = { label: "מנהל/ת חט\"ב", nameField: "principal_chativa_name", phoneField: "principal_chativa_phone", emailField: "principal_chativa_email", dayOffField: "principal_chativa_day_off", coordValue: "principal_chativa" };
+
 const CONTACT_ROWS = [
-  { label: "מנהל/ת",        nameField: "principal_name",       phoneField: "principal_phone",       emailField: "principal_email",       dayOffField: "principal_day_off",       coordValue: "principal" },
   { label: "מנהלנ/ית",      nameField: "secretary_name",       phoneField: "secretary_phone",       emailField: "secretary_email",       dayOffField: "secretary_day_off",       coordValue: "secretary" },
   { label: "אחראי/ת כספים", nameField: "finance_contact_name", phoneField: "finance_contact_phone", emailField: "finance_contact_email", dayOffField: "finance_contact_day_off", coordValue: "finance_contact" },
 ];
@@ -2522,6 +2526,7 @@ export default function SchoolPage() {
   const [showSchoolDeleteConfirm, setShowSchoolDeleteConfirm] = useState(false);
   const [deletingSchool, setDeletingSchool] = useState(false);
   const [recycleInfoSchoolName, setRecycleInfoSchoolName] = useState(null);
+  const [pendingStageScopeChoice, setPendingStageScopeChoice] = useState(false);
   const [editForm, setEditForm] = useState({
     name: "", symbol: "", city: "", authority: "",
     stage: "",
@@ -2534,6 +2539,8 @@ export default function SchoolPage() {
     extra_contacts: [],
     principal_day_off: [], secretary_day_off: [], finance_contact_day_off: [],
     meeting_coordinator: null,
+    principal_chativa_name: "", principal_chativa_phone: "", principal_chativa_email: "",
+    principal_chativa_day_off: [], principal_same_person: true,
   });
   const [saving, setSaving] = useState(false);
   const [triedSave, setTriedSave] = useState(false);
@@ -2772,7 +2779,7 @@ export default function SchoolPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draftTypedAdvisorIds, accessLinkedToAdvisors]);
 
-  async function startNewMeeting() {
+  async function createMeetingRow(stageScope) {
     const meetingServiceType = defaultMeetingServiceType(yearAdminData.service_type);
     const defaultAdvisorIds = resolveDefaultAdvisorIds(meetingServiceType, {
       gefenAdvisors: typedAdvisors.gefen, currentAdvisors: typedAdvisors.current, districtAdvisors: typedAdvisors.district,
@@ -2780,14 +2787,27 @@ export default function SchoolPage() {
     const defaultAdvisorProfiles = [typedAdvisors.gefen, typedAdvisors.current, typedAdvisors.district]
       .flat().filter(p => defaultAdvisorIds.includes(p.id))
       .filter((p, i, arr) => arr.findIndex(x => x.id === p.id) === i);
+    // For a six-year school, "תיכון בלבד"/"חט"ב בלבד" pre-fill the relevant principal as
+    // the default participant; "שניהם יחד" leaves participants empty for manual selection.
+    const contacts = getSchoolContacts();
+    let participants = [];
+    if (stageScope === "tichon") {
+      const c = contacts.find(x => x.key === "principal");
+      if (c) participants = [c];
+    } else if (stageScope === "chativa") {
+      const c = contacts.find(x => x.key === "principal_chativa") || contacts.find(x => x.key === "principal");
+      if (c) participants = [c];
+    }
     const payload = {
       status: "scheduled",
       meeting_type: "remote",
       meeting_service_type: meetingServiceType,
       advisor_ids: defaultAdvisorIds,
-      participants: [],
+      participants,
+      primary_contact_key: participants.length === 1 ? participants[0].key : null,
       reminder_enabled: false,
       academic_year: academicYear,
+      ...(stageScope === "tichon" || stageScope === "chativa" || stageScope === "both" ? { stage_scope: stageScope } : {}),
     };
     try {
       const res = await axios.post(`/schools/${schoolId}/meetings`, payload);
@@ -2796,6 +2816,24 @@ export default function SchoolPage() {
       sessionCreatedMeetingIdsRef.current.add(newMeeting.id);
     } catch (err) {
       console.error("Failed to create meeting:", err);
+    }
+  }
+
+  async function startNewMeeting() {
+    if (school?.stage === "sheshshnati") {
+      setPendingStageScopeChoice(true);
+      return;
+    }
+    await createMeetingRow(null);
+  }
+
+  async function handleStageScopeChoice(scope) {
+    setPendingStageScopeChoice(false);
+    if (scope === "separate") {
+      await createMeetingRow("tichon");
+      await createMeetingRow("chativa");
+    } else {
+      await createMeetingRow(scope);
     }
   }
 
@@ -2838,6 +2876,8 @@ export default function SchoolPage() {
       actual_duration: draft.actual_duration || null,
       notes: draft.notes || null,
       reminder_enabled: draft.reminder_enabled || false,
+      primary_contact_key: draft.primary_contact_key || null,
+      stage_scope: draft.stage_scope || null,
     };
     try {
       const res = await axios.put(`/schools/${schoolId}/meetings/${draft.id}`, payload);
@@ -2872,7 +2912,13 @@ export default function SchoolPage() {
 
   function getSchoolContacts() {
     const contacts = [];
-    if (school?.principal_name) contacts.push({ key: "principal", label: "מנהל/ת", name: school.principal_name, email: school.principal_email || "" });
+    const isSheshsSnatiSchool = school?.stage === "sheshshnati";
+    if (school?.principal_name) {
+      contacts.push({ key: "principal", label: isSheshsSnatiSchool ? "מנהל/ת חט\"ע" : "מנהל/ת", name: school.principal_name, email: school.principal_email || "" });
+    }
+    if (isSheshsSnatiSchool && school?.principal_same_person === false && school?.principal_chativa_name) {
+      contacts.push({ key: "principal_chativa", label: "מנהל/ת חט\"ב", name: school.principal_chativa_name, email: school.principal_chativa_email || "" });
+    }
     if (school?.secretary_name) contacts.push({ key: "secretary", label: "מנהלנ/ית", name: school.secretary_name, email: school.secretary_email || "" });
     if (school?.finance_contact_name) contacts.push({ key: "finance", label: "אחראי/ת כספים", name: school.finance_contact_name, email: school.finance_contact_email || "" });
     (school?.extra_contacts || []).forEach((ec, i) => {
@@ -2941,6 +2987,11 @@ export default function SchoolPage() {
       secretary_day_off: school.secretary_day_off || [],
       finance_contact_day_off: school.finance_contact_day_off || [],
       meeting_coordinator: school.meeting_coordinator || null,
+      principal_chativa_name: school.principal_chativa_name || "",
+      principal_chativa_phone: school.principal_chativa_phone || "",
+      principal_chativa_email: school.principal_chativa_email || "",
+      principal_chativa_day_off: school.principal_chativa_day_off || [],
+      principal_same_person: school.principal_same_person !== false,
     };
     setEditForm(formData);
     setOriginalForm(formData);
@@ -3025,7 +3076,9 @@ export default function SchoolPage() {
     const principalPhoneErr = validateContactPhone(editForm.principal_phone);
     const secretaryPhoneErr = validateContactPhone(editForm.secretary_phone);
     const financePhoneErr = validateContactPhone(editForm.finance_contact_phone);
-    if (!editForm.name || validateSymbol(editForm.symbol) || schoolPhoneErr || principalPhoneErr || secretaryPhoneErr || financePhoneErr) {
+    const principalChativaPhoneErr = (editForm.stage === "sheshshnati" && !editForm.principal_same_person)
+      ? validateContactPhone(editForm.principal_chativa_phone) : "";
+    if (!editForm.name || validateSymbol(editForm.symbol) || schoolPhoneErr || principalPhoneErr || secretaryPhoneErr || financePhoneErr || principalChativaPhoneErr) {
       setSaveError("יש שגיאות בטופס — אנא בדוק את השדות המסומנים.");
       return false;
     }
@@ -3058,7 +3111,17 @@ export default function SchoolPage() {
           }
         }
       }
-      await axios.put(`/schools/${schoolId}`, editForm);
+      // "אותו מנהל/ת לשתי החטיבות" — the חט"ב fields are hidden in the UI, so keep them
+      // in sync with the חט"ע ones rather than sending stale/blank data.
+      const chativaSync = (editForm.stage === "sheshshnati" && editForm.principal_same_person)
+        ? {
+            principal_chativa_name: editForm.principal_name,
+            principal_chativa_phone: editForm.principal_phone,
+            principal_chativa_email: editForm.principal_email,
+            principal_chativa_day_off: editForm.principal_day_off,
+          }
+        : {};
+      await axios.put(`/schools/${schoolId}`, { ...editForm, ...chativaSync });
       let updatedAdvisors = schoolAdvisors;
       if (managingAdvisors) {
         const updatedTyped = {
@@ -3081,6 +3144,7 @@ export default function SchoolPage() {
       setSchool(prev => ({
         ...prev,
         ...editForm,
+        ...chativaSync,
         advisor_schools: updatedAdvisors.map(adv => ({ advisor_id: adv.id, profiles: adv })),
         // Keep the display-mode "גישה" row in sync — otherwise it keeps showing the
         // pre-save snapshot from the initial GET instead of the just-saved selection.
@@ -3562,7 +3626,11 @@ export default function SchoolPage() {
                         </tr>
                       </thead>
                       <tbody>
-                        {CONTACT_ROWS.map(row => {
+                        {[
+                          editForm.stage === "sheshshnati" ? PRINCIPAL_TICHON_ROW : PRINCIPAL_SINGLE_ROW,
+                          ...(editForm.stage === "sheshshnati" && !editForm.principal_same_person ? [PRINCIPAL_CHATIVA_ROW] : []),
+                          ...CONTACT_ROWS,
+                        ].map(row => {
                           const phoneErr = validateContactPhone(editForm[row.phoneField]);
                           const emailErr = validateEmail(editForm[row.emailField]);
                           return (
@@ -3607,6 +3675,20 @@ export default function SchoolPage() {
                             </tr>
                           );
                         })}
+
+                        {editForm.stage === "sheshshnati" && (
+                          <tr className="border-t border-slate-100">
+                            <td></td>
+                            <td colSpan={5} className="py-2 px-2">
+                              <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
+                                <input type="checkbox" className="w-3.5 h-3.5 rounded accent-blue-600"
+                                  checked={!!editForm.principal_same_person}
+                                  onChange={e => setEditForm(p => ({ ...p, principal_same_person: e.target.checked }))} />
+                                אותו מנהל/ת לשתי החטיבות
+                              </label>
+                            </td>
+                          </tr>
+                        )}
 
                         {/* Extra contact rows */}
                         {(editForm.extra_contacts || []).map((ec, i) => (
@@ -3900,7 +3982,13 @@ export default function SchoolPage() {
                         </tr>
                       </thead>
                       <tbody>
-                        {CONTACT_ROWS.map(row => (
+                        {[
+                          school?.stage === "sheshshnati"
+                            ? { ...PRINCIPAL_TICHON_ROW, label: school?.principal_same_person === false ? PRINCIPAL_TICHON_ROW.label : "מנהל/ת חט\"ע וחט\"ב" }
+                            : PRINCIPAL_SINGLE_ROW,
+                          ...(school?.stage === "sheshshnati" && school?.principal_same_person === false ? [PRINCIPAL_CHATIVA_ROW] : []),
+                          ...CONTACT_ROWS,
+                        ].map(row => (
                           <tr key={row.nameField} className="border-t border-slate-100">
                             <td className="py-2.5 pr-1 text-[10px] font-semibold text-slate-400 uppercase tracking-wide whitespace-nowrap">{row.label}</td>
                             <td className="py-2.5 px-2">
@@ -4205,6 +4293,12 @@ export default function SchoolPage() {
                 />
               )}
 
+              {pendingStageScopeChoice && (
+                <StageScopeModal schoolName={school?.name}
+                  onChoose={handleStageScopeChoice}
+                  onCancel={() => setPendingStageScopeChoice(false)} />
+              )}
+
               {/* Top toolbar */}
               <div className="flex items-center gap-3 mb-4">
                 <button type="button" onClick={startNewMeeting}
@@ -4288,6 +4382,7 @@ export default function SchoolPage() {
                   usersWithAccess={users.filter(u => u.role === "owner" || u.role === "manager" || advisorHasAccess(u.id))}
                   usersWithoutAccess={users.filter(u => u.role === "advisor" && !advisorHasAccess(u.id))}
                   contacts={getSchoolContacts()}
+                  schoolStage={school?.stage}
                   onSave={updateMeeting}
                   onDelete={deleteMeeting}
                   onOpenNotes={(meetingId, notes, onSave) => setNotesModal({ meetingId, notes, onSave })}
