@@ -2,14 +2,18 @@ name: Process Scheduled Tasks
 
 on:
   schedule:
-    # Every 5 minutes (matches task-message-queue.yml's cadence) — evaluates tasks that were
-    # created ahead of time with a future scheduled_for date, computing which schools actually
-    # match the criteria once that date arrives and queuing/sending the first wave of messages.
-    # Was hourly ('0 * * * *') until a live test with a same-day scheduled_for (e.g. 16:15)
-    # showed that up to a ~59-minute gap between the scheduled time and actual evaluation is
-    # confusing and erodes trust — 5-minute granularity matches user expectations without a
-    # meaningful increase in GitHub Actions usage.
-    - cron: '*/5 * * * *'
+    # Every 15 minutes — evaluates tasks that were created ahead of time with a future
+    # scheduled_for date, computing which schools actually match the criteria once that date
+    # arrives and queuing/sending the first wave of messages.
+    # Was briefly every 5 minutes, but live measurement showed GitHub Actions' own scheduling
+    # throttling (not our cron expression) is the real bottleneck: even this workflow's own
+    # unchanged 5-minute setting, and task-message-queue.yml's (also unrelated, never touched)
+    # 5-minute cron, both drifted 10-30+ minutes between actual runs under real load — GitHub
+    # does not guarantee punctual execution of frequent schedules. Since actual delivery already
+    # has up to ~1 hour of slack communicated to the user (see the scheduling modal's copy in
+    # TaskCreateWizard.jsx), asking GitHub for 12x more runs than it can honor bought nothing —
+    # this interval only reduces wasted Actions minutes, not reliability either way.
+    - cron: '*/15 * * * *'
   workflow_dispatch: {}
 
 jobs:
