@@ -31,6 +31,16 @@ import { useFocusTrap } from "../../hooks/useFocusTrap";
 
 const TODAY = new Date().toISOString().slice(0, 10);
 
+// Contact keys that represent "the principal" for a school — a six-year school has two
+// (חט"ע / חט"ב). Used to decide who automatically wins the Outlook subject-line contact.
+const PRINCIPAL_KEYS = ["principal", "principal_chativa"];
+
+const STAGE_SCOPE_PILLS = [
+  { value: "tichon",  label: "תיכון" },
+  { value: "chativa", label: "חט\"ב" },
+  { value: "both",    label: "שניהם" },
+];
+
 // Does [startHM, endHM) overlap any of the advisor's existing Outlook busy ranges?
 // A conflict only counts if the draft time genuinely lands *inside* a busy range —
 // merely touching its boundary (e.g. starting exactly when another meeting ends) is fine.
@@ -175,7 +185,7 @@ export function MeetingRow({
   contacts, onRequestAccess, onReminderOn,
   showSchoolColumn, schoolLabel, onOpenSchoolPicker,
   selectable, selected, onToggleSelect, onSendStatusReminder, hideAdvisorColumn,
-  showCalendarColumn, onOpenSummary, typedAdvisors,
+  showCalendarColumn, onOpenSummary, typedAdvisors, schoolStage,
 }) {
   const navigate = useNavigate();
   const [draft, setDraft] = useState({ ...meeting });
@@ -593,16 +603,30 @@ export function MeetingRow({
         )}
         {/* משתתפים */}
         <td className="py-2.5 px-2">
+          {schoolStage === "sheshshnati" && (
+            <div className="flex items-center gap-1 mb-1.5" role="group" aria-label="היקף הפגישה (תיכון/חט&quot;ב)">
+              {STAGE_SCOPE_PILLS.map(p => (
+                <button key={p.value} type="button"
+                  onClick={() => { const nd = { ...draft, stage_scope: draft.stage_scope === p.value ? null : p.value }; setDraft(nd); saveDraft(nd); }}
+                  className={`text-[10px] px-2 py-0.5 rounded-full border transition-colors ${draft.stage_scope === p.value
+                    ? "bg-blue-600 border-blue-600 text-white"
+                    : "border-slate-200 text-slate-500 hover:border-blue-300"}`}>
+                  {p.label}
+                </button>
+              ))}
+            </div>
+          )}
           <ParticipantsSelector contacts={contacts} selected={draft.participants || []}
             onChange={v => {
               const reminderOff = v.length === 0 && draft.reminder_enabled;
-              // Who to call for the Outlook event subject: the principal always wins if
-              // present; a single participant is unambiguous; otherwise ask the user.
-              const hasPrincipal = v.some(p => p.key === "principal");
-              const primaryContactKey = hasPrincipal ? "principal" : v.length === 1 ? v[0].key : null;
+              // Who to call for the Outlook event subject: if exactly one principal-like
+              // contact (principal / principal_chativa) is selected, it wins; a single
+              // participant is unambiguous; otherwise ask the user.
+              const principalMatches = v.filter(p => PRINCIPAL_KEYS.includes(p.key));
+              const primaryContactKey = principalMatches.length === 1 ? principalMatches[0].key : v.length === 1 ? v[0].key : null;
               const nd = { ...draft, participants: v, primary_contact_key: primaryContactKey, ...(reminderOff ? { reminder_enabled: false } : {}) };
               setDraft(nd);
-              if (v.length > 1 && !hasPrincipal) {
+              if (v.length > 1 && !primaryContactKey) {
                 setContactPickerOptions(v); // defer save until the user picks who to call
               } else {
                 saveDraft(nd);

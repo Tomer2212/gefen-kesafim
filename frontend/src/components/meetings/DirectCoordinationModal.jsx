@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import axios from "axios";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
-import { buildSchoolContacts } from "./schoolContacts";
+import { buildSchoolContacts, resolveMeetingCoordinator } from "./schoolContacts";
+import { DirectCoordinationResolutionModal } from "./DirectCoordinationResolutionModal";
 
 const SERVICE_TYPE_OPTIONS = [
   { value: "gefen", label: "גפן" },
   { value: "current", label: "שוטף" },
+  { value: "district", label: "מחוז" },
 ];
 
 const DURATION_OPTIONS = Array.from({ length: (180 - 30) / 15 + 1 }, (_, i) => 30 + i * 15);
@@ -48,13 +50,15 @@ function newRange() {
   };
 }
 
-export function DirectCoordinationModal({ school, advisors, onClose, onSent }) {
+export function DirectCoordinationModal({ school: initialSchool, advisors, onClose, onSent }) {
   const { ref, handleKeyDown } = useFocusTrap(onClose);
+  const [school, setSchool] = useState(initialSchool);
   const [advisorIds, setAdvisorIds] = useState([]);
   const [ranges, setRanges] = useState([newRange()]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [sentInfo, setSentInfo] = useState(null); // { bookingUrl }
+  const [showResolution, setShowResolution] = useState(false);
 
   const contacts = buildSchoolContacts(school);
 
@@ -93,7 +97,7 @@ export function DirectCoordinationModal({ school, advisors, onClose, onSent }) {
   function validate() {
     if (advisorIds.length === 0) return "יש לבחור לפחות יועץ אחד";
     for (const r of ranges) {
-      if (!r.serviceType) return "יש לבחור סוג פגישה (גפן/שוטף) לכל טווח";
+      if (!r.serviceType) return "יש לבחור סוג פגישה (גפן/שוטף/מחוז) לכל טווח";
       const startISO = parseDateDDMMYY(r.startDateText);
       const endISO = parseDateDDMMYY(r.endDateText);
       if (!startISO || !endISO) return "יש למלא תאריך תקין בפורמט DD/MM/YY לכל פגישה";
@@ -103,10 +107,28 @@ export function DirectCoordinationModal({ school, advisors, onClose, onSent }) {
     return "";
   }
 
+  function participantRoleKeysNeeded() {
+    const keys = new Set();
+    for (const r of ranges) for (const k of r.participantKeys) keys.add(k);
+    return [...keys];
+  }
+
+  function hasProblems() {
+    const coordinator = resolveMeetingCoordinator(school);
+    if (!coordinator || !coordinator.email) return true;
+    const contactsByKey = Object.fromEntries(contacts.map(c => [c.key, c]));
+    return participantRoleKeysNeeded().some(k => !contactsByKey[k]?.email);
+  }
+
   async function handleSubmit() {
     const validationError = validate();
     if (validationError) { setError(validationError); return; }
     setError("");
+    if (hasProblems()) { setShowResolution(true); return; }
+    await doSend();
+  }
+
+  async function doSend() {
     setSubmitting(true);
     try {
       const body = {
@@ -269,6 +291,16 @@ export function DirectCoordinationModal({ school, advisors, onClose, onSent }) {
           </>
         )}
       </div>
+
+      {showResolution && (
+        <DirectCoordinationResolutionModal
+          school={school}
+          participantRoleKeysNeeded={participantRoleKeysNeeded()}
+          onSchoolUpdate={patch => setSchool(prev => ({ ...prev, ...patch }))}
+          onClose={() => setShowResolution(false)}
+          onProceed={async () => { setShowResolution(false); await doSend(); }}
+        />
+      )}
     </div>
   );
 }

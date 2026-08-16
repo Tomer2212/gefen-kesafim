@@ -2,10 +2,14 @@ name: Process Scheduled Tasks
 
 on:
   schedule:
-    # Hourly — evaluates tasks that were created ahead of time with a future scheduled_for
-    # date (e.g. "קביעת פגישות רבעון 3" set up at the start of the year), computing which
-    # schools actually match the criteria once that date arrives.
-    - cron: '0 * * * *'
+    # Every 5 minutes (matches task-message-queue.yml's cadence) — evaluates tasks that were
+    # created ahead of time with a future scheduled_for date, computing which schools actually
+    # match the criteria once that date arrives and queuing/sending the first wave of messages.
+    # Was hourly ('0 * * * *') until a live test with a same-day scheduled_for (e.g. 16:15)
+    # showed that up to a ~59-minute gap between the scheduled time and actual evaluation is
+    # confusing and erodes trust — 5-minute granularity matches user expectations without a
+    # meaningful increase in GitHub Actions usage.
+    - cron: '*/5 * * * *'
   workflow_dispatch: {}
 
 jobs:

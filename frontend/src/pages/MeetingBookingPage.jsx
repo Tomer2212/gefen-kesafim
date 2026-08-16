@@ -40,14 +40,20 @@ function SlotPickerModal({ token, month, onClose, onBooked }) {
   const [selected, setSelected] = useState(null); // { date, slot }
   const [confirmed, setConfirmed] = useState(null); // booked details, once confirmed
 
-  useEffect(() => {
-    axios.get(`/public/meeting-booking/${token}/freebusy`, { params: { month } })
+  function loadDays() {
+    setLoading(true);
+    return axios.get(`/public/meeting-booking/${token}/freebusy`, { params: { month } })
       .then(res => {
         setDays(res.data.days || []);
         if (!res.data.ok) setError("לא ניתן היה לבדוק זמינות ביומן כרגע, נסו שוב מאוחר יותר.");
       })
       .catch(() => setError("אירעה שגיאה בטעינת המשבצות הפנויות."))
       .finally(() => setLoading(false));
+  }
+
+  useEffect(() => {
+    loadDays();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, month]);
 
   async function confirmSelection() {
@@ -60,8 +66,11 @@ function SlotPickerModal({ token, month, onClose, onBooked }) {
       });
       setConfirmed(selected);
     } catch (err) {
-      setError(err?.response?.data?.detail || "המשבצת הזו כבר אינה פנויה, בחרו מועד אחר.");
+      setError(err?.response?.data?.detail || "אופס.. הזמן הזה כבר נתפס. נא לבחור מועד אחר.");
       setSelected(null);
+      // Round 9: the slot the user just tried is now taken — refresh immediately so the next
+      // earliest available slot (if any) shows up right away instead of a stale/dead listing.
+      loadDays();
     } finally {
       setBooking(false);
     }
@@ -145,14 +154,20 @@ function RangeSlotPickerModal({ token, range, onClose, onBooked }) {
   const [selected, setSelected] = useState(null); // { date, slot }
   const [confirmed, setConfirmed] = useState(null);
 
-  useEffect(() => {
-    axios.get(`/public/meeting-booking/${token}/freebusy`, { params: { range_key: range.key } })
+  function loadDays() {
+    setLoading(true);
+    return axios.get(`/public/meeting-booking/${token}/freebusy`, { params: { range_key: range.key } })
       .then(res => {
         setDays(res.data.days || []);
         if (!res.data.ok) setError("לא ניתן היה לבדוק זמינות ביומן כרגע, נסו שוב מאוחר יותר.");
       })
       .catch(() => setError("אירעה שגיאה בטעינת המשבצות הפנויות."))
       .finally(() => setLoading(false));
+  }
+
+  useEffect(() => {
+    loadDays();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, range.key]);
 
   async function confirmSelection() {
@@ -165,8 +180,10 @@ function RangeSlotPickerModal({ token, range, onClose, onBooked }) {
       });
       setConfirmed(selected);
     } catch (err) {
-      setError(err?.response?.data?.detail || "המשבצת הזו כבר אינה פנויה, בחרו מועד אחר.");
+      setError(err?.response?.data?.detail || "אופס.. הזמן הזה כבר נתפס. נא לבחור מועד אחר.");
       setSelected(null);
+      // Round 9: refresh immediately so the next earliest available slot shows up right away.
+      loadDays();
     } finally {
       setBooking(false);
     }
@@ -296,11 +313,9 @@ export default function MeetingBookingPage() {
           {status === "ready" && data && data.mode === "ranges" && (
             <>
               <h1 className="text-lg font-bold text-slate-800 mb-1 text-center">קביעת מועד לפגישות</h1>
-              <p className="text-sm text-slate-500 mb-6 text-center">
-                {data.school_name}{data.advisor_names?.length ? ` · עם ${data.advisor_names.join(", ")}` : ""}
-              </p>
+              <p className="text-sm text-slate-500 mb-6 text-center">{data.school_name}</p>
 
-{data.ranges.every(r => r.booked) ? (
+{data.ranges.every(r => r.booked || r.existing_meeting) ? (
                 <p className="text-sm text-slate-500 text-center py-4">כל הפגישות הנדרשות כבר נקבעו — תודה!</p>
               ) : (
                 <div className="flex flex-col gap-3">
@@ -310,6 +325,10 @@ export default function MeetingBookingPage() {
                         <span className="text-sm font-semibold text-slate-700">{r.label}</span>
                         {r.booked ? (
                           <span className="text-xs px-3 py-1 rounded-lg bg-green-100 text-green-700 font-semibold">✓ נקבע</span>
+                        ) : r.existing_meeting ? (
+                          <span className="text-xs px-3 py-1 rounded-lg bg-green-100 text-green-700 font-semibold whitespace-nowrap">
+                            ✓ כבר נקבעה פגישה בתאריך {formatDateDDMMYYYY(r.existing_meeting.meeting_date)} בשעה {r.existing_meeting.start_time}
+                          </span>
                         ) : (
                           <button type="button" onClick={() => setPickerRange(r)}
                             className="text-xs px-4 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold transition-colors">
@@ -320,6 +339,11 @@ export default function MeetingBookingPage() {
                       <p className="text-xs text-slate-500">
                         {formatDateDDMMYYYY(r.start_date)} עד {formatDateDDMMYYYY(r.end_date)}
                       </p>
+                      {r.advisor_names?.length > 0 && (
+                        <p className="text-xs text-slate-500">
+                          יועץ מבצע: {r.advisor_names.join(", ")}
+                        </p>
+                      )}
                       {r.participants?.length > 0 && (
                         <p className="text-xs text-slate-500">
                           משתתפים: {r.participants.map(p => p.name).filter(Boolean).join(", ")}

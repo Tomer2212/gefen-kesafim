@@ -664,9 +664,17 @@ function MyModal({ onClose }) {
 
 ---
 
-## AdminPage Form Sync Rule
+## School Card Structural Sync Rule (MANDATORY)
 
-**MANDATORY:** Whenever a field is added/removed/changed in the "new school" form OR the "edit school" form in `AdminPage.jsx`, you MUST ask the user: "האם להחיל את השינוי גם על טופס עריכת בית ספר קיים?" before implementing. The two forms must stay in sync unless the user explicitly says otherwise.
+The "school card" — a school's fields, contact table, and related sections (ליווי, etc.) — is rendered/edited in **multiple separate places** in the codebase, each with its own independent JSX and state, not a single shared component:
+
+1. **`SchoolPage.jsx`** — the school detail page. Has both a **display mode** (read-only 3-column grid + contact table + ליווי section) and an **edit mode** (same layout, editable), for an *existing* school.
+2. **`AdminPage.jsx`** — inline modal in the "ניהול" schools tab, shared by both "הוספת בית ספר חדש" (add) and "עריכת פרטי בית הספר" (edit) via one code path (`editingSchool` null vs set).
+3. **`AddSchoolPage.jsx`** — dedicated full-page route (`/school/new`) for adding a single new school.
+
+**MANDATORY:** Whenever a field or section is added/removed/changed in **any one** of these three surfaces — including structural/layout changes to the contact table, or sections like "ליווי" (client status, service type, funding method, order amount, access, per-service-type advisor/allocation/duration) — you MUST ask the user whether to apply the same change to the other surfaces, before implementing. Do not assume; do not silently skip. Since `AddSchoolPage.jsx` in particular has drifted out of sync with `SchoolPage.jsx`'s current structure before, treat "does this belong in the new-school flow too" as a real open question each time (e.g. year-scoped admin data like ליווי may need the school to exist first — the school ID from `POST /schools/` — before it can be saved, which may call for a different flow shape, not just copy-pasted fields).
+
+**Also mandatory:** whenever asked to research or audit "the school card," actively search for *any other* place in the codebase that renders school fields/contacts in a card-like way (e.g. exports, previews, other admin tabs) beyond the three known surfaces above, and report any newly found ones to the user rather than assuming the list above is exhaustive.
 
 ---
 
