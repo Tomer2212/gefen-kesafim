@@ -413,6 +413,7 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
     const file = e.target.files?.[0];
     if (!file) return;
     setUploading(true);
+    setError(null);
     try {
       // Round 13 — uploaded immediately (not deferred to after task creation): task creation
       // sends the first wave of messages right away (round 2), so the real storage_key must
@@ -422,8 +423,13 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
       form.append("file", file);
       const up = await axios.post("/tasks/attachments/upload", form);
       setAttachments(prev => [...prev, { storageKey: up.data.storage_key, filename: file.name }]);
-    } catch {
-      setError("העלאת הקובץ נכשלה — נסה שוב.");
+    } catch (err) {
+      // Diagnostic (round 13.1) — surfaces the real status/detail instead of a generic string,
+      // since every direct backend test of this endpoint succeeded and the failure could only
+      // be reproduced live in the browser.
+      const status = err?.response?.status;
+      const detail = err?.response?.data?.detail || err?.message;
+      setError(`העלאת הקובץ נכשלה${status ? ` (קוד ${status})` : ""}${detail ? `: ${detail}` : " — נסה שוב."}`);
     } finally {
       setUploading(false);
       e.target.value = "";
@@ -944,6 +950,9 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
                     </li>
                   ))}
                 </ul>
+                {/* Round 13.1 — shown right here (not only on the later "review" step) so an
+                    upload failure is visible immediately, at the moment it happens. */}
+                {error && <p role="alert" className="mt-1.5 text-xs text-red-600 bg-red-50 rounded-lg px-2.5 py-1.5">{error}</p>}
               </div>
             </div>
           )}
