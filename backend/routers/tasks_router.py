@@ -11,7 +11,7 @@ import shutil
 import tempfile
 import time
 import urllib.parse
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated
 
@@ -1092,11 +1092,11 @@ def get_task(task_id: str, user: Annotated[dict, Depends(get_current_user)]):
     # (process_message_queue only marks "sent" after the channel call succeeds) — the gap was
     # that nothing surfaced it to the manager. Non-fatal: a failure here must not break the
     # main progress view (Architecture Invariant #6).
-    message_summary = {"queued": 0, "sent": 0, "failed": 0, "pending": 0, "skipped": 0}
+    message_summary = {"queued": 0, "sent": 0, "failed": 0, "pending": 0, "skipped": 0, "outlook_pending": 0}
     try:
         msg_rows = (
             db.table("org_task_messages")
-            .select("school_id, status, sent_at, error, channel, booking_token_id")
+            .select("school_id, status, sent_at, error, channel, booking_token_id, fallback_used, outlook_sent_at")
             .eq("task_id", task_id)
             .order("created_at", desc=True)
             .execute()
@@ -1133,6 +1133,11 @@ def get_task(task_id: str, user: Annotated[dict, Depends(get_current_user)]):
                 "channel": latest.get("channel"),
                 "link_viewed_at": None,
                 "meeting_progress": None,
+                # Round 15 — "outlook_pending" means Graph accepted the send but delivery isn't
+                # confirmed yet (bounce-check grace window); fallback_used means a bounce was
+                # detected and Resend sent it instead.
+                "fallback_used": bool(latest.get("fallback_used")),
+                "outlook_sent_at": latest.get("outlook_sent_at"),
             }
             token = tokens_by_id.get(latest.get("booking_token_id"))
             if token:
@@ -1412,8 +1417,15 @@ def _send_message_now(db, org_id: str, school_id: str, channel: str, subject: st
     """Round-7 — actually dispatches one message through its channel. Shared by
     process_message_queue's cron-drained batches AND _queue_messages_for_schools' own
     immediate-send path below (email_resend/whatsapp no longer wait for the cron at all — see
-    that call site's comment for why). Returns ("sent", None) or ("failed", error_str); never
-    raises, so callers can always safely write the returned status straight into a row.
+    that call site's comment for why). Returns ("sent"|"outlook_pending", None) or
+    ("failed", error_str); never raises, so callers can always safely write the returned status
+    straight into a row.
+
+    Round 15: email_outlook returns "outlook_pending", not "sent" — Graph accepting the send
+    only means the request was queued for delivery, not that it arrived (a real bounce/NDR can
+    still come back minutes later, confirmed live). The caller (process_message_queue) is
+    responsible for later confirming/falling-back via graph_client.find_bounce_for_subject; this
+    function itself never blocks waiting for that.
 
     attachment_keys: list of {"key": storage_key, "filename": original_filename} — the display
     filename travels alongside the (ASCII-only) storage key rather than being derived from it
@@ -1437,6 +1449,7 @@ def _send_message_now(db, org_id: str, school_id: str, channel: str, subject: st
             if not advisor_id:
                 raise RuntimeError("לא נמצא יועץ לבית הספר לצורך שליחה מ-Outlook")
             graph_client.send_mail_as_advisor(db, org_id, advisor_id, subject or "", body or "", recipient_email, attachments=attachments)
+            return "outlook_pending", None
         elif channel == "whatsapp_twilio":
             whatsapp_twilio.send_whatsapp_message(org_id, recipient_phone, body or "", attachment_keys)
         else:  # email_resend (default)
@@ -1824,6 +1837,12 @@ def process_message_queue(request: Request):
             if status == "sent":
                 db.table("org_task_messages").update({"status": "sent", "sent_at": "now()"}).eq("id", row["id"]).execute()
                 sent += 1
+            elif status == "outlook_pending":
+                # Round 15 — Graph accepted the send, but that's not confirmed delivery (a bounce
+                # can still arrive minutes later). Held in this interim status until the
+                # grace-window check below either confirms it or falls back to Resend.
+                db.table("org_task_messages").update({"status": "outlook_pending", "outlook_sent_at": "now()"}).eq("id", row["id"]).execute()
+                sent += 1
             else:
                 logger.warning("process_message_queue: failed to send row %s: %s", row["id"], error)
                 db.table("org_task_messages").update({"status": "failed", "error": error}).eq("id", row["id"]).execute()
@@ -1836,7 +1855,69 @@ def process_message_queue(request: Request):
                 logger.error("process_message_queue: failed to mark row %s failed: %s", row["id"], log_exc)
             failed += 1
 
-    return {"ok": True, "sent": sent, "failed": failed, "skipped": skipped, "batch_size": len(rows)}
+    # Round 15 — second pass: confirm or fall back any Outlook sends that cleared their grace
+    # window (find_bounce_for_subject relies on a real NDR that empirically arrives within ~1
+    # minute of send, so 5 minutes leaves generous margin without materially delaying
+    # confirmation for the common case).
+    OUTLOOK_BOUNCE_GRACE_MINUTES = 5
+    confirmed, fell_back = 0, 0
+    outlook_pending_rows = (
+        db.table("org_task_messages")
+        .select("*")
+        .eq("status", "outlook_pending")
+        .lte("outlook_sent_at", (datetime.now(timezone.utc) - timedelta(minutes=OUTLOOK_BOUNCE_GRACE_MINUTES)).isoformat())
+        .order("outlook_sent_at")
+        .limit(BATCH_SIZE)
+        .execute()
+        .data or []
+    )
+    for row in outlook_pending_rows:
+        try:
+            task = db.table("org_tasks").select("org_id").eq("id", row["task_id"]).execute().data
+            org_id = task[0]["org_id"] if task else None
+            if not org_id:
+                raise ValueError(f"task {row['task_id']} not found for outlook_pending message {row['id']}")
+
+            advisors = db.table("advisor_schools").select("advisor_id").eq("school_id", row["school_id"]).execute().data or []
+            advisor_id = advisors[0]["advisor_id"] if advisors else None
+            if not advisor_id:
+                # Can't check for a bounce without a mailbox to inspect — best-effort finalize.
+                db.table("org_task_messages").update({"status": "sent", "sent_at": "now()"}).eq("id", row["id"]).execute()
+                confirmed += 1
+                continue
+
+            bounced = graph_client.find_bounce_for_subject(db, org_id, advisor_id, row.get("subject") or "", row["outlook_sent_at"])
+            if bounced is None:
+                continue  # couldn't check (missing Mail.Read consent / transient error) — retried next tick
+
+            if not bounced:
+                db.table("org_task_messages").update({"status": "sent", "sent_at": "now()"}).eq("id", row["id"]).execute()
+                confirmed += 1
+                continue
+
+            attachments = None
+            if row.get("attachment_keys"):
+                attachments = []
+                for a in row["attachment_keys"]:
+                    content = db.storage.from_("check-files").download(a["key"])
+                    attachments.append({"filename": a.get("filename") or a["key"].rsplit("/", 1)[-1], "content_b64": base64.b64encode(content).decode("ascii")})
+            try:
+                send_resend_email(row.get("recipient_email"), row.get("subject") or "", row.get("body") or "", attachments=attachments)
+                db.table("org_task_messages").update({"status": "sent", "sent_at": "now()", "fallback_used": True}).eq("id", row["id"]).execute()
+                fell_back += 1
+            except Exception as exc:
+                logger.warning("process_message_queue: Outlook bounced and Resend fallback also failed for row %s: %s", row["id"], exc)
+                db.table("org_task_messages").update({
+                    "status": "failed", "error": f"השליחה נכשלה גם דרך Outlook (bounce) וגם דרך הגיבוי (Resend): {exc}",
+                }).eq("id", row["id"]).execute()
+                failed += 1
+        except Exception as exc:
+            logger.warning("process_message_queue: outlook_pending confirmation failed for row %s (non-fatal, retried next tick): %s", row["id"], exc)
+
+    return {
+        "ok": True, "sent": sent, "failed": failed, "skipped": skipped, "batch_size": len(rows),
+        "outlook_confirmed": confirmed, "outlook_fallback": fell_back,
+    }
 
 
 @router.post("/process-scheduled-tasks")

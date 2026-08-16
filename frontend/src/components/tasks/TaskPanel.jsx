@@ -426,6 +426,9 @@ function TaskWindowItem({ taskId, minimized, minimizedOrder }) {
               {task.message_summary.pending > 0 && (
                 <span className="text-amber-600">ממתינות: <b>{task.message_summary.pending}</b></span>
               )}
+              {task.message_summary.outlook_pending > 0 && (
+                <span className="text-amber-600">ממתינות לאישור שליחה (Outlook): <b>{task.message_summary.outlook_pending}</b></span>
+              )}
             </div>
           )}
 
@@ -534,12 +537,16 @@ function TaskWindowItem({ taskId, minimized, minimizedOrder }) {
                           <div className="pointer-events-none absolute -top-2 right-full mr-1 opacity-0 group-hover:opacity-100 transition-opacity bg-amber-400 text-amber-950 text-[11px] font-medium px-2 py-1.5 rounded-md shadow-lg whitespace-nowrap z-10 text-right space-y-0.5">
                             <div>זמן שליחה: {formatDateTimeDMY(r.send_status.sent_at)}</div>
                             {meetingLinkStatusLabel(r.send_status) && <div>סטטוס: {meetingLinkStatusLabel(r.send_status)}</div>}
+                            {/* Round 15 — Outlook bounced (NDR), sent instead via the automatic Resend fallback. */}
+                            {r.send_status.fallback_used && <div>⚠ נשלח דרך Resend (Outlook נכשל, גיבוי אוטומטי)</div>}
                           </div>
                         </span>
                       ) : r.send_status.status === "failed" ? (
                         <span className="text-red-600 font-bold text-xs" title={r.send_status.error || ""}>✕ נכשל</span>
                       ) : r.send_status.status === "skipped" ? (
                         <span className="text-slate-400 font-bold text-xs">דולג</span>
+                      ) : r.send_status.status === "outlook_pending" ? (
+                        <span className="text-amber-600 font-bold text-xs" title="נשלח דרך Outlook — ממתין לאישור שהמייל אכן הגיע (לא רק שהתקבל לשליחה)">⏳ ממתין לאישור</span>
                       ) : (
                         <span className="text-amber-600 font-bold text-xs">⏳ ממתין</span>
                       )}
