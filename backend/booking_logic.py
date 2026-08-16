@@ -185,13 +185,10 @@ def _format_duration_he(minutes: int) -> str:
     return f"{hours} שעות" if rest == 0 else f"{hours}:{rest:02d} שעות"
 
 
-def build_direct_coordination_email_html(recipient_name: str, school_name: str, advisor_names: list[str],
-                                          ranges: list[dict], booking_url: str) -> str:
-    first_name = (recipient_name or "").strip().split(" ")[0]
-    greeting = f"היי {first_name}," if first_name else "היי,"
-    advisors_label = ", ".join(advisor_names) if advisor_names else ""
-    advisor_clause = f" עם {advisors_label}" if advisors_label else ""
-
+def format_ranges_html(ranges: list[dict]) -> str:
+    """The <ul> block of requested-meeting rows (date range/duration/participants), shared by
+    build_direct_coordination_email_html and the Tasks feature's {meetings_list} placeholder
+    (tasks_router._queue_messages_for_schools) so both render identically."""
     range_rows = ""
     for r in ranges:
         type_label = r.get("label") or _SERVICE_TYPE_LABEL_HE.get(r.get("service_type"), "")
@@ -203,6 +200,33 @@ def build_direct_coordination_email_html(recipient_name: str, school_name: str, 
         {f' · משך: {duration_label}' if duration_label else ""}
         {f'<br/><span style="color: #64748b; font-size: 12px;">משתתפים: {participants_label}</span>' if participants_label else ""}
       </li>"""
+    return f'<ul style="margin: 0 0 20px 0; padding-inline-start: 20px; color: #334155;">{range_rows}\n      </ul>'
+
+
+def format_ranges_text(ranges: list[dict]) -> str:
+    """Plain-text bullet equivalent of format_ranges_html, for channels that can't render HTML
+    (WhatsApp)."""
+    lines = []
+    for r in ranges:
+        type_label = r.get("label") or _SERVICE_TYPE_LABEL_HE.get(r.get("service_type"), "")
+        duration_label = _format_duration_he(r.get("duration_minutes"))
+        participants_label = ", ".join(p.get("name", "") for p in (r.get("participants") or []) if p.get("name"))
+        line = f"• {type_label} — {_format_range_date(r['start_date'])} עד {_format_range_date(r['end_date'])}"
+        if duration_label:
+            line += f" · משך: {duration_label}"
+        if participants_label:
+            line += f"\n  משתתפים: {participants_label}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def build_direct_coordination_email_html(recipient_name: str, school_name: str, advisor_names: list[str],
+                                          ranges: list[dict], booking_url: str) -> str:
+    first_name = (recipient_name or "").strip().split(" ")[0]
+    greeting = f"היי {first_name}," if first_name else "היי,"
+    advisors_label = ", ".join(advisor_names) if advisor_names else ""
+    advisor_clause = f" עם {advisors_label}" if advisors_label else ""
+    range_rows_html = format_ranges_html(ranges)
 
     return f"""
 <html>
@@ -220,8 +244,7 @@ def build_direct_coordination_email_html(recipient_name: str, school_name: str, 
         לבית הספר <b>{school_name}</b> מבוקש לתאם{advisor_clause} את הפגישות הבאות.
         נשמח <b>שתקבעי מועד</b> לכל אחת מהן בקישור המצורף — תוכלי לבחור זמן פנוי ביומן ישירות:
       </p>
-      <ul style="margin: 0 0 20px 0; padding-inline-start: 20px; color: #334155;">{range_rows}
-      </ul>
+      {range_rows_html}
       <div style="text-align: center; margin-bottom: 8px;">
         <a href="{booking_url}"
            style="display: inline-block; background: #0070F3; color: white;
