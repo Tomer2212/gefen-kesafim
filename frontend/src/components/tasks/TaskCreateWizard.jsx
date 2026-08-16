@@ -24,6 +24,19 @@ const BUILT_IN_TEMPLATE = {
   body_template: "שלום,\n\nלבית הספר {school_name} טרם נקבעה פגישה. נשמח שתקבעו מועד בקישור הבא:\n{booking_link}\n\nתודה!",
 };
 
+// Round-12 — for the dedicated "קביעת פגישות" task track specifically (structured meeting
+// requirements, not just a negated meeting filter), the default text matches exactly what
+// _queue_messages_for_schools actually renders (see backend/routers/tasks_router.py):
+// {meetings_list} is substituted server-side with the same per-range date/duration/participants
+// block "תיאום ישיר" already sends. Editing this text is no longer silently discarded — every
+// word here is genuinely what gets sent.
+const MEETING_TASK_BUILT_IN_TEMPLATE = {
+  id: "__builtin_meeting_task",
+  name: "ברירת מחדל — קביעת פגישות",
+  subject: "קביעת פגישה - {school_name}",
+  body_template: "היי {recipient_name},\n\nלבית הספר {school_name} מבוקש לתאם עם {advisor_names} את הפגישות הבאות. נשמח שתקבעי מועד לכל אחת מהן בקישור המצורף — תוכלי לבחור זמן פנוי ביומן ישירות:\n\n{meetings_list}\n\n{booking_link}\n\nתודה!",
+};
+
 // Round-2 redesign: two parallel wizard tracks sharing the message-config/review steps.
 // "קביעת פגישות" (isMeetingTask) — 4 steps, success is always "a meeting got booked", no
 // separate success-definition step. "תקשורת כללית" — 5 steps, adds the "מה נחשב הצלחה?" step
@@ -100,7 +113,7 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
   const [channel, setChannel] = useState("email_resend");
   const [subject, setSubject] = useState("");
   const [bodyTemplate, setBodyTemplate] = useState("");
-  const [attachments, setAttachments] = useState([]); // [{pendingFile, filename}]
+  const [attachments, setAttachments] = useState([]); // [{storageKey, filename}] — already uploaded, see handleAttachmentUpload
   const [uploading, setUploading] = useState(false);
   const [templates, setTemplates] = useState([]);
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
@@ -137,12 +150,18 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
       setControlLetterFields(r.data?.control_letter_fields || []);
       setGoalValueOptions(r.data?.goal_value_options || []);
     }).catch(() => {});
-    axios.get("/tasks/channel-availability").then(r => {
-      setChannelAvailability({
-        email_outlook: !!r.data?.email_outlook,
-        whatsapp_twilio: !!r.data?.whatsapp_twilio,
-      });
-    }).catch(() => {});
+    // Round 13 — one retry here specifically (unlike the other best-effort fetches on this page):
+    // a transient failure otherwise silently leaves both channels stuck at their "not connected"
+    // default for the whole lifetime of this wizard instance, misleading the manager into
+    // thinking a genuinely connected channel (e.g. Outlook) is unavailable.
+    axios.get("/tasks/channel-availability")
+      .catch(() => axios.get("/tasks/channel-availability"))
+      .then(r => {
+        setChannelAvailability({
+          email_outlook: !!r.data?.email_outlook,
+          whatsapp_twilio: !!r.data?.whatsapp_twilio,
+        });
+      }).catch(() => {});
     axios.get("/tasks/templates").then(r => setTemplates(r.data || [])).catch(() => {});
     axios.get("/schools/").then(r => setAllSchools(r.data || [])).catch(() => {});
     axios.get("/schools/users/all").then(r => setOrgUsers(r.data || [])).catch(() => {});
@@ -175,9 +194,10 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
   // opens with an empty subject/body.
   useEffect(() => {
     if (phase === "message" && looksLikeMissingMeetingTask && !subject && !bodyTemplate) {
-      setSubject(BUILT_IN_TEMPLATE.subject);
-      setBodyTemplate(BUILT_IN_TEMPLATE.body_template);
-      setSelectedTemplateId(BUILT_IN_TEMPLATE.id);
+      const tpl = isMeetingTask ? MEETING_TASK_BUILT_IN_TEMPLATE : BUILT_IN_TEMPLATE;
+      setSubject(tpl.subject);
+      setBodyTemplate(tpl.body_template);
+      setSelectedTemplateId(tpl.id);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase]);
@@ -185,7 +205,9 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
   function applyTemplate(templateId) {
     setSelectedTemplateId(templateId);
     if (!templateId) return;
-    const tpl = templateId === BUILT_IN_TEMPLATE.id
+    const tpl = templateId === MEETING_TASK_BUILT_IN_TEMPLATE.id
+      ? MEETING_TASK_BUILT_IN_TEMPLATE
+      : templateId === BUILT_IN_TEMPLATE.id
       ? BUILT_IN_TEMPLATE
       : templates.find(t => t.id === templateId);
     if (tpl) {
@@ -392,9 +414,16 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
     if (!file) return;
     setUploading(true);
     try {
-      // Attachments are uploaded per-task server-side; since the task doesn't exist yet,
-      // the actual upload call is deferred to right after creation (see attemptCreate).
-      setAttachments(prev => [...prev, { pendingFile: file, filename: file.name }]);
+      // Round 13 — uploaded immediately (not deferred to after task creation): task creation
+      // sends the first wave of messages right away (round 2), so the real storage_key must
+      // already exist by the time attemptCreate's POST /tasks/ fires, or that first wave goes
+      // out with no attachment at all.
+      const form = new FormData();
+      form.append("file", file);
+      const up = await axios.post("/tasks/attachments/upload", form);
+      setAttachments(prev => [...prev, { storageKey: up.data.storage_key, filename: file.name }]);
+    } catch {
+      setError("העלאת הקובץ נכשלה — נסה שוב.");
     } finally {
       setUploading(false);
       e.target.value = "";
@@ -421,25 +450,12 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
           channel: effectiveChannel,
           subject,
           body_template: bodyTemplate,
-          attachment_keys: [],
+          attachment_keys: attachments.map(a => a.storageKey),
         },
         scheduled_for: scheduledFor ? new Date(scheduledFor).toISOString() : null,
         confirm_outlook_limit: confirmOutlook,
       });
       const task = res.data;
-
-      if (attachments.length) {
-        const keys = [];
-        for (const a of attachments) {
-          const form = new FormData();
-          form.append("file", a.pendingFile);
-          const up = await axios.post(`/tasks/${task.id}/attachments`, form);
-          keys.push(up.data.storage_key);
-        }
-        await axios.patch(`/tasks/${task.id}`, {
-          message_config: { recipient_role: recipientRole, channel: effectiveChannel, subject, body_template: bodyTemplate, attachment_keys: keys },
-        });
-      }
 
       setOutlookLimitWarning(null);
       onCreated(task.id);
@@ -855,7 +871,9 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
                 <select value={selectedTemplateId} onChange={e => applyTemplate(e.target.value)}
                   className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 bg-white">
                   <option value="">בחר תבנית (אופציונלי)...</option>
-                  <option value={BUILT_IN_TEMPLATE.id}>{BUILT_IN_TEMPLATE.name}</option>
+                  <option value={isMeetingTask ? MEETING_TASK_BUILT_IN_TEMPLATE.id : BUILT_IN_TEMPLATE.id}>
+                    {isMeetingTask ? MEETING_TASK_BUILT_IN_TEMPLATE.name : BUILT_IN_TEMPLATE.name}
+                  </option>
                   {templates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
                 </select>
               </label>
@@ -868,7 +886,10 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
 
               <label className="block">
                 <span className="text-sm font-medium text-slate-700 mb-1.5 block">
-                  תוכן ההודעה — ניתן להשתמש ב-{"{school_name}"}{looksLikeMissingMeetingTask ? ` וב-{"{booking_link}"}` : ""}
+                  תוכן ההודעה — ניתן להשתמש ב-{"{school_name}"}, {"{recipient_name}"}
+                  {isMeetingTask ? <>, {"{advisor_names}"}</> : null}
+                  {looksLikeMissingMeetingTask ? <> וב-{"{booking_link}"}</> : null}
+                  {isMeetingTask ? <> וב-{"{meetings_list}"} (רשימת הפגישות המבוקשות — מוצגת אוטומטית לפי הנתונים בפועל)</> : null}
                 </span>
                 <textarea value={bodyTemplate} onChange={e => setBodyTemplate(e.target.value)} rows={5}
                   className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2" />

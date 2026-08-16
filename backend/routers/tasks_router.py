@@ -1,15 +1,17 @@
 import base64
 import hashlib
 import hmac
+import html
 import io
 import logging
 import os
+import re
 import secrets
 import shutil
 import tempfile
 import time
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Annotated
 
@@ -24,7 +26,7 @@ import task_logic
 import whatsapp_twilio
 from academic_years import DEFAULT_ACADEMIC_YEAR
 from auth import get_current_user
-from booking_logic import get_org_mailbox_capability, build_direct_coordination_email_html
+from booking_logic import get_org_mailbox_capability, format_ranges_html, format_ranges_text
 from email_resend import send_resend_email
 from supabase_client import get_admin_client, reset_admin_client
 
@@ -251,6 +253,41 @@ class SendIn(BaseModel):
 # is warned before a single task's bulk-send would meaningfully eat into the daily cap shared
 # by every other Outlook send in the org that day. Configurable since org size varies.
 OUTLOOK_SEND_WARN_THRESHOLD = int(os.getenv("OUTLOOK_SEND_WARN_THRESHOLD", "300"))
+
+# Round 12 — real enforcement of Microsoft's actual cumulative daily cap (10,000 recipients/day,
+# shared by every Outlook send in the org that day), not just the per-task warning above.
+# Deliberately set below the real 10,000 so this stops sends before Microsoft itself would.
+OUTLOOK_DAILY_SEND_CAP = int(os.getenv("OUTLOOK_DAILY_SEND_CAP", "9500"))
+
+
+def _outlook_daily_count_ok_and_increment(org_id: str) -> bool:
+    """Checked/incremented against org_outlook_send_counts (org_id, send_date) right before every
+    real email_outlook send — this is live DB state, not in-memory (Architecture Invariant #1),
+    so it stays correct across the cron-drained queue and the immediate-send path alike."""
+    today = date.today().isoformat()
+    for attempt in range(2):
+        try:
+            db2 = get_admin_client()
+            rows = (
+                db2.table("org_outlook_send_counts").select("count")
+                .eq("org_id", org_id).eq("send_date", today).execute().data or []
+            )
+            current = rows[0]["count"] if rows else 0
+            if current >= OUTLOOK_DAILY_SEND_CAP:
+                return False
+            db2.table("org_outlook_send_counts").upsert(
+                {"org_id": org_id, "send_date": today, "count": current + 1},
+                on_conflict="org_id,send_date",
+            ).execute()
+            return True
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("_outlook_daily_count_ok_and_increment attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("_outlook_daily_count_ok_and_increment failed after 2 attempts: %s", exc, exc_info=True)
+                return True  # fail-open: never block a real send over a transient DB hiccup
 
 
 @router.get("/field-options")
@@ -1147,13 +1184,80 @@ def delete_task(task_id: str, user: Annotated[dict, Depends(get_current_user)]):
     return {"ok": True}
 
 
-def _render_template(template: str, school: dict, booking_link: str | None = None, opt_out_link: str | None = None) -> str:
+def _render_template(template: str, school: dict, booking_link: str | None = None, opt_out_link: str | None = None,
+                      meetings_list: str | None = None, recipient_name: str | None = None,
+                      advisor_names: str | None = None, keep_tokens: bool = False) -> str:
+    """keep_tokens=True leaves {meetings_list}/{booking_link} untouched in the output — used when
+    the caller (_wrap_email_html) still needs to substitute them itself (meetings_list as trusted
+    pre-built HTML, booking_link as a styled button rather than a raw URL). {advisor_names} is
+    plain text (like {recipient_name}/{school_name}) so it's always substituted directly here,
+    regardless of keep_tokens — just the raw comma-joined advisor name(s) ("עם" belongs in the
+    template text itself, e.g. "מבוקש לתאם עם {advisor_names} את"). Effectively always non-empty
+    for meeting tasks in practice — _build_meeting_booking_link refuses to build a booking link at
+    all when no advisor resolves for any range, so ranges_data never reaches this function empty."""
     text = (template or "").replace("{school_name}", school.get("name") or "")
-    if "{booking_link}" in text:
-        text = text.replace("{booking_link}", booking_link or "")
+    if "{recipient_name}" in text:
+        text = text.replace("{recipient_name}", recipient_name or "")
+    if "{advisor_names}" in text:
+        text = text.replace("{advisor_names}", advisor_names or "")
+    if not keep_tokens:
+        if "{meetings_list}" in text:
+            text = text.replace("{meetings_list}", meetings_list or "")
+        if "{booking_link}" in text:
+            text = text.replace("{booking_link}", booking_link or "")
     if opt_out_link:
         text = f"{text}\n\nלהסרה מרשימת התפוצה: {opt_out_link}"
     return text
+
+
+_EMAIL_BODY_TOKEN_RE = re.compile(r"(\{meetings_list\}|\{booking_link\})")
+
+
+def _wrap_email_html(rendered_text: str, booking_url: str | None, meetings_list_html: str | None) -> str:
+    """Wraps a manager-authored body (rendered via _render_template(..., keep_tokens=True), so
+    {meetings_list}/{booking_link} are still literal tokens here) in the same branded card used by
+    booking_logic.build_direct_coordination_email_html. Free-text segments are HTML-escaped and
+    \\n\\n/\\n converted to real paragraph/line breaks — fixing the long-standing bug where
+    plain-text task bodies were sent as literal (unescaped) HTML, so newlines never rendered for
+    the recipient. {meetings_list}'s value is trusted, pre-built HTML (from
+    booking_logic.format_ranges_html) and is never escaped."""
+    parts = _EMAIL_BODY_TOKEN_RE.split(rendered_text)
+    html_parts = []
+    for part in parts:
+        if part == "{meetings_list}":
+            if meetings_list_html:
+                html_parts.append(meetings_list_html)
+        elif part == "{booking_link}":
+            if booking_url:
+                html_parts.append(
+                    f'<div style="text-align: center; margin: 8px 0 16px 0;">'
+                    f'<a href="{booking_url}" style="display: inline-block; background: #0070F3; color: white; '
+                    f'font-size: 14px; font-weight: 700; padding: 12px 28px; border-radius: 8px; '
+                    f'text-decoration: none;">קביעת מועד</a></div>'
+                )
+        elif part:
+            for paragraph in part.split("\n\n"):
+                if not paragraph.strip():
+                    continue
+                escaped = html.escape(paragraph).replace("\n", "<br/>")
+                html_parts.append(f'<p style="margin: 0 0 16px 0; color: #334155; line-height: 1.8;">{escaped}</p>')
+    body_html = "".join(html_parts)
+    return f"""
+<html>
+<body dir="rtl" style="font-family: Arial, sans-serif; font-size: 14px; color: #1e293b;
+                       background: #f8fafc; margin: 0; padding: 24px;">
+  <div style="max-width: 560px; margin: 0 auto; background: white;
+              border-radius: 12px; border: 1px solid #e2e8f0; overflow: hidden;">
+    <div style="background: #0070F3; padding: 20px 24px;">
+      <p style="margin: 0; color: white; font-size: 14px; font-weight: 700;">גפן AI</p>
+    </div>
+    <div style="padding: 28px 24px;">{body_html}</div>
+    <div style="background: #f1f5f9; padding: 12px 24px; text-align: center;">
+      <p style="margin: 0; font-size: 11px; color: #94a3b8;">נשלח אוטומטית מגפן AI</p>
+    </div>
+  </div>
+</body>
+</html>"""
 
 
 def _first_meeting_condition(criteria: dict) -> dict | None:
@@ -1317,6 +1421,8 @@ def _send_message_now(db, org_id: str, school_id: str, channel: str, subject: st
             capability = get_org_mailbox_capability(org_id)
             if not capability["connected"]:
                 raise RuntimeError("הארגון אינו מחובר ל-Outlook")
+            if not _outlook_daily_count_ok_and_increment(org_id):
+                raise RuntimeError("מגבלת השליחה היומית של Outlook הארגוני הושגה להיום — ההודעה תישלח מחר או שכדאי לעבור זמנית לערוץ מייל אחר")
             advisors = db.table("advisor_schools").select("advisor_id").eq("school_id", school_id).execute().data or []
             advisor_id = advisors[0]["advisor_id"] if advisors else None
             if not advisor_id:
@@ -1444,25 +1550,37 @@ def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[st
         else:
             booking_link, booking_token_id = _build_booking_link(db, org_id, task, school["id"]), None
 
-        # Round 9: meeting-scheduling task + email channel gets the exact same rich per-meeting
-        # HTML "תיאום ישיר" already sends (header, per-range bullets with date/duration/
-        # participants, CTA button) instead of the generic free-text body_template — the
-        # manager's typed body_template is not used for this combination (see plan notes).
-        # WhatsApp doesn't render HTML, so it keeps the plain-text _render_template path.
-        if ranges_data and channel != "whatsapp_twilio":
+        # Round 12: the manager's typed body_template is now always what's actually sent — a new
+        # {meetings_list} placeholder is substituted with the same per-range date/duration/
+        # participants block "תיאום ישיר" already renders (booking_logic.format_ranges_html/
+        # format_ranges_text), instead of silently discarding body_template in favor of a fixed
+        # HTML template (round 9's behavior). Email channels (Resend/Outlook) get the free text
+        # wrapped in the branded HTML card via _wrap_email_html (which also fixes a pre-existing
+        # bug where plain-text bodies were sent as literal unescaped HTML, so \n never rendered).
+        # WhatsApp doesn't render HTML, so it keeps the plain-text path with plain bullets.
+        advisor_names_value = ""
+        if ranges_data:
             advisor_ids_for_names = list({aid for r in ranges_data for aid in (r.get("advisor_ids") or [])})
-            advisor_names = []
             if advisor_ids_for_names:
                 try:
                     prof_rows = db.table("profiles").select("id, full_name").in_("id", advisor_ids_for_names).execute().data or []
-                    advisor_names = [p["full_name"] for p in prof_rows if p.get("full_name")]
+                    names = [p["full_name"] for p in prof_rows if p.get("full_name")]
+                    if names:
+                        advisor_names_value = ", ".join(names)
                 except Exception as exc:
                     logger.warning("_queue_messages_for_schools: advisor-name lookup failed (non-fatal): %s", exc)
-            body = build_direct_coordination_email_html(recipient.get("name"), school.get("name"), advisor_names, ranges_data, booking_link)
-            if opt_out_link:
-                body = body.replace("</body>", f'<p style="text-align:center;font-size:11px;color:#94a3b8;">להסרה מרשימת התפוצה: <a href="{opt_out_link}">כאן</a></p></body>')
+
+        if channel == "whatsapp_twilio":
+            meetings_list_text = format_ranges_text(ranges_data) if ranges_data else None
+            body = _render_template(body_template, school, booking_link, opt_out_link,
+                                     meetings_list=meetings_list_text, recipient_name=recipient.get("name"),
+                                     advisor_names=advisor_names_value)
         else:
-            body = _render_template(body_template, school, booking_link, opt_out_link)
+            meetings_list_html = format_ranges_html(ranges_data) if ranges_data else None
+            rendered = _render_template(body_template, school, opt_out_link=opt_out_link,
+                                         recipient_name=recipient.get("name"), advisor_names=advisor_names_value,
+                                         keep_tokens=True)
+            body = _wrap_email_html(rendered, booking_link, meetings_list_html)
 
         row = {
             "task_id": task["id"],
@@ -1613,22 +1731,27 @@ def put_task_school_note(task_id: str, school_id: str, body: TaskSchoolNoteIn, u
     return {"ok": True}
 
 
-@router.post("/{task_id}/attachments")
+@router.post("/attachments/upload")
 async def upload_task_attachment(
-    task_id: str,
     user: Annotated[dict, Depends(get_current_user)],
     file: UploadFile = File(...),
 ):
+    """Round 13 — deliberately NOT scoped to an existing task_id (unlike the old
+    /{task_id}/attachments this replaces, the only caller of which was TaskCreateWizard.jsx).
+    Task creation queues/sends the first wave of messages immediately (round 2), so the wizard
+    must be able to upload attachments and get real storage_keys *before* POST /tasks/ — otherwise
+    that first wave goes out with an empty attachment_keys list. Storage key keeps the real
+    filename as its last path segment (tasks/pending/<random>/<filename>) so _send_message_now's
+    `key.rsplit("/", 1)[-1]` attachment-name derivation shows the original name, not a random one."""
     _require_manager(user)
     db = get_admin_client()
-    _get_task_or_404(db, task_id, user["org_id"])
 
-    run_dir = Path(tempfile.mkdtemp(prefix=f"task_{task_id}_"))
+    run_dir = Path(tempfile.mkdtemp(prefix="task_attachment_"))
     try:
-        suffix = Path(file.filename or "").suffix
-        dest = run_dir / f"attachment{suffix}"
+        safe_filename = Path(file.filename or "attachment").name
+        dest = run_dir / safe_filename
         dest.write_bytes(await file.read())
-        storage_key = f"tasks/{task_id}/{secrets.token_hex(8)}{suffix}"
+        storage_key = f"tasks/pending/{secrets.token_hex(8)}/{safe_filename}"
         db.storage.from_("check-files").upload(storage_key, dest.read_bytes())
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)
