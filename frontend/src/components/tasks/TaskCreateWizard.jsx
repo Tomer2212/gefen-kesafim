@@ -37,6 +37,17 @@ const MEETING_TASK_BUILT_IN_TEMPLATE = {
   body_template: "היי {recipient_name},\n\nלבית הספר {school_name} מבוקש לתאם עם {advisor_names} את הפגישות הבאות. נשמח שתקבעי מועד לכל אחת מהן בקישור המצורף — תוכלי לבחור זמן פנוי ביומן ישירות:\n\n{meetings_list}\n\n{booking_link}\n\nתודה!",
 };
 
+// Per-phase title shown in the wizard header (replaces the old constant "יצירת משימה"/"יצירת
+// משימת קביעת פגישות" — a title describing what THIS screen actually does is more useful once
+// there are several distinctly-purposed steps).
+const PHASE_TITLES = {
+  audience: "סינון בתי ספר",
+  meeting_audience: "סינון בתי ספר",
+  success: "בחירת מדד הצלחה",
+  message: "תוכן ההודעה",
+  review: "סיכום ואישור",
+};
+
 // Round-2 redesign: two parallel wizard tracks sharing the message-config/review steps.
 // "קביעת פגישות" (isMeetingTask) — 4 steps, success is always "a meeting got booked", no
 // separate success-definition step. "תקשורת כללית" — 5 steps, adds the "מה נחשב הצלחה?" step
@@ -48,7 +59,7 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
   const { ref, handleKeyDown } = useFocusTrap(onClose);
   const PHASES = isMeetingTask
     ? ["meeting_audience", "message", "review"]
-    : ["basics", "audience", "success", "message", "review"];
+    : ["audience", "success", "message", "review"];
   const [step, setStep] = useState(1);
   const phase = PHASES[step - 1];
 
@@ -56,8 +67,12 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
   const [scheduledFor, setScheduledFor] = useState(""); // datetime-local string, empty = evaluate now
   const [showScheduleModal, setShowScheduleModal] = useState(false);
 
-  // Meeting-path audience state — pre-filled with "סטטוס לקוח = פעיל" since the vast majority
-  // of meeting-scheduling tasks target active clients; the manager can still change/remove it.
+  // Shared audience-mode state — used by BOTH tracks' unified audience step (general track's
+  // field-filter conditions live in `groups` below, meeting track's in `fieldGroups` — kept
+  // separate since the meeting track also has meetingRequirementGroups; manual selection
+  // (manualSchoolIds) is shared as-is since there's only ever one "which schools" answer).
+  // fieldGroups is pre-filled with "סטטוס לקוח = פעיל" since the vast majority of
+  // meeting-scheduling tasks target active clients; the manager can still change/remove it.
   const [audienceMode, setAudienceMode] = useState("filter"); // "filter" | "manual"
   const [fieldGroups, setFieldGroups] = useState([
     { conditions: [{ type: "field", field: "client_status", op: "eq", value: "active" }] },
@@ -73,8 +88,11 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
   // the inline alert + red-bordered fields in ConditionGroupsEditor.
   const [meetingReqAttempted, setMeetingReqAttempted] = useState(false);
 
-  // General-path audience + success state
-  const [groups, setGroups] = useState([newConditionGroup()]);
+  // General-path audience + success state — same default pre-fill as the meeting track's
+  // fieldGroups (see above): most tasks target active clients, still fully editable/removable.
+  const [groups, setGroups] = useState([
+    { conditions: [{ type: "field", field: "client_status", op: "eq", value: "active" }] },
+  ]);
   const [audiences, setAudiences] = useState([]);
   const [selectedAudienceId, setSelectedAudienceId] = useState("");
   const [showSaveAudience, setShowSaveAudience] = useState(false);
@@ -89,10 +107,10 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
   // Set by "ערוך" in the saved-audiences modal — while set, the save widget PATCHes this
   // audience instead of creating a new one.
   const [editingAudienceId, setEditingAudienceId] = useState(null);
-  const [successMode, setSuccessMode] = useState("auto"); // "auto" | "custom" | "none"
+  // No default — the manager must actively choose, per the same reasoning as the audience
+  // step never pre-selecting a filter (avoids accidentally shipping a meaningless default).
+  const [successMode, setSuccessMode] = useState(""); // "" | "custom" | "none"
   const [successGroups, setSuccessGroups] = useState([newConditionGroup()]);
-  const [derivedSuccess, setDerivedSuccess] = useState(null); // {success_criteria, invertible}
-  const [derivingSuccess, setDerivingSuccess] = useState(false);
 
   // Shared: field/meeting-type options, channel, message config
   const [fieldOptions, setFieldOptions] = useState([]);
@@ -170,13 +188,10 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
   }, []);
 
   function audiencePayload() {
-    if (isMeetingTask) {
-      if (audienceMode === "manual") {
-        return { criteria: { groups: [] }, manual_school_ids: manualSchoolIds };
-      }
-      return { criteria: { groups: fieldGroups }, manual_school_ids: null };
+    if (audienceMode === "manual") {
+      return { criteria: { groups: [] }, manual_school_ids: manualSchoolIds };
     }
-    return { criteria: { groups }, manual_school_ids: null };
+    return { criteria: { groups: isMeetingTask ? fieldGroups : groups }, manual_school_ids: null };
   }
 
   function buildSuccessCriteria() {
@@ -184,7 +199,7 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
       return { groups: meetingRequirementGroups };
     }
     if (successMode === "custom") return { groups: successGroups };
-    return null; // "auto" (server re-derives) or "none"
+    return null; // "none"
   }
   const trackSuccess = isMeetingTask ? true : successMode !== "none";
 
@@ -391,24 +406,6 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isMeetingTask, audienceMode, JSON.stringify(fieldGroups), JSON.stringify(manualSchoolIds), JSON.stringify(groups)]);
 
-  // Auto-derive success (general path, option (a)) — re-runs whenever the audience criteria
-  // changes while successMode is "auto". If not invertible, falls back to "custom" so the
-  // manager isn't stuck on a disabled/meaningless option.
-  useEffect(() => {
-    if (isMeetingTask || successMode !== "auto") return;
-    const hasAudience = groups.some(g => g.conditions.length > 0);
-    if (!hasAudience) { setDerivedSuccess(null); return; }
-    setDerivingSuccess(true);
-    axios.post("/tasks/derive-success-criteria", { criteria: { groups } })
-      .then(r => {
-        setDerivedSuccess(r.data);
-        if (!r.data?.invertible) setSuccessMode("custom");
-      })
-      .catch(() => setDerivedSuccess(null))
-      .finally(() => setDerivingSuccess(false));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isMeetingTask, successMode, JSON.stringify(groups)]);
-
   async function handleAttachmentUpload(e) {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -566,16 +563,16 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
     }
   }
 
-  const canNextFromBasics = name.trim().length > 0;
   const canNextFromMeetingAudience = isMeetingTask && name.trim().length > 0 && (
     audienceMode === "manual" ? manualSchoolIds.length > 0 : fieldGroups.some(g => g.conditions.length > 0)
   );
-  const canNextFromAudience = !isMeetingTask && groups.some(g => g.conditions.length > 0);
-  const canNextFromSuccess = !isMeetingTask && (successMode !== "custom" || successGroups.some(g => g.conditions.length > 0));
+  const canNextFromAudience = !isMeetingTask && name.trim().length > 0 && (
+    audienceMode === "manual" ? manualSchoolIds.length > 0 : groups.some(g => g.conditions.length > 0)
+  );
+  const canNextFromSuccess = !isMeetingTask && !!successMode && (successMode !== "custom" || successGroups.some(g => g.conditions.length > 0));
   const canNextFromMessage = recipientRole && channel && bodyTemplate.trim().length > 0;
 
   const canGoNext = {
-    basics: canNextFromBasics,
     meeting_audience: canNextFromMeetingAudience,
     audience: canNextFromAudience,
     success: canNextFromSuccess,
@@ -615,7 +612,7 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
       >
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
           <h2 id="task-wizard-title" className="font-bold text-black">
-            {isMeetingTask ? "יצירת משימת קביעת פגישות" : "יצירת משימה"} — שלב {step} מתוך {PHASES.length}
+            {PHASE_TITLES[phase]} — שלב {step} מתוך {PHASES.length}
           </h2>
           <button onClick={onClose} aria-label="סגור" className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400">
             <svg aria-hidden="true" className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -625,34 +622,6 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
         </div>
 
         <div className="overflow-y-auto flex-1 px-6 py-4 space-y-4">
-          {phase === "basics" && (
-            <div className="space-y-4">
-              <div>
-                <label htmlFor="task-name" className="block text-sm font-medium text-slate-700 mb-1.5">שם המשימה</label>
-                <input
-                  id="task-name"
-                  value={name}
-                  onChange={e => setName(e.target.value)}
-                  placeholder='למשל: "קביעת פגישות גפן — רבעון 1"'
-                  className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 outline-none focus:border-blue-400"
-                />
-              </div>
-              <div>
-                <label htmlFor="task-scheduled-for" className="block text-sm font-medium text-slate-700 mb-1.5">
-                  תזמון בדיקת הקריטריונים (אופציונלי)
-                </label>
-                <TaskDateTimeInput
-                  id="task-scheduled-for"
-                  value={scheduledFor}
-                  onChange={setScheduledFor}
-                />
-                <p className="text-xs text-slate-400 mt-1">
-                  אם לא נבחר תאריך — המשימה תיווצר מיד וההודעות יישלחו לכל מי שתואם כרגע. אם נבחר תאריך עתידי — המשימה תיווצר במצב "מתוזמן", ורשימת בתי הספר תיקבע וההודעות יישלחו אוטומטית רק בתאריך שנבחר, לפי מי שיעמוד בקריטריונים אז.
-                </p>
-              </div>
-            </div>
-          )}
-
           {phase === "meeting_audience" && (
             <div className="space-y-4">
               <div>
@@ -768,25 +737,81 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
 
           {phase === "audience" && (
             <div className="space-y-4">
-              {renderAudiencePicker(groups, setGroups, [newConditionGroup()])}
+              <div>
+                <label htmlFor="task-name" className="block text-sm font-medium text-slate-700 mb-1.5">שם המשימה</label>
+                <input
+                  id="task-name"
+                  value={name}
+                  onChange={e => setName(e.target.value)}
+                  placeholder='למשל: "עדכון לקראת סוף שנה"'
+                  className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 outline-none focus:border-blue-400"
+                />
+              </div>
 
-              <ConditionGroupsEditor
-                groups={groups} setGroups={setGroups} fieldOptions={fieldOptions} meetingTypes={meetingTypes} allSchools={allSchools}
-                goalOptions={goalOptions} divisionOptions={divisionOptions} budgetNameOptions={budgetNameOptions}
-                controlLetterFields={controlLetterFields} goalValueOptions={goalValueOptions}
-              />
+              <div className="flex items-center gap-2 border border-slate-200 rounded-lg p-1 w-fit">
+                <button
+                  type="button"
+                  onClick={() => setAudienceMode("filter")}
+                  className={`text-xs px-3 py-1.5 rounded-md font-medium ${audienceMode === "filter" ? "bg-blue-600 text-white" : "text-slate-600 hover:bg-slate-50"}`}
+                >
+                  סינון לפי שדות
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAudienceMode("manual")}
+                  className={`text-xs px-3 py-1.5 rounded-md font-medium ${audienceMode === "manual" ? "bg-blue-600 text-white" : "text-slate-600 hover:bg-slate-50"}`}
+                >
+                  בחירה ידנית
+                </button>
+              </div>
 
-              <div role="status" className="text-sm bg-slate-50 rounded-lg px-3 py-2 mt-2">
-                {previewLoading ? "בודק כמות בתי ספר תואמים..." : preview ? (
-                  <div className="flex items-center justify-between gap-2">
-                    <span>נמצאו <b>{preview.count}</b> בתי ספר תואמים לקריטריון.</span>
-                    {preview.count > 0 && (
+              {audienceMode === "filter" ? (
+                <>
+                  {renderAudiencePicker(groups, setGroups, [newConditionGroup()])}
+                  <ConditionGroupsEditor
+                    groups={groups} setGroups={setGroups} fieldOptions={fieldOptions} meetingTypes={meetingTypes} allSchools={allSchools}
+                    goalOptions={goalOptions} divisionOptions={divisionOptions} budgetNameOptions={budgetNameOptions}
+                    controlLetterFields={controlLetterFields} goalValueOptions={goalValueOptions}
+                  />
+                </>
+              ) : (
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => setShowSchoolPicker(true)}
+                    className="text-sm px-4 py-2 rounded-xl font-medium bg-slate-100 text-slate-700 hover:bg-slate-200"
+                  >
+                    {manualSchoolIds.length > 0 ? `בחירת בתי ספר (${manualSchoolIds.length} נבחרו)` : "בחירת בתי ספר..."}
+                  </button>
+                  {showSchoolPicker && (
+                    <SchoolMultiPickerModal
+                      selectedIds={manualSchoolIds}
+                      onChange={setManualSchoolIds}
+                      onClose={() => setShowSchoolPicker(false)}
+                    />
+                  )}
+                </div>
+              )}
+
+              <div role="status" className="text-sm bg-slate-50 rounded-lg px-3 py-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span>
+                    {previewLoading ? "בודק כמות בתי ספר תואמים..." : preview
+                      ? <>נמצאו <b>{preview.count}</b> בתי ספר תואמים.</>
+                      : "הגדר קריטריון סינון או בחר בתי ספר כדי לראות תצוגה מקדימה."}
+                  </span>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button type="button" onClick={() => setShowScheduleModal(true)}
+                      className="text-xs text-blue-700 hover:underline whitespace-nowrap">
+                      {scheduledFor ? `תזמון: ${new Date(scheduledFor).toLocaleString("he-IL")}` : "תזמון (אופציונלי)"}
+                    </button>
+                    {preview?.count > 0 && (
                       <button type="button" onClick={() => setShowPreviewList(v => !v)} className="text-xs text-blue-700 hover:underline whitespace-nowrap">
                         {showPreviewList ? "הסתר רשימה" : "הצג רשימה"}
                       </button>
                     )}
                   </div>
-                ) : "הגדר תנאי לפחות אחד כדי לראות תצוגה מקדימה."}
+                </div>
                 {showPreviewList && preview?.schools?.length > 0 && (
                   <ul className="mt-2 max-h-40 overflow-auto space-y-1 border-t border-slate-200 pt-2">
                     {preview.schools.map(s => (
@@ -805,36 +830,29 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
           {phase === "success" && (
             <div className="space-y-3">
               <p className="text-sm text-slate-600">
-                הסינון קובע <b>למי שולחים</b> את ההודעה. כאן קובעים בנפרד <b>מתי נחשב שהצלחנו</b> — לפעמים זה בדיוק ההפך מהסינון, ולפעמים זה תנאי אחר לגמרי (למשל: לשלוח לכל מי שיש לו פגישת שוטף, אבל להצליח יחשב שקבעו גם פגישת גפן).
+                כאן ניתן להגדיר תנאים המחשיבים את המשימה ככזו שהושלמה. למשל, להגדיר שכאשר שדה מסוים הופך מ-X ל-Y המשימה הושלמה עבור בית ספר מסוים.
               </p>
-
-              <label className="flex items-start gap-2 border border-slate-200 rounded-xl p-3 cursor-pointer has-[:checked]:border-blue-400 has-[:checked]:bg-blue-50/50">
-                <input type="radio" name="success-mode" checked={successMode === "auto"} onChange={() => setSuccessMode("auto")} className="mt-1" />
-                <div>
-                  <div className="text-sm font-medium text-slate-800">אוטומטי — ההפך מהסינון (ברירת מחדל)</div>
-                  {successMode === "auto" && (
-                    <div className="text-xs text-slate-500 mt-1">
-                      {derivingSuccess ? "מחשב..." : derivedSuccess?.invertible === false ? (
-                        <span className="text-amber-600">לא ניתן לגזור הצלחה אוטומטית מהסינון הזה (יותר מקבוצת "או" אחת, או תנאי "מכיל") — יש להגדיר הצלחה מותאמת אישית.</span>
-                      ) : derivedSuccess?.success_criteria ? (
-                        <span>הצלחה = {derivedSuccess.success_criteria.groups[0].conditions.map(c => describeCondition(c, taskFieldMeta)).join(" וגם ")}</span>
-                      ) : "הגדר קודם תנאי סינון בשלב הקודם."}
-                    </div>
-                  )}
-                </div>
-              </label>
 
               <label className="flex items-start gap-2 border border-slate-200 rounded-xl p-3 cursor-pointer has-[:checked]:border-blue-400 has-[:checked]:bg-blue-50/50">
                 <input type="radio" name="success-mode" checked={successMode === "custom"} onChange={() => setSuccessMode("custom")} className="mt-1" />
                 <div className="flex-1">
                   <div className="text-sm font-medium text-slate-800">הגדרה מותאמת אישית</div>
                   {successMode === "custom" && (
-                    <div className="mt-2">
+                    <div className="mt-2 space-y-2">
                       <ConditionGroupsEditor
                         groups={successGroups} setGroups={setSuccessGroups} fieldOptions={fieldOptions} meetingTypes={meetingTypes} allSchools={allSchools}
                         goalOptions={goalOptions} divisionOptions={divisionOptions} budgetNameOptions={budgetNameOptions}
-                        controlLetterFields={controlLetterFields} goalValueOptions={goalValueOptions}
+                        controlLetterFields={controlLetterFields} goalValueOptions={goalValueOptions} valueFieldLabel="מדד הצלחה"
                       />
+                      {successGroups.some(g => g.conditions.length > 0) && (
+                        <p className="text-xs text-slate-600 bg-slate-50 rounded-lg px-3 py-2">
+                          המשימה תיחשב כהושלמה עבור בית ספר מסוים כאשר{" "}
+                          {successGroups
+                            .filter(g => g.conditions.length > 0)
+                            .map(g => g.conditions.map(c => describeCondition(c, taskFieldMeta)).join(" וגם "))
+                            .join(" או ")}.
+                        </p>
+                      )}
                     </div>
                   )}
                 </div>
@@ -843,7 +861,7 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
               <label className="flex items-start gap-2 border border-slate-200 rounded-xl p-3 cursor-pointer has-[:checked]:border-blue-400 has-[:checked]:bg-blue-50/50">
                 <input type="radio" name="success-mode" checked={successMode === "none"} onChange={() => setSuccessMode("none")} className="mt-1" />
                 <div>
-                  <div className="text-sm font-medium text-slate-800">רק מעקב שליחה, ללא מדד הצלחה</div>
+                  <div className="text-sm font-medium text-slate-800">שליחת הודעה בלבד (ללא מדד הצלחה)</div>
                   <div className="text-xs text-slate-500 mt-1">מתאים למשל להודעת מידע כללית — המשימה תעקוב רק אחרי מי קיבל הודעה, בלי אחוז הצלחה.</div>
                 </div>
               </label>
@@ -986,11 +1004,9 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
                 {isMeetingTask ? (
                   meetingRequirementGroups.flatMap(g => g.conditions).map(c => describeCondition(c, taskFieldMeta)).join(" וגם ")
                 ) : successMode === "none" ? (
-                  "רק מעקב שליחה, ללא מדד הצלחה"
+                  "שליחת הודעה בלבד (ללא מדד הצלחה)"
                 ) : successMode === "custom" ? (
                   successGroups.map(g => g.conditions.map(c => describeCondition(c, taskFieldMeta)).join(" וגם ")).join(" או ")
-                ) : derivedSuccess?.success_criteria ? (
-                  derivedSuccess.success_criteria.groups[0].conditions.map(c => describeCondition(c, taskFieldMeta)).join(" וגם ")
                 ) : "—"}
               </div>
               <div>נמען: {RECIPIENT_ROLE_OPTIONS.find(r => r.value === recipientRole)?.label}</div>

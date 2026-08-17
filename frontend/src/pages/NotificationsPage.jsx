@@ -4,6 +4,7 @@ import axios from "axios";
 import { supabase } from "../lib/supabase";
 import Sidebar from "../components/Sidebar";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { useTasks } from "../context/TasksContext";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -31,6 +32,7 @@ const TYPE_ICON = {
   school_deleted:           "🗑️",
   meeting_reminder:         "🗓️",
   meeting_files_arrived:    "📎",
+  task_send_problems:       "⚠️",
 };
 
 const FIELD_LABEL = {
@@ -491,6 +493,7 @@ function MeetingFilesArrivedDetail({ meetingId, schoolId }) {
 
 function NotificationRow({ notif, isExpanded, onToggle, onRead, onReload, onDeleteApproved, role }) {
   const navigate = useNavigate();
+  const { openTask } = useTasks();
   const isUnread  = !notif.read_at;
   const icon      = TYPE_ICON[notif.type] || "🔔";
   const title     = notif.data?.title || "התראה";
@@ -525,7 +528,13 @@ function NotificationRow({ notif, isExpanded, onToggle, onRead, onReload, onDele
     // Actionable notifications (approve/reject) only get marked read after the review action,
     // not on simple expand — otherwise the buttons disappear before the user can act.
     if (isUnread && !isActionable) onRead(notif.id);
-    if (isActionable || isResultExpandable || isFilesArrived) {
+    if (notif.type === "task_send_problems" && data.task_id) {
+      // Tasks aren't a routed page — they open as a floating TaskPanel via TasksContext, not
+      // navigate(). TaskPanel itself auto-opens the 'בעיות' screen (meeting tasks only — see
+      // TaskPanel.jsx) when the loaded task has has_meeting_send_problems, so opening it here
+      // is enough to land on the right screen either way.
+      openTask(data.task_id);
+    } else if (isActionable || isResultExpandable || isFilesArrived) {
       onToggle(notif.id);
     } else if (data.deeplink) {
       navigate(data.deeplink);

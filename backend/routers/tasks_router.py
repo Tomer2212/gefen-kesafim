@@ -24,6 +24,7 @@ import booking_token_logic
 import graph_client
 import task_logic
 import whatsapp_twilio
+from routers import schools_router as _schools_router
 from academic_years import DEFAULT_ACADEMIC_YEAR
 from auth import get_current_user
 from booking_logic import get_org_mailbox_capability, format_ranges_html, format_ranges_text
@@ -70,9 +71,13 @@ def _principal_slots_for_school(school: dict, stage_scope: str | None) -> list[s
         return ["principal"]
     scope = stage_scope or "both"
     slots = []
-    if scope in ("tichon", "both"):
+    # "separate" (round 16 — two independent meetings, one per principal) still needs both
+    # principals' contact details resolved/checked, exactly like "both" (one merged meeting) —
+    # the two scopes only differ in how _build_meeting_booking_link groups the resolved
+    # participants into one range vs two, not in who needs a valid contact.
+    if scope in ("tichon", "both", "separate"):
         slots.append("principal")
-    if scope in ("chativa", "both"):
+    if scope in ("chativa", "both", "separate"):
         slots.append("principal_chativa")
     return slots
 
@@ -576,19 +581,16 @@ def _missing_contact_detail(school: dict) -> dict:
     }
 
 
-@router.post("/contacts/check")
-def check_contacts(body: ContactsCheckIn, user: Annotated[dict, Depends(get_current_user)]):
-    """Pre-creation contact-resolution check (TaskContactResolutionModal) — for the task's
-    audience (by criteria or manual_school_ids), resolves each school's recipient through the
-    role-priority cascade and reports who has a usable contact and who doesn't. Round 6: for
-    meeting-scheduling tasks specifically, this coordinator check has been folded into the
-    unified POST /tasks/meetings/check + TaskMeetingResolutionModal instead — this endpoint
-    (and TaskContactResolutionModal) now only runs for general/non-meeting tasks."""
-    _require_manager(user)
-    criteria = body.criteria.model_dump() if body.criteria else {}
-    matched = task_logic.find_matching_schools(
-        user["org_id"], criteria, body.academic_year, manual_school_ids=body.manual_school_ids,
-    )
+def _check_contact_problems(
+    org_id: str, criteria: dict, manual_school_ids: list[str] | None, recipient_role: str,
+    channel: str, is_meeting_task: bool, alternate_role: str | None, academic_year: str,
+) -> dict:
+    """Extracted from the /contacts/check endpoint handler so it can be reused for a scheduled
+    general (non-meeting) task's re-validation right before activation (see
+    _try_activate_scheduled_task) — same reasoning as _check_meeting_problems for the meeting
+    track. Resolves each matched school's recipient through the role-priority cascade and
+    reports who has a usable contact and who doesn't."""
+    matched = task_logic.find_matching_schools(org_id, criteria, academic_year, manual_school_ids=manual_school_ids)
     school_ids = [m["school_id"] for m in matched]
     db = get_admin_client()
     schools = db.table("schools").select("*").in_("id", school_ids).execute().data or [] if school_ids else []
@@ -599,7 +601,7 @@ def check_contacts(body: ContactsCheckIn, user: Annotated[dict, Depends(get_curr
         school = schools_by_id.get(m["school_id"])
         if not school:
             continue
-        res = _resolve_recipient_with_cascade(school, body.recipient_role, body.is_meeting_task, body.channel, body.alternate_role)
+        res = _resolve_recipient_with_cascade(school, recipient_role, is_meeting_task, channel, alternate_role)
         entry = {
             "school_id": m["school_id"], "school_name": m["school_name"],
             "symbol": m.get("symbol"), "authority": m.get("authority"),
@@ -609,6 +611,22 @@ def check_contacts(body: ContactsCheckIn, user: Annotated[dict, Depends(get_curr
             entry.update(_missing_contact_detail(school))
         results.append(entry)
     return {"schools": results, "missing_count": sum(1 for r in results if not r["has_contact"])}
+
+
+@router.post("/contacts/check")
+def check_contacts(body: ContactsCheckIn, user: Annotated[dict, Depends(get_current_user)]):
+    """Pre-creation contact-resolution check (TaskContactResolutionModal) — for the task's
+    audience (by criteria or manual_school_ids), resolves each school's recipient through the
+    role-priority cascade and reports who has a usable contact and who doesn't. Round 6: for
+    meeting-scheduling tasks specifically, this coordinator check has been folded into the
+    unified POST /tasks/meetings/check + TaskMeetingResolutionModal instead — this endpoint
+    (and TaskContactResolutionModal) now only runs for general/non-meeting tasks."""
+    _require_manager(user)
+    criteria = body.criteria.model_dump() if body.criteria else {}
+    return _check_contact_problems(
+        user["org_id"], criteria, body.manual_school_ids, body.recipient_role,
+        body.channel, body.is_meeting_task, body.alternate_role, body.academic_year,
+    )
 
 
 _CONTACT_EXPORT_COLUMNS = [
@@ -728,12 +746,14 @@ def _coordinator_problem(school: dict, channel: str) -> dict | None:
     return _missing_contact_detail(school)
 
 
-@router.post("/meetings/check")
-def check_meetings(body: MeetingsCheckIn, user: Annotated[dict, Depends(get_current_user)]):
+def _check_meeting_problems(
+    org_id: str, criteria: dict, manual_school_ids: list[str] | None,
+    meeting_requirements: list[MeetingRequirementIn], channel: str, academic_year: str,
+) -> dict:
     """Round-6 unified pre-creation check (TaskMeetingResolutionModal) for 'קביעת פגישות'
     tasks — replaces both the old split-out advisor/participant-name-only version of this
     endpoint AND a separate call to /tasks/contacts/check for the coordinator. Per matched
-    school, reports up to three independent problem kinds:
+    school, reports up to four independent problem kinds:
     - coordinator: who actually receives the "pick a time" email — same cascade /contacts/check
       uses, fixed to recipient_role="meeting_coordinator".
     - participants: named contacts invited to the meeting itself, deduped across every meeting
@@ -744,11 +764,14 @@ def check_meetings(body: MeetingsCheckIn, user: Annotated[dict, Depends(get_curr
       card for a division actually being requested — never checked before round 6 (silently
       fell back to 60 minutes at send time instead). One entry per meeting_service_type that
       has either gap, not two separate entries.
-    """
-    _require_manager(user)
-    criteria = body.criteria.model_dump() if body.criteria else {}
+    - advisor_access: a manually-chosen advisor who no longer has access to the school's card.
+
+    Extracted out of the /meetings/check endpoint handler so it can be reused both for the
+    pre-creation wizard check AND for re-validating an already-created task right before a
+    scheduled send (see /tasks/{task_id}/meetings/check and _try_activate_scheduled_task) —
+    behavior is byte-for-byte identical to the original inline version, just parameterized."""
     matched = task_logic.find_matching_schools(
-        user["org_id"], criteria, body.academic_year, manual_school_ids=body.manual_school_ids,
+        org_id, criteria, academic_year, manual_school_ids=manual_school_ids,
     )
     school_ids = [m["school_id"] for m in matched]
     if not school_ids:
@@ -767,10 +790,10 @@ def check_meetings(body: MeetingsCheckIn, user: Annotated[dict, Depends(get_curr
     duration_rows = (
         db.table("school_year_admin_data")
         .select("school_id, meeting_duration_gefen, meeting_duration_current, meeting_duration_district")
-        .eq("academic_year", body.academic_year).in_("school_id", school_ids).execute().data or []
+        .eq("academic_year", academic_year).in_("school_id", school_ids).execute().data or []
     )
     duration_by_school = {r["school_id"]: r for r in duration_rows}
-    needs_phone = body.channel == "whatsapp_twilio"
+    needs_phone = channel == "whatsapp_twilio"
 
     results = []
     for m in matched:
@@ -778,12 +801,12 @@ def check_meetings(body: MeetingsCheckIn, user: Annotated[dict, Depends(get_curr
         if not school:
             continue
 
-        coordinator = _coordinator_problem(school, body.channel)
+        coordinator = _coordinator_problem(school, channel)
 
         # Round 8: "principal" expands to 1-2 concrete slots (tichon/chativa) per this
         # school's stage_scope-aware resolution — every other role stays a flat 1:1 pass-through.
         participant_roles_needed: set[str] = set()
-        for req in body.meeting_requirements:
+        for req in meeting_requirements:
             for role in req.participant_roles:
                 if role == "principal":
                     participant_roles_needed.update(_principal_slots_for_school(school, req.stage_scope))
@@ -813,7 +836,7 @@ def check_meetings(body: MeetingsCheckIn, user: Annotated[dict, Depends(get_curr
 
         duration_row = duration_by_school.get(school["id"], {})
         type_needs: dict[str, dict] = {}
-        for req in body.meeting_requirements:
+        for req in meeting_requirements:
             service_type = req.meeting_service_type
             if service_type not in _MEETING_TYPE_LABELS:
                 continue
@@ -827,14 +850,71 @@ def check_meetings(body: MeetingsCheckIn, user: Annotated[dict, Depends(get_curr
             for t, flags in type_needs.items() if flags["missing_advisor"] or flags["missing_duration"]
         ]
 
-        if coordinator or participants or meeting_defaults:
+        # Advisor-access check — the "the manually picked advisor can't actually reach this
+        # school's card" case from the temp-access-grant feature. Only relevant for manual-mode
+        # requirements (a "default" advisor is resolved from the school's own card, which
+        # implicitly already has access via advisors_gefen/current/district assignment).
+        advisor_access = []
+        for req in meeting_requirements:
+            if req.advisor_mode != "manual" or not req.advisor_ids:
+                continue
+            for advisor_id in req.advisor_ids:
+                if not _schools_router._advisor_has_school_access(db, advisor_id, school):
+                    advisor_access.append({
+                        "meeting_service_type": req.meeting_service_type,
+                        "advisor_id": advisor_id,
+                        "date_from": req.date_from,
+                        "date_to": req.date_to,
+                    })
+
+        if coordinator or participants or meeting_defaults or advisor_access:
             results.append({
                 "school_id": school["id"], "school_name": school["name"],
                 "symbol": school.get("symbol"), "authority": school.get("authority"),
                 "coordinator": coordinator, "participants": participants, "meeting_defaults": meeting_defaults,
+                "advisor_access": advisor_access,
             })
 
     return {"schools": results, "total_schools": len(matched), "ok_schools": len(matched) - len(results)}
+
+
+@router.post("/meetings/check")
+def check_meetings(body: MeetingsCheckIn, user: Annotated[dict, Depends(get_current_user)]):
+    """Pre-creation check, driven by TaskMeetingResolutionModal in the task-creation wizard.
+    See _check_meeting_problems for the actual problem-detection logic."""
+    _require_manager(user)
+    criteria = body.criteria.model_dump() if body.criteria else {}
+    return _check_meeting_problems(
+        user["org_id"], criteria, body.manual_school_ids, body.meeting_requirements,
+        body.channel, body.academic_year,
+    )
+
+
+def _meeting_requirements_from_task(task: dict) -> list[MeetingRequirementIn]:
+    """Reconstructs the meeting_requirements list an already-created task was built with,
+    straight from its persisted success_criteria — same source _meeting_conditions_from_
+    success_criteria (used by _queue_messages_for_schools) already reads from. Extra keys
+    like "type" on each condition dict are silently ignored by MeetingRequirementIn."""
+    return [MeetingRequirementIn(**c) for c in _meeting_conditions_from_success_criteria(task)]
+
+
+@router.get("/{task_id}/meetings/check")
+def check_task_meeting_problems(task_id: str, user: Annotated[dict, Depends(get_current_user)]):
+    """Live re-check of an already-created meeting-scheduling task's current problems — used
+    by the 'בעיות' screen opened from a red task-card badge or a task_send_problems
+    notification (see has_meeting_send_problems / _try_activate_scheduled_task)."""
+    _require_manager(user)
+    db = get_admin_client()
+    task_row = db.table("org_tasks").select("*").eq("id", task_id).eq("org_id", user["org_id"]).execute().data
+    if not task_row:
+        raise HTTPException(status_code=404, detail="משימה לא נמצאה")
+    task = task_row[0]
+    meeting_requirements = _meeting_requirements_from_task(task)
+    channel = (task.get("message_config") or {}).get("channel") or "email_resend"
+    return _check_meeting_problems(
+        user["org_id"], task.get("criteria") or {}, task.get("manual_school_ids"),
+        meeting_requirements, channel, task.get("academic_year") or DEFAULT_ACADEMIC_YEAR,
+    )
 
 
 class MeetingProblemRowIn(BaseModel):
@@ -971,6 +1051,7 @@ def create_task(body: TaskCreateIn, user: Annotated[dict, Depends(get_current_us
             # the meeting) — see plan decision #2.
             progress = task_logic.compute_task_progress(user["org_id"], task)
             send_targets = [r["school_id"] for r in progress["schools"] if not r["done"]]
+            _mark_already_done_schools(db, task["id"], matched_school_ids, send_targets)
         else:
             send_targets = matched_school_ids
         if send_targets:
@@ -1161,6 +1242,7 @@ def get_task(task_id: str, user: Annotated[dict, Depends(get_current_user)]):
             note_row = notes_map.get(row["school_id"])
             row["note"] = (note_row or {}).get("note")
             row["excluded_emails"] = (note_row or {}).get("excluded_emails") or []
+            row["skip_reason"] = (note_row or {}).get("skip_reason")
     except Exception as exc:
         logger.warning("get_task notes/exclusions enrichment failed (non-fatal): %s", exc)
 
@@ -1223,14 +1305,20 @@ def _render_template(template: str, school: dict, booking_link: str | None = Non
 _EMAIL_BODY_TOKEN_RE = re.compile(r"(\{meetings_list\}|\{booking_link\})")
 
 
-def _wrap_email_html(rendered_text: str, booking_url: str | None, meetings_list_html: str | None) -> str:
+def _wrap_email_html(rendered_text: str, booking_url: str | None, meetings_list_html: str | None, branded: bool = True) -> str:
     """Wraps a manager-authored body (rendered via _render_template(..., keep_tokens=True), so
-    {meetings_list}/{booking_link} are still literal tokens here) in the same branded card used by
-    booking_logic.build_direct_coordination_email_html. Free-text segments are HTML-escaped and
-    \\n\\n/\\n converted to real paragraph/line breaks — fixing the long-standing bug where
-    plain-text task bodies were sent as literal (unescaped) HTML, so newlines never rendered for
-    the recipient. {meetings_list}'s value is trusted, pre-built HTML (from
-    booking_logic.format_ranges_html) and is never escaped."""
+    {meetings_list}/{booking_link} are still literal tokens here). Free-text segments are
+    HTML-escaped and \\n\\n/\\n converted to real paragraph/line breaks — fixing the long-standing
+    bug where plain-text task bodies were sent as literal (unescaped) HTML, so newlines never
+    rendered for the recipient. {meetings_list}'s value is trusted, pre-built HTML (from
+    booking_logic.format_ranges_html) and is never escaped.
+
+    branded=True (default, used for email_resend) wraps the body in the same branded card used
+    by booking_logic.build_direct_coordination_email_html — "גפן AI" header bar + footer.
+    branded=False (used for email_outlook) skips that chrome entirely — an Outlook send goes out
+    under the actual sender's own name/mailbox and is meant to read as a personal email from
+    them, not as automated system mail; the blue "גפן AI" branding looked out of place there
+    (confirmed live)."""
     parts = _EMAIL_BODY_TOKEN_RE.split(rendered_text)
     html_parts = []
     for part in parts:
@@ -1252,6 +1340,15 @@ def _wrap_email_html(rendered_text: str, booking_url: str | None, meetings_list_
                 escaped = html.escape(paragraph).replace("\n", "<br/>")
                 html_parts.append(f'<p style="margin: 0 0 16px 0; color: #334155; line-height: 1.8;">{escaped}</p>')
     body_html = "".join(html_parts)
+
+    if not branded:
+        return f"""
+<html>
+<body dir="rtl" style="font-family: Arial, sans-serif; font-size: 14px; color: #1e293b; margin: 0; padding: 0;">
+  {body_html}
+</body>
+</html>"""
+
     return f"""
 <html>
 <body dir="rtl" style="font-family: Arial, sans-serif; font-size: 14px; color: #1e293b;
@@ -1364,22 +1461,43 @@ def _build_meeting_booking_link(
             duration_minutes = c.get("duration_minutes") or 60
         else:
             duration_minutes = override.get("duration_minutes") or duration_row.get(f"meeting_duration_{service_type}") or 60
-        participants = _build_school_contacts(school, c.get("participant_roles") or [], c.get("stage_scope"))
-        if not participants:
-            continue
 
-        type_seen[service_type] = type_seen.get(service_type, 0) + 1
-        base_label = f"פגישת {_MEETING_TYPE_LABELS[service_type]}"
-        label = base_label if type_counts[service_type] == 1 else f"{base_label} ({type_seen[service_type]})"
-        ranges_data.append({
-            "key": f"r{len(ranges_data)}-{secrets.token_urlsafe(6)}",
-            "start_date": start_date, "end_date": end_date,
-            "service_type": service_type, "duration_minutes": duration_minutes,
-            "label": label, "participants": participants, "advisor_ids": advisor_ids,
-        })
-        for aid in advisor_ids:
-            if aid not in advisor_ids_union:
-                advisor_ids_union.append(aid)
+        roles = c.get("participant_roles") or []
+        stage_scope = c.get("stage_scope")
+        # Round 16 — "separate" builds TWO independent ranges (one per principal) instead of one
+        # merged range with both principals as participants, mirroring StageScopeModal.jsx's
+        # existing "שתי פגישות נפרדות" option for the general (non-task) scheduling flow.
+        split_scopes = ["tichon", "chativa"] if (stage_scope == "separate" and "principal" in roles) else [stage_scope]
+
+        for split_scope in split_scopes:
+            participants = _build_school_contacts(school, roles, split_scope)
+            if not participants:
+                continue
+
+            type_seen[service_type] = type_seen.get(service_type, 0) + 1
+            base_label = f"פגישת {_MEETING_TYPE_LABELS[service_type]}"
+            if len(split_scopes) > 1:
+                principal_slot = "principal" if split_scope == "tichon" else "principal_chativa"
+                label = f"{base_label} — {_principal_role_label(school, principal_slot)}"
+            elif type_counts[service_type] == 1:
+                label = base_label
+            else:
+                label = f"{base_label} ({type_seen[service_type]})"
+            ranges_data.append({
+                "key": f"r{len(ranges_data)}-{secrets.token_urlsafe(6)}",
+                "start_date": start_date, "end_date": end_date,
+                "service_type": service_type, "duration_minutes": duration_minutes,
+                "label": label, "participants": participants, "advisor_ids": advisor_ids,
+                # Round 17 — tags this range with which principal slot it's for (or the
+                # condition's original stage_scope when not splitting), so the booked `meetings`
+                # row can carry it too — without this, two ranges from the same "separate"
+                # condition are indistinguishable at the DB level and booking either one
+                # incorrectly satisfies (and duplicate-blocks) the other.
+                "stage_scope": split_scope,
+            })
+            for aid in advisor_ids:
+                if aid not in advisor_ids_union:
+                    advisor_ids_union.append(aid)
 
     if not ranges_data or not advisor_ids_union:
         return None, None, None
@@ -1402,7 +1520,7 @@ def _fetch_school_notes_map(db, task_id: str, school_ids: list[str]) -> dict[str
         return {}
     rows = (
         db.table("org_task_school_notes")
-        .select("school_id, note, excluded_emails")
+        .select("school_id, note, excluded_emails, skip_reason")
         .eq("task_id", task_id)
         .in_("school_id", school_ids)
         .execute()
@@ -1413,7 +1531,7 @@ def _fetch_school_notes_map(db, task_id: str, school_ids: list[str]) -> dict[str
 
 def _send_message_now(db, org_id: str, school_id: str, channel: str, subject: str, body: str,
                        recipient_email: str | None, recipient_phone: str | None,
-                       attachment_keys: list[dict] | None) -> tuple[str, str | None]:
+                       attachment_keys: list[dict] | None, created_by: str | None = None) -> tuple[str, str | None]:
     """Round-7 — actually dispatches one message through its channel. Shared by
     process_message_queue's cron-drained batches AND _queue_messages_for_schools' own
     immediate-send path below (email_resend/whatsapp no longer wait for the cron at all — see
@@ -1426,6 +1544,13 @@ def _send_message_now(db, org_id: str, school_id: str, channel: str, subject: st
     still come back minutes later, confirmed live). The caller (process_message_queue) is
     responsible for later confirming/falling-back via graph_client.find_bounce_for_subject; this
     function itself never blocks waiting for that.
+
+    created_by: the task's creator (org_tasks.created_by) — for email_outlook this is WHOSE
+    mailbox actually sends the message. Previously this looked up the school's assigned advisor
+    instead (advisor_schools), which sent from a possibly-unrelated, possibly low-reputation/
+    newly-created mailbox instead of the (usually senior, established) manager who authored the
+    task — confirmed live to be the wrong mailbox. Required for email_outlook; other channels
+    ignore it.
 
     attachment_keys: list of {"key": storage_key, "filename": original_filename} — the display
     filename travels alongside the (ASCII-only) storage key rather than being derived from it
@@ -1444,11 +1569,9 @@ def _send_message_now(db, org_id: str, school_id: str, channel: str, subject: st
                 raise RuntimeError("הארגון אינו מחובר ל-Outlook")
             if not _outlook_daily_count_ok_and_increment(org_id):
                 raise RuntimeError("מגבלת השליחה היומית של Outlook הארגוני הושגה להיום — ההודעה תישלח מחר או שכדאי לעבור זמנית לערוץ מייל אחר")
-            advisors = db.table("advisor_schools").select("advisor_id").eq("school_id", school_id).execute().data or []
-            advisor_id = advisors[0]["advisor_id"] if advisors else None
-            if not advisor_id:
-                raise RuntimeError("לא נמצא יועץ לבית הספר לצורך שליחה מ-Outlook")
-            graph_client.send_mail_as_advisor(db, org_id, advisor_id, subject or "", body or "", recipient_email, attachments=attachments)
+            if not created_by:
+                raise RuntimeError("לא ידוע יוצר המשימה לצורך שליחה מ-Outlook")
+            graph_client.send_mail_as_advisor(db, org_id, created_by, subject or "", body or "", recipient_email, attachments=attachments)
             return "outlook_pending", None
         elif channel == "whatsapp_twilio":
             whatsapp_twilio.send_whatsapp_message(org_id, recipient_phone, body or "", attachment_keys)
@@ -1457,6 +1580,24 @@ def _send_message_now(db, org_id: str, school_id: str, channel: str, subject: st
         return "sent", None
     except Exception as exc:
         return "failed", str(exc)
+
+
+def _mark_already_done_schools(db, task_id: str, matched_school_ids: list[str], send_targets: list[str]) -> None:
+    """Schools excluded from send_targets because they already satisfied success at the moment
+    send_targets was computed (see track_success filtering in create_task/
+    _try_activate_scheduled_task) get no org_task_messages row at all — from TaskPanel.jsx's
+    point of view that's indistinguishable from "not sent yet"/"missing contact". Persists the
+    same skip_reason marker _queue_messages_for_schools already uses for its own skip cases, so
+    get_task can surface it and the UI can show "אין צורך" instead of a bare "—"."""
+    already_done = set(matched_school_ids) - set(send_targets)
+    for school_id in already_done:
+        try:
+            db.table("org_task_school_notes").upsert(
+                {"task_id": task_id, "school_id": school_id, "skip_reason": "already_done"},
+                on_conflict="task_id,school_id",
+            ).execute()
+        except Exception as exc:
+            logger.warning("_mark_already_done_schools: failed to persist skip_reason (non-fatal): %s", exc)
 
 
 def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[str],
@@ -1602,7 +1743,7 @@ def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[st
             rendered = _render_template(body_template, school, opt_out_link=opt_out_link,
                                          recipient_name=recipient.get("name"), advisor_names=advisor_names_value,
                                          keep_tokens=True)
-            body = _wrap_email_html(rendered, booking_link, meetings_list_html)
+            body = _wrap_email_html(rendered, booking_link, meetings_list_html, branded=(channel != "email_outlook"))
 
         row = {
             "task_id": task["id"],
@@ -1624,6 +1765,7 @@ def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[st
             status, error = _send_message_now(
                 db, org_id, school["id"], channel, row["subject"], row["body"],
                 row.get("recipient_email"), row.get("recipient_phone"), row.get("attachment_keys"),
+                created_by=task.get("created_by"),
             )
             row["status"] = status
             if status == "sent":
@@ -1809,8 +1951,9 @@ def process_message_queue(request: Request):
     sent, failed, skipped = 0, 0, 0
     for row in rows:
         try:
-            task = db.table("org_tasks").select("org_id").eq("id", row["task_id"]).execute().data
+            task = db.table("org_tasks").select("org_id, created_by").eq("id", row["task_id"]).execute().data
             org_id = task[0]["org_id"] if task else None
+            created_by = task[0]["created_by"] if task else None
             if not org_id:
                 raise ValueError(f"task {row['task_id']} not found for queued message {row['id']}")
 
@@ -1833,6 +1976,7 @@ def process_message_queue(request: Request):
             status, error = _send_message_now(
                 db, org_id, row["school_id"], row["channel"], row["subject"], row["body"],
                 row.get("recipient_email"), row.get("recipient_phone"), row.get("attachment_keys"),
+                created_by=created_by,
             )
             if status == "sent":
                 db.table("org_task_messages").update({"status": "sent", "sent_at": "now()"}).eq("id", row["id"]).execute()
@@ -1873,20 +2017,22 @@ def process_message_queue(request: Request):
     )
     for row in outlook_pending_rows:
         try:
-            task = db.table("org_tasks").select("org_id").eq("id", row["task_id"]).execute().data
+            task = db.table("org_tasks").select("org_id, created_by").eq("id", row["task_id"]).execute().data
             org_id = task[0]["org_id"] if task else None
+            created_by = task[0]["created_by"] if task else None
             if not org_id:
                 raise ValueError(f"task {row['task_id']} not found for outlook_pending message {row['id']}")
 
-            advisors = db.table("advisor_schools").select("advisor_id").eq("school_id", row["school_id"]).execute().data or []
-            advisor_id = advisors[0]["advisor_id"] if advisors else None
-            if not advisor_id:
+            if not created_by:
                 # Can't check for a bounce without a mailbox to inspect — best-effort finalize.
                 db.table("org_task_messages").update({"status": "sent", "sent_at": "now()"}).eq("id", row["id"]).execute()
                 confirmed += 1
                 continue
 
-            bounced = graph_client.find_bounce_for_subject(db, org_id, advisor_id, row.get("subject") or "", row["outlook_sent_at"])
+            # The message was actually sent from the task creator's own mailbox (see
+            # _send_message_now) — so that's whose Inbox the NDR would land in, not the
+            # school's assigned advisor's.
+            bounced = graph_client.find_bounce_for_subject(db, org_id, created_by, row.get("subject") or "", row["outlook_sent_at"])
             if bounced is None:
                 continue  # couldn't check (missing Mail.Read consent / transient error) — retried next tick
 
@@ -1920,6 +2066,102 @@ def process_message_queue(request: Request):
     }
 
 
+def _hold_back_scheduled_task(db, task: dict, meeting_wording: bool) -> dict:
+    """Shared false→true/true→false transition + one-time notification logic for both problem
+    kinds (meeting-requirement problems and general-task contact problems) — see
+    _try_activate_scheduled_task. Reuses the same has_meeting_send_problems boolean column for
+    both task types: a given org_tasks row is always exclusively meeting or general, never both,
+    so there's no collision risk in sharing one column rather than adding a second."""
+    if not task.get("has_meeting_send_problems"):
+        db.table("org_tasks").update({"has_meeting_send_problems": True}).eq("id", task["id"]).execute()
+        title = (
+            "קיימות בעיות שמונעות ביצוע משימה לקביעת פגישות שתוזמנה להיום. אנא היכנס בכדי לפתור אותן."
+            if meeting_wording else
+            "קיימות בעיות שמונעות ביצוע משימה שתוזמנה להיום. אנא היכנס בכדי לפתור אותן."
+        )
+        try:
+            _schools_router._create_notifications(db, [{
+                "recipient_id": task["created_by"],
+                "type": "task_send_problems",
+                "data": {"title": title, "task_id": task["id"], "task_name": task.get("name")},
+            }])
+        except Exception as exc:
+            logger.warning("_try_activate_scheduled_task: notification failed (non-fatal) for task %s: %s", task["id"], exc)
+    return {"activated": False, "has_problems": True}
+
+
+def _try_activate_scheduled_task(db, task: dict) -> dict:
+    """Attempts to activate a single 'scheduled' task whose scheduled_for has arrived (also
+    reused for a manager-triggered immediate retry — see /retry-now below). Before activating,
+    re-validates whatever would block the send against CURRENT data (not the stale snapshot the
+    wizard checked at creation time — this is the whole point: something can have broken in
+    between): for meeting-scheduling tasks, coordinator/participant/meeting-default/advisor-
+    access problems (_check_meeting_problems); for general tasks, recipient-contact
+    resolvability (_check_contact_problems) — the exact same cascade /tasks/contacts/check
+    already uses pre-creation, just re-run live. If any matched school currently has a problem,
+    activation is held entirely: status stays 'scheduled', nothing is sent to ANY school (not
+    just the problem ones), and — only on the false→true transition of has_meeting_send_problems,
+    to avoid renotifying every 15-minute tick — a single notification is created for the task's
+    creator. Once the underlying data is fixed (via the dedicated 'בעיות' screen for meeting
+    tasks, a direct fix on the school card, or /retry-now), the very next call naturally proceeds
+    past this check and sends — no separate 'resolved' bookkeeping needed, it self-heals by
+    construction. Returns {"activated": bool, "has_problems": bool}."""
+    org_id = task["org_id"]
+
+    if task.get("is_meeting_task"):
+        meeting_requirements = _meeting_requirements_from_task(task)
+        channel = (task.get("message_config") or {}).get("channel") or "email_resend"
+        academic_year = task.get("academic_year") or DEFAULT_ACADEMIC_YEAR
+        check = _check_meeting_problems(
+            org_id, task.get("criteria") or {}, task.get("manual_school_ids"),
+            meeting_requirements, channel, academic_year,
+        )
+        if check["schools"]:
+            return _hold_back_scheduled_task(db, task, meeting_wording=True)
+        elif task.get("has_meeting_send_problems"):
+            db.table("org_tasks").update({"has_meeting_send_problems": False}).eq("id", task["id"]).execute()
+    else:
+        message_config = task.get("message_config") or {}
+        recipient_role = message_config.get("recipient_role")
+        channel = message_config.get("channel") or "email_resend"
+        academic_year = task.get("academic_year") or DEFAULT_ACADEMIC_YEAR
+        check = _check_contact_problems(
+            org_id, task.get("criteria") or {}, task.get("manual_school_ids"), recipient_role,
+            channel, False, None, academic_year,
+        )
+        if any(not s["has_contact"] for s in check["schools"]):
+            return _hold_back_scheduled_task(db, task, meeting_wording=False)
+        elif task.get("has_meeting_send_problems"):
+            db.table("org_tasks").update({"has_meeting_send_problems": False}).eq("id", task["id"]).execute()
+
+    matched = task_logic.find_matching_schools(
+        org_id, task.get("criteria") or {}, task.get("academic_year") or DEFAULT_ACADEMIC_YEAR,
+        manual_school_ids=task.get("manual_school_ids"),
+    )
+    matched_school_ids = [m["school_id"] for m in matched]
+    db.table("org_tasks").update({
+        "matched_school_ids": matched_school_ids,
+        "status": "active",
+    }).eq("id", task["id"]).execute()
+    task["matched_school_ids"] = matched_school_ids
+
+    if matched_school_ids:
+        if task.get("track_success", True):
+            progress = task_logic.compute_task_progress(org_id, task)
+            send_targets = [r["school_id"] for r in progress["schools"] if not r["done"]]
+            _mark_already_done_schools(db, task["id"], matched_school_ids, send_targets)
+        else:
+            send_targets = matched_school_ids
+
+        channel = (task.get("message_config") or {}).get("channel")
+        if send_targets and channel == "email_outlook" and len(send_targets) > OUTLOOK_SEND_WARN_THRESHOLD:
+            db.table("org_tasks").update({"needs_outlook_confirmation": True}).eq("id", task["id"]).execute()
+        elif send_targets:
+            _queue_messages_for_schools(db, task, org_id, send_targets)
+
+    return {"activated": True, "has_problems": False}
+
+
 @router.post("/process-scheduled-tasks")
 def process_scheduled_tasks(request: Request):
     """Cron-triggered (same convention as process-message-queue). Evaluates tasks that were
@@ -1933,11 +2175,21 @@ def process_scheduled_tasks(request: Request):
     switch channel/cancel) is impossible here — if activation would exceed the warning
     threshold on an Outlook-channel task, messages are deliberately left unqueued and
     `needs_outlook_confirmation` is set so TaskPanel.jsx can surface a banner requiring a
-    manager to explicitly confirm before anything sends (see plan decision #1)."""
+    manager to explicitly confirm before anything sends (see plan decision #1).
+
+    Per-task activation logic lives in _try_activate_scheduled_task (also reused by the
+    manager-triggered /retry-now endpoint for an immediate re-attempt after fixing a problem
+    that was blocking a scheduled meeting-task's send — see that function's docstring)."""
     if not CRON_SECRET or request.headers.get("X-Cron-Secret") != CRON_SECRET:
         raise HTTPException(status_code=401, detail="unauthorized")
 
     db = get_admin_client()
+
+    try:
+        _schools_router.process_temp_advisor_access(db)
+    except Exception as exc:
+        logger.warning("process_scheduled_tasks: temp advisor access processing failed (non-fatal): %s", exc)
+
     now_iso = datetime.now(timezone.utc).isoformat()
     rows = (
         db.table("org_tasks")
@@ -1951,31 +2203,26 @@ def process_scheduled_tasks(request: Request):
     evaluated = 0
     for task in rows:
         try:
-            matched = task_logic.find_matching_schools(
-                task["org_id"], task.get("criteria") or {}, task.get("academic_year") or DEFAULT_ACADEMIC_YEAR,
-                manual_school_ids=task.get("manual_school_ids"),
-            )
-            matched_school_ids = [m["school_id"] for m in matched]
-            db.table("org_tasks").update({
-                "matched_school_ids": matched_school_ids,
-                "status": "active",
-            }).eq("id", task["id"]).execute()
-            task["matched_school_ids"] = matched_school_ids
-
-            if matched_school_ids:
-                if task.get("track_success", True):
-                    progress = task_logic.compute_task_progress(task["org_id"], task)
-                    send_targets = [r["school_id"] for r in progress["schools"] if not r["done"]]
-                else:
-                    send_targets = matched_school_ids
-
-                channel = (task.get("message_config") or {}).get("channel")
-                if send_targets and channel == "email_outlook" and len(send_targets) > OUTLOOK_SEND_WARN_THRESHOLD:
-                    db.table("org_tasks").update({"needs_outlook_confirmation": True}).eq("id", task["id"]).execute()
-                elif send_targets:
-                    _queue_messages_for_schools(db, task, task["org_id"], send_targets)
+            _try_activate_scheduled_task(db, task)
             evaluated += 1
         except Exception as exc:
             logger.warning("process_scheduled_tasks: failed to evaluate task %s: %s", task["id"], exc)
 
     return {"ok": True, "evaluated": evaluated, "batch_size": len(rows)}
+
+
+@router.post("/{task_id}/retry-now")
+def retry_task_now(task_id: str, user: Annotated[dict, Depends(get_current_user)]):
+    """Manual immediate retry for a scheduled task currently held back by has_meeting_send_
+    problems — called right after the manager fixes the underlying issue via the 'בעיות' screen,
+    so they don't have to wait for the next cron tick even though the scheduled time already
+    passed. No-op (returns current state) if the task isn't in 'scheduled' status."""
+    _require_manager(user)
+    db = get_admin_client()
+    task_row = db.table("org_tasks").select("*").eq("id", task_id).eq("org_id", user["org_id"]).execute().data
+    if not task_row:
+        raise HTTPException(status_code=404, detail="משימה לא נמצאה")
+    task = task_row[0]
+    if task["status"] != "scheduled":
+        return {"activated": task["status"] == "active", "has_problems": False}
+    return _try_activate_scheduled_task(db, task)

@@ -1,9 +1,17 @@
 import { useEffect, useState } from "react";
 import TaskDateTimeInput from "./TaskDateTimeInput";
 import FieldPickerButton from "./FieldPickerButton";
+import { MEETING_STATUS_OPTIONS, MEETING_TYPE_OPTIONS } from "../meetings/constants";
+
+// Only scheduled/completed meetings are ever fetched for condition-matching at all (see
+// backend/task_logic.py's _fetch_schools_and_meetings, which pre-filters at the query level for
+// BOTH audience-filtering and success-tracking) — cancelled/postponed/other meetings never
+// reach this evaluation regardless of what a condition asks for. Restricting the dropdown to
+// just these two avoids offering options that could never actually match anything.
+const MEETING_CONDITION_STATUS_OPTIONS = MEETING_STATUS_OPTIONS.filter(s => s.value === "scheduled" || s.value === "completed");
 
 const EMPTY_MEETING_CONDITION = {
-  type: "meeting", meeting_service_type: "", date_from: "", date_to: "", negate: false,
+  type: "meeting", meeting_service_type: "", status: "", meeting_type: "", date_from: "", date_to: "", negate: false,
   // Round-5 "אילו פגישות צריך לקבוע?" metadata — ignored entirely by success-condition
   // evaluation (_eval_meeting_condition/_resolve_condition only read the fields above), used
   // only by the booking-link generator when this condition lives inside a meeting-scheduling
@@ -20,7 +28,16 @@ const MEETING_TYPE_PILLS = [{ value: "gefen", label: "גפן" }, { value: "curre
 const PARTICIPANT_ROLE_OPTIONS = [
   { value: "principal", label: "מנהל/ת" }, { value: "secretary", label: "מנהלנ/ית" }, { value: "finance_contact", label: "אחראי/ת כספים" },
 ];
-const STAGE_SCOPE_PILLS = [{ value: "tichon", label: "תיכון" }, { value: "chativa", label: 'חט"ב' }, { value: "both", label: "שניהם" }];
+// Round 16 — "separate" mirrors StageScopeModal.jsx's existing "שתי פגישות נפרדות" option
+// (frontend/src/components/meetings/StageScopeModal.jsx), which this task-level requirement
+// previously had no equivalent for: _build_meeting_booking_link now builds two independent
+// bookable ranges (one per principal) instead of merging both into one range's participant list.
+const STAGE_SCOPE_PILLS = [
+  { value: "tichon", label: "תיכון" },
+  { value: "chativa", label: 'חט"ב' },
+  { value: "both", label: "שניהם (פגישה אחת)" },
+  { value: "separate", label: "שתי פגישות נפרדות" },
+];
 function needsStageScope(cond) {
   return cond.meeting_service_type && cond.meeting_service_type !== "current" && (cond.participant_roles || []).includes("principal");
 }
@@ -197,8 +214,12 @@ function TypeaheadValueInput({ value, options, onChange }) {
   );
 }
 
+// "meeting" is no longer chosen via a type-selector — it's reached through the field-picker's
+// "פגישות" category (see conditionForPickedKey) — so a freshly-added blank condition should
+// default to a plain field condition whenever that's allowed at all, falling back to meeting
+// only for the dedicated meeting-requirements block (allowedTypes=["meeting"] only).
 function defaultConditionFor(allowedTypes) {
-  return allowedTypes.includes("meeting") ? { ...EMPTY_MEETING_CONDITION } : { ...EMPTY_FIELD_CONDITION };
+  return allowedTypes.includes("field") ? { ...EMPTY_FIELD_CONDITION } : { ...EMPTY_MEETING_CONDITION };
 }
 
 export function newConditionGroup(allowedTypes = ["meeting", "field"]) {
@@ -214,7 +235,7 @@ export default function ConditionGroupsEditor({
   groups, setGroups, fieldOptions, meetingTypes, allSchools, allowedTypes = ["meeting", "field"],
   goalOptions, divisionOptions, budgetNameOptions, controlLetterFields, goalValueOptions, orgUsers,
   hideGroupChrome = false, forceMeetingNegateFalse = false, addConditionLabel = "+ הוסף תנאי (וגם)",
-  showValidationErrors = false,
+  showValidationErrors = false, valueFieldLabel = "ערך",
 }) {
   function updateCondition(gi, ci, patch) {
     setGroups(prev => prev.map((g, i) => i !== gi ? g : {
@@ -230,6 +251,7 @@ export default function ConditionGroupsEditor({
   function conditionForPickedKey(key) {
     if (key.startsWith("goal:")) return { ...EMPTY_GOAL_CONDITION, goal_key: key.slice("goal:".length) };
     if (key.startsWith("control_letter:")) return { ...EMPTY_CONTROL_LETTER_CONDITION, field: key.slice("control_letter:".length) };
+    if (key === "meeting:has") return { ...EMPTY_MEETING_CONDITION };
     return { type: "field", field: key, op: "eq", value: "" };
   }
   function handleFieldPick(gi, ci, keys) {
@@ -240,11 +262,6 @@ export default function ConditionGroupsEditor({
       conditions[ci] = conditionForPickedKey(keys[0]);
       const extra = keys.slice(1).map(conditionForPickedKey);
       return { ...g, conditions: [...conditions.slice(0, ci + 1), ...extra, ...conditions.slice(ci + 1)] };
-    }));
-  }
-  function setConditionType(gi, ci, type) {
-    setGroups(prev => prev.map((g, i) => i !== gi ? g : {
-      ...g, conditions: g.conditions.map((c, j) => j !== ci ? c : (type === "meeting" ? { ...EMPTY_MEETING_CONDITION } : { ...EMPTY_FIELD_CONDITION })),
     }));
   }
   function addCondition(gi) {
@@ -284,20 +301,6 @@ export default function ConditionGroupsEditor({
               <div key={ci} className={isMeetingCard ? "border border-slate-200 rounded-xl p-4 bg-white/60 space-y-3" : "border border-slate-100 rounded-lg p-2.5 bg-slate-50 space-y-2"}>
                 <div className="flex items-center gap-2">
                   {isMeetingCard && <span className="text-sm font-semibold text-slate-700">פגישה {ci + 1}</span>}
-                  {allowedTypes.length > 1 && (
-                    <select
-                      aria-label="סוג תנאי"
-                      // "goal"/"control_letter" are only ever reached via the field-picker's
-                      // "יעדים"/"מכתב בקרה" categories (not this dropdown) — shown here as
-                      // "שדה בית ספר" so the selector never renders with no match selected.
-                      value={cond.type === "goal" || cond.type === "control_letter" ? "field" : cond.type}
-                      onChange={e => setConditionType(gi, ci, e.target.value)}
-                      className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white"
-                    >
-                      {allowedTypes.includes("meeting") && <option value="meeting">פגישה</option>}
-                      {allowedTypes.includes("field") && <option value="field">שדה בית ספר</option>}
-                    </select>
-                  )}
                   {group.conditions.length > 1 && (
                     <button onClick={() => removeCondition(gi, ci)} aria-label={`הסרת פגישה ${ci + 1}`} className="text-slate-400 hover:text-red-500 mr-auto">
                       {isMeetingCard ? "✕" : (
@@ -442,6 +445,19 @@ export default function ConditionGroupsEditor({
                   </div>
                 ) : cond.type === "meeting" ? (
                   <div className="grid grid-cols-2 gap-2">
+                    <label className="text-xs text-slate-500 col-span-2">
+                      שדה
+                      <div className="mt-0.5">
+                        <FieldPickerButton
+                          value="meeting:has"
+                          fieldOptions={fieldOptions}
+                          goalOptions={goalOptions}
+                          controlLetterFields={controlLetterFields}
+                          allowMeeting
+                          onConfirm={keys => handleFieldPick(gi, ci, keys)}
+                        />
+                      </div>
+                    </label>
                     <label className="text-xs text-slate-500">
                       קיימת/אין
                       <select value={cond.negate ? "no" : "yes"} onChange={e => updateCondition(gi, ci, { negate: e.target.value === "no" })}
@@ -456,6 +472,22 @@ export default function ConditionGroupsEditor({
                         className="w-full mt-0.5 text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white">
                         <option value="">כל סוג</option>
                         {(meetingTypes || []).map(mt => <option key={mt} value={mt}>{MEETING_SERVICE_TYPE_LABELS[mt] || mt}</option>)}
+                      </select>
+                    </label>
+                    <label className="text-xs text-slate-500">
+                      סטטוס פגישה
+                      <select value={cond.status || ""} onChange={e => updateCondition(gi, ci, { status: e.target.value })}
+                        className="w-full mt-0.5 text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white">
+                        <option value="">כל סטטוס</option>
+                        {MEETING_CONDITION_STATUS_OPTIONS.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
+                      </select>
+                    </label>
+                    <label className="text-xs text-slate-500">
+                      מיקום פגישה
+                      <select value={cond.meeting_type || ""} onChange={e => updateCondition(gi, ci, { meeting_type: e.target.value })}
+                        className="w-full mt-0.5 text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white">
+                        <option value="">כל מיקום</option>
+                        {MEETING_TYPE_OPTIONS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
                       </select>
                     </label>
                     <label className="text-xs text-slate-500">
@@ -478,19 +510,6 @@ export default function ConditionGroupsEditor({
                         />
                       </div>
                     </label>
-                    {!cond.negate && (
-                      <label className="text-xs text-slate-500 col-span-2">
-                        כמות נדרשת (אופציונלי — למעקב "X מתוך Y" באחוז ההתקדמות)
-                        <input
-                          type="number"
-                          min="1"
-                          value={cond.required_count || ""}
-                          onChange={e => updateCondition(gi, ci, { required_count: e.target.value ? parseInt(e.target.value, 10) : null })}
-                          placeholder="למשל: 3"
-                          className="w-full mt-0.5 text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white"
-                        />
-                      </label>
-                    )}
                   </div>
                 ) : cond.type === "goal" ? (
                   <div className="grid grid-cols-2 gap-2">
@@ -502,6 +521,7 @@ export default function ConditionGroupsEditor({
                           fieldOptions={fieldOptions}
                           goalOptions={goalOptions}
                           controlLetterFields={controlLetterFields}
+                          allowMeeting={allowedTypes.includes("meeting")}
                           onConfirm={keys => handleFieldPick(gi, ci, keys)}
                         />
                       </div>
@@ -544,6 +564,7 @@ export default function ConditionGroupsEditor({
                             fieldOptions={fieldOptions}
                             goalOptions={goalOptions}
                             controlLetterFields={controlLetterFields}
+                            allowMeeting={allowedTypes.includes("meeting")}
                             onConfirm={keys => handleFieldPick(gi, ci, keys)}
                           />
                         </div>
@@ -605,6 +626,7 @@ export default function ConditionGroupsEditor({
                             fieldOptions={fieldOptions}
                             goalOptions={goalOptions}
                             controlLetterFields={controlLetterFields}
+                            allowMeeting={allowedTypes.includes("meeting")}
                             onConfirm={keys => handleFieldPick(gi, ci, keys)}
                           />
                         </div>
@@ -619,7 +641,7 @@ export default function ConditionGroupsEditor({
                         </label>
                       )}
                       <label className="text-xs text-slate-500 col-span-1">
-                        ערך
+                        {valueFieldLabel}
                         {(() => {
                           if (opt?.options) {
                             return (

@@ -9,6 +9,8 @@ import { NotesModal } from "../components/meetings/NotesModal";
 import { SchoolPickerModal, SchoolPickerPopover, schoolLabel } from "../components/meetings/SchoolPickerCell";
 import { StageScopeModal } from "../components/meetings/StageScopeModal";
 import { DirectCoordinationModal } from "../components/meetings/DirectCoordinationModal";
+import AdvisorAccessGrantModal from "../components/meetings/AdvisorAccessGrantModal";
+import MeetingAutomationsModal from "../components/meetings/MeetingAutomationsModal";
 import { MEETING_STATUS_OPTIONS, MEETING_TYPE_OPTIONS, MEETING_SERVICE_TYPE_OPTIONS, STATUS_MAP, formatMeetingDate, defaultMeetingServiceType, resolveDefaultAdvisorIds } from "../components/meetings/constants";
 import { AcademicYearSelector } from "../components/AcademicYearSelector";
 import { DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
@@ -30,7 +32,7 @@ function saveState(state) {
   try { sessionStorage.setItem(SS_KEY, JSON.stringify(state)); } catch { /* ignore */ }
 }
 
-const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUsers, loadUsers, canDeleteMeetings, onIncompleteChange }, ref) {
+const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUsers, loadUsers, canDeleteMeetings, onIncompleteChange, myRole, canEditAutomations }, ref) {
   const saved = readSavedState();
 
   const [meetings, setMeetings] = useState([]);
@@ -61,6 +63,8 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
   const [pendingScopeSchool, setPendingScopeSchool] = useState(null);
   const [directCoordSchool, setDirectCoordSchool] = useState(null);
   const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false);
+  const [automationsModalOpen, setAutomationsModalOpen] = useState(false);
+  const showAutomationsButton = myRole === "owner" || canEditAutomations;
 
   // Status reminder states
   const [alreadySentModal, setAlreadySentModal] = useState(null); // { meeting, lastSentAt, recipients }
@@ -149,6 +153,42 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
   }
 
   useMeetingsPolling(() => loadAllMeetings(filters, academicYear, { silent: true }), true, [filters, academicYear]);
+
+  // Per-school advisor-access, needed so AdvisorCell can flag no-access users on this
+  // cross-school table (unlike SchoolPage.jsx, which is scoped to one school and can compute
+  // this locally). {school_id: {advisor_id: bool}}
+  const [accessMatrix, setAccessMatrix] = useState({});
+  const [advisorAccessModal, setAdvisorAccessModal] = useState(null); // {schoolId, advisorId, advisorName, meetingDate}
+  useEffect(() => {
+    const schoolIds = [...new Set(meetings.map(m => m.school_id).filter(Boolean))];
+    const advisorIds = (users || []).map(u => u.id);
+    if (!schoolIds.length || !advisorIds.length) return;
+    axios.post("/schools/advisor-access-matrix", { school_ids: schoolIds, advisor_ids: advisorIds })
+      .then(res => setAccessMatrix(res.data || {}))
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [meetings, users]);
+  function usersWithAccessFor(m) {
+    const map = accessMatrix[m.school_id];
+    if (!map) return users || [];
+    return (users || []).filter(u => map[u.id] !== false);
+  }
+  function usersWithoutAccessFor(m) {
+    const map = accessMatrix[m.school_id];
+    if (!map) return [];
+    return (users || []).filter(u => u.role === "advisor" && map[u.id] === false);
+  }
+  function handleRequestAdvisorAccess(advisorId, advisorName, meetingDate, meeting) {
+    setAdvisorAccessModal({ schoolId: meeting?.school_id, advisorId, advisorName, meetingDate });
+  }
+  async function refreshAccessMatrixForSchool(schoolId) {
+    const advisorIds = (users || []).map(u => u.id);
+    if (!schoolId || !advisorIds.length) return;
+    try {
+      const res = await axios.post("/schools/advisor-access-matrix", { school_ids: [schoolId], advisor_ids: advisorIds });
+      setAccessMatrix(prev => ({ ...prev, ...(res.data || {}) }));
+    } catch {}
+  }
 
   function handleYearChange(year) {
     setAcademicYear(year);
@@ -675,6 +715,21 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
           onSent={() => {}} />
       )}
 
+      {advisorAccessModal && (
+        <AdvisorAccessGrantModal
+          schoolId={advisorAccessModal.schoolId}
+          advisorId={advisorAccessModal.advisorId}
+          advisorName={advisorAccessModal.advisorName}
+          mode={{ type: "single_date", meetingDate: advisorAccessModal.meetingDate || new Date().toISOString().slice(0, 10) }}
+          onGranted={() => { const sid = advisorAccessModal.schoolId; setAdvisorAccessModal(null); refreshAccessMatrixForSchool(sid); }}
+          onCancel={() => setAdvisorAccessModal(null)}
+        />
+      )}
+
+      {automationsModalOpen && (
+        <MeetingAutomationsModal onClose={() => setAutomationsModalOpen(false)} />
+      )}
+
       {bulkDeleteConfirm && (
         <DeleteMeetingModal
           titleText="מחיקת פגישות"
@@ -702,6 +757,14 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
               <span aria-hidden="true">🔗</span> תיאום ישיר
             </button>
           </div>
+          {showAutomationsButton && (
+            <div className="relative">
+              <button type="button" onClick={() => setAutomationsModalOpen(true)}
+                className="btn-ghost flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-xl font-medium">
+                <span aria-hidden="true">⚙️</span> אוטומציות
+              </button>
+            </div>
+          )}
           <button type="button" onClick={() => setShowAdvanced(o => !o)} aria-expanded={showAdvanced}
             className={`flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-xl transition-all font-medium ${showAdvanced || advancedFilterCount > 0 ? "btn-blue" : "btn-ghost"}`}>
             <svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
@@ -840,14 +903,14 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
           {error && <p role="alert" className="text-red-600 text-sm mb-2">{error}</p>}
           <MeetingsTable
             meetings={displayedMeetings}
-            usersWithAccess={users || []}
-            usersWithoutAccess={[]}
+            usersWithAccessFor={usersWithAccessFor}
+            usersWithoutAccessFor={usersWithoutAccessFor}
             contactsFor={m => buildSchoolContacts(schools.find(s => s.id === m.school_id))}
             schoolStageFor={m => schools.find(s => s.id === m.school_id)?.stage}
             onSave={updateMeeting}
             onDelete={deleteMeeting}
             onOpenNotes={(meetingId, notes, onSave) => setNotesModal({ meetingId, notes, onSave })}
-            onRequestAccess={() => {}}
+            onRequestAccess={handleRequestAdvisorAccess}
             canDeleteMeetings={canDeleteMeetings}
             showSchoolColumn
             schoolLabelFor={m => schoolLabel({ name: m.school_name, symbol: m.school_symbol, city: m.school_city })}

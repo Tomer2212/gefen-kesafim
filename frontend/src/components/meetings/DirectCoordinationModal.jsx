@@ -3,6 +3,7 @@ import axios from "axios";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
 import { buildSchoolContacts, resolveMeetingCoordinator } from "./schoolContacts";
 import { DirectCoordinationResolutionModal } from "./DirectCoordinationResolutionModal";
+import AdvisorAccessGrantModal from "./AdvisorAccessGrantModal";
 
 const SERVICE_TYPE_OPTIONS = [
   { value: "gefen", label: "גפן" },
@@ -59,6 +60,7 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
   const [error, setError] = useState("");
   const [sentInfo, setSentInfo] = useState(null); // { bookingUrl }
   const [showResolution, setShowResolution] = useState(false);
+  const [advisorAccessModal, setAdvisorAccessModal] = useState(null); // {advisorId, advisorName, startDate, endDate}
 
   const contacts = buildSchoolContacts(school);
 
@@ -120,10 +122,34 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
     return participantRoleKeysNeeded().some(k => !contactsByKey[k]?.email);
   }
 
+  function schedulingWindow() {
+    const starts = ranges.map(r => parseDateDDMMYY(r.startDateText)).filter(Boolean);
+    const ends = ranges.map(r => parseDateDDMMYY(r.endDateText)).filter(Boolean);
+    return { startDate: starts.sort()[0], endDate: ends.sort().slice(-1)[0] };
+  }
+
+  async function checkAdvisorAccess() {
+    if (advisorIds.length === 0) return true;
+    try {
+      const res = await axios.get(`/schools/${school.id}/advisor-access`, { params: { advisor_ids: advisorIds.join(",") } });
+      const missingId = advisorIds.find(id => res.data?.[id] === false);
+      if (missingId) {
+        const advisor = advisors.find(a => a.id === missingId);
+        const { startDate, endDate } = schedulingWindow();
+        setAdvisorAccessModal({ advisorId: missingId, advisorName: advisor?.full_name || advisor?.email || "", startDate, endDate });
+        return false;
+      }
+      return true;
+    } catch {
+      return true; // non-fatal — the check itself failing shouldn't block sending
+    }
+  }
+
   async function handleSubmit() {
     const validationError = validate();
     if (validationError) { setError(validationError); return; }
     setError("");
+    if (!(await checkAdvisorAccess())) return;
     if (hasProblems()) { setShowResolution(true); return; }
     await doSend();
   }
@@ -152,6 +178,19 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
     } finally {
       setSubmitting(false);
     }
+  }
+
+  if (advisorAccessModal) {
+    return (
+      <AdvisorAccessGrantModal
+        schoolId={school.id}
+        advisorId={advisorAccessModal.advisorId}
+        advisorName={advisorAccessModal.advisorName}
+        mode={{ type: "range", startDate: advisorAccessModal.startDate, endDate: advisorAccessModal.endDate }}
+        onGranted={async () => { setAdvisorAccessModal(null); if (await checkAdvisorAccess()) { if (hasProblems()) setShowResolution(true); else await doSend(); } }}
+        onCancel={() => setAdvisorAccessModal(null)}
+      />
+    );
   }
 
   return (

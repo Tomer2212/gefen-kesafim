@@ -37,9 +37,16 @@ export default function AdminTasksTab() {
         key={t.id}
         type="button"
         onClick={() => openTask(t.id)}
-        className="text-right border border-slate-200 rounded-xl p-4 bg-white hover:border-blue-400 hover:shadow-sm transition-all flex flex-col gap-1"
+        className={`text-right border rounded-xl p-4 bg-white hover:shadow-sm transition-all flex flex-col gap-1 ${
+          t.has_meeting_send_problems ? "border-red-300 bg-red-50/40 hover:border-red-400" : "border-slate-200 hover:border-blue-400"
+        }`}
       >
-        <div className="font-semibold text-slate-800">{t.name}</div>
+        <div className="font-semibold text-slate-800 flex items-center gap-1.5">
+          {t.has_meeting_send_problems && (
+            <span aria-label="קיימות בעיות שמונעות שליחה" title="קיימות בעיות שמונעות שליחה" className="text-red-500">⚠</span>
+          )}
+          {t.name}
+        </div>
         <div className="text-xs text-slate-500 flex items-center gap-2 flex-wrap">
           {t.status === "scheduled" ? (
             <span className="text-amber-600 font-medium">מתוזמן</span>
@@ -50,6 +57,7 @@ export default function AdminTasksTab() {
           )}
           <span>· {t.total_schools ?? 0} בתי ספר</span>
           {t.created_by_name && <span>· נוצר ע"י {t.created_by_name}</span>}
+          {t.has_meeting_send_problems && <span className="text-red-600 font-medium">· יש בעיות שחוסמות שליחה</span>}
         </div>
       </button>
     );
