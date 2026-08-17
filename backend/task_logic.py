@@ -293,7 +293,7 @@ def _fetch_schools_and_meetings(
 
             meetings = (
                 db.table("meetings")
-                .select("school_id, meeting_date, meeting_service_type, status")
+                .select("school_id, meeting_date, meeting_service_type, status, stage_scope, meeting_type")
                 .in_("school_id", school_ids)
                 .in_("status", ["scheduled", "completed"])
                 .execute()
@@ -368,6 +368,12 @@ def _rows_for_school(rows_map: dict[str, list[dict]], school_id: str) -> list[di
 def _matching_meetings(cond: dict, school_meetings: list[dict]) -> list[dict]:
     date_from, date_to = cond.get("date_from"), cond.get("date_to")
     meeting_service_type = cond.get("meeting_service_type")
+    # status/meeting_type are optional filters added for audience-filtering condition cards
+    # (ConditionGroupsEditor.jsx) — a condition dict missing these keys (e.g. every audience
+    # saved before this round) reads back None/falsy here, so the check is skipped exactly like
+    # today, preserving old saved criteria unchanged.
+    status = cond.get("status")
+    meeting_type = cond.get("meeting_type")
     out = []
     for m in school_meetings:
         md = m.get("meeting_date")
@@ -378,6 +384,10 @@ def _matching_meetings(cond: dict, school_meetings: list[dict]) -> list[dict]:
         if date_to and md > date_to:
             continue
         if meeting_service_type and m.get("meeting_service_type") != meeting_service_type:
+            continue
+        if status and m.get("status") != status:
+            continue
+        if meeting_type and m.get("meeting_type") != meeting_type:
             continue
         out.append(m)
     return out
@@ -403,6 +413,32 @@ def _eval_meeting_condition(cond: dict, school_meetings: list[dict]) -> bool:
     criteria". Do NOT use this for progress/success tracking — see _resolve_condition."""
     matched = _meeting_exists(cond, school_meetings)
     return (not matched) if cond.get("negate") else matched
+
+
+def _required_count_for_condition(cond: dict) -> int:
+    """Round 17 — default required count for a meeting condition. A stage_scope="separate"
+    requirement always needs exactly 2 (one per principal) regardless of any manually-set
+    required_count (a split requirement can't sensibly ask for a different number — there are
+    only ever two slots). Every other meeting condition uses the manager's required_count if
+    set, otherwise 1 — matching _meeting_exists's original ">=1 match" behavior exactly, so this
+    is a no-op for every condition that doesn't use these new features."""
+    if cond.get("type") == "meeting" and cond.get("stage_scope") == "separate":
+        return 2
+    return cond.get("required_count") or 1
+
+
+def _fulfilled_count_for_meeting_condition(cond: dict, school_meetings: list[dict]) -> int:
+    """Round 17 — for stage_scope="separate", counts DISTINCT principal slots fulfilled (0-2)
+    via each matching meeting's own stage_scope, not the raw row count — booking only the
+    tichon principal's meeting must not count as 2/2. A "both"-scoped (or legacy/unscoped)
+    meeting counts toward either slot, since it covers both principals at once. Every other
+    condition keeps the original raw match count (identical to _count_matching_meetings)."""
+    matches = _matching_meetings(cond, school_meetings)
+    if cond.get("stage_scope") == "separate":
+        has_tichon = any(m.get("stage_scope") in ("tichon", "both") for m in matches)
+        has_chativa = any(m.get("stage_scope") in ("chativa", "both") for m in matches)
+        return int(has_tichon) + int(has_chativa)
+    return len(matches)
 
 
 def _coerce_bool(value) -> bool:
@@ -548,7 +584,12 @@ def _resolve_condition(
     condition. See compute_task_progress."""
     ctype = cond.get("type")
     if ctype == "meeting":
-        return _meeting_exists(cond, school_meetings)
+        # Round 17 — now required-count-aware (was a plain >=1 existence check). Defaults to
+        # requiring exactly 1 match for every condition that doesn't set required_count or
+        # stage_scope="separate", so this is behavior-identical to the old _meeting_exists check
+        # for the vast majority of existing conditions (confirmed against the regression task,
+        # which has no explicit required_count on any condition).
+        return _fulfilled_count_for_meeting_condition(cond, school_meetings) >= _required_count_for_condition(cond)
     if ctype == "goal":
         return _eval_goal_condition(cond, goal_rows or [])
     if ctype == "control_letter":
@@ -665,6 +706,7 @@ def compute_task_progress(org_id: str, task: dict, academic_year: str = DEFAULT_
                 "school_id": school_id, "school_name": school["name"],
                 "symbol": school.get("symbol"), "authority": school.get("authority"),
                 "done": None, "condition_results": [],
+                "stage_label": STAGE_LABELS.get(school.get("stage"), school.get("stage")), "stage_rows": None,
             })
         return {
             "schools": rows, "total": len(rows), "completed": None, "progress_pct": None,
@@ -703,16 +745,21 @@ def compute_task_progress(org_id: str, task: dict, academic_year: str = DEFAULT_
                 break
 
         display_group = groups[satisfied_group_idx] if satisfied_group_idx is not None else (groups[0] if groups else {"conditions": []})
+        conds = display_group.get("conditions") or []
         condition_results = [
             (
                 {
                     "ok": _resolve_condition(c, school, school_meetings, year_row, goal_rows, cl_rows), "meeting_exists": _meeting_exists(c, school_meetings),
-                    "actual_count": _count_matching_meetings(c, school_meetings), "required_count": c.get("required_count"),
+                    # Round 17: required-count-aware — always >=1 for a meeting condition now
+                    # (was raw match count / manager-set-or-None), so a "separate" split
+                    # condition shows 0-2 distinct-slot progress instead of a raw row count that
+                    # could misleadingly read "1/1" after only one of two principals was booked.
+                    "actual_count": _fulfilled_count_for_meeting_condition(c, school_meetings), "required_count": _required_count_for_condition(c),
                 }
                 if c.get("type") == "meeting"
                 else {"ok": _resolve_condition(c, school, school_meetings, year_row, goal_rows, cl_rows), "meeting_exists": None, "actual_count": None, "required_count": None}
             )
-            for c in (display_group.get("conditions") or [])
+            for c in conds
         ]
         is_done = satisfied_group_idx is not None
         if is_done:
@@ -720,13 +767,46 @@ def compute_task_progress(org_id: str, task: dict, academic_year: str = DEFAULT_
 
         # Improvement #5: "X of Y required actions" — additive to (not a replacement for) the
         # school-count-based is_done/completed_count model above, since other features
-        # (send-status, exclusions) key off `done` at the school level. Only meaningful for
-        # meeting conditions where the manager set an explicit required_count (e.g. "3 meetings
-        # per school") — accumulated across all matched schools' display-group conditions.
+        # (send-status, exclusions) key off `done` at the school level. Round 17: now runs for
+        # EVERY meeting condition (required_count is always populated, >=1, never None anymore)
+        # instead of only ones with an explicit manager-set required_count — non-meeting
+        # conditions still don't contribute (required_count stays None for them), so this has
+        # zero effect on tasks with no meeting conditions at all.
         for res in condition_results:
             if res.get("required_count"):
                 required_actions_total += res["required_count"]
                 completed_actions_total += min(res["actual_count"] or 0, res["required_count"])
+
+        # Round 17 — per-stage row breakdown for TaskPanel.jsx: only when this school is
+        # six-year (two real principals) AND the display group has at least one stage-specific
+        # meeting condition (tichon/chativa/separate). Reuses condition_results' already-computed
+        # `ok` for merged (non-split) conditions and the matching-stage case, so this never
+        # re-derives anything the main condition_results didn't already establish — only
+        # "separate" needs a fresh per-stage (single-slot, not both-required) check, since
+        # condition_results' `ok` for it reflects the combined 2-of-2 requirement.
+        stage_rows = None
+        is_six_year_split = (
+            school.get("stage") == "sheshshnati" and not school.get("principal_same_person")
+            and any(c.get("type") == "meeting" and c.get("stage_scope") in ("tichon", "chativa", "separate") for c in conds)
+        )
+        if is_six_year_split:
+            stage_rows = []
+            for row_stage, row_label in (("tichon", "תיכון"), ("chativa", "חטיבת ביניים")):
+                row_results = []
+                for c, base_res in zip(conds, condition_results):
+                    cond_stage_scope = c.get("stage_scope")
+                    if c.get("type") == "meeting" and cond_stage_scope in ("tichon", "chativa", "separate"):
+                        if cond_stage_scope == "separate":
+                            matches = _matching_meetings(c, school_meetings)
+                            ok = any(m.get("stage_scope") in (row_stage, "both") for m in matches)
+                            row_results.append({"ok": ok, "merged": False, "not_applicable": False})
+                        elif cond_stage_scope == row_stage:
+                            row_results.append({"ok": base_res["ok"], "merged": False, "not_applicable": False})
+                        else:
+                            row_results.append({"ok": None, "merged": False, "not_applicable": True})
+                    else:
+                        row_results.append({"ok": base_res["ok"], "merged": True, "not_applicable": False})
+                stage_rows.append({"stage_label": row_label, "condition_results": row_results})
 
         rows.append({
             "school_id": school_id,
@@ -735,6 +815,8 @@ def compute_task_progress(org_id: str, task: dict, academic_year: str = DEFAULT_
             "authority": school.get("authority"),
             "done": is_done,
             "condition_results": condition_results,
+            "stage_label": STAGE_LABELS.get(school.get("stage"), school.get("stage")),
+            "stage_rows": stage_rows,
         })
 
     total = len(rows)

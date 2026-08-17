@@ -878,6 +878,11 @@ const PERM_GROUPS = [
     advisorNA: new Set(["can_view_billing", "can_manage_billing"]),
     ownerOnly: true,
   },
+  {
+    label: "פגישות",
+    perms: ["can_edit_meeting_automations"],
+    advisorNA: new Set(["can_edit_meeting_automations"]),
+  },
 ];
 const ADVISOR_NA_PERMS = new Set(PERM_GROUPS.flatMap(g => [...(g.advisorNA || [])]));
 
@@ -3505,6 +3510,8 @@ export default function AdminPage() {
               loadUsers={loadUsers}
               canDeleteMeetings={canDeleteMeetings}
               onIncompleteChange={setMeetingsGuardActive}
+              myRole={myRole}
+              canEditAutomations={myRole === "owner" || (myRole === "manager" && permDefaults?.can_edit_meeting_automations?.manager === true)}
             />
           )}
 

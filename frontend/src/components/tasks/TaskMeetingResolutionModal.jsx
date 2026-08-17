@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import axios from "axios";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
-import { MEETING_SERVICE_TYPE_LABELS } from "./taskShared";
+import { MEETING_SERVICE_TYPE_LABELS, formatDateDMY } from "./taskShared";
 import { DURATION_OPTIONS, formatDuration } from "./ConditionGroupsEditor";
 
 // Fallback labels only — round 8: the backend sends a per-school school.participants.role_labels
@@ -38,6 +38,15 @@ const COORDINATOR_ROLE_OPTIONS = [
 // notes in handleSaveParticipant/handleSaveCoordinator.
 export default function TaskMeetingResolutionModal({
   criteria, manualSchoolIds, meetingRequirements, channel, academicYear, orgUsers, onProceed, onClose,
+  // taskId — "existing task" mode: re-checks an already-created task's CURRENT problems
+  // (GET /tasks/{taskId}/meetings/check) instead of the wizard's transient pre-creation state,
+  // used by the red-badge/notification flow for a scheduled task that got blocked because
+  // something broke between creation and its scheduled send time. In this mode the bottom
+  // button becomes "בדוק ושלח עכשיו" (never blocking) instead of "צור משימה", and the
+  // task-only "override" actions are hidden — they have nowhere to be committed to once the
+  // task already exists (only real saves to the school card, or a real access grant, make
+  // sense here).
+  taskId,
 }) {
   const { ref, handleKeyDown } = useFocusTrap(onClose);
   const [checking, setChecking] = useState(true);
@@ -52,6 +61,8 @@ export default function TaskMeetingResolutionModal({
   const [drafts, setDrafts] = useState({}); // composite key -> draft value(s), kept after saving so the green summary can show what was entered
   const [savingKey, setSavingKey] = useState(null);
   const [saveError, setSaveError] = useState(null);
+  const [retrying, setRetrying] = useState(false);
+  const [retrySuccess, setRetrySuccess] = useState(false);
 
   const needsPhone = channel === "whatsapp_twilio";
   function roleLabel(school, role) {
@@ -66,10 +77,13 @@ export default function TaskMeetingResolutionModal({
 
   function runCheck() {
     setChecking(true);
-    axios.post("/tasks/meetings/check", {
-      criteria, manual_school_ids: manualSchoolIds, meeting_requirements: meetingRequirements,
-      channel, academic_year: academicYear,
-    })
+    const request = taskId
+      ? axios.get(`/tasks/${taskId}/meetings/check`)
+      : axios.post("/tasks/meetings/check", {
+          criteria, manual_school_ids: manualSchoolIds, meeting_requirements: meetingRequirements,
+          channel, academic_year: academicYear,
+        });
+    request
       .then(r => setResult(r.data))
       .catch(() => setResult(null))
       .finally(() => setChecking(false));
@@ -79,6 +93,24 @@ export default function TaskMeetingResolutionModal({
     runCheck();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  async function handleRetryNow() {
+    setRetrying(true);
+    setSaveError(null);
+    try {
+      const res = await axios.post(`/tasks/${taskId}/retry-now`);
+      if (res.data?.activated) {
+        setRetrySuccess(true);
+        onProceed?.();
+      } else {
+        runCheck(); // still blocked — refresh with whatever's still wrong right now
+      }
+    } catch {
+      setSaveError("הבדיקה החוזרת נכשלה — נסה שוב.");
+    } finally {
+      setRetrying(false);
+    }
+  }
 
   const resolved = key => resolvedKeys.has(key);
   const markResolved = key => setResolvedKeys(prev => new Set(prev).add(key));
@@ -96,6 +128,9 @@ export default function TaskMeetingResolutionModal({
       if (md.missing_advisor) leaves.push(`advisor:${school.school_id}:${md.meeting_service_type}`);
       if (md.missing_duration) leaves.push(`duration:${school.school_id}:${md.meeting_service_type}`);
     }
+    for (const aa of school.advisor_access || []) {
+      leaves.push(`access:${school.school_id}:${aa.meeting_service_type}:${aa.advisor_id}`);
+    }
     return leaves;
   }
   function schoolUnresolvedCount(school) {
@@ -106,6 +141,17 @@ export default function TaskMeetingResolutionModal({
   const activeSchools = schools.filter(s => !removedSchoolIds.has(s.school_id));
   const remainingSchools = activeSchools.filter(s => schoolUnresolvedCount(s) > 0);
   const allClear = !checking && result && remainingSchools.length === 0;
+
+  // Existing-task mode: once every visible problem is marked resolved, immediately attempt
+  // the real send instead of making the manager click a button — the scheduled time has
+  // already passed, so there's no reason to wait. handleRetryNow does its own live re-check
+  // server-side, so this is safe even if something is still actually wrong.
+  useEffect(() => {
+    if (taskId && allClear && schools.length > 0 && !retrying && !retrySuccess) {
+      handleRetryNow();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allClear]);
 
   function toggleExpanded(schoolId) {
     setExpandedIds(prev => {
@@ -261,6 +307,33 @@ export default function TaskMeetingResolutionModal({
     markResolved(key);
   }
 
+  // --- Advisor-access card — the manually-picked advisor for this meeting requirement can't
+  // reach the school's card. Fix is always "grant access" (temporary, spanning the exact
+  // scheduling window already set for this requirement — the actual meeting date isn't known
+  // until the school books a slot later via the emailed link — or permanent); no "override
+  // this task only" alternative makes sense here the way it does for advisor/duration defaults.
+  async function handleGrantAccess(school, aa, permanent) {
+    const key = `access:${school.school_id}:${aa.meeting_service_type}:${aa.advisor_id}`;
+    setSavingKey(key);
+    setSaveError(null);
+    try {
+      if (permanent) {
+        await axios.post(`/schools/${school.school_id}/advisors`, { advisor_id: aa.advisor_id });
+      } else {
+        await axios.post(`/schools/${school.school_id}/advisors/${aa.advisor_id}/grant-temp-access`, {
+          starts_at: `${aa.date_from}T00:00:00.000Z`,
+          expires_at: `${aa.date_to}T23:59:59.000Z`,
+          source: "task_meeting_requirement",
+        });
+      }
+      markResolved(key);
+    } catch {
+      setSaveError(`הענקת הגישה עבור ${school.school_name} נכשלה — נסה שוב.`);
+    } finally {
+      setSavingKey(null);
+    }
+  }
+
   async function handleExport() {
     const rows = [];
     for (const school of remainingSchools) {
@@ -346,16 +419,18 @@ export default function TaskMeetingResolutionModal({
                         {school.authority && <span className="text-slate-400 text-xs">· {school.authority}</span>}
                         {!isClear && !isRemoved && <span className="text-xs text-amber-700">— {unresolvedCount} בעיות</span>}
                       </span>
-                      <span className="flex items-center gap-2">
-                        <span
-                          role="button" tabIndex={0}
-                          onClick={e => { e.stopPropagation(); toggleRemoved(school.school_id); }}
-                          onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.stopPropagation(); toggleRemoved(school.school_id); } }}
-                          className="text-xs text-slate-400 hover:text-red-600 whitespace-nowrap"
-                        >
-                          {isRemoved ? "בטל הסרה" : "הסר מהמשימה"}
+                      {!taskId && (
+                        <span className="flex items-center gap-2">
+                          <span
+                            role="button" tabIndex={0}
+                            onClick={e => { e.stopPropagation(); toggleRemoved(school.school_id); }}
+                            onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.stopPropagation(); toggleRemoved(school.school_id); } }}
+                            className="text-xs text-slate-400 hover:text-red-600 whitespace-nowrap"
+                          >
+                            {isRemoved ? "בטל הסרה" : "הסר מהמשימה"}
+                          </span>
                         </span>
-                      </span>
+                      )}
                     </button>
 
                     {isExpanded && !isRemoved && (
@@ -482,10 +557,12 @@ export default function TaskMeetingResolutionModal({
                                     className="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">
                                     {savingKey === advisorKey ? "שומר..." : "שמור בכרטיס בית הספר"}
                                   </button>
-                                  <button type="button" onClick={() => handleOverrideAdvisor(school, md.meeting_service_type)} disabled={!draftValue(advisorKey, "")}
-                                    className="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-white border border-amber-300 text-amber-800 hover:bg-amber-100 disabled:opacity-50">
-                                    קבע יועץ לפגישה זו בלבד
-                                  </button>
+                                  {!taskId && (
+                                    <button type="button" onClick={() => handleOverrideAdvisor(school, md.meeting_service_type)} disabled={!draftValue(advisorKey, "")}
+                                      className="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-white border border-amber-300 text-amber-800 hover:bg-amber-100 disabled:opacity-50">
+                                      קבע יועץ לפגישה זו בלבד
+                                    </button>
+                                  )}
                                 </div>
                               ))}
                               {md.missing_duration && (durationDone ? (
@@ -508,12 +585,51 @@ export default function TaskMeetingResolutionModal({
                                     className="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">
                                     {savingKey === durationKey ? "שומר..." : "שמור בכרטיס בית הספר"}
                                   </button>
-                                  <button type="button" onClick={() => handleOverrideDuration(school, md.meeting_service_type)} disabled={!draftValue(durationKey, "")}
-                                    className="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-white border border-amber-300 text-amber-800 hover:bg-amber-100 disabled:opacity-50">
-                                    קבע משך לפגישה זו בלבד
-                                  </button>
+                                  {!taskId && (
+                                    <button type="button" onClick={() => handleOverrideDuration(school, md.meeting_service_type)} disabled={!draftValue(durationKey, "")}
+                                      className="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-white border border-amber-300 text-amber-800 hover:bg-amber-100 disabled:opacity-50">
+                                      קבע משך לפגישה זו בלבד
+                                    </button>
+                                  )}
                                 </div>
                               ))}
+                            </div>
+                          );
+                        })}
+
+                        {(school.advisor_access || []).map(aa => {
+                          cardCounter += 1;
+                          const n = cardCounter;
+                          const typeLabel = MEETING_SERVICE_TYPE_LABELS[aa.meeting_service_type] || aa.meeting_service_type;
+                          const advisorName = orgUsers.find(u => u.id === aa.advisor_id)?.full_name
+                            || orgUsers.find(u => u.id === aa.advisor_id)?.email || "היועץ שנבחר";
+                          const key = `access:${school.school_id}:${aa.meeting_service_type}:${aa.advisor_id}`;
+                          const saving = savingKey === key;
+                          const done = resolved(key);
+                          if (done) {
+                            return (
+                              <div key={key} className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 flex items-center gap-2">
+                                <span aria-hidden="true" className="text-emerald-600 text-xs font-bold">✓</span>
+                                <span className="text-xs text-emerald-800"><b>בעיה {n}:</b> גישה עבור {advisorName} [{typeLabel}] — הוענקה</span>
+                              </div>
+                            );
+                          }
+                          return (
+                            <div key={key} className="bg-white rounded-lg border border-amber-100 p-3 space-y-2">
+                              <p className="text-xs text-slate-700">
+                                <b>בעיה {n}:</b> ל{advisorName}, שנבחר/ה כיועץ/ת מבצע/ת לפגישת {typeLabel}, אין גישה לבית הספר:
+                              </p>
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="text-xs font-medium text-slate-600">הענק גישה:</span>
+                                <button type="button" disabled={saving} onClick={() => handleGrantAccess(school, aa, false)}
+                                  className="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">
+                                  {saving ? "מעניק..." : `זמנית (${formatDateDMY(aa.date_from)}–${formatDateDMY(aa.date_to)})`}
+                                </button>
+                                <button type="button" disabled={saving} onClick={() => handleGrantAccess(school, aa, true)}
+                                  className="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-white border border-amber-300 text-amber-800 hover:bg-amber-100 disabled:opacity-50">
+                                  לצמיתות
+                                </button>
+                              </div>
                             </div>
                           );
                         })}
@@ -530,25 +646,33 @@ export default function TaskMeetingResolutionModal({
 
         <div className="flex items-center justify-between gap-2 px-6 py-4 border-t border-slate-100 flex-wrap">
           <button type="button" onClick={onClose} className="text-sm px-4 py-2 rounded-xl font-medium text-slate-500 hover:bg-slate-50">
-            ביטול
+            {taskId ? "סגירה" : "ביטול"}
           </button>
           <div className="flex items-center gap-2">
-            {remainingSchools.length > 0 && (
+            {!taskId && remainingSchools.length > 0 && (
               <button type="button" onClick={handleExport} className="text-sm px-4 py-2 rounded-xl font-medium bg-slate-100 text-slate-700 hover:bg-slate-200">
                 ייצוא לאקסל
               </button>
             )}
             <div className="flex flex-col items-end gap-1">
-              {!checking && result && remainingSchools.length > 0 && (
-                <span className="text-xs text-slate-500">יש להשלים את כל הבעיות או להסיר את בתי הספר הבעייתיים כדי להמשיך</span>
+              {taskId ? (
+                retrySuccess ? (
+                  <span className="text-xs text-emerald-700">המשימה הופעלה ונשלחה בהצלחה ✓</span>
+                ) : !checking && result && remainingSchools.length > 0 ? (
+                  <span className="text-xs text-slate-500">ברגע שכל הבעיות ייפתרו, המשימה תישלח אוטומטית</span>
+                ) : null
+              ) : (
+                !checking && result && remainingSchools.length > 0 && (
+                  <span className="text-xs text-slate-500">יש להשלים את כל הבעיות או להסיר את בתי הספר הבעייתיים כדי להמשיך</span>
+                )
               )}
               <button
                 type="button"
-                onClick={() => onProceed(Array.from(removedSchoolIds), meetingOverrides)}
-                disabled={checking || remainingSchools.length > 0}
+                onClick={() => taskId ? handleRetryNow() : onProceed(Array.from(removedSchoolIds), meetingOverrides)}
+                disabled={taskId ? (checking || retrying || retrySuccess) : (checking || remainingSchools.length > 0)}
                 className="text-sm px-4 py-2 rounded-xl font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed"
               >
-                צור משימה
+                {taskId ? (retrying ? "בודק..." : "בדוק ושלח עכשיו") : "צור משימה"}
               </button>
             </div>
           </div>

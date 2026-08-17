@@ -51,7 +51,15 @@ const FIELD_CATEGORIES = [
 // "control_letter:<field>" instead of a plain field name, since those two condition types need
 // an extra division/budget picker the caller (ConditionGroupsEditor) builds a different
 // condition shape for. The prefix is how the caller's onConfirm handler tells them apart.
-export default function FieldPickerButton({ value, fieldOptions, goalOptions, controlLetterFields, onConfirm }) {
+//
+// allowMeeting adds a third such category, "פגישות" — a single "meeting:has" entry that builds
+// a compound meeting-filter condition (type/status/location/date-range/existence, all one
+// condition — see ConditionGroupsEditor's EMPTY_MEETING_CONDITION). Gated behind a prop
+// (default off) because this same button is also used inside the meeting-task wizard's OWN
+// dedicated "פגישות" requirements block, which must never offer "meeting" as a pickable field
+// there (it already IS one, structurally) — only the general audience/success-criteria callers
+// pass allowMeeting.
+export default function FieldPickerButton({ value, fieldOptions, goalOptions, controlLetterFields, allowMeeting = false, onConfirm }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [checked, setChecked] = useState([]);
@@ -62,11 +70,13 @@ export default function FieldPickerButton({ value, fieldOptions, goalOptions, co
   const labelByField = Object.fromEntries((fieldOptions || []).map(f => [f.field, f.label]));
   for (const g of (goalOptions || [])) labelByField[`goal:${g.key}`] = `יעד: ${g.label}`;
   for (const f of (controlLetterFields || [])) labelByField[`control_letter:${f.field}`] = `מכתב בקרה: ${f.label}`;
+  if (allowMeeting) labelByField["meeting:has"] = "פגישה (סוג / סטטוס / תאריכים)";
   const knownFields = new Set(Object.keys(labelByField));
   const categories = [
     ...FIELD_CATEGORIES,
     { title: "יעדים", fields: (goalOptions || []).map(g => `goal:${g.key}`) },
     { title: "מכתב בקרה", fields: (controlLetterFields || []).map(f => `control_letter:${f.field}`) },
+    ...(allowMeeting ? [{ title: "פגישות", fields: ["meeting:has"] }] : []),
   ];
 
   function openPanel() {

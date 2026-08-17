@@ -6,6 +6,7 @@ import secrets
 import smtplib
 import time
 from concurrent.futures import ThreadPoolExecutor, wait as futures_wait, FIRST_COMPLETED
+from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -1674,9 +1675,18 @@ def assign_advisor(
 ):
     _require_manager(user)
     db = get_admin_client()
+    # temp_access_expires_at explicitly nulled — a manual/permanent assignment always wins
+    # over any pending or already-active temporary grant for the same advisor+school pair
+    # (see _process_temp_advisor_access below, which never touches a row with a null expiry).
     db.table("advisor_schools").upsert(
-        {"advisor_id": body.advisor_id, "school_id": school_id}
+        {"advisor_id": body.advisor_id, "school_id": school_id, "temp_access_expires_at": None}
     ).execute()
+    try:
+        db.table("temp_advisor_access").update({"status": "superseded"}).eq(
+            "advisor_id", body.advisor_id
+        ).eq("school_id", school_id).in_("status", ["pending", "active"]).execute()
+    except Exception as exc:
+        logger.warning("marking temp_advisor_access superseded failed (non-fatal): %s", exc)
     try:
         school_row = db.table("schools").select("name").eq("id", school_id).execute()
         school_name = school_row.data[0]["name"] if school_row.data else "בית ספר"
@@ -1694,6 +1704,166 @@ def assign_advisor(
     except Exception as exc:
         logger.warning("advisor_assigned notification failed (non-fatal): %s", exc)
     return {"ok": True}
+
+
+def _advisor_has_school_access(db, advisor_id: str, school: dict) -> bool:
+    """Read-only mirror of the existing ad-hoc 3-way access check duplicated across this
+    file (restrict_access_to null/list, or an advisor_schools row) — kept separate from
+    those call sites deliberately so this new code never risks altering their behavior."""
+    rat = school.get("restrict_access_to")
+    if rat is None or advisor_id in (rat or []):
+        return True
+    row = (
+        db.table("advisor_schools").select("advisor_id")
+        .eq("advisor_id", advisor_id).eq("school_id", school["id"]).execute().data
+    )
+    return bool(row)
+
+
+@router.get("/{school_id}/advisor-access")
+def check_advisor_access(
+    school_id: str,
+    advisor_ids: str,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    """Round: advisor-access grant modal. advisor_ids is a comma-separated list; returns
+    {advisor_id: bool} for whether each advisor currently has access to the school."""
+    db = get_admin_client()
+    school_row = db.table("schools").select("id, restrict_access_to").eq("id", school_id).execute()
+    if not school_row.data:
+        raise HTTPException(status_code=404, detail="בית ספר לא נמצא")
+    school = school_row.data[0]
+    ids = [a for a in advisor_ids.split(",") if a]
+    return {aid: _advisor_has_school_access(db, aid, school) for aid in ids}
+
+
+class AdvisorAccessMatrixIn(BaseModel):
+    school_ids: list[str]
+    advisor_ids: list[str]
+
+
+@router.post("/advisor-access-matrix")
+def advisor_access_matrix(
+    body: AdvisorAccessMatrixIn,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    """Batch version of /{school_id}/advisor-access for cross-school meeting tables (ניהול-
+    פגישות / אזור אישי), which render many schools' rows at once and need to know per-row
+    which advisors lack access before the AdvisorCell picker can meaningfully flag them.
+    Returns {school_id: {advisor_id: bool}}."""
+    db = get_admin_client()
+    if not body.school_ids or not body.advisor_ids:
+        return {}
+    schools = db.table("schools").select("id, restrict_access_to").in_("id", body.school_ids).execute().data or []
+    school_ids = [s["id"] for s in schools]
+    rows = (
+        db.table("advisor_schools").select("advisor_id, school_id")
+        .in_("school_id", school_ids).in_("advisor_id", body.advisor_ids).execute().data or []
+    )
+    granted: dict[str, set[str]] = {}
+    for r in rows:
+        granted.setdefault(r["school_id"], set()).add(r["advisor_id"])
+    result = {}
+    for s in schools:
+        rat = s.get("restrict_access_to")
+        school_granted = granted.get(s["id"], set())
+        result[s["id"]] = {
+            aid: (rat is None or aid in (rat or []) or aid in school_granted)
+            for aid in body.advisor_ids
+        }
+    return result
+
+
+class GrantTempAccessIn(BaseModel):
+    starts_at: str
+    expires_at: str
+    source: str | None = None
+
+
+@router.post("/{school_id}/advisors/{advisor_id}/grant-temp-access")
+def grant_temp_advisor_access(
+    school_id: str,
+    advisor_id: str,
+    body: GrantTempAccessIn,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    _require_manager(user)
+    db = get_admin_client()
+    now = datetime.now(timezone.utc)
+    starts_at = datetime.fromisoformat(body.starts_at.replace("Z", "+00:00"))
+    row = {
+        "school_id": school_id,
+        "advisor_id": advisor_id,
+        "starts_at": body.starts_at,
+        "expires_at": body.expires_at,
+        "status": "pending",
+        "granted_by": user["id"],
+        "source": body.source,
+    }
+    inserted = db.table("temp_advisor_access").insert(row).execute().data[0]
+    if starts_at <= now:
+        _activate_temp_access_row(db, inserted)
+    return {"ok": True, "id": inserted["id"]}
+
+
+def _activate_temp_access_row(db, row: dict) -> str:
+    """Turns a pending temp_advisor_access row into a real advisor_schools grant. Never
+    downgrades an existing permanent grant (temp_access_expires_at IS NULL) back to
+    temporary — that row is left untouched and this one is marked superseded instead.
+    Overlapping temp grants for the same advisor+school extend to the later expiry rather
+    than being overwritten by whichever activates last. Returns the resulting status."""
+    existing = (
+        db.table("advisor_schools").select("temp_access_expires_at")
+        .eq("advisor_id", row["advisor_id"]).eq("school_id", row["school_id"]).execute().data
+    )
+    if existing and existing[0].get("temp_access_expires_at") is None:
+        db.table("temp_advisor_access").update({"status": "superseded"}).eq("id", row["id"]).execute()
+        return "superseded"
+    new_expiry = row["expires_at"]
+    if existing and existing[0].get("temp_access_expires_at"):
+        new_expiry = max(existing[0]["temp_access_expires_at"], row["expires_at"])
+    db.table("advisor_schools").upsert(
+        {"advisor_id": row["advisor_id"], "school_id": row["school_id"], "temp_access_expires_at": new_expiry}
+    ).execute()
+    db.table("temp_advisor_access").update({"status": "active"}).eq("id", row["id"]).execute()
+    return "active"
+
+
+def process_temp_advisor_access(db) -> dict:
+    """Cron-driven (piggybacks on /tasks/process-scheduled-tasks, same 15-min tick as every
+    other scheduled evaluation in this app — see task-scheduled-tasks.yml) — activates
+    pending grants whose start date has arrived, and revokes advisor_schools access whose
+    temp_access_expires_at has passed. Never touches a permanent (null-expiry) row."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    activated, expired = 0, 0
+
+    pending = (
+        db.table("temp_advisor_access").select("*")
+        .eq("status", "pending").lte("starts_at", now_iso).execute().data or []
+    )
+    for row in pending:
+        try:
+            if _activate_temp_access_row(db, row) == "active":
+                activated += 1
+        except Exception as exc:
+            logger.warning("process_temp_advisor_access: activation failed for row %s: %s", row["id"], exc)
+
+    due = (
+        db.table("advisor_schools").select("advisor_id, school_id")
+        .not_.is_("temp_access_expires_at", "null").lte("temp_access_expires_at", now_iso)
+        .execute().data or []
+    )
+    for pair in due:
+        try:
+            db.table("advisor_schools").delete().eq("advisor_id", pair["advisor_id"]).eq("school_id", pair["school_id"]).execute()
+            db.table("temp_advisor_access").update({"status": "expired"}).eq(
+                "advisor_id", pair["advisor_id"]
+            ).eq("school_id", pair["school_id"]).eq("status", "active").execute()
+            expired += 1
+        except Exception as exc:
+            logger.warning("process_temp_advisor_access: expiry failed for %s: %s", pair, exc)
+
+    return {"activated": activated, "expired": expired}
 
 
 @router.delete("/{school_id}/advisors/{advisor_id}")
@@ -2782,13 +2952,22 @@ def _hebrew_join(names: list[str]) -> str:
 
 
 def _build_reminder_email_html(recipient_name: str, when_lamed: str, when_bet: str, meeting_date: str,
-                                start_time: str | None, advisor_name: str) -> str:
+                                start_time: str | None, advisor_name: str, meeting_service_type: str = "gefen") -> str:
     from datetime import date
     first_name = (recipient_name or "").strip().split(" ")[0]
     greeting = f"היי {first_name}," if first_name else "היי,"
     date_fmt = date.fromisoformat(meeting_date).strftime("%d/%m/%y")
     advisor_clause = f" עם {advisor_name}" if advisor_name else ""
     time_clause = f", בשעה {start_time}" if start_time else ""
+    # Round 16 — this used to hardcode "על תקציב הגפ\"ן" regardless of the meeting's actual
+    # type, so a שוטף/מחוז reminder said the wrong thing. Now reflects meeting_service_type;
+    # "gefen" keeps the exact original wording (no visible change for existing recipients).
+    if meeting_service_type == "current":
+        body_line = f'רצינו להזכיר לך על הפגישה השוטפת על התוכנה הכספית שמתוכננת {when_lamed}, בתאריך <b>{date_fmt}</b>{time_clause}{advisor_clause}.'
+    elif meeting_service_type == "district":
+        body_line = f'רצינו להזכיר לך על הפגישה שמתוכננת {when_lamed}, בתאריך <b>{date_fmt}</b>{time_clause}{advisor_clause} בנושא המחוז.'
+    else:
+        body_line = f'רצינו להזכיר לך על הפגישה שמתוכננת {when_lamed}, בתאריך <b>{date_fmt}</b>{time_clause}{advisor_clause} על תקציב הגפ"ן.'
     return f"""
 <html>
 <body dir="rtl" style="font-family: Arial, sans-serif; font-size: 14px; color: #1e293b;
@@ -2802,7 +2981,7 @@ def _build_reminder_email_html(recipient_name: str, when_lamed: str, when_bet: s
     <div style="padding: 28px 24px;">
       <p style="margin: 0 0 16px 0; font-size: 15px;">{greeting}</p>
       <p style="margin: 0 0 16px 0; color: #334155; line-height: 1.8;">
-        רצינו להזכיר לך על הפגישה שמתוכננת {when_lamed}, בתאריך <b>{date_fmt}</b>{time_clause}{advisor_clause} על תקציב הגפ"ן.
+        {body_line}
       </p>
       <p style="margin: 0; color: #334155; line-height: 1.8;">
         נתראה {when_bet} :)
@@ -2904,7 +3083,7 @@ def send_due_reminders(request: Request):
             db = get_admin_client()
             res = (
                 db.table("meetings")
-                .select("id, school_id, meeting_date, start_time, end_time, status, participants, advisor_ids")
+                .select("id, school_id, meeting_date, start_time, end_time, status, participants, advisor_ids, meeting_service_type")
                 .eq("reminder_enabled", True)
                 .eq("status", "scheduled")
                 .in_("meeting_date", due_dates)
@@ -2928,10 +3107,25 @@ def send_due_reminders(request: Request):
     schools_map = {}
     try:
         db = get_admin_client()
-        s_res = db.table("schools").select("id, name, stage, finance_software").in_("id", school_ids).execute()
+        s_res = db.table("schools").select("id, name, stage, finance_software, org_id").in_("id", school_ids).execute()
         schools_map = {s["id"]: s for s in (s_res.data or [])}
     except Exception as exc:
         logger.warning("send_due_reminders: school name lookup failed (non-fatal): %s", exc)
+
+    # Round: per-org automation toggles (organizations.meeting_reminders_enabled /
+    # secretary_upload_request_enabled). Missing org_id or a failed lookup fails OPEN (both
+    # True) — a broken toggle lookup must never silently stop reminders that were always sent.
+    org_ids = list({s.get("org_id") for s in schools_map.values() if s.get("org_id")})
+    org_settings_map = {}
+    if org_ids:
+        try:
+            db = get_admin_client()
+            o_res = db.table("organizations").select(
+                "id, meeting_reminders_enabled, secretary_upload_request_enabled"
+            ).in_("id", org_ids).execute()
+            org_settings_map = {o["id"]: o for o in (o_res.data or [])}
+        except Exception as exc:
+            logger.warning("send_due_reminders: org automation settings lookup failed (non-fatal, fail-open): %s", exc)
 
     advisor_ids = list({aid for m in meetings for aid in (m.get("advisor_ids") or [])})
     advisor_names_map = {}
@@ -2961,9 +3155,31 @@ def send_due_reminders(request: Request):
             subject = f"תזכורת: פגישה {when_bet}"
             school = schools_map.get(m["school_id"], {})
 
+            # Round 16 — a שוטף meeting needs no files, so its secretary/finance reminder uses
+            # the plain template (same as the principal's) instead of the file-upload-request one.
+            meeting_service_type = m.get("meeting_service_type") or "gefen"
+            org_settings = org_settings_map.get(school.get("org_id"), {})
+            reminders_on = org_settings.get("meeting_reminders_enabled", True)
+            upload_request_on = org_settings.get("secretary_upload_request_enabled", True)
             for p in participants:
                 email_addr = p["email"].strip()
-                is_upload_contact = p.get("key") in ("secretary", "finance")
+                is_upload_contact = p.get("key") in ("secretary", "finance") and meeting_service_type != "current"
+
+                # Org-level automation toggle (ניהול → פגישות → אוטומציות). Skipped recipients
+                # are still logged as "skipped" in meeting_reminders — same table the "already
+                # attempted today" guard above reads from — so re-running the same day doesn't
+                # re-evaluate them, and reporting stays consistent with actually-sent recipients.
+                if (is_upload_contact and not upload_request_on) or (not is_upload_contact and not reminders_on):
+                    try:
+                        db.table("meeting_reminders").insert({
+                            "meeting_id": m["id"], "school_id": m["school_id"],
+                            "recipient_email": email_addr, "recipient_name": p.get("name"),
+                            "status": "skipped", "error_message": None,
+                        }).execute()
+                    except Exception as log_exc:
+                        logger.error("send_due_reminders: failed to log skipped reminder for meeting %s / %s: %s",
+                                     m["id"], email_addr, log_exc)
+                    continue
 
                 if is_upload_contact:
                     try:
@@ -3003,6 +3219,7 @@ def send_due_reminders(request: Request):
                         meeting_date=m["meeting_date"],
                         start_time=m.get("start_time"),
                         advisor_name=advisor_name,
+                        meeting_service_type=meeting_service_type,
                     )
                     status, error = "sent", None
                     try:
@@ -5289,6 +5506,7 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
     "can_manage_user_permissions":  {"manager": False, "advisor": False},
     "can_view_billing":             {"manager": False, "advisor": False},
     "can_manage_billing":           {"manager": False, "advisor": False},
+    "can_edit_meeting_automations": {"manager": True,  "advisor": False},
 }
 
 PERMISSION_LABELS: dict[str, str] = {
@@ -5304,6 +5522,7 @@ PERMISSION_LABELS: dict[str, str] = {
     "can_manage_user_permissions":  "לערוך הרשאות של יועצים",
     "can_view_billing":             "לצפות באזור 'חיובים' של הארגון",
     "can_manage_billing":           "לנהל את אזור 'חיובים' (לרבות אמצעי תשלום)",
+    "can_edit_meeting_automations": "לערוך אוטומציות של פגישות",
 }
 
 
@@ -5431,6 +5650,43 @@ def set_permission_default(body: PermissionSettingIn, user: Annotated[dict, Depe
             else:
                 logger.error("set_permission_default failed: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב")
+
+
+def _require_can_edit_automations(db, user: dict) -> None:
+    if user["role"] == "owner":
+        return
+    if user["role"] == "manager" and _check_permission(db, user, "can_edit_meeting_automations"):
+        return
+    raise HTTPException(status_code=403, detail="אין הרשאה לעריכת אוטומציות")
+
+
+@router.get("/meetings/automations")
+def get_meeting_automations(user: Annotated[dict, Depends(get_current_user)]):
+    db = get_admin_client()
+    _require_can_edit_automations(db, user)
+    org = db.table("organizations").select(
+        "meeting_reminders_enabled, secretary_upload_request_enabled"
+    ).eq("id", user["org_id"]).single().execute().data or {}
+    return {
+        "meeting_reminders_enabled": org.get("meeting_reminders_enabled", True),
+        "secretary_upload_request_enabled": org.get("secretary_upload_request_enabled", True),
+    }
+
+
+class MeetingAutomationsIn(BaseModel):
+    meeting_reminders_enabled: bool | None = None
+    secretary_upload_request_enabled: bool | None = None
+
+
+@router.put("/meetings/automations")
+def set_meeting_automations(body: MeetingAutomationsIn, user: Annotated[dict, Depends(get_current_user)]):
+    db = get_admin_client()
+    _require_can_edit_automations(db, user)
+    patch = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not patch:
+        return {"ok": True}
+    db.table("organizations").update(patch).eq("id", user["org_id"]).execute()
+    return {"ok": True}
 
 
 @router.get("/permissions/overrides/counts")

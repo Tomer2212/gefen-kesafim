@@ -72,20 +72,29 @@ def _local_meeting_busy_blocks(db, advisor_ids: list[str], start_iso: str, end_i
     return blocks
 
 
-def _find_existing_meeting(db, school_id: str, service_type: str, start_date: str, end_date: str) -> dict | None:
+def _find_existing_meeting(db, school_id: str, service_type: str, start_date: str, end_date: str,
+                            stage_scope: str | None = None) -> dict | None:
     """Round-7 live check — a school may already have a genuine scheduled meeting of this
     service_type overlapping the requested range (booked another way entirely, e.g. by phone,
     or via a different token) even though THIS token's own booked_ranges never recorded one.
     "scheduled" is the codebase's own convention for "a real, non-cancelled booking" (matches
     schools_router.py's existing filters, e.g. line 794/2909/3195) — "cancelled"/"postponed"/
     "other" must not count. Checked live on every page load, not baked into the token at
-    creation time, so it also catches a meeting scheduled AFTER the link was sent."""
-    rows = (
+    creation time, so it also catches a meeting scheduled AFTER the link was sent.
+
+    Round 17: stage_scope=("tichon"|"chativa") scopes the check to meetings for that specific
+    principal (or a "both"/unset legacy meeting, which covers either) — without this, a
+    "separate" split condition's two ranges (same school/type/date-window, different principal)
+    were indistinguishable, so booking either one falsely "existing_meeting"-blocked the other.
+    stage_scope=None (the normal, non-split case) keeps the exact original behavior."""
+    query = (
         db.table("meetings").select("meeting_date, start_time, end_time")
         .eq("school_id", school_id).eq("meeting_service_type", service_type).eq("status", "scheduled")
         .gte("meeting_date", start_date).lte("meeting_date", end_date)
-        .limit(1).execute().data or []
     )
+    if stage_scope in ("tichon", "chativa"):
+        query = query.or_(f"stage_scope.eq.{stage_scope},stage_scope.eq.both,stage_scope.is.null")
+    rows = query.limit(1).execute().data or []
     return rows[0] if rows else None
 
 
@@ -183,7 +192,7 @@ def get_booking_info(token: str):
             is_booked = r["key"] in booked
             existing = None
             if not is_booked:
-                existing = _find_existing_meeting(db, token_row["school_id"], r["service_type"], r["start_date"], r["end_date"])
+                existing = _find_existing_meeting(db, token_row["school_id"], r["service_type"], r["start_date"], r["end_date"], r.get("stage_scope"))
             # Round 9 fix: show which specific advisor(s) THIS meeting is with — previously
             # only the token-wide union was shown once at the top of the page, so a school with
             # e.g. a "גפן" meeting with advisor A and a "שוטף" meeting with advisor B saw both
@@ -219,7 +228,7 @@ def get_booking_freebusy(token: str, month: str | None = None, range_key: str | 
         range_row = _range_by_key(token_row, range_key)
         if _range_is_booked(token_row, range_key):
             raise HTTPException(status_code=400, detail="הפגישה הזו כבר נקבעה")
-        if _find_existing_meeting(db, token_row["school_id"], range_row["service_type"], range_row["start_date"], range_row["end_date"]):
+        if _find_existing_meeting(db, token_row["school_id"], range_row["service_type"], range_row["start_date"], range_row["end_date"], range_row.get("stage_scope")):
             raise HTTPException(status_code=400, detail="כבר קיימת פגישה מסוג זה בטווח התאריכים הזה")
 
         window = {**token_row["scheduling_window"], "duration_minutes": range_row["duration_minutes"]}
@@ -373,7 +382,7 @@ def _book_range_slot(db, token_row: dict, range_key: str, body: dict) -> dict:
     # below. Also the actual safety net behind round-7's booked_ranges write becoming best-
     # effort (see the retry block at the end of this function): even if that write silently
     # failed for a prior booking, this live check against `meetings` itself still catches it.
-    if _find_existing_meeting(db, token_row["school_id"], range_row["service_type"], range_row["start_date"], range_row["end_date"]):
+    if _find_existing_meeting(db, token_row["school_id"], range_row["service_type"], range_row["start_date"], range_row["end_date"], range_row.get("stage_scope")):
         raise HTTPException(status_code=400, detail="כבר קיימת פגישה מסוג זה בטווח התאריכים הזה")
 
     meeting_date = body.get("meeting_date")
@@ -414,6 +423,10 @@ def _book_range_slot(db, token_row: dict, range_key: str, body: dict) -> dict:
         "academic_year": DEFAULT_ACADEMIC_YEAR,
         "reminder_enabled": True,
         "notes": "נקבע ע\"י בית הספר דרך קישור תיאום ישיר",
+        # Round 17 — tags which principal slot (or "both"/None) this booking is for, so
+        # _find_existing_meeting and task_logic.py's success-check can tell a "separate"
+        # condition's two sibling ranges apart instead of treating either one as satisfying both.
+        "stage_scope": range_row.get("stage_scope"),
     }
     try:
         res = db.table("meetings").insert(meeting_data).execute()

@@ -23,6 +23,7 @@ import HourMinuteInput from "../components/HourMinuteInput";
 import { MultiSelectChips } from "../components/MultiSelectChips";
 import { defaultMeetingServiceType, resolveDefaultAdvisorIds } from "../components/meetings/constants";
 import { AdvisorCell } from "../components/meetings/AdvisorCell";
+import AdvisorAccessGrantModal from "../components/meetings/AdvisorAccessGrantModal";
 import { DatePickerPopover } from "../components/meetings/DatePickerPopover";
 import { DeleteMeetingModal } from "../components/meetings/DeleteMeetingModal";
 import { MeetingRow } from "../components/meetings/MeetingRow";
@@ -2373,34 +2374,6 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
   );
 }
 
-// ─── Meetings: AccessGrantModal ──────────────────────────────────────────────
-function AccessGrantModal({ advisorName, canGrant, onGrant, onRequest, onCancel }) {
-  const { ref, handleKeyDown } = useFocusTrap(onCancel);
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(15,23,42,0.55)" }}
-      onClick={e => { if (e.target === e.currentTarget) onCancel(); }}>
-      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="access-modal-title"
-        onKeyDown={handleKeyDown} dir="rtl"
-        className="glass-card rounded-2xl p-6 w-full max-w-sm flex flex-col gap-4">
-        <div>
-          <h2 id="access-modal-title" className="font-bold text-slate-900">אין גישה לבית הספר</h2>
-          <p className="text-sm text-slate-500 mt-1">
-            ל{advisorName} אין גישה לנתוני בית הספר הזה. {canGrant ? "האם לפתוח עבורו/ה גישה?" : "ניתן לשלוח בקשת גישה לאחראי."}
-          </p>
-        </div>
-        <div className="flex gap-2">
-          {canGrant ? (
-            <button type="button" onClick={onGrant} className="flex-1 btn-blue text-sm px-4 py-2">פתח גישה</button>
-          ) : (
-            <button type="button" onClick={onRequest} className="flex-1 btn-blue text-sm px-4 py-2">שלח בקשה</button>
-          )}
-          <button type="button" onClick={onCancel} className="btn-ghost text-sm px-4 py-2">ביטול</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 export default function SchoolPage() {
   const { schoolId } = useParams();
   const navigate = useNavigate();
@@ -2480,7 +2453,7 @@ export default function SchoolPage() {
   const [notesModal, setNotesModal] = useState(null);
   const [summaryModalFor, setSummaryModalFor] = useState(null);
   const [showCalendarColumn, setShowCalendarColumn] = useState(false);
-  const [accessGrantModal, setAccessGrantModal] = useState(null);
+  const [advisorAccessModal, setAdvisorAccessModal] = useState(null); // {advisorId, advisorName, meetingDate}
   const sessionCreatedMeetingIdsRef = useRef(new Set());
   const [pendingTabSwitch, setPendingTabSwitch] = useState(null);
   const [meetingGuardBusy, setMeetingGuardBusy] = useState(false);
@@ -2837,14 +2810,19 @@ export default function SchoolPage() {
     }
   }
 
-  async function requestAdvisorAccess(advisorId) {
+  // Only managers/owners can actually act on the grant modal's buttons (backend enforces
+  // this too) — advisors picking a no-access colleague just see the pick go through silently,
+  // same as before this feature existed, rather than a modal whose buttons would 403.
+  function handleRequestAdvisorAccess(advisorId, advisorName, meetingDate) {
+    if (!(role === "owner" || role === "manager")) return;
+    setAdvisorAccessModal({ advisorId, advisorName, meetingDate });
+  }
+
+  async function refreshSchoolAdvisors() {
     try {
-      await axios.post(`/schools/${schoolId}/update-requests`, {
-        proposed_changes: { add_advisor_to_school: advisorId },
-      });
-    } catch (err) {
-      console.error("Failed to request advisor access:", err);
-    }
+      const res = await axios.get(`/schools/${schoolId}/advisors`);
+      setSchoolAdvisors(res.data || []);
+    } catch {}
   }
 
   function normalizeTime(t) {
@@ -2925,14 +2903,6 @@ export default function SchoolPage() {
       if (ec.name) contacts.push({ key: `extra_${i}`, label: ec.role || "איש קשר נוסף", name: ec.name, email: ec.email || "" });
     });
     return contacts;
-  }
-
-  async function grantAccessToAdvisor(advisorId) {
-    const current = school?.restrict_access_to;
-    if (current === null || current === undefined) return; // already all access
-    const updated = [...new Set([...(current || []), advisorId])];
-    await axios.put(`/schools/${schoolId}`, { ...school, restrict_access_to: updated });
-    setSchool(prev => ({ ...prev, restrict_access_to: updated }));
   }
 
   function advisorHasAccess(advisorId) {
@@ -4273,23 +4243,14 @@ export default function SchoolPage() {
                   onUploadStarted={meetingId => setMeetings(prev => prev.map(m => m.id === meetingId ? { ...m, summary_status: "processing" } : m))}
                 />
               )}
-              {accessGrantModal && (
-                <AccessGrantModal
-                  advisorName={accessGrantModal.advisorName}
-                  canGrant={role === "owner" || role === "manager"}
-                  onGrant={async () => {
-                    await grantAccessToAdvisor(accessGrantModal.advisorId);
-                    setAccessGrantModal(null);
-                  }}
-                  onRequest={async () => {
-                    try {
-                      await axios.post(`/schools/${schoolId}/update-requests`, {
-                        proposed_changes: { restrict_access_to: [...(school?.restrict_access_to || []), accessGrantModal.advisorId] },
-                      });
-                    } catch {}
-                    setAccessGrantModal(null);
-                  }}
-                  onCancel={() => setAccessGrantModal(null)}
+              {advisorAccessModal && (
+                <AdvisorAccessGrantModal
+                  schoolId={schoolId}
+                  advisorId={advisorAccessModal.advisorId}
+                  advisorName={advisorAccessModal.advisorName}
+                  mode={{ type: "single_date", meetingDate: advisorAccessModal.meetingDate || new Date().toISOString().slice(0, 10) }}
+                  onGranted={() => { setAdvisorAccessModal(null); refreshSchoolAdvisors(); }}
+                  onCancel={() => setAdvisorAccessModal(null)}
                 />
               )}
 
@@ -4304,9 +4265,6 @@ export default function SchoolPage() {
                 <button type="button" onClick={startNewMeeting}
                   className="btn-blue text-sm px-4 py-2 flex items-center gap-2">
                   <span aria-hidden="true">+</span> הוסף פגישה
-                </button>
-                <button type="button" className="btn-ghost text-sm px-4 py-2 flex items-center gap-2">
-                  <span aria-hidden="true">⚙️</span> אוטומציות
                 </button>
               </div>
 
@@ -4386,7 +4344,7 @@ export default function SchoolPage() {
                   onSave={updateMeeting}
                   onDelete={deleteMeeting}
                   onOpenNotes={(meetingId, notes, onSave) => setNotesModal({ meetingId, notes, onSave })}
-                  onRequestAccess={requestAdvisorAccess}
+                  onRequestAccess={handleRequestAdvisorAccess}
                   canDeleteMeetings={canDeleteMeetings}
                   onSendStatusReminder={sendStatusReminderFromSchool}
                   showCalendarColumn={showCalendarColumn}

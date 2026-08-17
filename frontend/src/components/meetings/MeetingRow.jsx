@@ -597,7 +597,7 @@ export function MeetingRow({
               usersWithAccess={usersWithAccess}
               usersWithoutAccess={usersWithoutAccess}
               onChange={profiles => { const nd = { ...draft, advisor_ids: profiles.map(x => x.id), advisor_profiles: profiles }; setDraft(nd); saveDraft(nd); }}
-              onRequestAccess={onRequestAccess}
+              onRequestAccess={(advisorId, name) => onRequestAccess?.(advisorId, name, draft.meeting_date, meeting)}
             />
           </td>
         )}
