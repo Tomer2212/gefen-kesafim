@@ -1,0 +1,24 @@
+name: Recompute Person Tasks
+
+on:
+  schedule:
+    # Every 30 minutes — person-tasks have no "send" action to piggyback a recompute trigger on
+    # (unlike school-tasks' process-message-queue), so field-based success metrics need a
+    # dedicated periodic tick to auto-detect completion (see person_tasks_router.
+    # recompute_all_person_tasks).
+    - cron: '*/30 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call person-tasks recompute-all endpoint
+        run: |
+          URL="${BACKEND_URL%/}"
+          curl -sf -X POST "${URL}/person-tasks/recompute-all" \
+            -H "X-Cron-Secret: ${CRON_SECRET}" \
+            --max-time 120
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}

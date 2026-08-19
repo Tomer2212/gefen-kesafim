@@ -418,6 +418,7 @@ export default function TaskMeetingResolutionModal({
                         {school.symbol && <bdi className="text-slate-400 text-xs">({school.symbol})</bdi>}
                         {school.authority && <span className="text-slate-400 text-xs">· {school.authority}</span>}
                         {!isClear && !isRemoved && <span className="text-xs text-amber-700">— {unresolvedCount} בעיות</span>}
+                        {school.opted_out && <span className="text-xs text-slate-500 bg-slate-100 rounded-full px-2 py-0.5">הוסר מרשימת תפוצה</span>}
                       </span>
                       {!taskId && (
                         <span className="flex items-center gap-2">
@@ -435,6 +436,13 @@ export default function TaskMeetingResolutionModal({
 
                     {isExpanded && !isRemoved && (
                       <div className="px-3 pb-3 space-y-2.5">
+                        {school.opted_out && (
+                          <div className="bg-slate-50 rounded-lg border border-slate-200 p-3">
+                            <p className="text-xs text-slate-600">
+                              <b>לתשומת לב:</b> בית ספר זה ביקש הסרה מרשימת התפוצה ({school.opted_out.email}) ולא יקבל את ההודעה, עד ששדה "סטטוס לקוח" שלו יהפוך ל"פעיל". זו הערה בלבד ואינה חוסמת את יצירת המשימה.
+                            </p>
+                          </div>
+                        )}
                         {school.participants && (() => {
                           cardCounter += 1;
                           const n = cardCounter;

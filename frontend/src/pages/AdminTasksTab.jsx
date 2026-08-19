@@ -1,135 +1,48 @@
-import { useEffect, useState } from "react";
-import axios from "axios";
-import { useTasks } from "../context/TasksContext";
-import TaskTypeChooser from "../components/tasks/TaskTypeChooser";
-import TaskCreateWizard from "../components/tasks/TaskCreateWizard";
+import { useSearchParams } from "react-router-dom";
+import AdminSchoolTasksTab from "./AdminSchoolTasksTab";
+import AdminPersonTasksTab from "./AdminPersonTasksTab";
 
-// 'משימות' tab (ניהול → משימות) — single entry point for task creation. Clicking
-// "+ יצירת משימה" opens TaskTypeChooser first (school-communication vs. per-advisor,
-// the latter not yet implemented), then TaskCreateWizard for the schools path.
-// Previously this lived as a chip bar (TaskListBar) above the schools table; that
-// component is now only rendered here.
+const SUB_TAB_IDS = ["schools", "users"];
+const SUB_TABS = [
+  { id: "schools", label: "בתי ספר" },
+  { id: "users", label: "אנשי הארגון" },
+];
+
+// 'משימות' tab (ניהול → משימות) — thin container with 2 sub-tabs: school-targeted tasks
+// (existing, AdminSchoolTasksTab.jsx) and person-targeted tasks (new, AdminPersonTasksTab.jsx).
+// Each sub-tab owns its own data/table/creation-wizard entry point independently.
 export default function AdminTasksTab() {
-  const { openTask } = useTasks();
-  const [tasks, setTasks] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [choosingType, setChoosingType] = useState(false);
-  const [wizardOpen, setWizardOpen] = useState(false);
-  const [wizardIsMeetingTask, setWizardIsMeetingTask] = useState(true);
-  const [showArchived, setShowArchived] = useState(false);
-
-  function loadTasks() {
-    setLoading(true);
-    axios.get("/tasks/")
-      .then(r => setTasks(r.data))
-      .catch(() => setTasks([]))
-      .finally(() => setLoading(false));
-  }
-
-  useEffect(() => { loadTasks(); }, []);
-
-  const openTasks = tasks.filter(t => t.status !== "archived");
-  const archivedTasks = tasks.filter(t => t.status === "archived");
-
-  function TaskCard({ t }) {
-    return (
-      <button
-        key={t.id}
-        type="button"
-        onClick={() => openTask(t.id)}
-        className={`text-right border rounded-xl p-4 bg-white hover:shadow-sm transition-all flex flex-col gap-1 ${
-          t.has_meeting_send_problems ? "border-red-300 bg-red-50/40 hover:border-red-400" : "border-slate-200 hover:border-blue-400"
-        }`}
-      >
-        <div className="font-semibold text-slate-800 flex items-center gap-1.5">
-          {t.has_meeting_send_problems && (
-            <span aria-label="קיימות בעיות שמונעות שליחה" title="קיימות בעיות שמונעות שליחה" className="text-red-500">⚠</span>
-          )}
-          {t.name}
-        </div>
-        <div className="text-xs text-slate-500 flex items-center gap-2 flex-wrap">
-          {t.status === "scheduled" ? (
-            <span className="text-amber-600 font-medium">מתוזמן</span>
-          ) : t.status === "archived" ? (
-            <span className="text-slate-400">בארכיון</span>
-          ) : (
-            <span className="text-green-600 font-medium">פעיל</span>
-          )}
-          <span>· {t.total_schools ?? 0} בתי ספר</span>
-          {t.created_by_name && <span>· נוצר ע"י {t.created_by_name}</span>}
-          {t.has_meeting_send_problems && <span className="text-red-600 font-medium">· יש בעיות שחוסמות שליחה</span>}
-        </div>
-      </button>
-    );
+  // ?subtab= (alongside AdminPage.jsx's own ?tab=tasks) — a page refresh must land back on
+  // whichever of "בתי ספר"/"אנשי הארגון" was open, same principle as ProfilePage.jsx's tabs.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const subTabParam = searchParams.get("subtab");
+  const subTab = SUB_TAB_IDS.includes(subTabParam) ? subTabParam : "schools";
+  function setSubTab(id) {
+    setSearchParams(prev => {
+      const p = new URLSearchParams(prev);
+      p.set("subtab", id);
+      return p;
+    });
   }
 
   return (
     <div dir="rtl">
-      <div className="flex items-center justify-between mb-4">
-        <div>
-          <h2 className="text-lg font-bold text-slate-800">משימות</h2>
-          <p className="text-sm text-slate-500">יצירה ומעקב אחר משימות תקשורת מול בתי ספר</p>
-        </div>
-        <button
-          type="button"
-          onClick={() => setChoosingType(true)}
-          className="btn-blue text-sm px-4 py-2"
-        >
-          + יצירת משימה חדשה
-        </button>
+      <div className="flex items-center gap-1 border-b border-slate-200 mb-4">
+        {SUB_TABS.map(t => (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => setSubTab(t.id)}
+            className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${
+              subTab === t.id ? "border-blue-600 text-blue-700" : "border-transparent text-slate-500 hover:text-slate-700"
+            }`}
+          >
+            {t.label}
+          </button>
+        ))}
       </div>
 
-      {loading ? (
-        <div role="status" aria-label="טוען משימות" className="text-sm text-slate-400">טוען...</div>
-      ) : openTasks.length === 0 ? (
-        <div className="text-sm text-slate-400 border border-dashed border-slate-200 rounded-xl p-8 text-center">
-          אין משימות פתוחות כרגע
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-          {openTasks.map(t => <TaskCard key={t.id} t={t} />)}
-        </div>
-      )}
-
-      {archivedTasks.length > 0 && (
-        <div className="mt-6">
-          <button
-            type="button"
-            onClick={() => setShowArchived(v => !v)}
-            className="text-sm text-slate-500 hover:text-slate-700 font-medium"
-          >
-            {showArchived ? "▼" : "◀"} משימות בארכיון ({archivedTasks.length})
-          </button>
-          {showArchived && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mt-3">
-              {archivedTasks.map(t => <TaskCard key={t.id} t={t} />)}
-            </div>
-          )}
-        </div>
-      )}
-
-      {choosingType && (
-        <TaskTypeChooser
-          onClose={() => setChoosingType(false)}
-          onChooseSchools={(isMeetingTask) => {
-            setChoosingType(false);
-            setWizardIsMeetingTask(isMeetingTask);
-            setWizardOpen(true);
-          }}
-        />
-      )}
-
-      {wizardOpen && (
-        <TaskCreateWizard
-          isMeetingTask={wizardIsMeetingTask}
-          onClose={() => setWizardOpen(false)}
-          onCreated={(taskId) => {
-            setWizardOpen(false);
-            loadTasks();
-            openTask(taskId);
-          }}
-        />
-      )}
+      {subTab === "schools" ? <AdminSchoolTasksTab /> : <AdminPersonTasksTab />}
     </div>
   );
 }

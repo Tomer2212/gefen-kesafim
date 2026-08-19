@@ -283,7 +283,7 @@ export default function Sidebar({ dark = false }) {
   const [isSuperAdmin, setIsSuperAdmin] = useState(false);
   const [notifCount, setNotifCount] = useState(0);
   const [toasts, setToasts] = useState([]);
-  const { addMeetingReminder, addStatusReminder, setUserName: setCtxUserName } = useMeetingReminders();
+  const { addMeetingReminder, addStatusReminder, addTaskReminder, setUserName: setCtxUserName } = useMeetingReminders();
   const prevCountRef = useRef(0);
   const lastPollTimeRef = useRef(Date.now());
   const notifPrefsRef = useRef({ meeting_reminder: true, meeting_reminder_minutes: 10 });
@@ -372,6 +372,9 @@ export default function Sidebar({ dark = false }) {
         const now = new Date();
         const reminderMs = (prefs.meeting_reminder_minutes || 10) * 60 * 1000;
         const twoHours = 2 * 60 * 60 * 1000;
+        // Meetings whose reminder toast fires THIS tick — collected so the "יש לך משימה" toast
+        // can be batched into one request instead of one /active-for-schools call per meeting.
+        const firingMeetings = [];
 
         for (const m of meetings) {
           if (!m.start_time || !m.meeting_date) continue;
@@ -391,6 +394,7 @@ export default function Sidebar({ dark = false }) {
           if (shouldFire) {
             sessionStorage.setItem(key, "1");
             addMeetingReminder({ ...m, msUntil });
+            firingMeetings.push(m);
           }
 
           // End-of-meeting status update reminder
@@ -407,6 +411,37 @@ export default function Sidebar({ dark = false }) {
                 sessionStorage.setItem(statusKey, "1");
                 addStatusReminder({ ...m });
               }
+            }
+          }
+        }
+
+        // "יש לך גם משימה לביצוע פה" — piggybacks on the meeting reminder that just fired above
+        // (same instant, same on/off preference), rather than its own separate time-window
+        // trigger. Deduped independently (own sessionStorage key, still tied to the meeting's
+        // own id/date/start_time so a rescheduled meeting can re-fire it) so it never depends on
+        // whether the meeting-reminder toast itself is still open.
+        if (firingMeetings.length) {
+          const dueMeetings = firingMeetings.filter(m => {
+            const taskKey = `task-reminder-${m.id}-${m.meeting_date}-${m.start_time}`;
+            return !sessionStorage.getItem(taskKey);
+          });
+          if (dueMeetings.length) {
+            try {
+              const schoolIds = [...new Set(dueMeetings.map(m => m.school_id))];
+              const activeRes = await axios.get("/person-tasks/active-for-schools", {
+                params: { school_ids: schoolIds.join(",") },
+              });
+              const activeBySchool = activeRes.data || {};
+              for (const m of dueMeetings) {
+                const taskKey = `task-reminder-${m.id}-${m.meeting_date}-${m.start_time}`;
+                sessionStorage.setItem(taskKey, "1");
+                const taskNames = activeBySchool[m.school_id];
+                if (taskNames?.length) {
+                  addTaskReminder({ school_id: m.school_id, school_name: m.school_name, task_names: taskNames, meeting_id: m.id });
+                }
+              }
+            } catch {
+              // non-fatal — a failed lookup here must never block the meeting reminder itself
             }
           }
         }

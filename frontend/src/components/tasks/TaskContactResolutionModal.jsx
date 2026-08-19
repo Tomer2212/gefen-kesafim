@@ -59,6 +59,10 @@ export default function TaskContactResolutionModal({
   }, [recipientRole]);
 
   const missing = (result?.schools || []).filter(s => !s.has_contact && !resolvedIds.has(s.school_id) && !removedIds.has(s.school_id));
+  // Purely informational — never removes/blocks anything, just surfaced separately from the
+  // "missing contact" list below since it's a different kind of issue (see task_logic.
+  // opted_out_recipients on the backend).
+  const optedOut = (result?.schools || []).filter(s => s.opted_out);
 
   function draftFor(school) {
     if (drafts[school.school_id]) return drafts[school.school_id];
@@ -158,13 +162,15 @@ export default function TaskContactResolutionModal({
             <p role="status" className="text-slate-500">בודק פרטי קשר...</p>
           ) : !result ? (
             <p role="alert" className="text-red-600">הבדיקה נכשלה — נסה שוב.</p>
-          ) : missing.length === 0 ? (
+          ) : missing.length === 0 && optedOut.length === 0 ? (
             <p className="text-emerald-700 bg-emerald-50 rounded-lg px-3 py-2">כל בתי הספר כוללים כעת פרטי קשר תקינים ✓</p>
           ) : (
             <>
-              <p className="text-slate-600">
-                <b className="text-slate-800">{missing.length}</b> בתי ספר חסרים איש קשר בתפקיד "{roleLabel}". אפשר לעבור עליהם בנחת — כל שורה נפתרת בנפרד.
-              </p>
+              {missing.length > 0 && (
+                <p className="text-slate-600">
+                  <b className="text-slate-800">{missing.length}</b> בתי ספר חסרים איש קשר בתפקיד "{roleLabel}". אפשר לעבור עליהם בנחת — כל שורה נפתרת בנפרד.
+                </p>
+              )}
 
               <button type="button" onClick={() => setShowRoleSwitch(v => !v)} className="text-xs text-blue-600 hover:underline">
                 {showRoleSwitch ? "סגור" : "נסה תפקיד ברירת מחדל אחר לכל המשימה"}
@@ -223,6 +229,20 @@ export default function TaskContactResolutionModal({
                   );
                 })}
               </div>
+
+              {optedOut.length > 0 && (
+                <div className="space-y-1.5">
+                  <p className="text-slate-600 text-xs">
+                    <b className="text-slate-800">{optedOut.length}</b> בתי ספר שביקשו הסרה מרשימת התפוצה (לא יקבלו הודעה עד לשינוי סטטוס הלקוח ל"פעיל"):
+                  </p>
+                  {optedOut.map(school => (
+                    <div key={school.school_id} className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-600">
+                      <b className="text-slate-800">{school.school_name}</b>{" "}
+                      {school.symbol && <bdi className="text-slate-400">({school.symbol})</bdi>} — {school.opted_out.email}
+                    </div>
+                  ))}
+                </div>
+              )}
 
               {saveError && <p role="alert" className="text-red-600 bg-red-50 rounded-lg px-3 py-2">{saveError}</p>}
             </>

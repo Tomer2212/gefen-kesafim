@@ -355,6 +355,8 @@ class NotificationPreferencesIn(BaseModel):
     notify_advisor_assignment: bool | None = None
     notify_role_changed: bool | None = None
     notify_mention: bool | None = None
+    notify_task_assigned: bool | None = None
+    notify_call_contact_ambiguous: bool | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1616,6 +1618,11 @@ def set_goal_status(
         raise HTTPException(status_code=400, detail="יעד לא נמצא")
 
     db = get_admin_client()
+    # Was missing entirely (only Depends(get_current_user), no access check) — any authenticated
+    # user, including an advisor with zero assignment to this school, could update ANY school's
+    # goal. Same access rule already enforced by upsert_control_letter/get_year_admin_data.
+    if user["role"] not in ("owner", "manager") and not _advisor_has_school_access(db, user, school_id):
+        raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
     row = (
         db.table("school_goals")
         .upsert(
@@ -1706,10 +1713,17 @@ def assign_advisor(
     return {"ok": True}
 
 
-def _advisor_has_school_access(db, advisor_id: str, school: dict) -> bool:
-    """Read-only mirror of the existing ad-hoc 3-way access check duplicated across this
-    file (restrict_access_to null/list, or an advisor_schools row) — kept separate from
-    those call sites deliberately so this new code never risks altering their behavior."""
+def _advisor_has_access_to_school_row(db, advisor_id: str, school: dict) -> bool:
+    """Read-only mirror of the existing ad-hoc 3-way access check duplicated across this file
+    (restrict_access_to null/list, or an advisor_schools row) — for a caller that already has
+    the school row in hand (unlike _advisor_has_school_access above, which takes a school_id and
+    fetches it itself). Named distinctly from that function (was previously an accidental
+    same-name redefinition at module scope — Python silently keeps only the LAST def with a
+    given name, so every one of _advisor_has_school_access's 9 call sites above was actually
+    calling THIS function instead, with an incompatible (user_dict, school_id_str) argument
+    order — a school_id string has no .get() method, so any non-manager advisor calling any of
+    those endpoints (year-admin-data, control-letters, goals, ...) got a 500, not the intended
+    403/allow. Fixed by giving this one its own name so the two stop colliding."""
     rat = school.get("restrict_access_to")
     if rat is None or advisor_id in (rat or []):
         return True
@@ -1734,7 +1748,7 @@ def check_advisor_access(
         raise HTTPException(status_code=404, detail="בית ספר לא נמצא")
     school = school_row.data[0]
     ids = [a for a in advisor_ids.split(",") if a]
-    return {aid: _advisor_has_school_access(db, aid, school) for aid in ids}
+    return {aid: _advisor_has_access_to_school_row(db, aid, school) for aid in ids}
 
 
 class AdvisorAccessMatrixIn(BaseModel):
@@ -1806,6 +1820,13 @@ def grant_temp_advisor_access(
     return {"ok": True, "id": inserted["id"]}
 
 
+def _format_date_dmy(iso_str: str) -> str:
+    try:
+        return datetime.fromisoformat(iso_str.replace("Z", "+00:00")).strftime("%d/%m/%Y")
+    except Exception:
+        return iso_str
+
+
 def _activate_temp_access_row(db, row: dict) -> str:
     """Turns a pending temp_advisor_access row into a real advisor_schools grant. Never
     downgrades an existing permanent grant (temp_access_expires_at IS NULL) back to
@@ -1826,6 +1847,23 @@ def _activate_temp_access_row(db, row: dict) -> str:
         {"advisor_id": row["advisor_id"], "school_id": row["school_id"], "temp_access_expires_at": new_expiry}
     ).execute()
     db.table("temp_advisor_access").update({"status": "active"}).eq("id", row["id"]).execute()
+
+    try:
+        school_row = db.table("schools").select("name").eq("id", row["school_id"]).execute().data
+        school_name = school_row[0]["name"] if school_row else "בית ספר"
+        _create_notifications(db, [{
+            "recipient_id": row["advisor_id"],
+            "type": "temp_access_granted",
+            "school_id": row["school_id"],
+            "data": {
+                "title": f"קיבלת גישה זמנית לבית הספר {school_name}, בתוקף עד {_format_date_dmy(new_expiry)}.",
+                "school_name": school_name,
+                "deeplink": f"/school/{row['school_id']}",
+            },
+        }])
+    except Exception as exc:
+        logger.warning("_activate_temp_access_row: notification failed (non-fatal): %s", exc)
+
     return "active"
 
 
@@ -1853,6 +1891,13 @@ def process_temp_advisor_access(db) -> dict:
         .not_.is_("temp_access_expires_at", "null").lte("temp_access_expires_at", now_iso)
         .execute().data or []
     )
+    school_names = {}
+    if due:
+        try:
+            rows = db.table("schools").select("id, name").in_("id", list({p["school_id"] for p in due})).execute().data or []
+            school_names = {r["id"]: r["name"] for r in rows}
+        except Exception as exc:
+            logger.warning("process_temp_advisor_access: school-name lookup failed (non-fatal): %s", exc)
     for pair in due:
         try:
             db.table("advisor_schools").delete().eq("advisor_id", pair["advisor_id"]).eq("school_id", pair["school_id"]).execute()
@@ -1860,6 +1905,16 @@ def process_temp_advisor_access(db) -> dict:
                 "advisor_id", pair["advisor_id"]
             ).eq("school_id", pair["school_id"]).eq("status", "active").execute()
             expired += 1
+            try:
+                school_name = school_names.get(pair["school_id"], "בית ספר")
+                _create_notifications(db, [{
+                    "recipient_id": pair["advisor_id"],
+                    "type": "temp_access_expired",
+                    "school_id": pair["school_id"],
+                    "data": {"title": f"הגישה הזמנית שלך לבית הספר {school_name} הסתיימה.", "school_name": school_name},
+                }])
+            except Exception as exc:
+                logger.warning("process_temp_advisor_access: expiry notification failed (non-fatal): %s", exc)
         except Exception as exc:
             logger.warning("process_temp_advisor_access: expiry failed for %s: %s", pair, exc)
 
@@ -2500,6 +2555,8 @@ def update_notification_preferences(
         new_prefs["meeting_reminder"] = body.meeting_reminder
     if body.meeting_reminder_minutes is not None:
         new_prefs["meeting_reminder_minutes"] = body.meeting_reminder_minutes
+    if body.notify_call_contact_ambiguous is not None:
+        new_prefs["notify_call_contact_ambiguous"] = body.notify_call_contact_ambiguous
     db.table("profiles").update({"notification_preferences": new_prefs}).eq("id", user["id"]).execute()
     invalidate_profile_cache(user["id"])
     return {"ok": True, "notification_preferences": new_prefs}
@@ -2951,8 +3008,20 @@ def _hebrew_join(names: list[str]) -> str:
     return ", ".join(names[:-1]) + " ו" + names[-1]
 
 
+def _opt_out_footer_html(opt_out_link: str | None) -> str:
+    """Shared footer line for the reminder/upload-request email builders below — mirrors
+    booking_logic._opt_out_footer_html's wording/placement for the direct-coordination and
+    booking-agent emails, kept as a separate copy here to avoid importing booking_logic just
+    for this one string (schools_router already imports it locally where actually needed)."""
+    if not opt_out_link:
+        return ""
+    return f'<p style="margin: 8px 0 0 0; font-size: 11px; color: #94a3b8;">' \
+           f'<a href="{opt_out_link}" style="color: #94a3b8;">להסרה מרשימת התפוצה</a></p>'
+
+
 def _build_reminder_email_html(recipient_name: str, when_lamed: str, when_bet: str, meeting_date: str,
-                                start_time: str | None, advisor_name: str, meeting_service_type: str = "gefen") -> str:
+                                start_time: str | None, advisor_name: str, meeting_service_type: str = "gefen",
+                                opt_out_link: str | None = None) -> str:
     from datetime import date
     first_name = (recipient_name or "").strip().split(" ")[0]
     greeting = f"היי {first_name}," if first_name else "היי,"
@@ -2968,6 +3037,7 @@ def _build_reminder_email_html(recipient_name: str, when_lamed: str, when_bet: s
         body_line = f'רצינו להזכיר לך על הפגישה שמתוכננת {when_lamed}, בתאריך <b>{date_fmt}</b>{time_clause}{advisor_clause} בנושא המחוז.'
     else:
         body_line = f'רצינו להזכיר לך על הפגישה שמתוכננת {when_lamed}, בתאריך <b>{date_fmt}</b>{time_clause}{advisor_clause} על תקציב הגפ"ן.'
+    opt_out_html = _opt_out_footer_html(opt_out_link)
     return f"""
 <html>
 <body dir="rtl" style="font-family: Arial, sans-serif; font-size: 14px; color: #1e293b;
@@ -2989,6 +3059,7 @@ def _build_reminder_email_html(recipient_name: str, when_lamed: str, when_bet: s
     </div>
     <div style="background: #f1f5f9; padding: 12px 24px; text-align: center;">
       <p style="margin: 0; font-size: 11px; color: #94a3b8;">נשלח אוטומטית מגפן AI</p>
+      {opt_out_html}
     </div>
   </div>
 </body>
@@ -2997,7 +3068,8 @@ def _build_reminder_email_html(recipient_name: str, when_lamed: str, when_bet: s
 
 def _build_secretary_upload_email_html(recipient_name: str, when_bet: str, school_name: str,
                                         checklist_items: list[str], upload_url: str, no_baseline: bool,
-                                        meeting_date: str, start_time: str | None, advisor_name: str) -> str:
+                                        meeting_date: str, start_time: str | None, advisor_name: str,
+                                        opt_out_link: str | None = None) -> str:
     from datetime import date
     first_name = (recipient_name or "").strip().split(" ")[0]
     greeting = f"היי {first_name}," if first_name else "היי,"
@@ -3010,6 +3082,7 @@ def _build_secretary_upload_email_html(recipient_name: str, when_bet: str, schoo
         "border-radius:8px; padding:10px 14px; font-size:13px;'>"
         "טרם בוצעה בדיקה עבור בית הספר בשנת הלימודים הנוכחית — הרשימה למטה כללית.</p>"
     ) if no_baseline else ""
+    opt_out_html = _opt_out_footer_html(opt_out_link)
     return f"""
 <html>
 <body dir="rtl" style="font-family: Arial, sans-serif; font-size: 14px; color: #1e293b;
@@ -3039,6 +3112,7 @@ def _build_secretary_upload_email_html(recipient_name: str, when_bet: str, schoo
     </div>
     <div style="background: #f1f5f9; padding: 12px 24px; text-align: center;">
       <p style="margin: 0; font-size: 11px; color: #94a3b8;">נשלח אוטומטית מגפן AI</p>
+      {opt_out_html}
     </div>
   </div>
 </body>
@@ -3137,6 +3211,29 @@ def send_due_reminders(request: Request):
         except Exception as exc:
             logger.warning("send_due_reminders: advisor name lookup failed (non-fatal): %s", exc)
 
+    # Opt-out suppression — batched once for every participant email / school across every due
+    # meeting (Architecture Invariant #7: no per-row query loop). client_status_map is reused
+    # below both to decide suppression and whether to attach an opt-out link to sendable
+    # reminders — fetched unconditionally since either use needs it regardless of whether
+    # anyone has actually opted out yet.
+    import task_logic  # local import — task_logic imports from this module at module level
+    all_participant_emails = list({
+        (p.get("email") or "").strip().lower()
+        for m in meetings for p in (m.get("participants") or []) if (p.get("email") or "").strip()
+    })
+    client_status_map = {}
+    opted_out_emails = set()
+    try:
+        db = get_admin_client()
+        opted_out_emails = task_logic.fetch_opted_out_emails(db, all_participant_emails)
+        year_rows = (
+            db.table("school_year_admin_data").select("school_id, client_status")
+            .eq("academic_year", DEFAULT_ACADEMIC_YEAR).in_("school_id", school_ids).execute().data or []
+        )
+        client_status_map = {r["school_id"]: r.get("client_status") for r in year_rows}
+    except Exception as exc:
+        logger.warning("send_due_reminders: opt-out lookup failed (non-fatal, treated as none opted out): %s", exc)
+
     sent, failed, skipped_meetings = 0, 0, 0
     for m in meetings:
         try:
@@ -3169,17 +3266,27 @@ def send_due_reminders(request: Request):
                 # are still logged as "skipped" in meeting_reminders — same table the "already
                 # attempted today" guard above reads from — so re-running the same day doesn't
                 # re-evaluate them, and reporting stays consistent with actually-sent recipients.
-                if (is_upload_contact and not upload_request_on) or (not is_upload_contact and not reminders_on):
+                is_opted_out = (
+                    email_addr.lower() in opted_out_emails
+                    and client_status_map.get(m["school_id"]) != "active"
+                )
+                if (is_upload_contact and not upload_request_on) or (not is_upload_contact and not reminders_on) or is_opted_out:
                     try:
                         db.table("meeting_reminders").insert({
                             "meeting_id": m["id"], "school_id": m["school_id"],
                             "recipient_email": email_addr, "recipient_name": p.get("name"),
-                            "status": "skipped", "error_message": None,
+                            "status": "skipped",
+                            "error_message": "recipient opted out (client_status not active)" if is_opted_out else None,
                         }).execute()
                     except Exception as log_exc:
                         logger.error("send_due_reminders: failed to log skipped reminder for meeting %s / %s: %s",
                                      m["id"], email_addr, log_exc)
                     continue
+
+                opt_out_link = None
+                if client_status_map.get(m["school_id"]) != "active":
+                    email_lower = email_addr.lower()
+                    opt_out_link = f"{os.getenv('APP_URL', '')}/tasks/opt-out?email={email_lower}&token={task_logic.make_optout_token(email_lower)}"
 
                 if is_upload_contact:
                     try:
@@ -3196,6 +3303,7 @@ def send_due_reminders(request: Request):
                             meeting_date=m["meeting_date"],
                             start_time=m.get("start_time"),
                             advisor_name=advisor_name,
+                            opt_out_link=opt_out_link,
                         )
                         status, error = "sent", None
                         try:
@@ -3220,6 +3328,7 @@ def send_due_reminders(request: Request):
                         start_time=m.get("start_time"),
                         advisor_name=advisor_name,
                         meeting_service_type=meeting_service_type,
+                        opt_out_link=opt_out_link,
                     )
                     status, error = "sent", None
                     try:
@@ -3257,6 +3366,7 @@ def process_booking_email_queue(request: Request):
         raise HTTPException(status_code=401, detail="unauthorized")
 
     import booking_logic
+    import task_logic  # local import — task_logic imports from this module at module level
     from booking_draft_state import _update_draft
 
     db = get_admin_client()
@@ -3291,6 +3401,30 @@ def process_booking_email_queue(request: Request):
             if not to_email:
                 raise ValueError(f"school {row['school_id']} has no secretary/finance email")
 
+            try:
+                opted_out_map = task_logic.opted_out_recipients(
+                    db, DEFAULT_ACADEMIC_YEAR, {row["school_id"]: to_email},
+                )
+            except Exception as exc:
+                logger.warning("process_booking_email_queue: opt-out lookup failed (non-fatal): %s", exc)
+                opted_out_map = {}
+            if row["school_id"] in opted_out_map:
+                db.table("meeting_booking_email_queue").update({
+                    "status": "skipped", "attempted_at": "now()",
+                    "error_message": "recipient opted out (client_status not active)",
+                }).eq("id", row["id"]).execute()
+                continue
+
+            year_rows = (
+                db.table("school_year_admin_data").select("client_status")
+                .eq("academic_year", DEFAULT_ACADEMIC_YEAR).eq("school_id", row["school_id"]).execute().data or []
+            )
+            client_status = year_rows[0].get("client_status") if year_rows else None
+            opt_out_link = None
+            if client_status != "active":
+                email_lower = to_email.strip().lower()
+                opt_out_link = f"{os.getenv('APP_URL', '')}/tasks/opt-out?email={email_lower}&token={task_logic.make_optout_token(email_lower)}"
+
             booking_url = f"{os.getenv('APP_URL', '')}/book/{token_row['token']}"
             html = booking_logic.build_booking_request_email_html(
                 recipient_name=recipient_name,
@@ -3298,6 +3432,7 @@ def process_booking_email_queue(request: Request):
                 advisor_name=advisor.get("full_name") or "",
                 months=token_row["months"],
                 booking_url=booking_url,
+                opt_out_link=opt_out_link,
             )
             subject = f"קביעת פגישה - {school['name']}"
             booking_logic.send_booking_request_email(row["org_id"], row["advisor_id"], to_email, subject, html)
@@ -5113,6 +5248,52 @@ def preview_meeting_subject(school_id: str, body: MeetingSubjectPreviewIn, user:
     return {"subject": subject}
 
 
+@router.get("/{school_id}/calls")
+def list_school_calls(
+    school_id: str,
+    user: Annotated[dict, Depends(get_current_user)],
+    academic_year: str | None = None,
+):
+    """Calls (from Voicenter) matched to this school's contacts — same visibility as the
+    rest of the school card (advisor assigned / restrict_access_to / manager+)."""
+    from academic_years import get_academic_year_date_range
+    from routers.voicenter_router import _pull_org_calls
+
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            school_row = db.table("schools").select("id, restrict_access_to").eq("id", school_id).eq("org_id", user["org_id"]).execute()
+            break
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("list_school_calls attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.error("list_school_calls failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    if not school_row.data:
+        raise HTTPException(status_code=404, detail="בית ספר לא נמצא")
+    if user["role"] not in ("owner", "manager") and not _advisor_has_access_to_school_row(db, user["id"], school_row.data[0]):
+        raise HTTPException(status_code=403, detail="אין הרשאה לצפות בבית ספר זה")
+
+    start_date, end_date = get_academic_year_date_range(academic_year or DEFAULT_ACADEMIC_YEAR)
+    date_from = f"{start_date.isoformat()}T00:00:00"
+    date_to = f"{end_date.isoformat()}T23:59:59"
+
+    try:
+        result = _pull_org_calls(user["org_id"], date_from, date_to)
+    except HTTPException as exc:
+        if exc.status_code == 400:
+            # Voicenter not configured/enabled for this org — friendly empty state, not an error
+            return {"calls": [], "voicenter_enabled": False}
+        raise
+
+    calls = [c for c in result["calls"] if c.get("school_id") == school_id]
+    return {"calls": calls, "voicenter_enabled": True}
+
+
 @router.get("/{school_id}/meetings")
 def list_meetings(school_id: str, user: Annotated[dict, Depends(get_current_user)], academic_year: str | None = None):
     meetings = []
@@ -5241,6 +5422,20 @@ def send_direct_coordination_request(
     if not coordinator or not coordinator.get("email"):
         raise HTTPException(status_code=400, detail="יש להגדיר אחראי/ת לתיאום פגישות עם כתובת מייל בפרטי בית הספר לפני שליחה")
 
+    import task_logic  # local import — task_logic imports from this module at module level
+    try:
+        opted_out_map = task_logic.opted_out_recipients(
+            db, DEFAULT_ACADEMIC_YEAR, {school_id: coordinator.get("email")},
+        )
+    except Exception as exc:
+        logger.warning("send_direct_coordination_request: opt-out lookup failed (non-fatal): %s", exc)
+        opted_out_map = {}
+    if school_id in opted_out_map:
+        raise HTTPException(
+            status_code=400,
+            detail="לא ניתן לשלוח — בית הספר ביקש הסרה מרשימת התפוצה, עד שסטטוס הלקוח שלו יהפוך ל'פעיל'",
+        )
+
     advisor_rows = (
         db.table("profiles").select("id, full_name, email")
         .eq("org_id", user["org_id"]).in_("id", body.advisor_ids).execute().data or []
@@ -5283,8 +5478,18 @@ def send_direct_coordination_request(
 
     token_row = booking_token_logic.create_direct_booking_token(db, user["org_id"], school_id, body.advisor_ids, ranges_data)
     booking_url = f"{os.getenv('APP_URL', '')}/book/{token_row['token']}"
+    opt_out_link = None
+    if coordinator.get("email"):
+        year_rows = (
+            db.table("school_year_admin_data").select("client_status")
+            .eq("academic_year", DEFAULT_ACADEMIC_YEAR).eq("school_id", school_id).execute().data or []
+        )
+        client_status = year_rows[0].get("client_status") if year_rows else None
+        if client_status != "active":
+            email_lower = coordinator["email"].strip().lower()
+            opt_out_link = f"{os.getenv('APP_URL', '')}/tasks/opt-out?email={email_lower}&token={task_logic.make_optout_token(email_lower)}"
     html = booking_logic.build_direct_coordination_email_html(
-        coordinator["name"], school["name"], advisor_names, ranges_data, booking_url,
+        coordinator["name"], school["name"], advisor_names, ranges_data, booking_url, opt_out_link,
     )
     subject = f"בקשה לתיאום פגישה - {school['name']}"
     try:

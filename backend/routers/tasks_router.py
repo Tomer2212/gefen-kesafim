@@ -1,5 +1,4 @@
 import base64
-import hashlib
 import hmac
 import html
 import io
@@ -35,15 +34,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 CRON_SECRET = os.getenv("CRON_SECRET", "")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 APP_URL = os.getenv("APP_URL", "http://localhost:5173")
-
-
-def _make_optout_token(email: str) -> str:
-    """Same HMAC-token convention as signup_router._make_unsub_token, kept as an
-    independent helper since this opts a contact out of task messages specifically,
-    not the unrelated marketing-leads list signup_router manages."""
-    return hmac.new(SUPABASE_KEY.encode(), email.lower().encode(), hashlib.sha256).hexdigest()[:32]
 
 
 _ROLE_CONTACT_FIELDS = {
@@ -269,6 +260,12 @@ OUTLOOK_SEND_WARN_THRESHOLD = int(os.getenv("OUTLOOK_SEND_WARN_THRESHOLD", "300"
 # Deliberately set below the real 10,000 so this stops sends before Microsoft itself would.
 OUTLOOK_DAILY_SEND_CAP = int(os.getenv("OUTLOOK_DAILY_SEND_CAP", "9500"))
 
+# Real enforcement of Microsoft's actual per-minute Graph sendMail cap (30/minute, fixed) —
+# process_message_queue's BATCH_SIZE/cron-cadence combo only gave incidental protection (no
+# guaranteed spacing between individual sends within one drained batch). 2.2s gives ~27/min
+# actual throughput, a real safety margin under 30, not sitting exactly on the limit.
+OUTLOOK_SEND_MIN_INTERVAL_SECONDS = float(os.getenv("OUTLOOK_SEND_MIN_INTERVAL_SECONDS", "2.2"))
+
 
 def _outlook_daily_count_ok_and_increment(org_id: str) -> bool:
     """Checked/incremented against org_outlook_send_counts (org_id, send_date) right before every
@@ -302,7 +299,12 @@ def _outlook_daily_count_ok_and_increment(org_id: str) -> bool:
 
 @router.get("/field-options")
 def get_field_options(user: Annotated[dict, Depends(get_current_user)]):
-    _require_manager(user)
+    # No manager gate — this is a static label/options catalog (field names, goal
+    # planning/reporting percentages, control-letter status labels, etc.), not per-school data.
+    # An advisor viewing their own field-kind person-task in אזור אישי needs this catalog too
+    # (to render the "מדד הצלחה" column's title/options), so gating it manager-only left every
+    # advisor's fetch silently 403ing (swallowed by the frontend's .catch), which meant they
+    # never got real labels — just raw goal_key/field-key fallback text.
     return {
         **task_logic.field_options(user["org_id"]),
         "meeting_types": task_logic.MEETING_SERVICE_TYPE_OPTIONS,
@@ -596,7 +598,8 @@ def _check_contact_problems(
     schools = db.table("schools").select("*").in_("id", school_ids).execute().data or [] if school_ids else []
     schools_by_id = {s["id"]: s for s in schools}
 
-    results = []
+    resolved_by_school = {}
+    entries_by_school = {}
     for m in matched:
         school = schools_by_id.get(m["school_id"])
         if not school:
@@ -606,10 +609,25 @@ def _check_contact_problems(
             "school_id": m["school_id"], "school_name": m["school_name"],
             "symbol": m.get("symbol"), "authority": m.get("authority"),
             "resolved_via": res["resolved_via"], "has_contact": res["resolved_via"] is not None,
+            "opted_out": None,
         }
         if not entry["has_contact"]:
             entry.update(_missing_contact_detail(school))
-        results.append(entry)
+        resolved_by_school[m["school_id"]] = res["recipient"].get("email")
+        entries_by_school[m["school_id"]] = entry
+
+    # Purely informational, never affects has_contact/missing_count — an opted-out school still
+    # "has a contact", it's just currently suppressed from receiving messages (see task_logic.
+    # opted_out_recipients). TaskContactResolutionModal is confirmed non-blocking regardless.
+    try:
+        opted_out_map = task_logic.opted_out_recipients(db, academic_year, resolved_by_school)
+    except Exception as exc:
+        logger.warning("_check_contact_problems: opt-out lookup failed (non-fatal): %s", exc)
+        opted_out_map = {}
+    for school_id, email in opted_out_map.items():
+        entries_by_school[school_id]["opted_out"] = {"email": email}
+
+    results = list(entries_by_school.values())
     return {"schools": results, "missing_count": sum(1 for r in results if not r["has_contact"])}
 
 
@@ -795,13 +813,17 @@ def _check_meeting_problems(
     duration_by_school = {r["school_id"]: r for r in duration_rows}
     needs_phone = channel == "whatsapp_twilio"
 
-    results = []
+    entries_by_school: dict[str, dict] = {}
+    coordinator_emails: dict[str, str | None] = {}
     for m in matched:
         school = schools_by_id.get(m["school_id"])
         if not school:
             continue
 
         coordinator = _coordinator_problem(school, channel)
+        coordinator_emails[school["id"]] = _resolve_recipient_with_cascade(
+            school, "meeting_coordinator", True, channel,
+        )["recipient"].get("email")
 
         # Round 8: "principal" expands to 1-2 concrete slots (tichon/chativa) per this
         # school's stage_scope-aware resolution — every other role stays a flat 1:1 pass-through.
@@ -868,14 +890,37 @@ def _check_meeting_problems(
                     })
 
         if coordinator or participants or meeting_defaults or advisor_access:
-            results.append({
+            entries_by_school[school["id"]] = {
                 "school_id": school["id"], "school_name": school["name"],
                 "symbol": school.get("symbol"), "authority": school.get("authority"),
                 "coordinator": coordinator, "participants": participants, "meeting_defaults": meeting_defaults,
-                "advisor_access": advisor_access,
-            })
+                "advisor_access": advisor_access, "opted_out": None,
+            }
 
-    return {"schools": results, "total_schools": len(matched), "ok_schools": len(matched) - len(results)}
+    # Purely informational (never a blocking leaf) — an opted-out coordinator is added even to
+    # an otherwise-clean school so the manager sees it, but never contributes to ok_schools math
+    # below in a way that would block "צור משימה" (TaskMeetingResolutionModal keeps this field
+    # out of its leaves/blocking system entirely).
+    try:
+        opted_out_map = task_logic.opted_out_recipients(db, academic_year, coordinator_emails)
+    except Exception as exc:
+        logger.warning("_check_meeting_problems: opt-out lookup failed (non-fatal): %s", exc)
+        opted_out_map = {}
+    for school_id, email in opted_out_map.items():
+        school = schools_by_id.get(school_id)
+        if not school:
+            continue
+        entry = entries_by_school.setdefault(school_id, {
+            "school_id": school_id, "school_name": school["name"],
+            "symbol": school.get("symbol"), "authority": school.get("authority"),
+            "coordinator": None, "participants": None, "meeting_defaults": [],
+            "advisor_access": [], "opted_out": None,
+        })
+        entry["opted_out"] = {"email": email}
+
+    results = list(entries_by_school.values())
+    blocking_count = sum(1 for r in results if r["coordinator"] or r["participants"] or r["meeting_defaults"] or r["advisor_access"])
+    return {"schools": results, "total_schools": len(matched), "ok_schools": len(matched) - blocking_count}
 
 
 @router.post("/meetings/check")
@@ -1061,19 +1106,49 @@ def create_task(body: TaskCreateIn, user: Annotated[dict, Depends(get_current_us
 
 
 @router.get("/")
-def list_tasks(user: Annotated[dict, Depends(get_current_user)]):
+def list_tasks(
+    user: Annotated[dict, Depends(get_current_user)],
+    status: str | None = None,
+    is_meeting_task: bool | None = None,
+    created_by: str | None = None,
+    track_success: bool | None = None,
+    has_meeting_send_problems: bool | None = None,
+    channel: str | None = None,
+    created_from: str | None = None,
+    created_to: str | None = None,
+    academic_year: str | None = None,
+):
+    """Redesigned "משימות" table (see plan doc) — the list view is a pure read of stored
+    columns (status, cached_total_schools/cached_actions_needed/cached_actions_completed/
+    cached_progress_pct), never a live compute_task_progress loop over every org task
+    (Architecture Invariant #7). Those cached columns are kept correct by task_logic.
+    recompute_task_status_and_cache, called at the mutation touchpoints in this file, exactly
+    like has_meeting_send_problems already was. Server-side filters below are all either plain
+    column `.eq()`/range chains or (for `channel`, nested inside the message_config JSONB) a
+    post-fetch Python filter over the single already org-scoped result set — never a per-row
+    query loop."""
     _require_manager(user)
     for attempt in range(2):
         try:
             db = get_admin_client()
-            rows = (
-                db.table("org_tasks")
-                .select("*")
-                .eq("org_id", user["org_id"])
-                .order("created_at", desc=True)
-                .execute()
-                .data or []
-            )
+            query = db.table("org_tasks").select("*").eq("org_id", user["org_id"])
+            if status:
+                query = query.eq("status", status)
+            if is_meeting_task is not None:
+                query = query.eq("is_meeting_task", is_meeting_task)
+            if created_by:
+                query = query.eq("created_by", created_by)
+            if track_success is not None:
+                query = query.eq("track_success", track_success)
+            if has_meeting_send_problems is not None:
+                query = query.eq("has_meeting_send_problems", has_meeting_send_problems)
+            if created_from:
+                query = query.gte("created_at", created_from)
+            if created_to:
+                query = query.lte("created_at", created_to)
+            if academic_year:
+                query = query.eq("academic_year", academic_year)
+            rows = query.order("created_at", desc=True).execute().data or []
             break
         except Exception as exc:
             if attempt == 0:
@@ -1082,6 +1157,9 @@ def list_tasks(user: Annotated[dict, Depends(get_current_user)]):
             else:
                 logger.error("list_tasks failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    if channel:
+        rows = [r for r in rows if (r.get("message_config") or {}).get("channel") == channel]
 
     try:
         db = get_admin_client()
@@ -1092,9 +1170,23 @@ def list_tasks(user: Annotated[dict, Depends(get_current_user)]):
             names_map = {p["id"]: p["full_name"] for p in p_rows}
         for r in rows:
             r["created_by_name"] = names_map.get(r.get("created_by"))
-            r["total_schools"] = len(r.get("matched_school_ids") or [])
     except Exception as exc:
-        logger.warning("list_tasks enrichment failed (non-fatal): %s", exc)
+        logger.warning("list_tasks creator-name enrichment failed (non-fatal): %s", exc)
+
+    try:
+        db = get_admin_client()
+        task_ids = [r["id"] for r in rows]
+        pins_map = {}
+        if task_ids:
+            pin_rows = (
+                db.table("task_pins").select("task_id, pinned_at")
+                .eq("user_id", user["id"]).in_("task_id", task_ids).execute().data or []
+            )
+            pins_map = {p["task_id"]: p["pinned_at"] for p in pin_rows}
+        for r in rows:
+            r["pinned_at"] = pins_map.get(r["id"])
+    except Exception as exc:
+        logger.warning("list_tasks pin enrichment failed (non-fatal): %s", exc)
 
     return rows
 
@@ -1122,7 +1214,7 @@ def opt_out_task_contact(body: TaskOptOutIn):
     _queue_messages_for_schools) lands here via TaskOptOutPage.jsx and is suppressed from all
     future task messages, across every task, until manually removed from the table."""
     email = body.email.strip().lower()
-    expected = _make_optout_token(email)
+    expected = task_logic.make_optout_token(email)
     if not hmac.compare_digest(expected, body.token):
         raise HTTPException(status_code=400, detail="קישור לא תקין")
     for attempt in range(2):
@@ -1245,6 +1337,14 @@ def get_task(task_id: str, user: Annotated[dict, Depends(get_current_user)]):
             row["skip_reason"] = (note_row or {}).get("skip_reason")
     except Exception as exc:
         logger.warning("get_task notes/exclusions enrichment failed (non-fatal): %s", exc)
+
+    # Self-heals the cached status/progress columns list_tasks reads (see task_logic.
+    # recompute_task_status_and_cache) every time a manager actually opens this task — on top
+    # of the write-time touchpoints elsewhere, this guarantees the Tasks table can never drift
+    # from what this exact detail view is showing for more than one open of the task.
+    cache_patch = task_logic.recompute_task_status_and_cache(db, user["org_id"], task)
+    if cache_patch:
+        task = {**task, **cache_patch}
 
     return {**task, "progress": progress, "message_summary": message_summary, "effective_success_criteria": effective_success_criteria}
 
@@ -1506,13 +1606,6 @@ def _build_meeting_booking_link(
     return f"{os.getenv('APP_URL', '')}/book/{token_row['token']}", token_row["id"], ranges_data
 
 
-def _fetch_opted_out_emails(db, emails: list[str]) -> set[str]:
-    if not emails:
-        return set()
-    rows = db.table("task_opted_out_contacts").select("email").in_("email", emails).execute().data or []
-    return {r["email"] for r in rows}
-
-
 def _fetch_school_notes_map(db, task_id: str, school_ids: list[str]) -> dict[str, dict]:
     """Non-fatal by design at the call sites — a lookup failure here should degrade to
     'no exclusions known' rather than block sending, per Architecture Invariant #6."""
@@ -1654,15 +1747,13 @@ def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[st
     # fallback role there would fail to find a contact again here at actual send time.
     resolved = {s["id"]: _resolve_recipient_with_cascade(s, recipient_role, is_meeting_task, channel) for s in schools}
     resolved_recipients = {sid: r["recipient"] for sid, r in resolved.items()}
-    all_emails = [
-        (r.get("email") or "").strip().lower()
-        for r in resolved_recipients.values() if r.get("email")
-    ]
     try:
-        opted_out_emails = _fetch_opted_out_emails(db, all_emails)
+        opted_out_map = task_logic.opted_out_recipients(
+            db, academic_year, {sid: r.get("email") for sid, r in resolved_recipients.items()},
+        )
     except Exception as exc:
         logger.warning("_queue_messages_for_schools: opt-out lookup failed (non-fatal, treated as none opted out): %s", exc)
-        opted_out_emails = set()
+        opted_out_map = {}
 
     missing = []
     queue_rows = []
@@ -1680,13 +1771,23 @@ def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[st
             continue
         recipient_email = (recipient.get("email") or "").strip().lower()
         excluded_emails = {e.lower() for e in (notes_map.get(school["id"], {}).get("excluded_emails") or [])}
-        if recipient_email and (recipient_email in excluded_emails or recipient_email in opted_out_emails):
+        if recipient_email and school["id"] in opted_out_map:
+            missing.append(school["id"])
+            try:
+                db.table("org_task_school_notes").upsert(
+                    {"task_id": task["id"], "school_id": school["id"], "skip_reason": "opted_out"},
+                    on_conflict="task_id,school_id",
+                ).execute()
+            except Exception as exc:
+                logger.warning("_queue_messages_for_schools: failed to persist skip_reason (non-fatal): %s", exc)
+            continue
+        if recipient_email and recipient_email in excluded_emails:
             missing.append(school["id"])
             continue
 
         opt_out_link = None
-        if client_status_map.get(school["id"]) == "inactive" and recipient_email:
-            opt_out_link = f"{APP_URL}/tasks/opt-out?email={recipient_email}&token={_make_optout_token(recipient_email)}"
+        if client_status_map.get(school["id"]) != "active" and recipient_email:
+            opt_out_link = f"{APP_URL}/tasks/opt-out?email={recipient_email}&token={task_logic.make_optout_token(recipient_email)}"
 
         ranges_data = None
         if not needs_booking_link:
@@ -1815,6 +1916,7 @@ def send_task_bulk(task_id: str, body: SendIn, user: Annotated[dict, Depends(get
         # process_scheduled_tasks) resolves the flag regardless of channel — a manager who
         # explicitly clicked send has made their decision either way.
         db.table("org_tasks").update({"needs_outlook_confirmation": False}).eq("id", task_id).execute()
+    task_logic.recompute_task_status_and_cache(db, user["org_id"], task)
     if missing:
         raise HTTPException(status_code=409, detail={
             "message": "לחלק מבתי הספר חסרים פרטי קשר מתאימים לערוץ שנבחר",
@@ -1830,7 +1932,17 @@ def send_task_single(task_id: str, school_id: str, user: Annotated[dict, Depends
     db = get_admin_client()
     task = _get_task_or_404(db, task_id, user["org_id"])
     missing = _queue_messages_for_schools(db, task, user["org_id"], [school_id])
+    task_logic.recompute_task_status_and_cache(db, user["org_id"], task)
     if missing:
+        note_rows = (
+            db.table("org_task_school_notes").select("skip_reason")
+            .eq("task_id", task_id).eq("school_id", school_id).execute().data or []
+        )
+        if note_rows and note_rows[0].get("skip_reason") == "opted_out":
+            raise HTTPException(status_code=409, detail={
+                "message": "בית הספר ביקש הסרה מרשימת התפוצה — ההודעה לא נשלחה, עד ששדה 'סטטוס לקוח' שלו יהפוך ל'פעיל'",
+                "opted_out": True,
+            })
         raise HTTPException(status_code=409, detail={
             "message": "לבית הספר חסרים פרטי קשר מתאימים לערוץ שנבחר",
             "missing_contact_school_ids": missing,
@@ -1895,6 +2007,50 @@ def put_task_school_note(task_id: str, school_id: str, body: TaskSchoolNoteIn, u
     return {"ok": True}
 
 
+class TaskSchoolFilterIn(BaseModel):
+    criteria: ConditionsIn
+
+
+@router.post("/{task_id}/schools/filter")
+def filter_task_schools(task_id: str, body: TaskSchoolFilterIn, user: Annotated[dict, Depends(get_current_user)]):
+    """Backs the redesigned Tasks table's in-row "סנן בתי ספר" — full parity with every field
+    category the audience-criteria builder supports (school/contact/financial/goals/control-
+    letters/meetings), which is why this needs a real server-side evaluation rather than a
+    client-side filter over already-fetched (partial) row data. Reuses find_matching_schools
+    exactly as-is (same evaluate_tree pass over every org school) and intersects the result with
+    this task's own matched_school_ids — no duplicated evaluation logic, no per-school-in-a-loop
+    queries beyond what find_matching_schools already does for a single compute_task_progress-
+    equivalent call."""
+    _require_manager(user)
+    db = get_admin_client()
+    task = _get_task_or_404(db, task_id, user["org_id"])
+    matched_ids = set(task.get("matched_school_ids") or [])
+    if not matched_ids:
+        return {"school_ids": []}
+    academic_year = task.get("academic_year") or DEFAULT_ACADEMIC_YEAR
+    all_matches = task_logic.find_matching_schools(user["org_id"], body.criteria.model_dump(), academic_year)
+    return {"school_ids": [m["school_id"] for m in all_matches if m["school_id"] in matched_ids]}
+
+
+@router.post("/{task_id}/pin")
+def pin_task(task_id: str, user: Annotated[dict, Depends(get_current_user)]):
+    """Personal per-manager pin (task_pins) — floats a task to the very top of the redesigned
+    Tasks table regardless of its status tier, visible only to the manager who pinned it."""
+    _require_manager(user)
+    db = get_admin_client()
+    _get_task_or_404(db, task_id, user["org_id"])
+    db.table("task_pins").upsert({"task_id": task_id, "user_id": user["id"]}, on_conflict="task_id,user_id").execute()
+    return {"ok": True}
+
+
+@router.delete("/{task_id}/pin")
+def unpin_task(task_id: str, user: Annotated[dict, Depends(get_current_user)]):
+    _require_manager(user)
+    db = get_admin_client()
+    db.table("task_pins").delete().eq("task_id", task_id).eq("user_id", user["id"]).execute()
+    return {"ok": True}
+
+
 @router.post("/attachments/upload")
 async def upload_task_attachment(
     user: Annotated[dict, Depends(get_current_user)],
@@ -1949,20 +2105,28 @@ def process_message_queue(request: Request):
     )
 
     sent, failed, skipped = 0, 0, 0
+    touched_task_ids: set[str] = set()  # recomputed once each at the end (not per-row — see below)
+    last_outlook_send_at = None  # monotonic clock — paces real email_outlook sends only (see
+    # OUTLOOK_SEND_MIN_INTERVAL_SECONDS); other channels in the same batch are unaffected.
     for row in rows:
         try:
-            task = db.table("org_tasks").select("org_id, created_by").eq("id", row["task_id"]).execute().data
+            task = db.table("org_tasks").select("org_id, created_by, academic_year").eq("id", row["task_id"]).execute().data
             org_id = task[0]["org_id"] if task else None
             created_by = task[0]["created_by"] if task else None
+            task_academic_year = (task[0].get("academic_year") if task else None) or DEFAULT_ACADEMIC_YEAR
             if not org_id:
                 raise ValueError(f"task {row['task_id']} not found for queued message {row['id']}")
+            touched_task_ids.add(row["task_id"])
 
             # Belt-and-suspenders re-check (bugs #10/#13): a row can have been queued before an
-            # exclusion/opt-out was recorded, so this is checked again right before the actual
-            # send, not only at queue-time in _queue_messages_for_schools.
+            # exclusion/opt-out was recorded, or the school's client_status could have changed
+            # since queue-time, so this is checked again right before the actual send, not only
+            # at queue-time in _queue_messages_for_schools.
             recipient_email = (row.get("recipient_email") or "").strip().lower()
             if recipient_email:
-                is_opted_out = bool(_fetch_opted_out_emails(db, [recipient_email]))
+                is_opted_out = bool(task_logic.opted_out_recipients(
+                    db, task_academic_year, {row["school_id"]: recipient_email},
+                ))
                 note_rows = (
                     db.table("org_task_school_notes").select("excluded_emails")
                     .eq("task_id", row["task_id"]).eq("school_id", row["school_id"]).execute().data or []
@@ -1973,11 +2137,21 @@ def process_message_queue(request: Request):
                     skipped += 1
                     continue
 
+            if row["channel"] == "email_outlook" and last_outlook_send_at is not None:
+                # Real pacing (not just the incidental cron-cadence/batch-size protection) —
+                # measured from actual elapsed time so Graph's own response latency counts
+                # toward the interval instead of stacking on top of a blind sleep.
+                wait = OUTLOOK_SEND_MIN_INTERVAL_SECONDS - (time.monotonic() - last_outlook_send_at)
+                if wait > 0:
+                    time.sleep(wait)
+
             status, error = _send_message_now(
                 db, org_id, row["school_id"], row["channel"], row["subject"], row["body"],
                 row.get("recipient_email"), row.get("recipient_phone"), row.get("attachment_keys"),
                 created_by=created_by,
             )
+            if row["channel"] == "email_outlook":
+                last_outlook_send_at = time.monotonic()
             if status == "sent":
                 db.table("org_task_messages").update({"status": "sent", "sent_at": "now()"}).eq("id", row["id"]).execute()
                 sent += 1
@@ -2022,6 +2196,7 @@ def process_message_queue(request: Request):
             created_by = task[0]["created_by"] if task else None
             if not org_id:
                 raise ValueError(f"task {row['task_id']} not found for outlook_pending message {row['id']}")
+            touched_task_ids.add(row["task_id"])
 
             if not created_by:
                 # Can't check for a bounce without a mailbox to inspect — best-effort finalize.
@@ -2059,6 +2234,17 @@ def process_message_queue(request: Request):
                 failed += 1
         except Exception as exc:
             logger.warning("process_message_queue: outlook_pending confirmation failed for row %s (non-fatal, retried next tick): %s", row["id"], exc)
+
+    # Recompute status/cache once PER DISTINCT TASK touched in this tick (never per message row —
+    # Architecture Invariant #7) — bounded by BATCH_SIZE (<=20 rows across both passes, so at
+    # most 20 distinct tasks, typically far fewer).
+    if touched_task_ids:
+        try:
+            touched_tasks = db.table("org_tasks").select("*").in_("id", list(touched_task_ids)).execute().data or []
+            for t in touched_tasks:
+                task_logic.recompute_task_status_and_cache(db, t["org_id"], t)
+        except Exception as exc:
+            logger.warning("process_message_queue: batch status/cache recompute failed (non-fatal): %s", exc)
 
     return {
         "ok": True, "sent": sent, "failed": failed, "skipped": skipped, "batch_size": len(rows),
@@ -2116,7 +2302,10 @@ def _try_activate_scheduled_task(db, task: dict) -> dict:
             org_id, task.get("criteria") or {}, task.get("manual_school_ids"),
             meeting_requirements, channel, academic_year,
         )
-        if check["schools"]:
+        # opted_out-only entries are informational (see _check_meeting_problems) and must never
+        # hold back activation on their own — only real coordinator/participants/meeting_defaults/
+        # advisor_access problems do.
+        if any(s["coordinator"] or s["participants"] or s["meeting_defaults"] or s["advisor_access"] for s in check["schools"]):
             return _hold_back_scheduled_task(db, task, meeting_wording=True)
         elif task.get("has_meeting_send_problems"):
             db.table("org_tasks").update({"has_meeting_send_problems": False}).eq("id", task["id"]).execute()
@@ -2144,6 +2333,7 @@ def _try_activate_scheduled_task(db, task: dict) -> dict:
         "status": "active",
     }).eq("id", task["id"]).execute()
     task["matched_school_ids"] = matched_school_ids
+    task["status"] = "active"
 
     if matched_school_ids:
         if task.get("track_success", True):
@@ -2159,6 +2349,7 @@ def _try_activate_scheduled_task(db, task: dict) -> dict:
         elif send_targets:
             _queue_messages_for_schools(db, task, org_id, send_targets)
 
+    task_logic.recompute_task_status_and_cache(db, org_id, task)
     return {"activated": True, "has_problems": False}
 
 
@@ -2224,5 +2415,6 @@ def retry_task_now(task_id: str, user: Annotated[dict, Depends(get_current_user)
         raise HTTPException(status_code=404, detail="משימה לא נמצאה")
     task = task_row[0]
     if task["status"] != "scheduled":
+        task_logic.recompute_task_status_and_cache(db, user["org_id"], task)
         return {"activated": task["status"] == "active", "has_problems": False}
     return _try_activate_scheduled_task(db, task)

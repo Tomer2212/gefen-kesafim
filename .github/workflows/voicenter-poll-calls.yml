@@ -1,0 +1,23 @@
+name: Voicenter Poll New Calls
+
+on:
+  schedule:
+    # Every 15 minutes — detects new calls whose counterpart phone number matches a
+    # contact shared by more than one school, and notifies who needs to resolve which
+    # school the call belongs to. Mirrors task-message-queue.yml.
+    - cron: '*/15 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call voicenter process-new-calls endpoint
+        run: |
+          URL="${BACKEND_URL%/}"
+          curl -sf -X POST "${URL}/voicenter/process-new-calls" \
+            -H "X-Cron-Secret: ${CRON_SECRET}" \
+            --max-time 120
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}

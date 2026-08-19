@@ -35,6 +35,18 @@ export function MeetingRemindersProvider({ children }) {
     setActiveKey(prev => prev ?? key);
   }, []);
 
+  // "יש לך משימה" — fires alongside addMeetingReminder for the same meeting (see Sidebar.jsx),
+  // keyed by meeting_id so it stacks as its own independent toast rather than replacing/merging
+  // with the meeting reminder itself.
+  const addTaskReminder = useCallback((m) => {
+    const key = `task-${m.meeting_id}`;
+    setReminders(prev => {
+      if (prev.some(r => r._key === key)) return prev;
+      return [...prev, { ...m, _type: "task", _key: key }];
+    });
+    setActiveKey(prev => prev ?? key);
+  }, []);
+
   const dismiss = useCallback((key) => {
     setReminders(prev => prev.filter(r => r._key !== key));
   }, []);
@@ -42,7 +54,7 @@ export function MeetingRemindersProvider({ children }) {
   return (
     <MeetingRemindersCtx.Provider value={{
       reminders, activeKey, setActiveKey,
-      addMeetingReminder, addStatusReminder, dismiss,
+      addMeetingReminder, addStatusReminder, addTaskReminder, dismiss,
       userName, setUserName,
     }}>
       {children}
