@@ -80,18 +80,26 @@ export function describeCondition(cond, meta) {
     const goalOptions = meta?.goalOptions || [];
     const divisionOptions = meta?.divisionOptions || [];
     const goalLabel = goalOptions.find(g => g.key === cond.goal_key)?.label || cond.goal_key || "—";
-    const divisionLabel = divisionOptions.find(d => d.value === cond.division_type)?.label || cond.division_type || "—";
+    const budgetNames = cond.budget_names || (cond.budget_name ? [cond.budget_name] : []);
+    const budgetLabel = budgetNames.length ? budgetNames.join(" + ") : "—";
     const valueLabel = GOAL_VALUE_LABELS[cond.value] || cond.value || "—";
-    return `יעד: ${goalLabel} — ${divisionLabel} / ${cond.budget_name || "—"} = ${valueLabel}`;
+    // Legacy conditions still carry a fixed division_type — shown as-is for those; new
+    // conditions have none (auto-detected per school server-side, see task_logic.py).
+    const divisionSuffix = cond.division_type
+      ? ` — ${divisionOptions.find(d => d.value === cond.division_type)?.label || cond.division_type}`
+      : "";
+    return `יעד: ${goalLabel}${divisionSuffix} / ${budgetLabel} = ${valueLabel}`;
   }
   if (cond.type === "control_letter") {
     const divisionOptions = meta?.divisionOptions || [];
     const controlLetterFields = meta?.controlLetterFields || [];
-    const divisionLabel = divisionOptions.find(d => d.value === cond.division_type)?.label || cond.division_type || "—";
     const fieldDef = controlLetterFields.find(f => f.field === cond.field);
     const opLabel = NUMBER_OP_LABELS[cond.op] || "=";
     const valueLabel = fieldDef?.options?.find(o => o.value === cond.value)?.label ?? cond.value;
-    return `מכתב בקרה (${divisionLabel}): ${fieldDef?.label || cond.field} ${opLabel} ${valueLabel}`;
+    const divisionSuffix = cond.division_type
+      ? ` (${divisionOptions.find(d => d.value === cond.division_type)?.label || cond.division_type})`
+      : "";
+    return `מכתב בקרה${divisionSuffix}: ${fieldDef?.label || cond.field} ${opLabel} ${valueLabel}`;
   }
   const label = FIELD_LABELS[cond.field] || cond.field;
   if (cond.type === "field") {

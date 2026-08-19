@@ -17,7 +17,7 @@ jobs:
           URL="${BACKEND_URL%/}"
           curl -sf -X POST "${URL}/tasks/process-message-queue" \
             -H "X-Cron-Secret: ${CRON_SECRET}" \
-            --max-time 60
+            --max-time 120
         env:
           BACKEND_URL: ${{ secrets.BACKEND_URL }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}

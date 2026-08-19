@@ -1,13 +1,12 @@
 import { useState } from "react";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
 
-// Entry-point fork shown before TaskCreateWizard opens — two sequential questions rather than
-// one three-option screen (UX refinement after user testing): (1) who is this for — schools
-// vs. advisors, (2) only if schools was chosen, what kind of task — scheduling meetings vs.
-// sending a message. Deciding this here, before any wizard state exists, keeps the wizard
-// itself simple (it always knows exactly which of its two tracks to render).
-// The per-advisor path is still a placeholder reserving its future navigation slot.
-export default function TaskTypeChooser({ onClose, onChooseSchools }) {
+// Entry-point fork shown before TaskCreateWizard/PersonTaskCreateWizard opens — two sequential
+// questions rather than one three-option screen (UX refinement after user testing): (1) who is
+// this for — schools vs. org staff, (2) only if schools was chosen, what kind of task —
+// scheduling meetings vs. sending a message. Deciding this here, before any wizard state
+// exists, keeps each wizard simple (it always knows exactly which track to render).
+export default function TaskTypeChooser({ onClose, onChooseSchools, onChooseUsers }) {
   const { ref, handleKeyDown } = useFocusTrap(onClose);
   const [level, setLevel] = useState(1);
 
@@ -48,10 +47,14 @@ export default function TaskTypeChooser({ onClose, onChooseSchools }) {
               <div className="text-sm text-slate-500">קביעת פגישות או שליחת הודעות לבתי ספר לפי קריטריונים.</div>
             </button>
 
-            <div className="text-right border border-slate-100 rounded-xl p-4 bg-slate-50 opacity-60 cursor-not-allowed" aria-disabled="true">
-              <div className="font-semibold text-slate-500 mb-1">משימה על יועץ / קבוצת יועצים <span className="text-xs font-normal">(בקרוב)</span></div>
-              <div className="text-sm text-slate-400">הטלת משימה אישית על משתמש במערכת, עם דדליין ומעקב השלמה — בפיתוח.</div>
-            </div>
+            <button
+              type="button"
+              onClick={() => onChooseUsers()}
+              className="text-right border border-slate-200 rounded-xl p-4 hover:border-blue-400 hover:bg-blue-50/50 transition-colors"
+            >
+              <div className="font-semibold text-slate-800 mb-1">אנשי הארגון</div>
+              <div className="text-sm text-slate-500">הטלת משימה אישית על משתמש/י מערכת (או אוטומטית ליועץ המלווה של בית ספר), עם דדליין ומעקב השלמה.</div>
+            </button>
           </div>
         )}
 

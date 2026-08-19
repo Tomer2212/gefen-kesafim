@@ -33,6 +33,12 @@ const TYPE_ICON = {
   meeting_reminder:         "🗓️",
   meeting_files_arrived:    "📎",
   task_send_problems:       "⚠️",
+  person_task_assigned:     "📌",
+  person_task_updated:      "✏️",
+  person_task_routing_problem: "⚠️",
+  temp_access_granted:      "🔓",
+  temp_access_expired:      "🔒",
+  call_contact_ambiguous:   "📞",
 };
 
 const FIELD_LABEL = {
@@ -226,6 +232,7 @@ function SettingsModal({ onClose, role }) {
         { label: "בית ספר נמחק על ידי מנהל או יועץ",      prefKey: "notify_school_deleted" },
         { label: "תפקיד של משתמש בצוות שונה",              prefKey: "notify_role_changed" },
         { label: "תויגתי בהערת פגישה",                     prefKey: "notify_mention" },
+        { label: "שיחה עם איש קשר ששייך למספר בתי ספר וממתינה לשיוך", prefKey: "notify_call_contact_ambiguous" },
       ]
     : role === "manager"
     ? [
@@ -233,6 +240,7 @@ function SettingsModal({ onClose, role }) {
         { label: "יועץ הוסיף בית ספר חדש",              prefKey: "notify_school_created" },
         { label: "תפקיד של משתמש בצוות שונה",           prefKey: "notify_role_changed" },
         { label: "תויגתי בהערת פגישה",                   prefKey: "notify_mention" },
+        { label: "שיחה עם איש קשר ששייך למספר בתי ספר וממתינה לשיוך", prefKey: "notify_call_contact_ambiguous" },
       ]
     : [
         { label: "הבקשה שלי לעדכון פרטים אושרה או נדחתה", prefKey: "notify_update_request_reviewed" },
@@ -505,9 +513,12 @@ function NotificationRow({ notif, isExpanded, onToggle, onRead, onReload, onDele
     notif.type === "update_request_result"
   ) && !!data.proposed_changes;
   const isFilesArrived = notif.type === "meeting_files_arrived" && !!notif.ref_id;
+  const isCallResolvable = notif.type === "call_contact_ambiguous" && !!data.call_id;
 
   const [reviewNote, setReviewNote] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [callResolveError, setCallResolveError] = useState("");
+  const [resolvedSchoolId, setResolvedSchoolId] = useState(null);
   const [fieldDecisions, setFieldDecisions] = useState({});  // { [fieldKey]: "pending" | "approved" | "rejected" }
   // Initialize from DB status so remounting after navigation shows the correct state
   const [reviewed, setReviewed] = useState(() => {
@@ -527,14 +538,24 @@ function NotificationRow({ notif, isExpanded, onToggle, onRead, onReload, onDele
   async function handleNavigate() {
     // Actionable notifications (approve/reject) only get marked read after the review action,
     // not on simple expand — otherwise the buttons disappear before the user can act.
-    if (isUnread && !isActionable) onRead(notif.id);
+    if (isUnread && !isActionable && !isCallResolvable) onRead(notif.id);
     if (notif.type === "task_send_problems" && data.task_id) {
       // Tasks aren't a routed page — they open as a floating TaskPanel via TasksContext, not
       // navigate(). TaskPanel itself auto-opens the 'בעיות' screen (meeting tasks only — see
       // TaskPanel.jsx) when the loaded task has has_meeting_send_problems, so opening it here
       // is enough to land on the right screen either way.
       openTask(data.task_id);
-    } else if (isActionable || isResultExpandable || isFilesArrived) {
+    } else if (notif.type === "person_task_assigned" || notif.type === "person_task_updated") {
+      // Person-tasks live in "אזור אישי" (no floating-window equivalent — TasksContext is
+      // school-task-specific), so this navigates there instead of calling openTask(). For
+      // person_task_updated, the "what changed" explanation is already embedded directly in
+      // the notification's title (see patch_person_task) — no separate expand step needed.
+      navigate("/profile");
+    } else if (notif.type === "person_task_routing_problem") {
+      // Sent to the task's creator (manager/owner) — the fix happens in the admin table, not
+      // the personal area.
+      navigate("/admin?tab=tasks");
+    } else if (isActionable || isResultExpandable || isFilesArrived || isCallResolvable) {
       onToggle(notif.id);
     } else if (data.deeplink) {
       navigate(data.deeplink);
@@ -573,6 +594,22 @@ function NotificationRow({ notif, isExpanded, onToggle, onRead, onReload, onDele
     }
   }
 
+  async function handleResolveCallSchool(schoolId) {
+    if (submitting || resolvedSchoolId) return;
+    setSubmitting(true);
+    setCallResolveError("");
+    try {
+      await axios.patch(`/voicenter/calls/${data.call_id}/resolve-contact-school`, { school_id: schoolId });
+      setResolvedSchoolId(schoolId);
+      onRead(notif.id);
+      setTimeout(() => { onToggle(notif.id); onReload(); }, 2000);
+    } catch (err) {
+      setCallResolveError(err.response?.data?.detail || "אירעה שגיאה בשיוך השיחה — נסה שוב");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   return (
     <div
       className={`rounded-2xl transition-colors ${
@@ -596,10 +633,39 @@ function NotificationRow({ notif, isExpanded, onToggle, onRead, onReload, onDele
 
         <span className="text-xs text-slate-400 flex-shrink-0 whitespace-nowrap">{timeAgo(notif.created_at)}</span>
 
-        {(isActionable || isResultExpandable || isFilesArrived) && (
+        {(isActionable || isResultExpandable || isFilesArrived || isCallResolvable) && (
           <span aria-hidden="true" className={`text-slate-400 transition-transform ${isExpanded ? "rotate-90" : ""}`}>›</span>
         )}
       </button>
+
+      {/* Expanded: ambiguous-contact call — pick which school it belongs to */}
+      {isExpanded && isCallResolvable && (
+        <div className="px-4 pb-4 border-t border-slate-100">
+          <p className="text-sm text-slate-600 leading-relaxed pt-3">{data.text}</p>
+          {resolvedSchoolId ? (
+            <div role="status" className="mt-3 py-3 px-4 rounded-xl text-sm font-semibold text-center bg-green-50 text-green-700 border border-green-200">
+              ✓ השיחה שויכה בהצלחה
+            </div>
+          ) : (
+            <div className="mt-3 flex flex-col gap-2">
+              {(data.candidate_schools || []).map(s => (
+                <button
+                  key={s.id}
+                  type="button"
+                  disabled={submitting}
+                  onClick={() => handleResolveCallSchool(s.id)}
+                  className="text-sm py-2.5 px-4 rounded-xl font-medium text-slate-700 bg-slate-100 hover:bg-blue-100 hover:text-blue-800 transition-colors disabled:opacity-50"
+                >
+                  {s.name}
+                </button>
+              ))}
+            </div>
+          )}
+          {callResolveError && (
+            <p role="alert" className="text-sm text-red-600 mt-2">{callResolveError}</p>
+          )}
+        </div>
+      )}
 
       {/* Expanded: uploaded-files comparison + actions (meeting_files_arrived) */}
       {isExpanded && isFilesArrived && (

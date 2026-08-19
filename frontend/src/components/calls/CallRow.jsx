@@ -64,7 +64,7 @@ function buildWindowTitle(call, advisorLabel) {
   return parts.join(" - ");
 }
 
-export function CallRow({ call, onDelete }) {
+export function CallRow({ call, onDelete, hideSchoolColumn, canManage = true }) {
   const { openCallNote } = useCallNoteWindows();
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -114,8 +114,18 @@ export function CallRow({ call, onDelete }) {
       </td>
       <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap" dir="ltr">{formatPhone(call.counterpart_phone)}</td>
       <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap">{call.contact_name || "—"}</td>
-      <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap">{call.contact_role || "—"}</td>
-      <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap">{call.school_name || "—"}</td>
+      <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap">
+        {call.pending_school_resolution
+          ? <span className="text-amber-600 text-xs font-medium">ממתין לשיוך</span>
+          : (call.contact_role || "—")}
+      </td>
+      {!hideSchoolColumn && (
+        <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap">
+          {call.pending_school_resolution
+            ? <span className="text-amber-600 text-xs font-medium">ממתין לשיוך</span>
+            : (call.school_name || "—")}
+        </td>
+      )}
       <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap">
         <span className="flex items-center gap-1.5">
           <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: status.dot }} aria-hidden="true" />
@@ -145,10 +155,12 @@ export function CallRow({ call, onDelete }) {
         )}
       </td>
       <td className="py-2.5 px-2 text-center relative">
+        {canManage && (
         <button type="button" onClick={() => setMenuOpen(v => !v)} aria-label="פעולות נוספות"
           className="text-slate-400 hover:text-slate-700 transition-colors text-base leading-none px-1.5">
           ⋮
         </button>
+        )}
         {menuOpen && (
           <>
             <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)} />

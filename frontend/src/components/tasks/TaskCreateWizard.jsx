@@ -1,13 +1,15 @@
 import { useEffect, useState } from "react";
 import axios from "axios";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
-import TaskDateTimeInput from "./TaskDateTimeInput";
 import ConditionGroupsEditor, { newConditionGroup, isMeetingRequirementComplete } from "./ConditionGroupsEditor";
+import ScheduleCriteriaModal from "./ScheduleCriteriaModal";
 import OutlookLimitModal from "./OutlookLimitModal";
 import TaskContactResolutionModal from "./TaskContactResolutionModal";
 import TaskMeetingResolutionModal from "./TaskMeetingResolutionModal";
 import SavedAudiencesModal from "./SavedAudiencesModal";
 import { SchoolMultiPickerModal } from "../meetings/SchoolPickerCell";
+import { AcademicYearSelector } from "../AcademicYearSelector";
+import { DEFAULT_ACADEMIC_YEAR } from "../../constants/academicYears";
 import {
   RECIPIENT_ROLE_OPTIONS, CHANNEL_OPTIONS, describeCondition,
 } from "./taskShared";
@@ -55,7 +57,8 @@ const PHASE_TITLES = {
 // motivating examples — a plain "send to whoever already has a meeting" broadcast where
 // success is just the send itself, vs. a filtered audience whose success condition is
 // unrelated to the filter). useFocusTrap + role="dialog" per CLAUDE.md accessibility checklist.
-export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) {
+export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, onClose, onCreated }) {
+  const [academicYear, setAcademicYear] = useState(initialAcademicYear || DEFAULT_ACADEMIC_YEAR);
   const { ref, handleKeyDown } = useFocusTrap(onClose);
   const PHASES = isMeetingTask
     ? ["meeting_audience", "message", "review"]
@@ -397,14 +400,14 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
     if (!hasAudience) { setPreview(null); return; }
     setPreviewLoading(true);
     const timer = setTimeout(() => {
-      axios.post("/tasks/preview", { criteria, manual_school_ids })
+      axios.post("/tasks/preview", { criteria, manual_school_ids, academic_year: academicYear })
         .then(r => setPreview(r.data))
         .catch(() => setPreview(null))
         .finally(() => setPreviewLoading(false));
     }, 400);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isMeetingTask, audienceMode, JSON.stringify(fieldGroups), JSON.stringify(manualSchoolIds), JSON.stringify(groups)]);
+  }, [isMeetingTask, audienceMode, academicYear, JSON.stringify(fieldGroups), JSON.stringify(manualSchoolIds), JSON.stringify(groups)]);
 
   async function handleAttachmentUpload(e) {
     const file = e.target.files?.[0];
@@ -443,6 +446,7 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
         name,
         criteria,
         manual_school_ids,
+        academic_year: academicYear,
         success_criteria: buildSuccessCriteria(),
         track_success: trackSuccess,
         is_meeting_task: isMeetingTask,
@@ -518,7 +522,7 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
     try {
       const { criteria, manual_school_ids } = audiencePayload();
       const res = await axios.post("/tasks/meetings/check", {
-        criteria, manual_school_ids, meeting_requirements: requirements, channel,
+        criteria, manual_school_ids, meeting_requirements: requirements, channel, academic_year: academicYear,
       });
       const hasIssues = (res.data?.schools?.length || 0) > 0;
       setCheckingMeetings(false);
@@ -549,7 +553,7 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
     try {
       const { criteria, manual_school_ids } = audiencePayload();
       const res = await axios.post("/tasks/contacts/check", {
-        criteria, manual_school_ids, recipient_role: recipientRole, channel, is_meeting_task: isMeetingTask,
+        criteria, manual_school_ids, recipient_role: recipientRole, channel, is_meeting_task: isMeetingTask, academic_year: academicYear,
       });
       if ((res.data?.missing_count || 0) > 0) {
         setShowContactModal(true);
@@ -624,6 +628,10 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
         <div className="overflow-y-auto flex-1 px-6 py-4 space-y-4">
           {phase === "meeting_audience" && (
             <div className="space-y-4">
+              <div>
+                <span className="block text-sm font-medium text-slate-700 mb-1.5">שנת לימודים</span>
+                <AcademicYearSelector value={academicYear} onChange={setAcademicYear} />
+              </div>
               <div>
                 <label htmlFor="task-name" className="block text-sm font-medium text-slate-700 mb-1.5">שם המשימה</label>
                 <input
@@ -737,6 +745,10 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
 
           {phase === "audience" && (
             <div className="space-y-4">
+              <div>
+                <span className="block text-sm font-medium text-slate-700 mb-1.5">שנת לימודים</span>
+                <AcademicYearSelector value={academicYear} onChange={setAcademicYear} />
+              </div>
               <div>
                 <label htmlFor="task-name" className="block text-sm font-medium text-slate-700 mb-1.5">שם המשימה</label>
                 <input
@@ -1124,33 +1136,5 @@ export default function TaskCreateWizard({ isMeetingTask, onClose, onCreated }) 
   );
 }
 
-// Round-10 UX merge — for the meeting-task track, "תזמון בדיקת קריטריונים" moved out of its own
-// wizard step into this small on-demand modal (opened from a button next to "הצג רשימה" on the
-// merged name+audience step), instead of always taking up space on the main step.
-function ScheduleCriteriaModal({ value, onChange, onClose }) {
-  const { ref, handleKeyDown } = useFocusTrap(onClose);
-  return (
-    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 backdrop-blur-sm" dir="rtl"
-      onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
-      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="schedule-criteria-title" onKeyDown={handleKeyDown}
-        className="glass-card rounded-2xl w-full max-w-md mx-4 p-6 space-y-3">
-        <h3 id="schedule-criteria-title" className="font-bold text-slate-900">תזמון בדיקת הקריטריונים (אופציונלי)</h3>
-        <TaskDateTimeInput id="task-scheduled-for-modal" value={value} onChange={onChange} />
-        <p className="text-xs text-slate-400">
-          אם לא נבחר תאריך — המשימה תיווצר מיד וההודעות יישלחו לכל מי שתואם כרגע. אם נבחר תאריך עתידי — המשימה תיווצר במצב "מתוזמן", ורשימת בתי הספר תיקבע וההודעות יישלחו אוטומטית רק בתאריך שנבחר, לפי מי שיעמוד בקריטריונים אז.
-        </p>
-        <p className="text-xs text-amber-600">
-          לתשומת לבך: ההפעלה בפועל עשויה להתרחש עד כשעה לאחר המועד שנבחר (בהתאם לתדירות הבדיקה האוטומטית של המערכת) — מתאים לתזמון פגישות עתידיות, לא לזמן מדויק לדקה.
-        </p>
-        <div className="flex justify-end gap-2 pt-1">
-          {value && (
-            <button type="button" onClick={() => onChange("")} className="text-xs text-slate-500 hover:underline px-2 py-1.5">
-              נקה תזמון
-            </button>
-          )}
-          <button type="button" onClick={onClose} className="btn-blue text-sm px-4 py-1.5">אישור</button>
-        </div>
-      </div>
-    </div>
-  );
-}
+// (ScheduleCriteriaModal now lives in its own file — see ./ScheduleCriteriaModal.jsx — reused
+// as-is by PersonTaskCreateWizard.jsx.)

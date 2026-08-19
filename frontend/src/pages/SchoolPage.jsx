@@ -13,6 +13,8 @@ import { FilesThread } from "../components/SchoolFilesSection";
 import { GoalsTab } from "../components/GoalsTab";
 import { SchoolYearClosureTab } from "../components/SchoolYearClosureTab";
 import { ControlLetterTab } from "../components/ControlLetterTab";
+import SchoolTasksTab from "../components/SchoolTasksTab";
+import { CallsTable } from "../components/calls/CallsTable";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useMeetingsPolling } from "../hooks/useMeetingsPolling";
 import { mergeMeetingsSilently } from "../components/meetings/mergeMeetings";
@@ -2396,6 +2398,10 @@ export default function SchoolPage() {
   const [logsError, setLogsError] = useState("");
   const [logsLoading, setLogsLoading] = useState(true);
   const [meetingsError, setMeetingsError] = useState("");
+  const [calls, setCalls] = useState([]);
+  const [callsError, setCallsError] = useState("");
+  const [callsLoading, setCallsLoading] = useState(true);
+  const [voicenterEnabled, setVoicenterEnabled] = useState(true);
   const [loading, setLoading] = useState(!location.state?.school);
   const [activeTab, setActiveTab] = useState("info");
   const [activeSubTab, setActiveSubTab] = useState("tikkon");
@@ -2411,7 +2417,7 @@ export default function SchoolPage() {
     if (meetingParam) {
       setActiveTab("meetings");
       setUploadComparisonMeetingId(meetingParam);
-    } else if (["info", "meetings", "goals", "checks", "closure", "control_letter"].includes(tabParam)) {
+    } else if (["info", "meetings", "goals", "checks", "tasks", "calls", "closure", "control_letter"].includes(tabParam)) {
       setActiveTab(tabParam);
     }
   }, []);
@@ -2534,12 +2540,21 @@ export default function SchoolPage() {
 
   const blocker = useBlocker(isDirty || hasIncompleteMeetings);
 
+  function updateActiveTab(id) {
+    setActiveTab(id);
+    setSearchParams(prev => {
+      const p = new URLSearchParams(prev);
+      p.set("tab", id);
+      return p;
+    });
+  }
+
   function handleTabClick(id) {
     if (activeTab === "meetings" && id !== "meetings" && hasIncompleteMeetings) {
       setPendingTabSwitch(id);
       return;
     }
-    setActiveTab(id);
+    updateActiveTab(id);
   }
 
   async function discardIncompleteMeetings(ids) {
@@ -2584,24 +2599,26 @@ export default function SchoolPage() {
         // non-fatal
       }
 
-      // When arriving via deeplink (e.g. from a notification) location.state.school is absent.
-      // Fetch the school record directly so the info tab isn't blank.
-      if (!location.state?.school) {
-        try {
-          const schoolRes = await axios.get(`/schools/${schoolId}`);
-          setSchool(schoolRes.data);
-          setAccounts(schoolRes.data?.gefen_accounts || []);
-          setSchoolAdvisors(
-            (schoolRes.data?.advisor_schools || []).map(as => as.profiles).filter(Boolean)
-          );
-          setTypedAdvisors({
-            gefen: schoolRes.data?.advisors_gefen || [],
-            current: schoolRes.data?.advisors_current || [],
-            district: schoolRes.data?.advisors_district || [],
-          });
-        } catch {
-          // non-fatal — page still usable without info tab data
-        }
+      // Always re-fetch fresh — location.state.school (passed from DashboardPage's row click)
+      // is a snapshot that can be stale (DashboardPage only re-fetches on its own mount/
+      // academic-year change, not on every visit), which previously caused already-removed
+      // typed advisors (e.g. a district advisor unassigned in a prior visit) to intermittently
+      // reappear here. The location.state.school value is still used as the initial useState
+      // seed above (instant paint, no blank flash) — this fetch just corrects it moments later.
+      try {
+        const schoolRes = await axios.get(`/schools/${schoolId}`);
+        setSchool(schoolRes.data);
+        setAccounts(schoolRes.data?.gefen_accounts || []);
+        setSchoolAdvisors(
+          (schoolRes.data?.advisor_schools || []).map(as => as.profiles).filter(Boolean)
+        );
+        setTypedAdvisors({
+          gefen: schoolRes.data?.advisors_gefen || [],
+          current: schoolRes.data?.advisors_current || [],
+          district: schoolRes.data?.advisors_district || [],
+        });
+      } catch {
+        // non-fatal — page still usable with the initial (possibly stale) snapshot
       }
 
       const [accountsResult, logsResult] = await Promise.allSettled([
@@ -2730,6 +2747,25 @@ export default function SchoolPage() {
       if (users.length === 0 && (role === "owner" || role === "manager")) loadUsers();
     }
   }, [activeTab, schoolId, role, academicYear]);
+
+  async function loadCalls() {
+    setCallsLoading(true);
+    setCallsError("");
+    try {
+      const res = await axios.get(`/schools/${schoolId}/calls`, { params: { academic_year: academicYear } });
+      setCalls(res.data?.calls || []);
+      setVoicenterEnabled(res.data?.voicenter_enabled !== false);
+    } catch {
+      setCallsError("שגיאה בטעינת השיחות — נסה לרענן");
+      setCalls([]);
+    } finally {
+      setCallsLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (activeTab === "calls") loadCalls();
+  }, [activeTab, schoolId, academicYear]);
 
   useEffect(() => {
     axios.get("/calendar/connection")
@@ -3304,14 +3340,14 @@ export default function SchoolPage() {
             else blocker.reset();
           }}
           onSaveAndLeave={() => {
-            if (pendingTabSwitch) { setActiveTab(pendingTabSwitch); setPendingTabSwitch(null); }
+            if (pendingTabSwitch) { updateActiveTab(pendingTabSwitch); setPendingTabSwitch(null); }
             else blocker.proceed();
           }}
           onDiscardAndLeave={async () => {
             setMeetingGuardBusy(true);
             await discardIncompleteMeetings(incompleteSessionMeetings.map(m => m.id));
             setMeetingGuardBusy(false);
-            if (pendingTabSwitch) { setActiveTab(pendingTabSwitch); setPendingTabSwitch(null); }
+            if (pendingTabSwitch) { updateActiveTab(pendingTabSwitch); setPendingTabSwitch(null); }
             else blocker.proceed();
           }}
         />
@@ -3382,7 +3418,7 @@ export default function SchoolPage() {
       )}
 
       <div style={{ marginRight: "var(--sidebar-w, 240px)", transition: "margin-right 0.25s cubic-bezier(0.4,0,0.2,1)" }}>
-        <div className={`mx-auto px-6 py-10 ${["checks", "meetings", "info", "closure", "control_letter"].includes(activeTab) ? "max-w-[100rem]" : "max-w-4xl"}`}>
+        <div className={`mx-auto px-6 py-10 ${["checks", "meetings", "info", "closure", "control_letter", "tasks", "calls"].includes(activeTab) ? "max-w-[100rem]" : "max-w-4xl"}`}>
 
           {/* Page header */}
           <div className="mb-5 flex items-center justify-between">
@@ -3404,8 +3440,10 @@ export default function SchoolPage() {
             {[
               { id: "info",     label: "פרטי בית הספר" },
               { id: "meetings", label: "פגישות" },
-              { id: "goals",    label: "יעדים" },
               { id: "checks",   label: "בדיקות" },
+              { id: "tasks",    label: "משימות" },
+              { id: "goals",    label: "יעדים" },
+              { id: "calls",    label: "שיחות" },
               { id: "closure",  label: "סגירת שנה" },
               { id: "control_letter", label: "מכתב בקרה" },
             ].map(t => (
@@ -4368,6 +4406,39 @@ export default function SchoolPage() {
             />
           )}
 
+          {/* ─── TAB: שיחות ─── */}
+          {activeTab === "calls" && (
+            <div>
+              <div className="flex items-center justify-between mb-4">
+                <h1 className="text-xl font-bold text-slate-900">שיחות</h1>
+              </div>
+              {callsLoading ? (
+                <div className="glass-card rounded-2xl p-10 flex justify-center">
+                  <div role="status" aria-label="טוען שיחות"><div aria-hidden="true" className="spinner w-8 h-8" /></div>
+                </div>
+              ) : callsError ? (
+                <div role="alert" className="glass-card rounded-2xl p-6 text-center">
+                  <p className="text-red-600 mb-3">{callsError}</p>
+                  <button onClick={loadCalls} className="btn-blue text-sm px-4 py-2">רענן</button>
+                </div>
+              ) : !voicenterEnabled ? (
+                <div className="glass-card rounded-2xl p-12 text-center">
+                  <p className="text-3xl mb-3">📞</p>
+                  <p className="font-semibold text-slate-700 mb-1">אינטגרציית השיחות אינה מוגדרת</p>
+                  <p className="text-slate-400 text-sm">ניתן להגדיר את האינטגרציה עם Voicenter באזור ניהול</p>
+                </div>
+              ) : calls.length === 0 ? (
+                <div className="glass-card rounded-2xl p-12 text-center">
+                  <p className="text-3xl mb-3">📞</p>
+                  <p className="font-semibold text-slate-700 mb-1">אין שיחות להצגה</p>
+                  <p className="text-slate-400 text-sm">בטווח שנת הלימודים הנבחרת לא נמצאו שיחות עם אנשי הקשר של בית הספר</p>
+                </div>
+              ) : (
+                <CallsTable calls={calls} hideSchoolColumn canManage={role === "owner" || role === "manager"} />
+              )}
+            </div>
+          )}
+
           {activeTab === "checks" && (
             <ChecksTab
               accounts={accounts}
@@ -4382,6 +4453,10 @@ export default function SchoolPage() {
               setActiveSubTab={setActiveSubTab}
               academicYear={academicYear}
             />
+          )}
+
+          {activeTab === "tasks" && (
+            <SchoolTasksTab schoolId={schoolId} />
           )}
 
           {activeTab === "closure" && (

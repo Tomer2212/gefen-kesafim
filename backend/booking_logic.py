@@ -129,12 +129,23 @@ def months_label_he(months: list[str]) -> str:
     return " ,".join(labels[:-1]) + f" ו{labels[-1]}"
 
 
+def _opt_out_footer_html(opt_out_link: str | None) -> str:
+    """Shared footer line for the three HTML email builders below — same wording/placement
+    convention as tasks_router._render_template's plain-text opt_out_link substitution, just
+    rendered as a link since these builders always produce HTML."""
+    if not opt_out_link:
+        return ""
+    return f'<p style="margin: 8px 0 0 0; font-size: 11px; color: #94a3b8;">' \
+           f'<a href="{opt_out_link}" style="color: #94a3b8;">להסרה מרשימת התפוצה</a></p>'
+
+
 def build_booking_request_email_html(recipient_name: str, school_name: str, advisor_name: str,
-                                      months: list[str], booking_url: str) -> str:
+                                      months: list[str], booking_url: str, opt_out_link: str | None = None) -> str:
     first_name = (recipient_name or "").strip().split(" ")[0]
     greeting = f"היי {first_name}," if first_name else "היי,"
     months_label = months_label_he(months)
     advisor_clause = f" עם {advisor_name}" if advisor_name else ""
+    opt_out_html = _opt_out_footer_html(opt_out_link)
     return f"""
 <html>
 <body dir="rtl" style="font-family: Arial, sans-serif; font-size: 14px; color: #1e293b;
@@ -162,6 +173,7 @@ def build_booking_request_email_html(recipient_name: str, school_name: str, advi
     </div>
     <div style="background: #f1f5f9; padding: 12px 24px; text-align: center;">
       <p style="margin: 0; font-size: 11px; color: #94a3b8;">נשלח אוטומטית מגפן AI</p>
+      {opt_out_html}
     </div>
   </div>
 </body>
@@ -221,12 +233,13 @@ def format_ranges_text(ranges: list[dict]) -> str:
 
 
 def build_direct_coordination_email_html(recipient_name: str, school_name: str, advisor_names: list[str],
-                                          ranges: list[dict], booking_url: str) -> str:
+                                          ranges: list[dict], booking_url: str, opt_out_link: str | None = None) -> str:
     first_name = (recipient_name or "").strip().split(" ")[0]
     greeting = f"היי {first_name}," if first_name else "היי,"
     advisors_label = ", ".join(advisor_names) if advisor_names else ""
     advisor_clause = f" עם {advisors_label}" if advisors_label else ""
     range_rows_html = format_ranges_html(ranges)
+    opt_out_html = _opt_out_footer_html(opt_out_link)
 
     return f"""
 <html>
@@ -256,6 +269,7 @@ def build_direct_coordination_email_html(recipient_name: str, school_name: str, 
     </div>
     <div style="background: #f1f5f9; padding: 12px 24px; text-align: center;">
       <p style="margin: 0; font-size: 11px; color: #94a3b8;">נשלח אוטומטית מגפן AI</p>
+      {opt_out_html}
     </div>
   </div>
 </body>

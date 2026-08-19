@@ -3,7 +3,7 @@ import logging
 import os
 import secrets
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
 import httpx
@@ -19,6 +19,7 @@ router = APIRouter()
 _MANAGER_ROLES = ("owner", "manager")
 _CALL_LOG_URL = "https://api.voicenter.com/hub/cdr/"
 _TRANSCRIPTS_BUCKET = "voicenter-transcripts"
+CRON_SECRET = os.getenv("CRON_SECRET", "")
 
 
 def _build_webhook_url(org_id: str, secret_value: str) -> str:
@@ -54,34 +55,105 @@ def _phone_suffix(raw) -> str | None:
 
 def _build_contact_map(org_id: str) -> dict:
     """OUR OWN data (schools/contacts) — not Voicenter's — used to resolve the
-    counterpart phone number of a call to a known person, their role, and school."""
+    counterpart phone number of a call to known person(s), their role, and school(s).
+    Returns dict[phone_suffix] -> list of matches (usually one; more than one means the
+    same phone number is a contact at multiple schools — an ambiguity the caller must
+    resolve, not silently pick a "winner")."""
     contact_map: dict = {}
     try:
         db = get_admin_client()
         rows = (
             db.table("schools")
-            .select("name, principal_name, principal_phone, secretary_name, secretary_phone, "
+            .select("id, name, principal_name, principal_phone, "
+                     "principal_chativa_name, principal_chativa_phone, "
+                     "secretary_name, secretary_phone, "
                      "finance_contact_name, finance_contact_phone, extra_contacts")
             .eq("org_id", org_id)
             .execute()
         ).data or []
         for s in rows:
+            school_id = s.get("id")
             school_name = s.get("name")
             for name_field, phone_field, role_label in (
                 ("principal_name", "principal_phone", "מנהל/ת"),
+                ("principal_chativa_name", "principal_chativa_phone", "מנהל/ת חט\"ב"),
                 ("secretary_name", "secretary_phone", "מנהלנ/ית"),
                 ("finance_contact_name", "finance_contact_phone", "אחראי/ת כספים"),
             ):
                 suffix = _phone_suffix(s.get(phone_field))
                 if suffix and s.get(name_field):
-                    contact_map[suffix] = {"name": s[name_field], "role": role_label, "school_name": school_name}
+                    contact_map.setdefault(suffix, []).append(
+                        {"name": s[name_field], "role": role_label, "school_id": school_id, "school_name": school_name}
+                    )
             for ec in (s.get("extra_contacts") or []):
                 suffix = _phone_suffix(ec.get("phone"))
                 if suffix and ec.get("name"):
-                    contact_map[suffix] = {"name": ec["name"], "role": ec.get("role") or "", "school_name": school_name}
+                    contact_map.setdefault(suffix, []).append(
+                        {"name": ec["name"], "role": ec.get("role") or "", "school_id": school_id, "school_name": school_name}
+                    )
     except Exception as exc:
         logger.warning("voicenter: contact map enrichment failed (non-fatal): %s", exc)
     return contact_map
+
+
+def _get_call_resolutions(org_id: str, call_ids: list[str]) -> dict:
+    """Existing voicenter_call_contact_resolutions rows for the given call_ids, keyed by call_id."""
+    if not call_ids:
+        return {}
+    try:
+        db = get_admin_client()
+        rows = (
+            db.table("voicenter_call_contact_resolutions")
+            .select("*")
+            .eq("org_id", org_id)
+            .in_("call_id", call_ids)
+            .execute()
+        ).data or []
+        return {r["call_id"]: r for r in rows}
+    except Exception as exc:
+        logger.warning("voicenter: call resolutions lookup failed (non-fatal): %s", exc)
+        return {}
+
+
+def _resolve_contact_for_call(contact_map: dict, resolutions_by_call_id: dict, call_id: str, counterpart: str) -> dict:
+    """Resolves a single call's contact/school given the org-wide contact_map and any
+    persisted resolutions. Returns a dict with contact_name/contact_role/school_id/
+    school_name (all possibly None) plus pending_school_resolution + candidate_schools
+    for the ambiguous-and-unresolved case."""
+    matches = contact_map.get(_phone_suffix(counterpart)) or []
+    if len(matches) <= 1:
+        m = matches[0] if matches else None
+        return {
+            "contact_name": m["name"] if m else None,
+            "contact_role": m["role"] if m else None,
+            "school_id": m["school_id"] if m else None,
+            "school_name": m["school_name"] if m else None,
+            "pending_school_resolution": False,
+            "candidate_schools": None,
+        }
+
+    resolution = resolutions_by_call_id.get(call_id)
+    candidate_schools = [{"id": m["school_id"], "name": m["school_name"]} for m in matches]
+    if resolution and resolution.get("resolved_school_id"):
+        resolved_id = resolution["resolved_school_id"]
+        resolved_match = next((m for m in matches if m["school_id"] == resolved_id), None)
+        return {
+            "contact_name": resolved_match["name"] if resolved_match else resolution.get("contact_name"),
+            "contact_role": resolved_match["role"] if resolved_match else None,
+            "school_id": resolved_id,
+            "school_name": resolved_match["school_name"] if resolved_match else None,
+            "pending_school_resolution": False,
+            "candidate_schools": None,
+        }
+
+    return {
+        "contact_name": matches[0]["name"],
+        "contact_role": None,
+        "school_id": None,
+        "school_name": None,
+        "pending_school_resolution": True,
+        "candidate_schools": candidate_schools,
+    }
 
 
 def _get_integration_config(org_id: str) -> dict | None:
@@ -268,19 +340,16 @@ async def voicenter_webhook(org_id: str, secret: str, request: Request):
 
 # ---------------------------------------------------------------------------
 # Calls — live pull from Voicenter's Call Log API on every request.
-# Nothing about the calls themselves is ever written to Supabase.
+# Nothing about the calls themselves is ever written to Supabase (except the
+# ambiguous-contact resolution rows in voicenter_call_contact_resolutions).
 # ---------------------------------------------------------------------------
 
-@router.get("/calls")
-def list_calls(
-    user: Annotated[dict, Depends(get_current_user)],
-    date_from: str,
-    date_to: str,
-    advisor_id: str | None = None,
-):
-    _require_manager(user)
-
-    cfg = _get_integration_config(user["org_id"])
+def _pull_org_calls(org_id: str, date_from: str, date_to: str) -> dict:
+    """Shared puller: Call Log API fetch + advisor/AI/contact enrichment. Used by the admin
+    /calls endpoint, the per-school /schools/{id}/calls endpoint, and the scheduled
+    process-new-calls job. Raises HTTPException on hard failures (bad/missing config,
+    Voicenter API errors) — callers that want a soft-fail (e.g. the cron job) should catch it."""
+    cfg = _get_integration_config(org_id)
     if not cfg or not cfg.get("enabled"):
         raise HTTPException(status_code=400, detail="אינטגרציית Voicenter אינה מוגדרת או כבויה")
     if not cfg.get("api_bearer_token"):
@@ -301,11 +370,11 @@ def list_calls(
         resp = httpx.post(_CALL_LOG_URL, json=payload, headers=headers, timeout=15)
         data = resp.json()
     except Exception as exc:
-        logger.error("voicenter list_calls: request to Call Log API failed: %s", exc, exc_info=True)
+        logger.error("voicenter _pull_org_calls: request to Call Log API failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=502, detail="לא ניתן היה לשלוף שיחות מ-Voicenter כרגע — נסה שוב")
 
     if data.get("ERROR_NUMBER") not in (0, None):
-        logger.warning("voicenter list_calls: Voicenter returned error %s: %s", data.get("ERROR_NUMBER"), data.get("ERROR_DESCRIPTION"))
+        logger.warning("voicenter _pull_org_calls: Voicenter returned error %s: %s", data.get("ERROR_NUMBER"), data.get("ERROR_DESCRIPTION"))
         raise HTTPException(status_code=502, detail=f"Voicenter: {data.get('ERROR_DESCRIPTION', 'שגיאה לא ידועה')}")
 
     cdr_list = data.get("CDR_LIST") or []
@@ -323,7 +392,7 @@ def list_calls(
             m_rows = (
                 db.table("voicenter_rep_mappings")
                 .select("representative_code, advisor_id")
-                .eq("org_id", user["org_id"])
+                .eq("org_id", org_id)
                 .in_("representative_code", rep_codes)
                 .execute()
             ).data or []
@@ -333,7 +402,7 @@ def list_calls(
                 p_rows = db.table("profiles").select("id, full_name, email").in_("id", advisor_ids).execute()
                 profiles_map = {p["id"]: p for p in (p_rows.data or [])}
         except Exception as exc:
-            logger.warning("voicenter list_calls: advisor mapping enrichment failed (non-fatal): %s", exc)
+            logger.warning("voicenter _pull_org_calls: advisor mapping enrichment failed (non-fatal): %s", exc)
 
     # AI summary/transcript come only from our own webhook capture (voicenter_call_ai) —
     # the Call Log API never returns them (confirmed empirically). Non-fatal enrichment,
@@ -346,38 +415,40 @@ def list_calls(
             ai_rows = (
                 db.table("voicenter_call_ai")
                 .select("call_id, summary, transcript_path")
-                .eq("org_id", user["org_id"])
+                .eq("org_id", org_id)
                 .in_("call_id", call_ids)
                 .execute()
             ).data or []
             ai_by_call_id = {r["call_id"]: r for r in ai_rows}
         except Exception as exc:
-            logger.warning("voicenter list_calls: AI summary enrichment failed (non-fatal): %s", exc)
+            logger.warning("voicenter _pull_org_calls: AI summary enrichment failed (non-fatal): %s", exc)
 
     # Contact matching is OUR OWN data (schools/contacts), not Voicenter's — resolves the
-    # counterpart phone number to a known person's name/role/school. Non-fatal enrichment.
-    contact_map = _build_contact_map(user["org_id"])
+    # counterpart phone number to known person(s)/role/school(s). Non-fatal enrichment.
+    contact_map = _build_contact_map(org_id)
+    resolutions_by_call_id = _get_call_resolutions(org_id, call_ids)
 
     calls = []
     for c in cdr_list:
         rep_code = c.get("representativecode")
         mapped_advisor_id = mapping_by_code.get(rep_code)
-        if advisor_id and mapped_advisor_id != advisor_id:
-            continue
         direction = _derive_direction(c.get("type"))
         counterpart = c.get("targetnumber") if direction == "outgoing" else c.get("callernumber")
         duration = c.get("duration") or 0
         ai_exists = str((c.get("customdata") or {}).get("AiExists", "")).lower() == "true"
         call_id = c.get("callid")
         ai_row = ai_by_call_id.get(call_id)
-        contact = contact_map.get(_phone_suffix(counterpart))
+        contact = _resolve_contact_for_call(contact_map, resolutions_by_call_id, call_id, counterpart)
         calls.append({
             "call_id": call_id,
             "direction": direction,
             "counterpart_phone": counterpart,
-            "contact_name": contact["name"] if contact else None,
-            "contact_role": contact["role"] if contact else None,
-            "school_name": contact["school_name"] if contact else None,
+            "contact_name": contact["contact_name"],
+            "contact_role": contact["contact_role"],
+            "school_id": contact["school_id"],
+            "school_name": contact["school_name"],
+            "pending_school_resolution": contact["pending_school_resolution"],
+            "candidate_schools": contact["candidate_schools"],
             "representative_code": rep_code,
             "representative_name": c.get("representativename") or c.get("username"),
             "advisor_id": mapped_advisor_id,
@@ -391,6 +462,93 @@ def list_calls(
         })
 
     return {"calls": calls, "total_hits": data.get("TOTAL_HITS"), "returned_hits": data.get("RETURN_HITS")}
+
+
+@router.get("/calls")
+def list_calls(
+    user: Annotated[dict, Depends(get_current_user)],
+    date_from: str,
+    date_to: str,
+    advisor_id: str | None = None,
+):
+    _require_manager(user)
+    result = _pull_org_calls(user["org_id"], date_from, date_to)
+    if advisor_id:
+        result["calls"] = [c for c in result["calls"] if c["advisor_id"] == advisor_id]
+    return result
+
+
+class ResolveCallContactSchoolIn(BaseModel):
+    school_id: str
+
+
+@router.patch("/calls/{call_id}/resolve-contact-school")
+def resolve_call_contact_school(
+    call_id: str,
+    body: ResolveCallContactSchoolIn,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    """Resolves which school an ambiguous-contact call belongs to. Only the notified
+    recipient(s) or an owner/manager may decide."""
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            rows = (
+                db.table("voicenter_call_contact_resolutions")
+                .select("*")
+                .eq("org_id", user["org_id"])
+                .eq("call_id", call_id)
+                .limit(1)
+                .execute()
+            ).data
+            break
+        except Exception as exc:
+            if attempt == 0:
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("resolve_call_contact_school failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="לא נמצאה שיחה הממתינה לשיוך")
+    resolution = rows[0]
+
+    is_recipient = user["id"] in (resolution.get("notified_recipient_ids") or [])
+    if not is_recipient and user["role"] not in _MANAGER_ROLES:
+        raise HTTPException(status_code=403, detail="אין הרשאה לשייך שיחה זו")
+
+    candidate_ids = [s["id"] for s in (resolution.get("candidate_schools") or [])]
+    if body.school_id not in candidate_ids:
+        raise HTTPException(status_code=400, detail="בית הספר שנבחר אינו אחד מהמועמדים לשיחה זו")
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            db.table("voicenter_call_contact_resolutions").update({
+                "resolved_school_id": body.school_id,
+                "resolved_by": user["id"],
+                "resolved_at": now_iso,
+            }).eq("id", resolution["id"]).execute()
+            # Mark every notification tied to this call as read for every recipient — a decision
+            # made by one owner/manager shouldn't leave the same "pending" notification open for
+            # the others who were notified as a fallback.
+            recipient_ids = resolution.get("notified_recipient_ids") or []
+            if recipient_ids:
+                db.table("notifications").update({"read_at": now_iso}).in_(
+                    "recipient_id", recipient_ids
+                ).contains("data", {"call_id": call_id}).execute()
+            break
+        except Exception as exc:
+            if attempt == 0:
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("resolve_call_contact_school: update failed for call=%s: %s", call_id, exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    return {"ok": True}
 
 
 @router.get("/calls/{call_id}/transcript")
@@ -575,3 +733,104 @@ def delete_mapping(user: Annotated[dict, Depends(get_current_user)], mapping_id:
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Scheduled job — detects new calls with an ambiguous contact (same phone number
+# is a contact at more than one school) and notifies who needs to resolve it.
+# Cron-secured (GitHub Actions, every 15 min — see voicenter-poll-calls.yml).
+# ---------------------------------------------------------------------------
+
+@router.post("/process-new-calls")
+def process_new_calls(request: Request):
+    if not CRON_SECRET or request.headers.get("X-Cron-Secret") != CRON_SECRET:
+        raise HTTPException(status_code=403, detail="אין הרשאה")
+
+    from routers.schools_router import _create_notifications
+
+    db = get_admin_client()
+    now = datetime.now(timezone.utc)
+    try:
+        orgs = db.table("voicenter_integrations").select("org_id, enabled, last_call_scan_at").eq("enabled", True).execute().data or []
+    except Exception as exc:
+        logger.error("process_new_calls: failed to load integrations: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת")
+
+    processed_orgs = 0
+    new_ambiguous_calls = 0
+
+    for org in orgs:
+        org_id = org["org_id"]
+        last_scan = org.get("last_call_scan_at")
+        # First run for this org: only look back 1 hour, to avoid a flood of historical
+        # ambiguous-contact notifications on rollout.
+        window_start = (datetime.fromisoformat(last_scan) if last_scan else now - timedelta(hours=1)) - timedelta(minutes=5)
+        date_from = window_start.strftime("%Y-%m-%dT%H:%M:%S")
+        date_to = now.strftime("%Y-%m-%dT%H:%M:%S")
+
+        try:
+            result = _pull_org_calls(org_id, date_from, date_to)
+        except HTTPException as exc:
+            logger.warning("process_new_calls: skipping org=%s (pull failed: %s)", org_id, exc.detail)
+            continue
+        except Exception as exc:
+            logger.warning("process_new_calls: skipping org=%s (unexpected error: %s)", org_id, exc)
+            continue
+
+        ambiguous_calls = [c for c in result["calls"] if c.get("pending_school_resolution")]
+        if ambiguous_calls:
+            call_ids = [c["call_id"] for c in ambiguous_calls]
+            already_tracked = set(_get_call_resolutions(org_id, call_ids).keys())
+
+            managers_and_owners: list[str] = []
+            try:
+                rows = db.table("profiles").select("id").in_("role", ["owner", "manager"]).eq("org_id", org_id).execute().data or []
+                managers_and_owners = [r["id"] for r in rows]
+            except Exception as exc:
+                logger.warning("process_new_calls: failed to load owners/managers for org=%s: %s", org_id, exc)
+
+            for c in ambiguous_calls:
+                if c["call_id"] in already_tracked:
+                    continue
+                recipient_ids = [c["advisor_id"]] if c.get("advisor_id") else managers_and_owners
+                if not recipient_ids:
+                    continue
+
+                try:
+                    db.table("voicenter_call_contact_resolutions").insert({
+                        "org_id": org_id,
+                        "call_id": c["call_id"],
+                        "call_time": c["start_time"],
+                        "contact_phone_suffix": _phone_suffix(c["counterpart_phone"]),
+                        "contact_name": c["contact_name"],
+                        "candidate_schools": c["candidate_schools"],
+                        "caller_advisor_id": c.get("advisor_id"),
+                        "notified_recipient_ids": recipient_ids,
+                    }).execute()
+                except Exception as exc:
+                    logger.warning("process_new_calls: failed to insert resolution row for call=%s: %s", c["call_id"], exc)
+                    continue
+
+                school_names = " ו-".join(s["name"] for s in c["candidate_schools"] if s.get("name"))
+                notif_rows = [{
+                    "recipient_id": rid,
+                    "type": "call_contact_ambiguous",
+                    "data": {
+                        "title": f"שיחה עם {c['contact_name']} — יש לשייך לבית ספר",
+                        "contact_name": c["contact_name"],
+                        "call_id": c["call_id"],
+                        "candidate_schools": c["candidate_schools"],
+                        "text": f"{c['contact_name']} שאיתו/ה דיברת הוא/היא איש/אשת קשר גם ב{school_names}. יש לשייך את השיחה לבית הספר הנכון.",
+                    },
+                } for rid in recipient_ids]
+                _create_notifications(db, notif_rows, pref_key="notify_call_contact_ambiguous")
+                new_ambiguous_calls += 1
+
+        try:
+            db.table("voicenter_integrations").update({"last_call_scan_at": now.isoformat()}).eq("org_id", org_id).execute()
+        except Exception as exc:
+            logger.warning("process_new_calls: failed to update cursor for org=%s: %s", org_id, exc)
+
+        processed_orgs += 1
+
+    return {"ok": True, "processed_orgs": processed_orgs, "new_ambiguous_calls": new_ambiguous_calls}

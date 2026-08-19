@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import TaskDateTimeInput from "./TaskDateTimeInput";
+import DirectStyleDateInput from "./DirectStyleDateInput";
 import FieldPickerButton from "./FieldPickerButton";
 import { MEETING_STATUS_OPTIONS, MEETING_TYPE_OPTIONS } from "../meetings/constants";
 
@@ -48,109 +49,8 @@ export function formatDuration(minutes) {
   return Number.isInteger(hours) ? `${hours} שעות` : `${Math.floor(hours)}:${String(minutes % 60).padStart(2, "0")} שעות`;
 }
 
-// Same DD/MM/YY masked-text date field as DirectCoordinationModal.jsx's "תיאום ישיר" (not
-// TaskDateTimeInput's multi-segment day/month/year layout) — the user explicitly asked for
-// pixel parity with that field. Stores/emits plain ISO ("YYYY-MM-DD") to stay compatible with
-// the meeting condition's date_from/date_to, converting to/from the DD/MM/YY display text.
-// Clamps each 2-digit segment to a plausible range (day 01-31, month 01-12) the moment it's
-// fully typed, so e.g. typing "88" for month can never sit in the field as-is (it clamps to
-// 12) — day-vs-month validity (e.g. 31/02) still can't be checked until all 6 digits exist,
-// that's parseDateDDMMYY's job, surfaced live by DirectStyleDateInput below.
-function clamp(n, min, max) { return Math.min(max, Math.max(min, n)); }
-function maskDateInput(raw) {
-  let digits = raw.replace(/\D/g, "").slice(0, 6);
-  if (digits.length >= 2) {
-    const day = clamp(parseInt(digits.slice(0, 2), 10), 1, 31);
-    digits = String(day).padStart(2, "0") + digits.slice(2);
-  }
-  if (digits.length >= 4) {
-    const month = clamp(parseInt(digits.slice(2, 4), 10), 1, 12);
-    digits = digits.slice(0, 2) + String(month).padStart(2, "0") + digits.slice(4);
-  }
-  if (digits.length > 4) return `${digits.slice(0, 2)}/${digits.slice(2, 4)}/${digits.slice(4)}`;
-  if (digits.length > 2) return `${digits.slice(0, 2)}/${digits.slice(2)}`;
-  return digits;
-}
-function parseDateDDMMYY(text) {
-  const m = /^(\d{2})\/(\d{2})\/(\d{2})$/.exec(text || "");
-  if (!m) return null;
-  const day = parseInt(m[1], 10), month = parseInt(m[2], 10), year = 2000 + parseInt(m[3], 10);
-  if (month < 1 || month > 12) return null;
-  const daysInMonth = new Date(year, month, 0).getDate();
-  if (day < 1 || day > daysInMonth) return null;
-  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
-}
-function isoToDDMMYY(iso) {
-  if (!iso) return "";
-  const [y, m, d] = (iso || "").split("-");
-  if (!y || !m || !d) return "";
-  return `${d}/${m}/${y.slice(2)}`;
-}
-function todayIso() {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
-// Meeting requirements only make sense for today-or-later — a required meeting "due" in the
-// past can never be scheduled. Compared as plain ISO strings (YYYY-MM-DD sorts lexicographically).
-function isPastDate(iso) { return iso < todayIso(); }
-function DirectStyleDateInput({ id, value, onChange, invalid }) {
-  const [text, setText] = useState(() => isoToDDMMYY(value));
-  const [lastEmitted, setLastEmitted] = useState(value);
-  // True only once all 6 digits are typed but they don't form a real calendar date (e.g.
-  // 31/02/26) — day/month range is already clamped per-segment by maskDateInput, so this is
-  // just the day-vs-days-in-month case parseDateDDMMYY catches.
-  const [localInvalid, setLocalInvalid] = useState(false);
-  const [pastInvalid, setPastInvalid] = useState(false);
-  useEffect(() => {
-    if (value === lastEmitted) return; // externally-triggered change only (e.g. "נקה בחירה")
-    setText(isoToDDMMYY(value));
-    setLastEmitted(value);
-    setLocalInvalid(false);
-    setPastInvalid(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [value]);
-  const showInvalid = invalid || localInvalid || pastInvalid;
-  return (
-    <div>
-      <input
-        id={id} type="text" inputMode="numeric" placeholder="DD/MM/YY" maxLength={8}
-        aria-invalid={showInvalid || undefined}
-        value={text}
-        onChange={e => {
-          const masked = maskDateInput(e.target.value);
-          setText(masked);
-          const digitCount = masked.replace(/\D/g, "").length;
-          if (masked === "") {
-            setLastEmitted("");
-            setLocalInvalid(false);
-            setPastInvalid(false);
-            onChange("");
-            return;
-          }
-          const iso = parseDateDDMMYY(masked);
-          if (iso) {
-            setLocalInvalid(false);
-            if (isPastDate(iso)) {
-              // Keep the typed text visible (don't silently revert) but withhold onChange —
-              // a past date must never reach the condition's date_from/date_to.
-              setPastInvalid(true);
-              return;
-            }
-            setPastInvalid(false);
-            setLastEmitted(iso);
-            onChange(iso);
-          } else {
-            setPastInvalid(false);
-            setLocalInvalid(digitCount === 6);
-          }
-        }}
-        className={`text-sm border rounded-lg px-2.5 py-1.5 w-full ${showInvalid ? "border-red-400 focus:border-red-500" : "border-slate-200"}`}
-      />
-      {localInvalid && <p className="text-[11px] text-red-600 mt-0.5">תאריך לא קיים בלוח השנה</p>}
-      {pastInvalid && <p className="text-[11px] text-red-600 mt-0.5">לא ניתן לבחור תאריך שחלף — יש לבחור מהיום והלאה</p>}
-    </div>
-  );
-}
+// (DirectStyleDateInput now lives in its own file — see ./DirectStyleDateInput.jsx — reused by
+// PersonTaskCreateWizard.jsx's "תאריך יעד" field.)
 const MEETING_SERVICE_TYPE_LABELS = { gefen: "גפן", current: "שוטף", gefen_current: "גפן+שוטף", district: "מחוז" };
 export function isMeetingRequirementComplete(cond) {
   return !!(
@@ -159,8 +59,12 @@ export function isMeetingRequirementComplete(cond) {
   );
 }
 const EMPTY_FIELD_CONDITION = { type: "field", field: "", op: "eq", value: "" };
-const EMPTY_GOAL_CONDITION = { type: "goal", goal_key: "", division_type: "", budget_name: "", value: "" };
-const EMPTY_CONTROL_LETTER_CONDITION = { type: "control_letter", division_type: "", field: "", op: "eq", value: "" };
+// division_type is intentionally absent — which division(s) apply is inherently per-school (a
+// six-year school has two), so it's auto-detected server-side rather than pre-chosen here (see
+// task_logic._eval_goal_condition/_eval_control_letter_condition). budget_names defaults to a
+// single pre-selected "גפן" pill since that's the overwhelmingly common case.
+const EMPTY_GOAL_CONDITION = { type: "goal", goal_key: "", budget_names: ["גפן"], value: "" };
+const EMPTY_CONTROL_LETTER_CONDITION = { type: "control_letter", field: "", op: "eq", value: "" };
 
 // Which comparison operators make sense per field type — a free-text field can be "contains",
 // but ">"/"<" on a closed dropdown or a boolean is meaningless. Bool fields get no operator UI
@@ -236,6 +140,11 @@ export default function ConditionGroupsEditor({
   goalOptions, divisionOptions, budgetNameOptions, controlLetterFields, goalValueOptions, orgUsers,
   hideGroupChrome = false, forceMeetingNegateFalse = false, addConditionLabel = "+ הוסף תנאי (וגם)",
   showValidationErrors = false, valueFieldLabel = "ערך",
+  // When set, "+ הוסף קבוצת 'או'" seeds the new group with these conditions instead of a single
+  // blank one — used by PersonTaskCreateWizard.jsx's "יועץ מלווה" audience filter, where every
+  // alternative group needs the same client_status/service_type pair the first group starts
+  // with (a bare group otherwise gives no hint that service_type is expected there too).
+  defaultGroupConditions = null,
 }) {
   function updateCondition(gi, ci, patch) {
     setGroups(prev => prev.map((g, i) => i !== gi ? g : {
@@ -271,7 +180,10 @@ export default function ConditionGroupsEditor({
     setGroups(prev => prev.map((g, i) => i !== gi ? g : { ...g, conditions: g.conditions.filter((_, j) => j !== ci) }));
   }
   function addGroup() {
-    setGroups(prev => [...prev, newConditionGroup(allowedTypes)]);
+    setGroups(prev => [
+      ...prev,
+      defaultGroupConditions ? { conditions: defaultGroupConditions.map(c => ({ ...c })) } : newConditionGroup(allowedTypes),
+    ]);
   }
   function removeGroup(gi) {
     setGroups(prev => prev.filter((_, i) => i !== gi));
@@ -526,24 +438,29 @@ export default function ConditionGroupsEditor({
                         />
                       </div>
                     </label>
+                    <div className="text-xs text-slate-500">
+                      סוג תקציב
+                      <div className="flex flex-wrap gap-1.5 mt-0.5">
+                        {(budgetNameOptions || []).map(b => {
+                          const selected = (cond.budget_names || []).includes(b.value);
+                          return (
+                            <button key={b.value} type="button" aria-pressed={selected}
+                              onClick={() => updateCondition(gi, ci, {
+                                budget_names: selected
+                                  ? (cond.budget_names || []).filter(v => v !== b.value)
+                                  : [...(cond.budget_names || []), b.value],
+                              })}
+                              className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
+                                selected ? "bg-blue-600 border-blue-600 text-white font-semibold" : "border-slate-200 text-slate-600 hover:bg-slate-50"
+                              }`}>
+                              {b.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
                     <label className="text-xs text-slate-500">
-                      חטיבה
-                      <select value={cond.division_type} onChange={e => updateCondition(gi, ci, { division_type: e.target.value })}
-                        className="w-full mt-0.5 text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white">
-                        <option value="">בחר חטיבה</option>
-                        {(divisionOptions || []).map(d => <option key={d.value} value={d.value}>{d.label}</option>)}
-                      </select>
-                    </label>
-                    <label className="text-xs text-slate-500">
-                      תקציב
-                      <TypeaheadValueInput
-                        value={cond.budget_name}
-                        options={(budgetNameOptions || []).map(b => b.value)}
-                        onChange={v => updateCondition(gi, ci, { budget_name: v })}
-                      />
-                    </label>
-                    <label className="text-xs text-slate-500 col-span-2">
-                      ערך
+                      ערך מדד הצלחה
                       <select value={cond.value} onChange={e => updateCondition(gi, ci, { value: e.target.value })}
                         className="w-full mt-0.5 text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white">
                         <option value="">בחר</option>
@@ -568,14 +485,6 @@ export default function ConditionGroupsEditor({
                             onConfirm={keys => handleFieldPick(gi, ci, keys)}
                           />
                         </div>
-                      </label>
-                      <label className="text-xs text-slate-500">
-                        חטיבה
-                        <select value={cond.division_type} onChange={e => updateCondition(gi, ci, { division_type: e.target.value })}
-                          className="w-full mt-0.5 text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white">
-                          <option value="">בחר חטיבה</option>
-                          {(divisionOptions || []).map(d => <option key={d.value} value={d.value}>{d.label}</option>)}
-                        </select>
                       </label>
                       {ops.length > 1 && (
                         <label className="text-xs text-slate-500">

@@ -1,8 +1,6 @@
 import { useState } from "react";
 import { CallRow, computeEndTimeIso } from "./CallRow";
 
-const NUM_COLUMNS = 14;
-
 function SortableHeader({ field, sortField, sortDir, onSort, children }) {
   const icon = sortField !== field
     ? <span className="text-slate-300 ml-0.5">⇅</span>
@@ -51,11 +49,12 @@ function gapHeightPx(gapSeconds) {
   return Math.round(MIN_PX + t * (MAX_PX - MIN_PX));
 }
 
-export function CallsTable({ calls, showGapRows }) {
+export function CallsTable({ calls, showGapRows, hideSchoolColumn, canManage = true }) {
   const [sortField, setSortField] = useState("start_time");
   const [sortDir, setSortDir] = useState("desc");
   const [removedIds, setRemovedIds] = useState(() => new Set());
   const visibleCalls = calls.filter(c => !removedIds.has(c.call_id));
+  const numColumns = 14 - (hideSchoolColumn ? 1 : 0);
 
   function handleSort(field) {
     if (sortField !== field) { setSortField(field); setSortDir("asc"); }
@@ -97,7 +96,9 @@ export function CallsTable({ calls, showGapRows }) {
               <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">מספר צד שני</th>
               <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">שם צד שני</th>
               <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">תפקיד</th>
-              <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">שם מוסד</th>
+              {!hideSchoolColumn && (
+                <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">שם מוסד</th>
+              )}
               <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">
                 <SortableHeader field="status" sortField={sortField} sortDir={sortDir} onSort={handleSort}>סטטוס</SortableHeader>
               </th>
@@ -109,12 +110,12 @@ export function CallsTable({ calls, showGapRows }) {
           <tbody>
             {rows.map(row => row.type === "gap" ? (
               <tr key={row.key} aria-hidden="true">
-                <td colSpan={NUM_COLUMNS} className="p-0">
+                <td colSpan={numColumns} className="p-0">
                   <div style={{ height: `${gapHeightPx(row.gapSeconds)}px`, background: "#16a34a", opacity: 0.5 }} />
                 </td>
               </tr>
             ) : (
-              <CallRow key={row.call.call_id} call={row.call}
+              <CallRow key={row.call.call_id} call={row.call} hideSchoolColumn={hideSchoolColumn} canManage={canManage}
                 onDelete={id => setRemovedIds(prev => new Set(prev).add(id))} />
             ))}
           </tbody>

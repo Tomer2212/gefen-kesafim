@@ -12,27 +12,39 @@ Each condition is one of:
            (and matching meeting_service_type — the meetings-area "סוג" column — if given).
     {"type": "field", "field": "<key>", "op": "eq"|"ne"|"gt"|"gte"|"lt"|"lte"|"contains", "value": ...}
         -> Compares a school-level or school_year_admin_data-level field against `value`.
-    {"type": "goal", "goal_key": "<key>", "division_type": "tikkon"|"beinayim"|"yesodi"|"other",
-     "budget_name": "<name>", "value": "yes"|"no"|"unset"}
-        -> Compares the school's school_goals row for that exact
-           (division_type, budget_name, goal_key) against `value` ("unset" = no row / met is
-           NULL — a goal can be genuinely never-evaluated, not just false).
-    {"type": "control_letter", "division_type": "tikkon"|"beinayim"|"yesodi"|"other",
-     "field": "status"|"received_date"|"days_to_answer"|"notes", "op": "eq"|...|"contains", "value": ...}
-        -> Compares the school's control_letters row for that division_type (a school can have
-           up to 2 — one per division) against `value`.
+    {"type": "goal", "goal_key": "<key>", "budget_names": ["<name>", ...], "value": "yes"|"no"|"unset",
+     "division_type": "tikkon"|"beinayim"|"yesodi"|"other"}  # division_type: legacy only, see below
+        -> Compares the school's school_goals row(s) for (budget_name, goal_key) against `value`
+           ("unset" = no row / met is NULL). `budget_names` is AND'd — every listed budget must
+           independently satisfy `value`. `division_type` is a legacy field: if a condition still
+           has it set (saved before the per-school auto-detected division split existed), it's
+           evaluated against that ONE division_type exactly, unchanged, for backward
+           compatibility. New conditions never set it — the UI no longer offers a division
+           picker, since which division_type(s) apply is inherently per-school (a six-year
+           school has two) — instead the check is evaluated across ALL division_type rows that
+           exist for the school for that budget/goal, ANDed together.
+    {"type": "control_letter", "field": "status"|"received_date"|"days_to_answer"|"notes",
+     "op": "eq"|...|"contains", "value": ..., "division_type": "tikkon"|"beinayim"|"yesodi"|"other"}
+        -> Compares the school's control_letters row(s) against `value`. Same division_type
+           legacy/auto-detect split as "goal" above (a school can have up to 2 rows — one per
+           division — ANDed together when division_type isn't set on the condition).
 
 Only bounded DB queries are ever issued (schools, meetings, school_goals, control_letters,
 per-service-type advisor tables) — never a per-school loop — per Architecture Invariant #7
 (no Python-side table scans).
 """
 
+import hashlib
+import hmac
 import logging
+import os
 import time
 
 from academic_years import DEFAULT_ACADEMIC_YEAR
 from routers.schools_router import GOAL_DEFINITIONS, DIVISION_LABELS
 from supabase_client import get_admin_client, reset_admin_client
+
+_SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 
 _log = logging.getLogger(__name__)
 
@@ -119,6 +131,50 @@ SERVICE_TYPE_LABELS = {"gefen": "גפן", "current": "שוטף", "gefen_current"
 CLIENT_STATUS_LABELS = {"active": "פעיל", "inactive": "לא פעיל", "in_progress": "בתהליך", "former": "לקוח עבר"}
 ORDER_METHOD_LABELS = {"private": "פרטי", "authority": "רשות", "district": "מחוז"}
 BOOL_LABELS = {"yes": "כן", "no": "לא"}
+
+
+def make_optout_token(email: str) -> str:
+    """Same HMAC-token convention as signup_router._make_unsub_token, kept independent since
+    this opts a contact out of task/school messages specifically, not the unrelated
+    marketing-leads list signup_router manages. Shared (moved from tasks_router) so
+    schools_router's non-task send paths (direct coordination, booking-agent emails, due
+    reminders) can build/verify the same opt-out links and _opted_out_recipients below."""
+    return hmac.new(_SUPABASE_KEY.encode(), email.lower().encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def fetch_opted_out_emails(db, emails: list[str]) -> set[str]:
+    if not emails:
+        return set()
+    rows = db.table("task_opted_out_contacts").select("email").in_("email", emails).execute().data or []
+    return {r["email"] for r in rows}
+
+
+def opted_out_recipients(
+    db, academic_year: str, resolved_emails_by_school_id: dict[str, str | None],
+) -> dict[str, str]:
+    """Returns {school_id: email} for every school whose resolved recipient email is on the
+    global opt-out list AND whose CURRENT client_status isn't 'active' — i.e. genuinely
+    suppressed right now. Re-evaluated fresh on every call (no caching, no separate
+    "reactivated" state) so a school becomes sendable again automatically the instant its
+    status flips back to 'active', with zero manual list-management. The opt-out row itself is
+    never deleted — if the school later goes inactive again, suppression resumes immediately."""
+    school_ids = [sid for sid, email in resolved_emails_by_school_id.items() if email]
+    if not school_ids:
+        return {}
+    emails = list({(email or "").strip().lower() for email in resolved_emails_by_school_id.values() if email})
+    opted_out_emails = fetch_opted_out_emails(db, emails)
+    if not opted_out_emails:
+        return {}
+    year_rows = (
+        db.table("school_year_admin_data").select("school_id, client_status")
+        .eq("academic_year", academic_year).in_("school_id", school_ids).execute().data or []
+    )
+    client_status_map = {r["school_id"]: r.get("client_status") for r in year_rows}
+    return {
+        sid: email.strip().lower()
+        for sid, email in resolved_emails_by_school_id.items()
+        if email and email.strip().lower() in opted_out_emails and client_status_map.get(sid) != "active"
+    }
 
 FIELD_LABELS = {
     "name": "שם בית ספר",
@@ -226,7 +282,10 @@ def field_options(org_id: str | None = None) -> dict:
             "label": FIELD_LABELS[key], "options": options,
         })
 
-    goal_options = [{"key": d["key"], "label": d["label"], "goal_number": d["goal_number"]} for d in GOAL_DEFS]
+    # "kind" ("planning"/"reporting") lets the frontend build a short title like "תכנון 70%"
+    # without hardcoding a second copy of GOAL_DEFS' planning/reporting split (see
+    # FieldMetricEditor.jsx's goalTitle).
+    goal_options = [{"key": d["key"], "label": d["label"], "goal_number": d["goal_number"], "kind": d["kind"]} for d in GOAL_DEFS]
     division_options = _labeled(DIVISION_TYPE_OPTIONS, DIVISION_LABELS)
     budget_name_options = _labeled(BUDGET_NAME_OPTIONS, {})
     control_letter_fields = [
@@ -468,8 +527,10 @@ def _compare(ftype: str | None, op: str, actual, target) -> bool:
     if op == "contains":
         return str(target or "").strip().lower() in str(actual or "").lower()
     if isinstance(actual, list):
-        return target in actual
-    return str(actual or "").strip() == str(target or "").strip()
+        is_member = target in actual
+        return not is_member if op == "ne" else is_member
+    is_equal = str(actual or "").strip() == str(target or "").strip()
+    return not is_equal if op == "ne" else is_equal
 
 
 def _eval_field_condition(cond: dict, school: dict, year_row: dict | None) -> bool:
@@ -488,22 +549,24 @@ def _eval_field_condition(cond: dict, school: dict, year_row: dict | None) -> bo
     return _compare(ftype, op, actual, target)
 
 
-def _goal_row(cond: dict, goal_rows: list[dict]) -> dict | None:
-    return next((
+def _goal_budget_names(cond: dict) -> list[str]:
+    """budget_names (new, list) with a fallback to the legacy singular budget_name for
+    conditions saved before the multi-select UI existed."""
+    names = cond.get("budget_names")
+    if names:
+        return names
+    legacy = cond.get("budget_name")
+    return [legacy] if legacy else [None]
+
+
+def _eval_single_goal(division_type, budget_name, goal_key: str, value: str, goal_rows: list[dict]) -> bool:
+    row = next((
         r for r in goal_rows
-        if r.get("division_type") == cond.get("division_type")
-        and r.get("budget_name") == cond.get("budget_name")
-        and r.get("goal_key") == cond.get("goal_key")
+        if r.get("division_type") == division_type
+        and r.get("budget_name") == budget_name
+        and r.get("goal_key") == goal_key
     ), None)
-
-
-def _eval_goal_condition(cond: dict, goal_rows: list[dict]) -> bool:
-    """No negate/op concept — `value` ("yes"/"no"/"unset") is the whole comparison. "unset"
-    means no school_goals row exists for this exact (division_type, budget_name, goal_key)
-    combination, or one exists with met still NULL (never explicitly toggled)."""
-    row = _goal_row(cond, goal_rows)
     met = row.get("met") if row else None
-    value = cond.get("value") or "unset"
     if value == "yes":
         return met is True
     if value == "no":
@@ -511,20 +574,52 @@ def _eval_goal_condition(cond: dict, goal_rows: list[dict]) -> bool:
     return met is None
 
 
-def _control_letter_row(cond: dict, cl_rows: list[dict]) -> dict | None:
-    return next((r for r in cl_rows if r.get("division_type") == cond.get("division_type")), None)
+def _eval_goal_condition(cond: dict, goal_rows: list[dict]) -> bool:
+    """No negate/op concept — `value` ("yes"/"no"/"unset") is the whole comparison. "unset"
+    means no school_goals row exists for the relevant (division_type, budget_name, goal_key)
+    combination, or one exists with met still NULL (never explicitly toggled).
+
+    `division_type`: legacy exact-match path when a condition still has one saved (old data) —
+    unchanged single-row check. New conditions never set it: instead every division_type that
+    actually has a school_goals row for this goal_key is checked (a six-year school naturally
+    has two), ANDed together — a division the school doesn't have simply contributes nothing.
+    `budget_names` is always ANDed across every listed budget (see _goal_budget_names)."""
+    goal_key = cond.get("goal_key")
+    value = cond.get("value") or "unset"
+    budget_names = _goal_budget_names(cond)
+    division_type = cond.get("division_type")
+    if division_type:
+        divisions = [division_type]
+    else:
+        divisions = sorted({r["division_type"] for r in goal_rows if r.get("goal_key") == goal_key}) or [None]
+    return all(
+        _eval_single_goal(d, b, goal_key, value, goal_rows)
+        for d in divisions for b in budget_names
+    )
 
 
-def _eval_control_letter_condition(cond: dict, cl_rows: list[dict]) -> bool:
-    row = _control_letter_row(cond, cl_rows)
-    field = cond.get("field")
+def _eval_single_control_letter(division_type, field: str, op: str, target, cl_rows: list[dict]) -> bool:
+    row = next((r for r in cl_rows if r.get("division_type") == division_type), None)
     ftype = CONTROL_LETTER_FIELDS.get(field)
     if ftype is None:
         return False
-    op = cond.get("op") or "eq"
-    target = cond.get("value")
     actual = (row or {}).get(field)
     return _compare(ftype, op, actual, target)
+
+
+def _eval_control_letter_condition(cond: dict, cl_rows: list[dict]) -> bool:
+    """Same legacy-vs-auto-detect division_type split as _eval_goal_condition — a school can
+    have up to 2 control_letters rows (one per division); new conditions check all of them,
+    ANDed together, instead of forcing a single pre-chosen division."""
+    field = cond.get("field")
+    op = cond.get("op") or "eq"
+    target = cond.get("value")
+    division_type = cond.get("division_type")
+    if division_type:
+        divisions = [division_type]
+    else:
+        divisions = sorted({r["division_type"] for r in cl_rows if r.get("division_type")}) or [None]
+    return all(_eval_single_control_letter(d, field, op, target, cl_rows) for d in divisions)
 
 
 def _eval_condition_for_matching(
@@ -831,6 +926,110 @@ def compute_task_progress(org_id: str, task: dict, academic_year: str = DEFAULT_
         "schools": rows, "total": total, "completed": completed_count, "progress_pct": progress_pct,
         "action_progress": action_progress, "track_success": True,
     }
+
+
+_OK_SKIP_REASONS_FOR_COMPLETION = {"already_done", "opted_out"}
+
+
+def recompute_task_status_and_cache(db, org_id: str, task: dict) -> dict | None:
+    """Single source of truth for the 3-state status transition (active <-> archived, i.e.
+    open <-> closed/"סגורה") AND the cached progress columns (cached_total_schools/
+    cached_actions_needed/cached_actions_completed/cached_progress_pct) — computed together so
+    they can never drift apart. Mirrors has_meeting_send_problems' established convention:
+    written at specific mutation touchpoints in tasks_router.py, never computed live inside
+    list_tasks, so the tasks list stays a cheap read of stored columns regardless of org size.
+    Self-healing both directions — a task can reopen (archived -> active) if it later becomes
+    incomplete again (e.g. a newly-matched school, or a message needing resend). No-ops for
+    'scheduled' tasks (nothing to evaluate before activation). Non-fatal: never raises."""
+    if task.get("status") == "scheduled":
+        return None
+    try:
+        academic_year = task.get("academic_year") or DEFAULT_ACADEMIC_YEAR
+        progress = compute_task_progress(org_id, task, academic_year)
+        matched_ids = [r["school_id"] for r in progress["schools"]]
+        total = len(matched_ids)
+
+        if progress["track_success"]:
+            completed = progress["completed"]
+            is_complete = total > 0 and completed == total
+            # "actions" here must mean the exact same thing the live detail view's own
+            # action_progress does (get_task/TaskDetailContent's "פעולות: X מתוך Y") — a
+            # required-count-aware aggregate (e.g. 2 stage-split meetings counted as 2 actions
+            # for one school), NOT a re-labeling of the school total/completed counts. Falls
+            # back to the school-level counts only when the success tree has no required_count-
+            # bearing meeting condition at all (action_progress is None then), since in that case
+            # "the school reaching the condition" IS the only unit of "action" that exists.
+            if progress["action_progress"]:
+                actions_needed = progress["action_progress"]["required"]
+                actions_completed = progress["action_progress"]["completed"]
+                progress_pct = progress["action_progress"]["pct"]
+            else:
+                actions_needed, actions_completed = total, completed
+                progress_pct = progress["progress_pct"]
+        elif not matched_ids:
+            is_complete, actions_needed, actions_completed, progress_pct = False, 0, 0, 0.0
+        else:
+            # No done/not-done concept from compute_task_progress for track_success=False —
+            # completion is instead about actual send outcomes: a school counts as "handled"
+            # only via a confirmed 'sent' message (not 'outlook_pending', still unconfirmed) or a
+            # skip the MANAGER deliberately chose (already_done / opted_out / their own
+            # excluded_emails) — never a 'failed' send or a missing-contact/config problem, so a
+            # real unresolved issue can never silently read as "task complete". A note's
+            # skip_reason is only trusted if it's at least as recent as the school's latest
+            # message attempt — org_task_school_notes is never cleared after a skip, so a STALE
+            # skip_reason (e.g. the school was opted-out once, later reactivated, resent, and
+            # THAT later attempt failed) must not keep masking a genuinely newer failure.
+            # excluded_emails is different: it's a standing manager decision re-checked LIVE at
+            # every future send attempt (_queue_messages_for_schools), not a one-time snapshot —
+            # so it's trusted regardless of recency, same as it already behaves at send-time.
+            msg_rows = (
+                db.table("org_task_messages").select("school_id, status, created_at")
+                .eq("task_id", task["id"]).order("created_at", desc=True).execute().data or []
+            )
+            latest_by_school = {}
+            for m in msg_rows:
+                latest_by_school.setdefault(m["school_id"], m)
+            notes_map = {
+                r["school_id"]: r for r in (
+                    db.table("org_task_school_notes").select("school_id, skip_reason, excluded_emails, updated_at")
+                    .eq("task_id", task["id"]).in_("school_id", matched_ids).execute().data or []
+                )
+            }
+            completed = 0
+            for school_id in matched_ids:
+                latest = latest_by_school.get(school_id)
+                note = notes_map.get(school_id) or {}
+                note_is_current = not latest or not note.get("updated_at") or note["updated_at"] >= latest["created_at"]
+                if (
+                    (latest and latest.get("status") == "sent")
+                    or (note_is_current and note.get("skip_reason") in _OK_SKIP_REASONS_FOR_COMPLETION)
+                    or note.get("excluded_emails")
+                ):
+                    completed += 1
+            is_complete = completed == total
+            actions_needed, actions_completed = total, completed
+            progress_pct = round((completed / total) * 100, 2) if total else 0.0
+
+        current_status = task.get("status")
+        new_status = current_status
+        if is_complete and current_status != "archived":
+            new_status = "archived"
+        elif not is_complete and current_status == "archived":
+            new_status = "active"
+
+        patch = {
+            "status": new_status,
+            "cached_total_schools": total,
+            "cached_actions_needed": actions_needed,
+            "cached_actions_completed": actions_completed,
+            "cached_progress_pct": progress_pct,
+            "cache_updated_at": "now()",
+        }
+        db.table("org_tasks").update(patch).eq("id", task["id"]).execute()
+        return patch
+    except Exception as exc:
+        _log.warning("recompute_task_status_and_cache failed (non-fatal) for task %s: %s", task.get("id"), exc)
+        return None
 
 
 _CONTACT_NAME_FIELDS = {
