@@ -6,7 +6,7 @@ import secrets
 import smtplib
 import time
 from concurrent.futures import ThreadPoolExecutor, wait as futures_wait, FIRST_COMPLETED
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -3733,6 +3733,7 @@ def get_me(user: Annotated[dict, Depends(get_current_user)]):
         result["can_invite_users"] = _check_permission(db, user, "can_invite_users")
         result["can_delete_users"] = _check_permission(db, user, "can_delete_users")
         result["can_manage_user_permissions"] = _check_permission(db, user, "can_manage_user_permissions")
+        result["can_remove_call_from_school"] = _check_permission(db, user, "can_remove_call_from_school")
     except Exception as exc:
         logger.warning("get_me permission check failed (non-fatal): %s", exc)
         result["can_delete_schools"] = user.get("role") == "owner"
@@ -3742,6 +3743,7 @@ def get_me(user: Annotated[dict, Depends(get_current_user)]):
         result["can_invite_users"] = user.get("role") in ("owner", "manager")
         result["can_delete_users"] = user.get("role") == "owner"
         result["can_manage_user_permissions"] = user.get("role") == "owner"
+        result["can_remove_call_from_school"] = user.get("role") in ("owner", "manager")
 
     return result
 
@@ -5290,8 +5292,471 @@ def list_school_calls(
             return {"calls": [], "voicenter_enabled": False}
         raise
 
-    calls = [c for c in result["calls"] if c.get("school_id") == school_id]
+    calls = [
+        c for c in result["calls"]
+        if school_id not in (c.get("excluded_school_ids") or [])
+        and (c.get("school_id") == school_id or school_id in (c.get("linked_school_ids") or []))
+    ]
     return {"calls": calls, "voicenter_enabled": True}
+
+
+# ---------------------------------------------------------------------------
+# Meeting "בפועל" activity — calls attributed to a specific meeting + manually
+# logged offline work, feeding both display and (opt-in) auto-completion.
+# ---------------------------------------------------------------------------
+
+def _attribute_calls_to_meetings(calls: list[dict], meetings_for_day: list[dict]) -> dict:
+    """Two-tier attribution for a school with possibly more than one meeting the same day:
+    1) role/stage match (מנהל/ת -&gt; tichon, מנהל/ת חט"ב -&gt; chativa) IF it uniquely matches
+       exactly one of that day's meetings' stage_scope;
+    2) otherwise, time-bucket fallback — earliest meeting whose end_time &gt;= the call's time,
+       or the day's last meeting as a catch-all. Returns {call_id: meeting_id}."""
+    if not meetings_for_day:
+        return {}
+    meetings_sorted = sorted(meetings_for_day, key=lambda m: m.get("end_time") or "23:59")
+    assignments: dict = {}
+    for call in calls:
+        role = call.get("contact_role")
+        stage_signal = "tichon" if role == "מנהל/ת" else ("chativa" if role == "מנהל/ת חט\"ב" else None)
+        target = None
+        if stage_signal:
+            matches = [m for m in meetings_sorted if m.get("stage_scope") in (stage_signal, "both")]
+            if len(matches) == 1:
+                target = matches[0]
+        if target is None:
+            call_time_hm = (call.get("start_time") or "")[11:16]
+            candidates = [m for m in meetings_sorted if m.get("end_time") and m["end_time"] >= call_time_hm]
+            target = candidates[0] if candidates else meetings_sorted[-1]
+        assignments[call["call_id"]] = target["id"]
+    return assignments
+
+
+def _recompute_meeting_aggregates(db, meeting_id: str) -> None:
+    """Recomputes calls_start_time/calls_duration_seconds from whatever meeting_call_links
+    rows currently point at this meeting (both auto and manual) — no Voicenter call, cheap."""
+    rows = db.table("meeting_call_links").select("call_time, duration_seconds").eq("meeting_id", meeting_id).execute().data or []
+    if rows:
+        earliest = min(rows, key=lambda r: r.get("call_time") or "")
+        calls_start_time = (earliest.get("call_time") or "")[11:16] or None
+        calls_duration_seconds = sum(r.get("duration_seconds") or 0 for r in rows)
+    else:
+        calls_start_time = None
+        calls_duration_seconds = 0
+    db.table("meetings").update({
+        "calls_start_time": calls_start_time,
+        "calls_duration_seconds": calls_duration_seconds,
+        "calls_synced_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", meeting_id).execute()
+
+
+def _recompute_meeting_call_activity(db, org_id: str, school_id: str, meeting_date: str, calls_for_school: list[dict]) -> list[str]:
+    """Attributes calls_for_school (already filtered to this school for this date, from
+    _pull_org_calls) to the day's meetings for this school, upserts meeting_call_links
+    (never overwriting source='manual' rows), and refreshes each meeting's cached aggregate
+    columns. Returns the affected meeting ids (all of that day's meetings for this school,
+    even ones with zero calls — marks them as synced)."""
+    meetings_for_day = (
+        db.table("meetings").select("id, stage_scope, end_time, status")
+        .eq("school_id", school_id).eq("meeting_date", meeting_date).execute()
+    ).data or []
+    if not meetings_for_day:
+        return []
+
+    call_ids = [c["call_id"] for c in calls_for_school]
+    existing = []
+    if call_ids:
+        existing = (
+            db.table("meeting_call_links").select("call_id, source")
+            .eq("org_id", org_id).in_("call_id", call_ids).execute()
+        ).data or []
+    manual_call_ids = {r["call_id"] for r in existing if r.get("source") == "manual"}
+
+    attributable = [
+        c for c in calls_for_school
+        if c["call_id"] not in manual_call_ids and not c.get("pending_school_resolution")
+    ]
+    assignments = _attribute_calls_to_meetings(attributable, meetings_for_day)
+
+    rows = []
+    for c in attributable:
+        meeting_id = assignments.get(c["call_id"])
+        if not meeting_id:
+            continue
+        rows.append({
+            "org_id": org_id,
+            "meeting_id": meeting_id,
+            "school_id": school_id,
+            "call_id": c["call_id"],
+            "call_time": c.get("start_time"),
+            "duration_seconds": c.get("duration_seconds") or 0,
+            "contact_name": c.get("contact_name"),
+            "contact_role": c.get("contact_role"),
+            "counterpart_phone": c.get("counterpart_phone"),
+            "source": "auto",
+        })
+    if rows:
+        db.table("meeting_call_links").upsert(rows, on_conflict="org_id,call_id").execute()
+
+    meeting_ids = [m["id"] for m in meetings_for_day]
+    for mid in meeting_ids:
+        _recompute_meeting_aggregates(db, mid)
+    return meeting_ids
+
+
+def _sum_offline_seconds(entries: list[dict] | None) -> int:
+    total = 0
+    for e in (entries or []):
+        st, et = e.get("start_time"), e.get("end_time")
+        if not st or not et:
+            continue
+        try:
+            sh, sm = (int(x) for x in st.split(":")[:2])
+            eh, em = (int(x) for x in et.split(":")[:2])
+            total += max(0, (eh * 60 + em) - (sh * 60 + sm)) * 60
+        except Exception:
+            continue
+    return total
+
+
+def _maybe_auto_complete_meeting(db, org_id: str, meeting_id: str) -> None:
+    """Auto-flips a meeting to 'completed' when: the org's automation toggle is on, the
+    meeting is still 'scheduled', its scheduled end_time has already passed, and its total
+    invested time (calls + offline work) reaches 5 minutes. Never touches cancelled/postponed
+    meetings, and never reverses a completion that already happened."""
+    try:
+        org_res = db.table("organizations").select("auto_complete_meetings_from_activity_enabled").eq("id", org_id).execute()
+        org = org_res.data[0] if org_res.data else None
+        if not org or not org.get("auto_complete_meetings_from_activity_enabled"):
+            return
+        m_res = db.table("meetings").select(
+            "id, school_id, status, meeting_date, end_time, calls_duration_seconds, offline_work_entries"
+        ).eq("id", meeting_id).execute()
+        m = m_res.data[0] if m_res.data else None
+        if not m or m.get("status") != "scheduled" or not m.get("meeting_date") or not m.get("end_time"):
+            return
+        from zoneinfo import ZoneInfo
+        now_il = datetime.now(ZoneInfo("Asia/Jerusalem"))
+        try:
+            meeting_end = datetime.fromisoformat(f"{m['meeting_date']}T{m['end_time']}:00").replace(tzinfo=ZoneInfo("Asia/Jerusalem"))
+        except ValueError:
+            return
+        if now_il < meeting_end:
+            return
+        total = (m.get("calls_duration_seconds") or 0) + _sum_offline_seconds(m.get("offline_work_entries"))
+        if total < 300:
+            return
+        _apply_meeting_patch(db, org_id, m["school_id"], meeting_id, {"status": "completed"})
+    except Exception as exc:
+        logger.warning("_maybe_auto_complete_meeting failed (non-fatal) for meeting %s: %s", meeting_id, exc)
+
+
+def _require_school_access_for_meeting_activity(db, user: dict, school_id: str) -> dict:
+    school_row = db.table("schools").select("id, restrict_access_to").eq("id", school_id).eq("org_id", user["org_id"]).execute()
+    if not school_row.data:
+        raise HTTPException(status_code=404, detail="בית ספר לא נמצא")
+    if user["role"] not in ("owner", "manager") and not _advisor_has_access_to_school_row(db, user["id"], school_row.data[0]):
+        raise HTTPException(status_code=403, detail="אין הרשאה לפעולה זו")
+    return school_row.data[0]
+
+
+@router.get("/{school_id}/meetings/{meeting_id}/actual-detail")
+def get_meeting_actual_detail(school_id: str, meeting_id: str, user: Annotated[dict, Depends(get_current_user)]):
+    """Powers the meeting row's expanded 'בפועל' panel: calls attributed to this meeting +
+    manually logged offline-work entries. If this meeting was never synced yet (and its date
+    isn't in the future), runs a one-off recompute for just this school+date first, so
+    historical/never-cron-touched meetings still show correct data the first time they're
+    opened."""
+    from zoneinfo import ZoneInfo
+
+    db = get_admin_client()
+    _require_school_access_for_meeting_activity(db, user, school_id)
+
+    m_res = db.table("meetings").select("*").eq("id", meeting_id).eq("school_id", school_id).execute()
+    if not m_res.data:
+        raise HTTPException(status_code=404, detail="פגישה לא נמצאה")
+    meeting = m_res.data[0]
+
+    today_il = datetime.now(ZoneInfo("Asia/Jerusalem")).date().isoformat()
+    if not meeting.get("calls_synced_at") and meeting.get("meeting_date") and meeting["meeting_date"] <= today_il:
+        try:
+            from routers.voicenter_router import _pull_org_calls
+            d = meeting["meeting_date"]
+            result = _pull_org_calls(user["org_id"], f"{d}T00:00:00", f"{d}T23:59:59")
+            calls_for_school = [
+                c for c in result["calls"]
+                if school_id not in (c.get("excluded_school_ids") or [])
+                and (c.get("school_id") == school_id or school_id in (c.get("linked_school_ids") or []))
+            ]
+            _recompute_meeting_call_activity(db, user["org_id"], school_id, d, calls_for_school)
+            refreshed = db.table("meetings").select("*").eq("id", meeting_id).execute()
+            if refreshed.data:
+                meeting = refreshed.data[0]
+        except Exception as exc:
+            logger.warning("actual-detail on-demand recompute failed (non-fatal) for meeting %s: %s", meeting_id, exc)
+
+    link_rows = db.table("meeting_call_links").select("*").eq("meeting_id", meeting_id).order("call_time").execute().data or []
+
+    # AI summary/transcript-availability are always looked up fresh here (never cached on
+    # meeting_call_links) so late-arriving transcripts show up the moment a user opens the row.
+    ai_by_call_id: dict = {}
+    call_ids = [r["call_id"] for r in link_rows]
+    if call_ids:
+        try:
+            ai_rows = (
+                db.table("voicenter_call_ai").select("call_id, summary, transcript_path")
+                .eq("org_id", user["org_id"]).in_("call_id", call_ids).execute()
+            ).data or []
+            ai_by_call_id = {r["call_id"]: r for r in ai_rows}
+        except Exception as exc:
+            logger.warning("actual-detail AI enrichment failed (non-fatal): %s", exc)
+
+    calls_out = []
+    for r in link_rows:
+        ai = ai_by_call_id.get(r["call_id"])
+        calls_out.append({
+            "call_id": r["call_id"],
+            "call_time": r["call_time"],
+            "duration_seconds": r["duration_seconds"],
+            "contact_name": r["contact_name"],
+            "contact_role": r["contact_role"],
+            "counterpart_phone": r.get("counterpart_phone"),
+            "notes": r.get("notes"),
+            "source": r["source"],
+            "ai_summary": ai["summary"] if ai else None,
+            "ai_transcript_available": bool(ai and ai.get("transcript_path")),
+        })
+
+    other_meetings_same_day = []
+    if meeting.get("meeting_date"):
+        other_meetings_same_day = (
+            db.table("meetings").select("id, start_time, end_time, stage_scope")
+            .eq("school_id", school_id).eq("meeting_date", meeting["meeting_date"])
+            .neq("id", meeting_id).execute()
+        ).data or []
+
+    offline_entries = meeting.get("offline_work_entries") or []
+    offline_seconds = _sum_offline_seconds(offline_entries)
+    calls_seconds = meeting.get("calls_duration_seconds") or 0
+
+    return {
+        "calls_start_time": meeting.get("calls_start_time"),
+        "calls_duration_seconds": calls_seconds,
+        "offline_duration_seconds": offline_seconds,
+        "total_seconds": calls_seconds + offline_seconds,
+        "calls": calls_out,
+        "offline_entries": offline_entries,
+        "other_meetings_same_day": other_meetings_same_day,
+    }
+
+
+class CallLinkNotesIn(BaseModel):
+    notes: str | None = None
+
+
+@router.patch("/meetings/{meeting_id}/call-links/{call_id}/notes")
+def update_call_link_notes(meeting_id: str, call_id: str, body: CallLinkNotesIn, user: Annotated[dict, Depends(get_current_user)]):
+    db = get_admin_client()
+    link_res = db.table("meeting_call_links").select("id, school_id").eq("meeting_id", meeting_id).eq("call_id", call_id).eq("org_id", user["org_id"]).execute()
+    if not link_res.data:
+        raise HTTPException(status_code=404, detail="שיחה לא נמצאה עבור פגישה זו")
+    link = link_res.data[0]
+    _require_school_access_for_meeting_activity(db, user, link["school_id"])
+    db.table("meeting_call_links").update({"notes": body.notes}).eq("id", link["id"]).execute()
+    return {"ok": True}
+
+
+class ReassignCallIn(BaseModel):
+    target_meeting_id: str
+
+
+@router.patch("/meetings/{meeting_id}/call-links/{call_id}/reassign")
+def reassign_call_link(meeting_id: str, call_id: str, body: ReassignCallIn, user: Annotated[dict, Depends(get_current_user)]):
+    """Moves a call from one meeting to another — must be the same school, same day. Marks
+    the link source='manual' so future recomputes never move it back automatically. Updates
+    both meetings' cached aggregates immediately and re-checks auto-completion for the
+    DESTINATION only — never un-completes the source meeting."""
+    db = get_admin_client()
+    link_res = db.table("meeting_call_links").select("*").eq("meeting_id", meeting_id).eq("call_id", call_id).eq("org_id", user["org_id"]).execute()
+    if not link_res.data:
+        raise HTTPException(status_code=404, detail="שיחה לא נמצאה עבור פגישה זו")
+    link = link_res.data[0]
+    _require_school_access_for_meeting_activity(db, user, link["school_id"])
+
+    source_res = db.table("meetings").select("id, school_id, meeting_date").eq("id", meeting_id).execute()
+    target_res = db.table("meetings").select("id, school_id, meeting_date").eq("id", body.target_meeting_id).execute()
+    if not source_res.data or not target_res.data:
+        raise HTTPException(status_code=404, detail="פגישה לא נמצאה")
+    sm, tm = source_res.data[0], target_res.data[0]
+    if sm["school_id"] != tm["school_id"] or sm["meeting_date"] != tm["meeting_date"]:
+        raise HTTPException(status_code=400, detail="ניתן להעביר שיחה רק לפגישה אחרת של אותו בית ספר באותו יום")
+
+    db.table("meeting_call_links").update({
+        "meeting_id": body.target_meeting_id,
+        "source": "manual",
+        "linked_by": user["id"],
+        "linked_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", link["id"]).execute()
+
+    _recompute_meeting_aggregates(db, meeting_id)
+    _recompute_meeting_aggregates(db, body.target_meeting_id)
+    _maybe_auto_complete_meeting(db, user["org_id"], body.target_meeting_id)
+    return {"ok": True}
+
+
+class OfflineWorkIn(BaseModel):
+    start_time: str
+    end_time: str
+    notes: str | None = None
+
+
+class OfflineWorkPatchIn(BaseModel):
+    start_time: str | None = None
+    end_time: str | None = None
+    notes: str | None = None
+
+
+@router.post("/{school_id}/meetings/{meeting_id}/offline-work")
+def add_offline_work(school_id: str, meeting_id: str, body: OfflineWorkIn, user: Annotated[dict, Depends(get_current_user)]):
+    import uuid
+    db = get_admin_client()
+    _require_school_access_for_meeting_activity(db, user, school_id)
+    m_res = db.table("meetings").select("id, offline_work_entries").eq("id", meeting_id).eq("school_id", school_id).execute()
+    if not m_res.data:
+        raise HTTPException(status_code=404, detail="פגישה לא נמצאה")
+    entries = m_res.data[0].get("offline_work_entries") or []
+    entry = {
+        "id": str(uuid.uuid4()),
+        "start_time": body.start_time,
+        "end_time": body.end_time,
+        "notes": body.notes,
+        "created_by": user["id"],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    entries.append(entry)
+    db.table("meetings").update({"offline_work_entries": entries}).eq("id", meeting_id).execute()
+    _maybe_auto_complete_meeting(db, user["org_id"], meeting_id)
+    return {"ok": True, "entry": entry}
+
+
+@router.patch("/{school_id}/meetings/{meeting_id}/offline-work/{entry_id}")
+def update_offline_work(school_id: str, meeting_id: str, entry_id: str, body: OfflineWorkPatchIn, user: Annotated[dict, Depends(get_current_user)]):
+    db = get_admin_client()
+    _require_school_access_for_meeting_activity(db, user, school_id)
+    m_res = db.table("meetings").select("id, offline_work_entries").eq("id", meeting_id).eq("school_id", school_id).execute()
+    if not m_res.data:
+        raise HTTPException(status_code=404, detail="פגישה לא נמצאה")
+    entries = m_res.data[0].get("offline_work_entries") or []
+    found = False
+    for e in entries:
+        if e.get("id") == entry_id:
+            if body.start_time is not None: e["start_time"] = body.start_time
+            if body.end_time is not None: e["end_time"] = body.end_time
+            if body.notes is not None: e["notes"] = body.notes
+            found = True
+            break
+    if not found:
+        raise HTTPException(status_code=404, detail="רשומת עבודה עצמאית לא נמצאה")
+    db.table("meetings").update({"offline_work_entries": entries}).eq("id", meeting_id).execute()
+    _maybe_auto_complete_meeting(db, user["org_id"], meeting_id)
+    return {"ok": True}
+
+
+@router.delete("/{school_id}/meetings/{meeting_id}/offline-work/{entry_id}")
+def delete_offline_work(school_id: str, meeting_id: str, entry_id: str, user: Annotated[dict, Depends(get_current_user)]):
+    db = get_admin_client()
+    _require_school_access_for_meeting_activity(db, user, school_id)
+    m_res = db.table("meetings").select("id, offline_work_entries").eq("id", meeting_id).eq("school_id", school_id).execute()
+    if not m_res.data:
+        raise HTTPException(status_code=404, detail="פגישה לא נמצאה")
+    entries = [e for e in (m_res.data[0].get("offline_work_entries") or []) if e.get("id") != entry_id]
+    db.table("meetings").update({"offline_work_entries": entries}).eq("id", meeting_id).execute()
+    _maybe_auto_complete_meeting(db, user["org_id"], meeting_id)
+    return {"ok": True}
+
+
+@router.post("/meetings/recompute-call-activity")
+def recompute_meeting_call_activity(request: Request):
+    """Scheduled job (every 10 min, see .github/workflows/meeting-call-activity-recompute.yml):
+    for every org, refreshes today's + yesterday's meetings' 'בפועל' call data (one Voicenter
+    pull per org per day — cheap regardless of how many schools/meetings that covers) and
+    runs the opt-in auto-completion check. Sequential — no ThreadPoolExecutor on the shared
+    Supabase client."""
+    if not CRON_SECRET or request.headers.get("X-Cron-Secret") != CRON_SECRET:
+        raise HTTPException(status_code=403, detail="אין הרשאה")
+
+    from zoneinfo import ZoneInfo
+    from routers.voicenter_router import _pull_org_calls
+
+    today_il = datetime.now(ZoneInfo("Asia/Jerusalem")).date()
+    dates = [today_il.isoformat(), (today_il - timedelta(days=1)).isoformat()]
+
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            orgs = db.table("organizations").select("id").execute().data or []
+            break
+        except Exception as exc:
+            if attempt == 0:
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.error("recompute_meeting_call_activity: failed to load orgs: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת")
+
+    processed = 0
+    for org in orgs:
+        org_id = org["id"]
+        try:
+            db = get_admin_client()
+            school_ids = [s["id"] for s in (db.table("schools").select("id").eq("org_id", org_id).execute().data or [])]
+        except Exception as exc:
+            logger.warning("recompute_meeting_call_activity: failed to load schools for org %s: %s", org_id, exc)
+            continue
+        if not school_ids:
+            continue
+
+        for date_str in dates:
+            try:
+                db = get_admin_client()
+                meeting_rows = (
+                    db.table("meetings").select("school_id")
+                    .eq("meeting_date", date_str).in_("school_id", school_ids).execute()
+                ).data or []
+            except Exception as exc:
+                logger.warning("recompute_meeting_call_activity: failed to load meetings org=%s date=%s: %s", org_id, date_str, exc)
+                continue
+            schools_with_meetings = list({m["school_id"] for m in meeting_rows})
+            if not schools_with_meetings:
+                continue
+
+            try:
+                result = _pull_org_calls(org_id, f"{date_str}T00:00:00", f"{date_str}T23:59:59")
+            except HTTPException as exc:
+                if exc.status_code != 400:
+                    logger.warning("recompute_meeting_call_activity: pull failed org=%s date=%s: %s", org_id, date_str, exc.detail)
+                continue
+            except Exception as exc:
+                logger.warning("recompute_meeting_call_activity: pull failed org=%s date=%s: %s", org_id, date_str, exc)
+                continue
+
+            calls = result["calls"]
+            for school_id in schools_with_meetings:
+                calls_for_school = [
+                    c for c in calls
+                    if school_id not in (c.get("excluded_school_ids") or [])
+                    and (c.get("school_id") == school_id or school_id in (c.get("linked_school_ids") or []))
+                ]
+                try:
+                    db = get_admin_client()
+                    affected = _recompute_meeting_call_activity(db, org_id, school_id, date_str, calls_for_school)
+                except Exception as exc:
+                    logger.warning("recompute_meeting_call_activity: recompute failed org=%s school=%s date=%s: %s", org_id, school_id, date_str, exc)
+                    continue
+                for mid in affected:
+                    _maybe_auto_complete_meeting(db, org_id, mid)
+                processed += 1
+
+    return {"ok": True, "processed_school_days": processed}
 
 
 @router.get("/{school_id}/meetings")
@@ -5538,7 +6003,7 @@ def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annot
             if acquired:
                 existing = db.table("meetings").select("calendar_sync").eq("id", meeting_id).execute()
                 previous_sync = (existing.data[0].get("calendar_sync") or {}) if existing.data else {}
-                if meeting.get("status") == "cancelled":
+                if meeting.get("status") in ("cancelled", "postponed"):
                     graph_client.sync_meeting_cancel(db, user["org_id"], previous_sync)
                     sync_map = {}
                 else:
@@ -5552,20 +6017,16 @@ def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annot
     return meeting
 
 
-@router.patch("/{school_id}/meetings/{meeting_id}")
-def patch_meeting(school_id: str, meeting_id: str, body: MeetingStatusPatchIn, user: Annotated[dict, Depends(get_current_user)]):
-    """Partial update — only updates the fields provided. Does not touch advisor_ids, participants, etc."""
-    db = get_admin_client()
-    data = {}
-    if body.status is not None: data["status"] = body.status
-    if body.notes is not None: data["notes"] = body.notes
-    if body.start_time is not None: data["start_time"] = body.start_time
-    if body.end_time is not None: data["end_time"] = body.end_time
-    if not data:
+def _apply_meeting_patch(db, org_id: str, school_id: str, meeting_id: str, patch_dict: dict) -> dict:
+    """Shared body of the lightweight meeting PATCH — used by the `patch_meeting` route AND
+    internal callers (auto-complete-from-activity job/checks) that have no Request/user to go
+    through HTTP with. Includes the same Outlook calendar-sync side effect as the route always
+    has had — do not strip that out when calling this from a new internal context."""
+    if not patch_dict:
         return {"ok": True}
     try:
-        db.table("meetings").update(data).eq("id", meeting_id).eq("school_id", school_id).execute()
-    except Exception as e:
+        db.table("meetings").update(patch_dict).eq("id", meeting_id).eq("school_id", school_id).execute()
+    except Exception:
         raise HTTPException(status_code=500, detail="שגיאה בעדכון פגישה")
 
     try:
@@ -5575,17 +6036,29 @@ def patch_meeting(school_id: str, meeting_id: str, body: MeetingStatusPatchIn, u
                 meeting = row.data[0] if row.data else None
                 if meeting:
                     previous_sync = meeting.get("calendar_sync") or {}
-                    if meeting.get("status") == "cancelled":
-                        graph_client.sync_meeting_cancel(db, user["org_id"], previous_sync)
+                    if meeting.get("status") in ("cancelled", "postponed"):
+                        graph_client.sync_meeting_cancel(db, org_id, previous_sync)
                         sync_map = {}
                     else:
                         subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"))
-                        sync_map = graph_client.sync_meeting_update(db, user["org_id"], meeting, previous_sync, subject)
+                        sync_map = graph_client.sync_meeting_update(db, org_id, meeting, previous_sync, subject)
                     graph_client.persist_calendar_sync(db, meeting_id, sync_map)
     except Exception as exc:
         logger.warning("calendar sync failed for patched meeting %s (non-fatal): %s", meeting_id, exc)
 
     return {"ok": True}
+
+
+@router.patch("/{school_id}/meetings/{meeting_id}")
+def patch_meeting(school_id: str, meeting_id: str, body: MeetingStatusPatchIn, user: Annotated[dict, Depends(get_current_user)]):
+    """Partial update — only updates the fields provided. Does not touch advisor_ids, participants, etc."""
+    db = get_admin_client()
+    data = {}
+    if body.status is not None: data["status"] = body.status
+    if body.notes is not None: data["notes"] = body.notes
+    if body.start_time is not None: data["start_time"] = body.start_time
+    if body.end_time is not None: data["end_time"] = body.end_time
+    return _apply_meeting_patch(db, user["org_id"], school_id, meeting_id, data)
 
 
 @router.delete("/{school_id}/meetings/{meeting_id}")
@@ -5712,6 +6185,7 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
     "can_view_billing":             {"manager": False, "advisor": False},
     "can_manage_billing":           {"manager": False, "advisor": False},
     "can_edit_meeting_automations": {"manager": True,  "advisor": False},
+    "can_remove_call_from_school":  {"manager": True,  "advisor": False},
 }
 
 PERMISSION_LABELS: dict[str, str] = {
@@ -5728,6 +6202,7 @@ PERMISSION_LABELS: dict[str, str] = {
     "can_view_billing":             "לצפות באזור 'חיובים' של הארגון",
     "can_manage_billing":           "לנהל את אזור 'חיובים' (לרבות אמצעי תשלום)",
     "can_edit_meeting_automations": "לערוך אוטומציות של פגישות",
+    "can_remove_call_from_school":  "להסיר שיחה מטאב 'שיחות' בכרטיס בית ספר",
 }
 
 
@@ -5870,17 +6345,21 @@ def get_meeting_automations(user: Annotated[dict, Depends(get_current_user)]):
     db = get_admin_client()
     _require_can_edit_automations(db, user)
     org = db.table("organizations").select(
-        "meeting_reminders_enabled, secretary_upload_request_enabled"
+        "meeting_reminders_enabled, secretary_upload_request_enabled, auto_complete_meetings_from_activity_enabled"
     ).eq("id", user["org_id"]).single().execute().data or {}
     return {
         "meeting_reminders_enabled": org.get("meeting_reminders_enabled", True),
         "secretary_upload_request_enabled": org.get("secretary_upload_request_enabled", True),
+        # Defaults to False, unlike the other automations above — higher-impact (auto-changes
+        # meeting status), must stay opt-in until an owner/manager explicitly turns it on.
+        "auto_complete_meetings_from_activity_enabled": org.get("auto_complete_meetings_from_activity_enabled", False),
     }
 
 
 class MeetingAutomationsIn(BaseModel):
     meeting_reminders_enabled: bool | None = None
     secretary_upload_request_enabled: bool | None = None
+    auto_complete_meetings_from_activity_enabled: bool | None = None
 
 
 @router.put("/meetings/automations")

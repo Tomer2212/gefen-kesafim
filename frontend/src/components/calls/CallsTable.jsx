@@ -49,7 +49,7 @@ function gapHeightPx(gapSeconds) {
   return Math.round(MIN_PX + t * (MAX_PX - MIN_PX));
 }
 
-export function CallsTable({ calls, showGapRows, hideSchoolColumn, canManage = true }) {
+export function CallsTable({ calls, showGapRows, hideSchoolColumn, canManage = true, schoolId }) {
   const [sortField, setSortField] = useState("start_time");
   const [sortDir, setSortDir] = useState("desc");
   const [removedIds, setRemovedIds] = useState(() => new Set());
@@ -115,7 +115,7 @@ export function CallsTable({ calls, showGapRows, hideSchoolColumn, canManage = t
                 </td>
               </tr>
             ) : (
-              <CallRow key={row.call.call_id} call={row.call} hideSchoolColumn={hideSchoolColumn} canManage={canManage}
+              <CallRow key={row.call.call_id} call={row.call} hideSchoolColumn={hideSchoolColumn} canManage={canManage} schoolId={schoolId}
                 onDelete={id => setRemovedIds(prev => new Set(prev).add(id))} />
             ))}
           </tbody>

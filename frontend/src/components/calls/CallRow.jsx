@@ -1,6 +1,7 @@
 import { useState } from "react";
 import axios from "axios";
 import { useCallNoteWindows } from "../../context/CallNoteWindowsContext";
+import { SchoolPickerModal } from "../meetings/SchoolPickerCell";
 
 const STATUS_LABELS = {
   ANSWER: { label: "נענתה", dot: "#22c55e" },
@@ -64,10 +65,12 @@ function buildWindowTitle(call, advisorLabel) {
   return parts.join(" - ");
 }
 
-export function CallRow({ call, onDelete, hideSchoolColumn, canManage = true }) {
+export function CallRow({ call, onDelete, hideSchoolColumn, canManage = true, schoolId }) {
   const { openCallNote } = useCallNoteWindows();
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [linkModalOpen, setLinkModalOpen] = useState(false);
+  const [linkSchools, setLinkSchools] = useState(null);
   const status = STATUS_LABELS[call.status] || DEFAULT_STATUS;
   const endIso = computeEndTimeIso(call.start_time, call.duration_seconds);
   const advisorLabel = call.advisor_profile?.full_name || call.advisor_profile?.email || call.representative_name || "—";
@@ -78,24 +81,52 @@ export function CallRow({ call, onDelete, hideSchoolColumn, canManage = true }) 
       {confirmDelete && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(15,23,42,0.55)" }} dir="rtl">
           <div role="dialog" aria-modal="true" aria-labelledby="delete-call-title" className="glass-card rounded-2xl p-6 w-full max-w-md flex flex-col gap-4">
-            <h2 id="delete-call-title" className="font-bold text-slate-900">מחיקת נתוני שיחה</h2>
+            <h2 id="delete-call-title" className="font-bold text-slate-900">
+              {schoolId ? "הסרת שיחה מכרטיס בית הספר" : "מחיקת נתוני שיחה"}
+            </h2>
             <p className="text-sm text-slate-600 leading-relaxed">
-              האם אתה בטוח שברצונך למחוק את הסיכום והתמלול השמורים אצלנו לשיחה זו? השיחה עצמה תישאר שמורה במערכת Voicenter — הפעולה מוחקת רק את הנתונים המוצגים כאן.
+              {schoolId
+                ? "השיחה תוסר מטאב \"שיחות\" של בית הספר הזה בלבד — היא תישאר מוצגת כרגיל באזור \"ניהול\"-\"שיחות\", ובכל בית ספר אחר שהיא משויכת אליו."
+                : "האם אתה בטוח שברצונך למחוק את הסיכום והתמלול השמורים אצלנו לשיחה זו? השיחה עצמה תישאר שמורה במערכת Voicenter — הפעולה מוחקת רק את הנתונים המוצגים כאן."}
             </p>
             <div className="flex gap-2 justify-end">
               <button type="button" onClick={() => setConfirmDelete(false)} className="btn-ghost text-sm px-4 py-2">ביטול</button>
               <button type="button"
                 onClick={async () => {
-                  try { await axios.delete(`/voicenter/calls/${call.call_id}`); } catch { /* non-fatal for UI */ }
+                  try {
+                    if (schoolId) {
+                      await axios.post(`/voicenter/calls/${call.call_id}/exclude-from-school`, { school_id: schoolId });
+                    } else {
+                      await axios.delete(`/voicenter/calls/${call.call_id}`);
+                    }
+                  } catch { /* non-fatal for UI */ }
                   setConfirmDelete(false);
                   onDelete?.(call.call_id);
                 }}
                 className="text-sm px-4 py-2 rounded-xl font-medium text-white bg-red-600 hover:bg-red-700 transition-colors">
-                מחק
+                {schoolId ? "הסר" : "מחק"}
               </button>
             </div>
           </div>
         </div>
+      )}
+      {linkModalOpen && (
+        linkSchools ? (
+          <SchoolPickerModal
+            schools={linkSchools}
+            title="שיוך שיחה לבית ספר"
+            submittingLabel="משייך..."
+            onCancel={() => setLinkModalOpen(false)}
+            onConfirm={async s => {
+              try { await axios.post(`/voicenter/calls/${call.call_id}/link-school`, { school_id: s.id }); } catch { /* non-fatal for UI */ }
+              setLinkModalOpen(false);
+            }}
+          />
+        ) : (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(15,23,42,0.55)" }} dir="rtl">
+            <div role="status" aria-label="טוען בתי ספר" className="glass-card rounded-2xl p-6"><div aria-hidden="true" className="spinner w-6 h-6" /></div>
+          </div>
+        )
       )}
       <tr className="border-b border-slate-100 hover:bg-slate-50/50 transition-colors group">
       <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap">{formatDate(call.start_time)}</td>
@@ -165,10 +196,28 @@ export function CallRow({ call, onDelete, hideSchoolColumn, canManage = true }) 
           <>
             <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)} />
             <div className="absolute left-0 top-full mt-1 z-20 bg-white border border-slate-200 rounded-xl shadow-lg py-1 min-w-[160px]" dir="rtl">
+              {!schoolId && (
+                <button type="button"
+                  onClick={async () => {
+                    setMenuOpen(false);
+                    setLinkModalOpen(true);
+                    if (!linkSchools) {
+                      try {
+                        const res = await axios.get("/schools/");
+                        setLinkSchools((res.data || []).filter(s => s.status !== "deleted"));
+                      } catch {
+                        setLinkSchools([]);
+                      }
+                    }
+                  }}
+                  className="w-full text-right px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 transition-colors">
+                  שייך שיחה לבית ספר
+                </button>
+              )}
               <button type="button"
                 onClick={() => { setMenuOpen(false); setConfirmDelete(true); }}
                 className="w-full text-right px-4 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors">
-                מחק נתוני שיחה
+                {schoolId ? "הסר שיחה מכרטיס בית הספר" : "מחק נתוני שיחה"}
               </button>
             </div>
           </>

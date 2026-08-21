@@ -201,7 +201,7 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
         className="glass-card rounded-2xl p-6 w-full max-w-2xl max-h-[85vh] overflow-y-auto flex flex-col gap-4">
 
         <h2 id="direct-coord-title" className="font-bold text-slate-900 text-lg">
-          תיאום ישיר — {school.name}
+          תיאום עצמי — {school.name}
         </h2>
 
         {sentInfo ? (

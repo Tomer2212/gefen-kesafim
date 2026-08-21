@@ -11,6 +11,10 @@ const AUTOMATIONS = [
     key: "secretary_upload_request_enabled",
     description: "שליחת בקשה למנהלנית להעלאת קבצים יום לפני פגישת גפן/מחוז",
   },
+  {
+    key: "auto_complete_meetings_from_activity_enabled",
+    description: "השלמה אוטומטית של סטטוס פגישה כשיש מספיק פעילות (שיחות/עבודה עצמאית) אחרי שעת סיומה",
+  },
 ];
 
 export default function MeetingAutomationsModal({ onClose }) {

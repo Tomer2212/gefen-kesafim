@@ -1,0 +1,26 @@
+name: Recompute Meeting Call Activity
+
+on:
+  schedule:
+    # Every 10 minutes — refreshes the "בפועל" (calls/offline-work) display cache on today's
+    # and yesterday's meetings for every org, and runs the opt-in auto-completion check for
+    # any scheduled meeting whose end_time has passed. Older/never-synced meetings are instead
+    # handled on-demand the first time a user opens their row (see the actual-detail endpoint)
+    # — this cron intentionally stays narrow (today+yesterday) since Voicenter cost scales with
+    # org-days in scope (one pull per org per day), not with polling frequency.
+    - cron: '*/10 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call meetings recompute-call-activity endpoint
+        run: |
+          URL="${BACKEND_URL%/}"
+          curl -sf -X POST "${URL}/schools/meetings/recompute-call-activity" \
+            -H "X-Cron-Secret: ${CRON_SECRET}" \
+            --max-time 180
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}

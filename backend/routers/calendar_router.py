@@ -196,7 +196,7 @@ def freebusy(
             # if the advisor were genuinely free.
             if blocks is None:
                 return {"busy": [], "ok": False}
-            return {"busy": blocks, "ok": True}
+            return {"busy": graph_client.reconcile_busy_blocks(db, blocks), "ok": True}
         except Exception as exc:
             if attempt == 0:
                 reset_admin_client()

@@ -17,6 +17,7 @@ import UserSchoolsConflictModal from "./UserSchoolsConflictModal";
 import MeetingNavigationGuardModal from "../components/meetings/MeetingNavigationGuardModal";
 import { AcademicYearSelector } from "../components/AcademicYearSelector";
 import { DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
+import { DOMAIN_OPTIONS } from "../constants/domains";
 import { CONTROL_LETTER_STATUS_MAP } from "../components/controlLetter/constants";
 import { AdvisorSearch } from "../components/AdvisorSearch";
 import HourMinuteInput from "../components/HourMinuteInput";
@@ -66,13 +67,6 @@ const FUNDING_METHOD_OPTIONS = [
   { value: "private", label: "פרטי" },
   { value: "authority", label: "רשות" },
   { value: "district", label: "מחוז" },
-];
-
-const DOMAIN_OPTIONS = [
-  { value: "gefen", label: "גפן" },
-  { value: "kesafim2000", label: "כספים2000" },
-  { value: "payscool", label: "פייסקול" },
-  { value: "schoolcash", label: "סקולקאש" },
 ];
 
 // New admin/financial columns, per-school-year (stored in school_year_admin_data).
@@ -882,6 +876,11 @@ const PERM_GROUPS = [
     label: "פגישות",
     perms: ["can_edit_meeting_automations"],
     advisorNA: new Set(["can_edit_meeting_automations"]),
+  },
+  {
+    label: "שיחות",
+    perms: ["can_remove_call_from_school"],
+    advisorNA: new Set(),
   },
 ];
 const ADVISOR_NA_PERMS = new Set(PERM_GROUPS.flatMap(g => [...(g.advisorNA || [])]));
@@ -3266,7 +3265,7 @@ export default function AdminPage() {
                         </select>
                       </div>
                       <div className="flex flex-col gap-1.5">
-                        <span className="text-xs text-slate-800">תחומי שליטה</span>
+                        <span className="text-xs text-slate-800">תחומי ידע</span>
                         <MultiSelectChips neutral options={DOMAIN_OPTIONS}
                           selected={inviteForm.control_domains}
                           onChange={v => setInviteForm(p => ({ ...p, control_domains: v }))}
@@ -3305,7 +3304,7 @@ export default function AdminPage() {
                       <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium whitespace-nowrap">אימייל</th>
                       <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium whitespace-nowrap">תפקיד</th>
                       <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium whitespace-nowrap">סטטוס</th>
-                      <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium whitespace-nowrap">תחומי שליטה</th>
+                      <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium whitespace-nowrap">תחומי ידע</th>
                       <th scope="col" className="px-5 py-3 text-center text-slate-500 font-medium whitespace-nowrap">הרשאות בהתאמה אישית</th>
                     </tr>
                   </thead>

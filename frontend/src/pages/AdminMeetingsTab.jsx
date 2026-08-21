@@ -11,6 +11,7 @@ import { StageScopeModal } from "../components/meetings/StageScopeModal";
 import { DirectCoordinationModal } from "../components/meetings/DirectCoordinationModal";
 import AdvisorAccessGrantModal from "../components/meetings/AdvisorAccessGrantModal";
 import MeetingAutomationsModal from "../components/meetings/MeetingAutomationsModal";
+import { AdvisorFinderModal } from "../components/meetings/AdvisorFinderModal";
 import { MEETING_STATUS_OPTIONS, MEETING_TYPE_OPTIONS, MEETING_SERVICE_TYPE_OPTIONS, STATUS_MAP, formatMeetingDate, defaultMeetingServiceType, resolveDefaultAdvisorIds } from "../components/meetings/constants";
 import { AcademicYearSelector } from "../components/AcademicYearSelector";
 import { DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
@@ -65,6 +66,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
   const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false);
   const [automationsModalOpen, setAutomationsModalOpen] = useState(false);
   const showAutomationsButton = myRole === "owner" || canEditAutomations;
+  const [advisorFinderOpen, setAdvisorFinderOpen] = useState(false);
 
   // Status reminder states
   const [alreadySentModal, setAlreadySentModal] = useState(null); // { meeting, lastSentAt, recipients }
@@ -383,6 +385,65 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
       sessionCreatedMeetingIdsRef.current.add(newMeeting.id);
     } catch (err) {
       console.error("Failed to create meeting:", err);
+    }
+  }
+
+  // Books a meeting from an "איתור יועץ" search result — advisor/date/time are already fixed
+  // by the chosen slot, unlike createMeetingRow which resolves a default advisor from the
+  // school's own assigned-advisor lists. Two stages: first check the advisor actually has
+  // access to this school (same proactive check DirectCoordinationModal does before sending —
+  // schools_router.py's GET .../advisor-access), then create the meeting.
+  async function createMeetingFromAdvisorFinder(advisorId, meetingDate, startTime, endTime, school, advisorFullName) {
+    let hasAccess = true;
+    try {
+      const res = await axios.get(`/schools/${school.id}/advisor-access`, { params: { advisor_ids: advisorId } });
+      hasAccess = res.data?.[advisorId] !== false;
+    } catch {
+      // non-fatal — same as DirectCoordinationModal.checkAdvisorAccess: a failed check
+      // shouldn't block creating the meeting
+    }
+    if (!hasAccess) {
+      setAdvisorAccessModal({
+        schoolId: school.id, advisorId, advisorName: advisorFullName, meetingDate,
+        resumeMeeting: { advisorId, meetingDate, startTime, endTime, school, advisorFullName },
+      });
+      return;
+    }
+    await doCreateMeetingFromAdvisorFinder({ advisorId, meetingDate, startTime, endTime, school, advisorFullName });
+  }
+
+  async function doCreateMeetingFromAdvisorFinder({ advisorId, meetingDate, startTime, endTime, school, advisorFullName }) {
+    let schoolServiceType = null;
+    try {
+      const yad = await axios.get(`/schools/${school.id}/year-admin-data`, { params: { academic_year: academicYear } });
+      schoolServiceType = yad.data?.service_type || null;
+    } catch {
+      // non-fatal — meeting creation proceeds without a pre-filled service type
+    }
+    const meetingServiceType = defaultMeetingServiceType(schoolServiceType);
+    const contacts = buildSchoolContacts(school);
+    const principal = contacts.find(c => c.key === "principal");
+    const participants = principal ? [principal] : [];
+    const payload = {
+      status: "scheduled", meeting_type: "remote",
+      meeting_service_type: meetingServiceType,
+      meeting_date: meetingDate, start_time: startTime, end_time: endTime,
+      advisor_ids: [advisorId],
+      participants,
+      primary_contact_key: participants.length === 1 ? participants[0].key : null,
+      reminder_enabled: false, academic_year: academicYear,
+    };
+    try {
+      const res = await axios.post(`/schools/${school.id}/meetings`, payload);
+      const newMeeting = {
+        ...res.data,
+        advisor_profiles: [{ id: advisorId, full_name: advisorFullName }],
+        school_name: school.name, school_symbol: school.symbol, school_city: school.city,
+      };
+      setMeetings(prev => [newMeeting, ...prev]);
+      sessionCreatedMeetingIdsRef.current.add(newMeeting.id);
+    } catch (err) {
+      console.error("Failed to create meeting from advisor finder:", err);
     }
   }
 
@@ -721,13 +782,26 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
           advisorId={advisorAccessModal.advisorId}
           advisorName={advisorAccessModal.advisorName}
           mode={{ type: "single_date", meetingDate: advisorAccessModal.meetingDate || new Date().toISOString().slice(0, 10) }}
-          onGranted={() => { const sid = advisorAccessModal.schoolId; setAdvisorAccessModal(null); refreshAccessMatrixForSchool(sid); }}
+          onGranted={() => {
+            const { schoolId: sid, resumeMeeting } = advisorAccessModal;
+            setAdvisorAccessModal(null);
+            if (resumeMeeting) {
+              doCreateMeetingFromAdvisorFinder(resumeMeeting);
+            } else {
+              refreshAccessMatrixForSchool(sid);
+            }
+          }}
           onCancel={() => setAdvisorAccessModal(null)}
         />
       )}
 
       {automationsModalOpen && (
         <MeetingAutomationsModal onClose={() => setAutomationsModalOpen(false)} />
+      )}
+
+      {advisorFinderOpen && (
+        <AdvisorFinderModal schools={schools} users={users} onClose={() => setAdvisorFinderOpen(false)}
+          onBook={createMeetingFromAdvisorFinder} />
       )}
 
       {bulkDeleteConfirm && (
@@ -754,9 +828,17 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
           <div className="relative">
             <button type="button" onClick={() => setSchoolPickerFor("direct")}
               className="btn-ghost flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-xl font-medium">
-              <span aria-hidden="true">🔗</span> תיאום ישיר
+              <span aria-hidden="true">🔗</span> תיאום עצמי
             </button>
           </div>
+          {showAutomationsButton && (
+            <div className="relative">
+              <button type="button" onClick={() => setAdvisorFinderOpen(true)}
+                className="btn-ghost flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-xl font-medium">
+                <span aria-hidden="true">🔎</span> איתור יועץ
+              </button>
+            </div>
+          )}
           {showAutomationsButton && (
             <div className="relative">
               <button type="button" onClick={() => setAutomationsModalOpen(true)}
