@@ -11,7 +11,30 @@ import { NoParticipantsModal } from "./NoParticipantsModal";
 import { ParticipantsSelector } from "./ParticipantsSelector";
 import { TimeInput, normalizeTimeValue } from "./TimeInput";
 import { AdvisorReassignModal } from "./AdvisorReassignModal";
+import { MeetingActualDetail } from "./MeetingActualDetail";
 import { MEETING_STATUS_OPTIONS, MEETING_SERVICE_TYPE_OPTIONS, STATUS_MAP, formatMeetingDate } from "./constants";
+
+function formatActualDuration(seconds) {
+  if (!seconds) return "0:00";
+  const total = Math.round(seconds);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function sumOfflineSeconds(entries) {
+  let total = 0;
+  for (const e of (entries || [])) {
+    if (!e.start_time || !e.end_time) continue;
+    const [sh, sm] = e.start_time.split(":").map(Number);
+    const [eh, em] = e.end_time.split(":").map(Number);
+    const diff = (eh * 60 + em) - (sh * 60 + sm);
+    if (diff > 0) total += diff * 60;
+  }
+  return total;
+}
 
 // Resolves the deduplicated list of advisor profiles that "belong" to a given meeting service
 // type, from the school's three per-service-type advisor lists (gefen_current = union of both).
@@ -186,6 +209,7 @@ export function MeetingRow({
   showSchoolColumn, schoolLabel, onOpenSchoolPicker,
   selectable, selected, onToggleSelect, onSendStatusReminder, hideAdvisorColumn,
   showCalendarColumn, onOpenSummary, typedAdvisors, schoolStage,
+  expanded, onToggleExpand, colSpanTotal,
 }) {
   const navigate = useNavigate();
   const [draft, setDraft] = useState({ ...meeting });
@@ -405,6 +429,8 @@ export function MeetingRow({
   }
 
   const status = STATUS_MAP[draft.status] || STATUS_MAP.other;
+  const offlineSeconds = sumOfflineSeconds(meeting.offline_work_entries);
+  const callsSeconds = meeting.calls_duration_seconds || 0;
 
   return (
     <>
@@ -452,6 +478,17 @@ export function MeetingRow({
               aria-label="בחר פגישה" className="w-3.5 h-3.5 rounded accent-blue-600" />
           </td>
         )}
+        {/* כפתור הרחבת שורה */}
+        <td className="py-2.5 px-1 text-center">
+          <button type="button" onClick={() => onToggleExpand?.(meeting.id)} aria-expanded={!!expanded}
+            aria-label={expanded ? "כווץ שורה" : "הרחב שורה — פירוט פעילות בפועל"}
+            className="text-slate-400 hover:text-slate-700 transition-colors">
+            <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+              style={{ transform: expanded ? "rotate(90deg)" : "none", transition: "transform 0.15s" }}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 6l6 6-6 6" />
+            </svg>
+          </button>
+        </td>
         {/* תאריך */}
         <td className="py-2.5 px-2">
           <div className="relative">
@@ -731,6 +768,14 @@ export function MeetingRow({
             <CalendarSyncBadge calendarSync={meeting.calendar_sync} />
           </td>
         )}
+        {/* בפועל: תחילת שיחה */}
+        <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap text-center" dir="ltr">{meeting.calls_start_time || "—"}</td>
+        {/* בפועל: משך שיחות */}
+        <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap text-center" dir="ltr">{formatActualDuration(callsSeconds)}</td>
+        {/* בפועל: משך אופליין */}
+        <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap text-center" dir="ltr">{formatActualDuration(offlineSeconds)}</td>
+        {/* בפועל: סה"כ שהושקע */}
+        <td className="py-2.5 px-2 text-sm font-semibold text-slate-800 whitespace-nowrap text-center" dir="ltr">{formatActualDuration(callsSeconds + offlineSeconds)}</td>
         {/* סיכום פגישה */}
         <td className="py-2.5 px-2 text-center">
           {meeting.summary_status === "processing" ? (
@@ -781,6 +826,13 @@ export function MeetingRow({
           </td>
         )}
       </tr>
+      {expanded && (
+        <tr>
+          <td colSpan={colSpanTotal} className="p-0 border-b border-slate-100 bg-slate-50/50">
+            <MeetingActualDetail meeting={meeting} />
+          </td>
+        </tr>
+      )}
     </>
   );
 }

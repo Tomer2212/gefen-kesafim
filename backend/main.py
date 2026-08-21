@@ -11,6 +11,7 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from routers.advisor_finder_router import router as advisor_finder_router
 from routers.agent_router import router as agent_router
 from routers.analyze_router import router as analyze_router
 from routers.calendar_router import router as calendar_router
@@ -139,6 +140,7 @@ app.include_router(meeting_summary_router)
 app.include_router(meeting_upload_router)
 app.include_router(person_tasks_router, prefix="/person-tasks")
 app.include_router(schools_router, prefix="/schools")
+app.include_router(advisor_finder_router, prefix="/schools")
 app.include_router(signup_router, prefix="/signup")
 app.include_router(tasks_router, prefix="/tasks")
 app.include_router(voicenter_router, prefix="/voicenter")

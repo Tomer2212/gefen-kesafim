@@ -58,6 +58,34 @@ export function MeetingsTable({
   const [sortDir, setSortDir]   = useState("asc");
   const [pendingDeleteId, setPendingDeleteId] = useState(null);
   const [reminderToast, setReminderToast] = useState(false);
+  const [expandedIds, setExpandedIds] = useState(() => new Set());
+
+  function toggleExpand(meetingId) {
+    setExpandedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(meetingId)) next.delete(meetingId); else next.add(meetingId);
+      return next;
+    });
+  }
+
+  const colSpanTotal =
+    (selectable ? 1 : 0) +
+    1 /* כפתור הרחבה */ +
+    1 /* תאריך */ +
+    1 /* סטטוס */ +
+    (showSchoolColumn ? 1 : 0) +
+    1 /* התחלה */ +
+    1 /* סיום */ +
+    (!hideAdvisorColumn ? 1 : 0) +
+    1 /* משתתפים */ +
+    1 /* מיקום */ +
+    1 /* סוג */ +
+    1 /* הערות */ +
+    1 /* תזכורת */ +
+    (showCalendarColumn ? 1 : 0) +
+    4 /* בפועל */ +
+    1 /* סיכום פגישה */ +
+    (canDeleteMeetings ? 1 : 0);
 
   function handleSort(field) {
     if (sortField !== field) { setSortField(field); setSortDir("asc"); }
@@ -134,41 +162,49 @@ export function MeetingsTable({
             <thead>
               <tr className="border-b border-slate-200 bg-slate-50/80">
                 {selectable && (
-                  <th scope="col" className="py-3 px-2 text-center">
+                  <th scope="col" rowSpan={2} className="py-3 px-2 text-center">
                     <input type="checkbox" checked={allSelected} onChange={onToggleSelectAll}
                       aria-label="בחר הכל" className="w-3.5 h-3.5 rounded accent-blue-600" />
                   </th>
                 )}
-                <th scope="col" className="py-3 px-2 pr-3 text-xs font-semibold text-slate-500">
+                <th scope="col" rowSpan={2} className="py-3 px-1"><span className="sr-only">הרחבת שורה</span></th>
+                <th scope="col" rowSpan={2} className="py-3 px-2 pr-3 text-xs font-semibold text-slate-500">
                   <SortableHeader field="date">תאריך</SortableHeader>
                 </th>
-                <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500">
+                <th scope="col" rowSpan={2} className="py-3 px-2 text-xs font-semibold text-slate-500">
                   <SortableHeader field="status">סטטוס</SortableHeader>
                 </th>
                 {showSchoolColumn && (
-                  <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">שם מוסד</th>
+                  <th scope="col" rowSpan={2} className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">שם מוסד</th>
                 )}
-                <th scope="col" className="py-3 pr-2 pl-3 text-xs font-semibold text-slate-500 whitespace-nowrap" style={{ width: "100px" }}>התחלה</th>
-                <th scope="col" className="py-3 px-1 text-xs font-semibold text-slate-500 whitespace-nowrap" style={{ width: "52px" }}>סיום</th>
+                <th scope="col" rowSpan={2} className="py-3 pr-2 pl-3 text-xs font-semibold text-slate-500 whitespace-nowrap" style={{ width: "100px" }}>התחלה</th>
+                <th scope="col" rowSpan={2} className="py-3 px-1 text-xs font-semibold text-slate-500 whitespace-nowrap" style={{ width: "52px" }}>סיום</th>
                 {!hideAdvisorColumn && (
-                  <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500">
+                  <th scope="col" rowSpan={2} className="py-3 px-2 text-xs font-semibold text-slate-500">
                     <SortableHeader field="advisor">יועץ מבצע</SortableHeader>
                   </th>
                 )}
-                <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500">משתתפים</th>
-                <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500">
+                <th scope="col" rowSpan={2} className="py-3 px-2 text-xs font-semibold text-slate-500">משתתפים</th>
+                <th scope="col" rowSpan={2} className="py-3 px-2 text-xs font-semibold text-slate-500">
                   <SortableHeader field="type">מיקום</SortableHeader>
                 </th>
-                <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500">סוג</th>
-                <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">הערות</th>
-                <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500">
+                <th scope="col" rowSpan={2} className="py-3 px-2 text-xs font-semibold text-slate-500">סוג</th>
+                <th scope="col" rowSpan={2} className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">הערות</th>
+                <th scope="col" rowSpan={2} className="py-3 px-2 text-xs font-semibold text-slate-500">
                   <ReminderHeaderTooltip />
                 </th>
                 {showCalendarColumn && (
-                  <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap" style={{ width: "95px" }}>יומן</th>
+                  <th scope="col" rowSpan={2} className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap" style={{ width: "95px" }}>יומן</th>
                 )}
-                <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">סיכום פגישה</th>
-                {canDeleteMeetings && <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500"></th>}
+                <th scope="col" colSpan={4} className="py-2 px-2 text-xs font-semibold text-slate-500 text-center border-b border-slate-200">בפועל</th>
+                <th scope="col" rowSpan={2} className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">סיכום פגישה</th>
+                {canDeleteMeetings && <th scope="col" rowSpan={2} className="py-3 px-2 text-xs font-semibold text-slate-500"></th>}
+              </tr>
+              <tr className="border-b border-slate-200 bg-slate-50/80">
+                <th scope="col" className="py-1.5 px-2 text-[11px] font-semibold text-slate-500 whitespace-nowrap text-center">תחילת שיחה</th>
+                <th scope="col" className="py-1.5 px-2 text-[11px] font-semibold text-slate-500 whitespace-nowrap text-center">משך שיחות</th>
+                <th scope="col" className="py-1.5 px-2 text-[11px] font-semibold text-slate-500 whitespace-nowrap text-center">משך אופליין</th>
+                <th scope="col" className="py-1.5 px-2 text-[11px] font-semibold text-slate-500 whitespace-nowrap text-center">סה"כ שהושקע</th>
               </tr>
             </thead>
             <tbody>
@@ -192,6 +228,9 @@ export function MeetingsTable({
                   onOpenSummary={onOpenSummary}
                   typedAdvisors={typedAdvisorsFor ? typedAdvisorsFor(m) : null}
                   schoolStage={schoolStageFor ? schoolStageFor(m) : schoolStage}
+                  expanded={expandedIds.has(m.id)}
+                  onToggleExpand={toggleExpand}
+                  colSpanTotal={colSpanTotal}
                 />
               ))}
             </tbody>

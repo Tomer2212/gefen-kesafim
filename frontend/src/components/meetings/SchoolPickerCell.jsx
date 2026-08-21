@@ -6,7 +6,7 @@ function schoolLabel(s) {
   return `${s.name || ""} - ${s.symbol || ""} - ${s.city || ""}`;
 }
 
-function SchoolResultsList({ schools, query, setQuery, pendingId, setPendingId, onConfirm, onCancel }) {
+function SchoolResultsList({ schools, query, setQuery, pendingId, setPendingId, onConfirm, onCancel, submittingLabel = "יוצר..." }) {
   // onConfirm (e.g. createMeetingForSchool) is async and does real work (a school-
   // advisors lookup, then a POST) before the modal closes — with no per-click feedback,
   // a user who doesn't see anything happen right away tends to click again, and again;
@@ -18,7 +18,8 @@ function SchoolResultsList({ schools, query, setQuery, pendingId, setPendingId, 
     const q = query.trim().toLowerCase();
     return (s.name || "").toLowerCase().includes(q)
       || (s.symbol || "").toLowerCase().includes(q)
-      || (s.city || "").toLowerCase().includes(q);
+      || (s.city || "").toLowerCase().includes(q)
+      || (s.authority || "").toLowerCase().includes(q);
   });
 
   return (
@@ -30,7 +31,7 @@ function SchoolResultsList({ schools, query, setQuery, pendingId, setPendingId, 
         autoFocus
         value={query}
         onChange={e => setQuery(e.target.value)}
-        placeholder="חיפוש לפי שם מוסד, סמל מוסד או עיר..."
+        placeholder="חיפוש לפי שם מוסד, סמל מוסד, עיר או בעלות..."
         className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 outline-none focus:border-blue-400 bg-white"
         aria-label="חיפוש בית ספר"
       />
@@ -63,7 +64,7 @@ function SchoolResultsList({ schools, query, setQuery, pendingId, setPendingId, 
             }
           }}
           className="btn-blue text-sm px-4 py-1.5 disabled:opacity-40 disabled:cursor-not-allowed">
-          {submitting ? "יוצר..." : "אישור"}
+          {submitting ? submittingLabel : "אישור"}
         </button>
       </div>
     </div>
@@ -93,7 +94,7 @@ export function SchoolPickerPopover({ schools, currentSchoolId, onConfirm, onClo
 }
 
 /** Modal variant — used when creating a new meeting; blocks creation until a school is chosen. */
-export function SchoolPickerModal({ schools, onConfirm, onCancel }) {
+export function SchoolPickerModal({ schools, onConfirm, onCancel, title = "בחירת בית ספר לפגישה", submittingLabel }) {
   const [query, setQuery] = useState("");
   const [pendingId, setPendingId] = useState(null);
   const { ref, handleKeyDown } = useFocusTrap(onCancel);
@@ -104,11 +105,12 @@ export function SchoolPickerModal({ schools, onConfirm, onCancel }) {
       <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="school-picker-title"
         onKeyDown={handleKeyDown} dir="rtl"
         className="glass-card rounded-2xl p-6 w-full max-w-md flex flex-col gap-3">
-        <h2 id="school-picker-title" className="font-bold text-slate-900">בחירת בית ספר לפגישה</h2>
+        <h2 id="school-picker-title" className="font-bold text-slate-900">{title}</h2>
         <SchoolResultsList schools={schools} query={query} setQuery={setQuery}
           pendingId={pendingId} setPendingId={setPendingId}
           onConfirm={onConfirm}
-          onCancel={onCancel} />
+          onCancel={onCancel}
+          {...(submittingLabel ? { submittingLabel } : {})} />
       </div>
     </div>
   );

@@ -373,6 +373,39 @@ def get_freebusy(db, org_id: str, advisor_id: str, start_iso: str, end_iso: str)
         return None
 
 
+def reconcile_busy_blocks(db, busy_blocks: list[dict]) -> list[dict]:
+    """Cross-checks Graph busy blocks against our own meetings' status via calendar_event_index
+    (external_event_id -> meeting_id). A Graph event can outlive its meeting's real state —
+    e.g. a postponed meeting whose Outlook event wasn't cleaned up, or a cancel-sync that
+    silently failed (calendar_sync calls are non-fatal by design) — so blindly trusting
+    Graph's "busy" flag can report a slot as taken when the app itself no longer considers
+    the meeting to be happening. Filters out only blocks that map to a meeting whose status
+    isn't "scheduled"; a Graph event with no match in calendar_event_index (a personal/
+    unrelated Outlook event) is left untouched and still counts as busy — this only ever
+    frees up a slot when we hold positive evidence the underlying meeting isn't real anymore.
+    Never fatal — a failure here returns busy_blocks unchanged, since showing a slot as busy
+    when it's actually free is a minor inconvenience, while the reverse is a double-booking risk."""
+    event_ids = [b["id"] for b in busy_blocks if b.get("id")]
+    if not event_ids:
+        return busy_blocks
+    try:
+        idx_rows = db.table("calendar_event_index").select("external_event_id, meeting_id").in_("external_event_id", event_ids).execute().data or []
+        if not idx_rows:
+            return busy_blocks
+        meeting_ids = list({r["meeting_id"] for r in idx_rows})
+        status_rows = db.table("meetings").select("id, status").in_("id", meeting_ids).execute().data or []
+        status_by_meeting = {r["id"]: r["status"] for r in status_rows}
+        meeting_by_event = {r["external_event_id"]: r["meeting_id"] for r in idx_rows}
+    except Exception as exc:
+        logger.warning("reconcile_busy_blocks failed (non-fatal, keeping all blocks as busy): %s", exc)
+        return busy_blocks
+
+    return [
+        b for b in busy_blocks
+        if b.get("id") not in meeting_by_event or status_by_meeting.get(meeting_by_event[b["id"]]) == "scheduled"
+    ]
+
+
 def persist_calendar_sync(db, meeting_id: str, sync_map: dict) -> None:
     """Single place that writes calendar_sync onto a meeting. Also keeps
     calendar_event_index up to date — a reverse lookup (external_event_id ->
@@ -669,6 +702,7 @@ def _check_meeting_conflict(db, org_id: str, advisor_id: str, meeting: dict, exc
     blocks = get_freebusy(db, org_id, advisor_id, start_iso, end_iso)
     if blocks is None:
         return False  # couldn't check — don't claim a conflict we can't actually see
+    blocks = reconcile_busy_blocks(db, blocks)
     for b in blocks:
         if exclude_event_id and b.get("id") == exclude_event_id:
             continue

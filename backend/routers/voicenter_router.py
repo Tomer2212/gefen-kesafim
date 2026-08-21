@@ -115,6 +115,40 @@ def _get_call_resolutions(org_id: str, call_ids: list[str]) -> dict:
         return {}
 
 
+def _get_manual_school_overrides(org_id: str, call_ids: list[str]) -> tuple[dict, dict]:
+    """Manual per-school overrides for the given call_ids (voicenter_call_school_links).
+    Two independent, per-call kinds of override:
+    - 'linked' — manually attaches a call to a school's שיחות tab, IN ADDITION to (never
+      instead of) any auto-detected contact match. A call can be linked to any number of
+      schools.
+    - 'excluded' — hides a call from ONE specific school's שיחות tab only (e.g. an owner/
+      manager removed a row from that school's card). This is purely local to that school's
+      tab: it never touches the underlying Voicenter/AI call data, never affects any other
+      school's tab, and never affects the admin "ניהול-שיחות" table, which always shows
+      every call regardless of any school's exclusion.
+    Returns (linked_by_call_id, excluded_by_call_id), each call_id -> list of school_ids."""
+    if not call_ids:
+        return {}, {}
+    try:
+        db = get_admin_client()
+        rows = (
+            db.table("voicenter_call_school_links")
+            .select("call_id, school_id, state")
+            .eq("org_id", org_id)
+            .in_("call_id", call_ids)
+            .execute()
+        ).data or []
+        linked: dict = {}
+        excluded: dict = {}
+        for r in rows:
+            target = excluded if r.get("state") == "excluded" else linked
+            target.setdefault(r["call_id"], []).append(r["school_id"])
+        return linked, excluded
+    except Exception as exc:
+        logger.warning("voicenter: manual school overrides lookup failed (non-fatal): %s", exc)
+        return {}, {}
+
+
 def _resolve_contact_for_call(contact_map: dict, resolutions_by_call_id: dict, call_id: str, counterpart: str) -> dict:
     """Resolves a single call's contact/school given the org-wide contact_map and any
     persisted resolutions. Returns a dict with contact_name/contact_role/school_id/
@@ -427,6 +461,7 @@ def _pull_org_calls(org_id: str, date_from: str, date_to: str) -> dict:
     # counterpart phone number to known person(s)/role/school(s). Non-fatal enrichment.
     contact_map = _build_contact_map(org_id)
     resolutions_by_call_id = _get_call_resolutions(org_id, call_ids)
+    manual_links_by_call_id, manual_exclusions_by_call_id = _get_manual_school_overrides(org_id, call_ids)
 
     calls = []
     for c in cdr_list:
@@ -449,6 +484,8 @@ def _pull_org_calls(org_id: str, date_from: str, date_to: str) -> dict:
             "school_name": contact["school_name"],
             "pending_school_resolution": contact["pending_school_resolution"],
             "candidate_schools": contact["candidate_schools"],
+            "linked_school_ids": manual_links_by_call_id.get(call_id, []),
+            "excluded_school_ids": manual_exclusions_by_call_id.get(call_id, []),
             "representative_code": rep_code,
             "representative_name": c.get("representativename") or c.get("username"),
             "advisor_id": mapped_advisor_id,
@@ -476,6 +513,91 @@ def list_calls(
     if advisor_id:
         result["calls"] = [c for c in result["calls"] if c["advisor_id"] == advisor_id]
     return result
+
+
+class LinkCallSchoolIn(BaseModel):
+    school_id: str
+
+
+@router.post("/calls/{call_id}/link-school")
+def link_call_school(
+    call_id: str,
+    body: LinkCallSchoolIn,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    """Manually attaches a call to a school's שיחות tab — independent of (and in addition
+    to) any auto-detected contact match. A call can be linked to any number of schools;
+    linking to one never removes it from another."""
+    _require_manager(user)
+
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            db.table("voicenter_call_school_links").upsert({
+                "org_id": user["org_id"],
+                "call_id": call_id,
+                "school_id": body.school_id,
+                "linked_by": user["id"],
+                "state": "linked",
+            }, on_conflict="org_id,call_id,school_id").execute()
+            break
+        except Exception as exc:
+            if attempt == 0:
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("link_call_school failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    return {"ok": True}
+
+
+class ExcludeCallSchoolIn(BaseModel):
+    school_id: str
+
+
+@router.post("/calls/{call_id}/exclude-from-school")
+def exclude_call_from_school(
+    call_id: str,
+    body: ExcludeCallSchoolIn,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    """Hides a call from ONE specific school's שיחות tab — purely local to that school's
+    card. Never deletes the underlying Voicenter/AI call data, never affects any other
+    school's tab, and never affects the admin 'ניהול-שיחות' table (which keeps showing
+    every call regardless). Owner/manager always allowed; advisor only if explicitly
+    granted the can_remove_call_from_school permission (role default or per-user override —
+    see schools_router.PERMISSION_DEFAULTS)."""
+    from routers.schools_router import _advisor_has_access_to_school_row, _check_permission
+
+    db = get_admin_client()
+    if user["role"] not in _MANAGER_ROLES:
+        if not _check_permission(db, user, "can_remove_call_from_school"):
+            raise HTTPException(status_code=403, detail="אין הרשאה לפעולה זו")
+        school_row = db.table("schools").select("id, restrict_access_to").eq("id", body.school_id).eq("org_id", user["org_id"]).execute()
+        if not school_row.data or not _advisor_has_access_to_school_row(db, user["id"], school_row.data[0]):
+            raise HTTPException(status_code=403, detail="אין הרשאה לצפות בבית ספר זה")
+
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            db.table("voicenter_call_school_links").upsert({
+                "org_id": user["org_id"],
+                "call_id": call_id,
+                "school_id": body.school_id,
+                "linked_by": user["id"],
+                "state": "excluded",
+            }, on_conflict="org_id,call_id,school_id").execute()
+            break
+        except Exception as exc:
+            if attempt == 0:
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("exclude_call_from_school failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    return {"ok": True}
 
 
 class ResolveCallContactSchoolIn(BaseModel):

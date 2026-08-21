@@ -2487,6 +2487,7 @@ export default function SchoolPage() {
   const [accessLinkedToAdvisors, setAccessLinkedToAdvisors] = useState(false);
   const [canDeleteSchool, setCanDeleteSchool] = useState(false);
   const [canDeleteMeetings, setCanDeleteMeetings] = useState(false);
+  const [canRemoveCallFromSchool, setCanRemoveCallFromSchool] = useState(false);
   const [meetingReminderToasts, setMeetingReminderToasts] = useState([]);
   const [meetingAlreadySentModal, setMeetingAlreadySentModal] = useState(null);
   function addMeetingReminderToast(msg) {
@@ -2593,6 +2594,7 @@ export default function SchoolPage() {
         if (meRes.data?.role) setRole(meRes.data.role);
         if (meRes.data?.can_delete_schools) setCanDeleteSchool(true);
         setCanDeleteMeetings(!!meRes.data?.can_delete_own_meetings);
+        setCanRemoveCallFromSchool(!!meRes.data?.can_remove_call_from_school);
         setCanEditDirectly(!!meRes.data?.can_edit_school_directly);
         setCanRequestUpdate(meRes.data?.can_request_school_update !== false);
       } catch {
@@ -4434,7 +4436,7 @@ export default function SchoolPage() {
                   <p className="text-slate-400 text-sm">בטווח שנת הלימודים הנבחרת לא נמצאו שיחות עם אנשי הקשר של בית הספר</p>
                 </div>
               ) : (
-                <CallsTable calls={calls} hideSchoolColumn canManage={role === "owner" || role === "manager"} />
+                <CallsTable calls={calls} hideSchoolColumn canManage={canRemoveCallFromSchool} schoolId={schoolId} />
               )}
             </div>
           )}

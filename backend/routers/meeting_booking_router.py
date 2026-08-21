@@ -247,7 +247,7 @@ def get_booking_freebusy(token: str, month: str | None = None, range_key: str | 
             advisor_busy = graph_client.get_freebusy(db, token_row["org_id"], advisor_id, range_start, range_end)
             if advisor_busy is None:
                 return {"days": [], "ok": False}
-            busy.extend(advisor_busy)
+            busy.extend(graph_client.reconcile_busy_blocks(db, advisor_busy))
         busy.extend(_local_meeting_busy_blocks(db, advisor_ids, range_start, range_end))
 
         days = []
@@ -270,7 +270,7 @@ def get_booking_freebusy(token: str, month: str | None = None, range_key: str | 
     busy = graph_client.get_freebusy(db, token_row["org_id"], token_row["advisor_id"], range_start, range_end)
     if busy is None:
         return {"days": [], "ok": False}
-    busy = list(busy) + _local_meeting_busy_blocks(db, [token_row["advisor_id"]], range_start, range_end)
+    busy = graph_client.reconcile_busy_blocks(db, list(busy)) + _local_meeting_busy_blocks(db, [token_row["advisor_id"]], range_start, range_end)
 
     days = []
     for d in dates:
@@ -304,7 +304,7 @@ def book_meeting_slot(token: str, body: dict):
     busy = graph_client.get_freebusy(db, token_row["org_id"], token_row["advisor_id"], day_start, day_end)
     if busy is None:
         raise HTTPException(status_code=503, detail="לא ניתן לאמת זמינות כרגע, נסה שוב")
-    busy = list(busy) + _local_meeting_busy_blocks(db, [token_row["advisor_id"]], day_start, day_end)
+    busy = graph_client.reconcile_busy_blocks(db, list(busy)) + _local_meeting_busy_blocks(db, [token_row["advisor_id"]], day_start, day_end)
     if any(_time_overlaps(start_time, end_time, b["start"][11:16], b["end"][11:16]) for b in busy):
         raise HTTPException(status_code=409, detail="אופס.. הזמן הזה כבר נתפס. נא לבחור מועד אחר.")
 
@@ -401,7 +401,7 @@ def _book_range_slot(db, token_row: dict, range_key: str, body: dict) -> dict:
         advisor_busy = graph_client.get_freebusy(db, token_row["org_id"], advisor_id, day_start, day_end)
         if advisor_busy is None:
             raise HTTPException(status_code=503, detail="לא ניתן לאמת זמינות כרגע, נסה שוב")
-        busy.extend(advisor_busy)
+        busy.extend(graph_client.reconcile_busy_blocks(db, advisor_busy))
     busy.extend(_local_meeting_busy_blocks(db, advisor_ids, day_start, day_end))
     if any(_time_overlaps(start_time, end_time, b["start"][11:16], b["end"][11:16]) for b in busy):
         raise HTTPException(status_code=409, detail="אופס.. הזמן הזה כבר נתפס. נא לבחור מועד אחר.")
@@ -422,7 +422,7 @@ def _book_range_slot(db, token_row: dict, range_key: str, body: dict) -> dict:
         "participants": range_row.get("participants") or [],
         "academic_year": DEFAULT_ACADEMIC_YEAR,
         "reminder_enabled": True,
-        "notes": "נקבע ע\"י בית הספר דרך קישור תיאום ישיר",
+        "notes": "נקבע ע\"י בית הספר דרך קישור תיאום עצמי",
         # Round 17 — tags which principal slot (or "both"/None) this booking is for, so
         # _find_existing_meeting and task_logic.py's success-check can tell a "separate"
         # condition's two sibling ranges apart instead of treating either one as satisfying both.

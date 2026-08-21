@@ -550,7 +550,9 @@ function NotificationRow({ notif, isExpanded, onToggle, onRead, onReload, onDele
       // school-task-specific), so this navigates there instead of calling openTask(). For
       // person_task_updated, the "what changed" explanation is already embedded directly in
       // the notification's title (see patch_person_task) — no separate expand step needed.
-      navigate("/profile");
+      // ?tab=tasks (ProfilePage.jsx's own tab id) — without it, ProfilePage defaults to
+      // "meetings" (the first tab), landing the user on the wrong sub-tab.
+      navigate("/profile?tab=tasks");
     } else if (notif.type === "person_task_routing_problem") {
       // Sent to the task's creator (manager/owner) — the fix happens in the admin table, not
       // the personal area.
