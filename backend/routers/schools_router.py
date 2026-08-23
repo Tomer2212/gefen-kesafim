@@ -2,6 +2,7 @@ import io
 import json
 import logging
 import os
+import re
 import secrets
 import smtplib
 import time
@@ -305,6 +306,7 @@ class UserInviteIn(BaseModel):
     full_name: str | None = None
     role: str = "advisor"
     control_domains: list[str] = []
+    work_phone: str | None = None
 
 
 class UserRoleIn(BaseModel):
@@ -318,6 +320,14 @@ class UserRoleIn(BaseModel):
 def _require_manager(user: dict):
     if user["role"] not in ("owner", "manager"):
         raise HTTPException(status_code=403, detail="אין הרשאה לפעולה זו")
+
+
+def _validate_work_phone(phone: str | None) -> str | None:
+    if phone is None or phone == "":
+        return phone
+    if not re.fullmatch(r"05\d{8}", phone):
+        raise HTTPException(status_code=400, detail="טלפון עבודה חייב להיות 10 ספרות המתחילות ב-05")
+    return phone
 
 
 def _require_owner(user: dict):
@@ -3812,6 +3822,7 @@ def invite_user(
     db_pre = get_admin_client()
     if not _check_permission(db_pre, user, "can_invite_users"):
         raise HTTPException(status_code=403, detail="אין הרשאה להזמין משתמשים חדשים")
+    work_phone = _validate_work_phone(body.work_phone)
     app_url = os.getenv("APP_URL", "https://gefenai.co.il")
     for attempt in range(2):
         try:
@@ -3832,6 +3843,7 @@ def invite_user(
                 "org_id": user["org_id"],
                 "status": "pending",
                 "control_domains": body.control_domains,
+                "work_phone": work_phone,
             }).execute()
             return {"ok": True, "user_id": user_id}
         except HTTPException:
@@ -4061,6 +4073,7 @@ def update_role(
 class UserProfileUpdateIn(BaseModel):
     full_name: str | None = None
     control_domains: list[str] | None = None
+    work_phone: str | None = None
 
 
 @router.patch("/users/{user_id}")
@@ -4070,7 +4083,10 @@ def update_user_profile(
     user: Annotated[dict, Depends(get_current_user)],
 ):
     _require_manager(user)
-    data = {k: v for k, v in body.model_dump().items() if v is not None}
+    provided = body.model_dump(exclude_unset=True)
+    if "work_phone" in provided:
+        provided["work_phone"] = _validate_work_phone(provided["work_phone"])
+    data = {k: v for k, v in provided.items() if v is not None}
     if not data:
         return {"ok": True}
     for attempt in range(2):
@@ -5392,6 +5408,7 @@ def _recompute_meeting_call_activity(db, org_id: str, school_id: str, meeting_da
             "contact_name": c.get("contact_name"),
             "contact_role": c.get("contact_role"),
             "counterpart_phone": c.get("counterpart_phone"),
+            "advisor_id": c.get("advisor_id"),
             "source": "auto",
         })
     if rows:
@@ -5459,6 +5476,38 @@ def _require_school_access_for_meeting_activity(db, user: dict, school_id: str) 
     return school_row.data[0]
 
 
+@router.get("/{school_id}/users-with-access")
+def list_users_with_access(school_id: str, user: Annotated[dict, Depends(get_current_user)]):
+    """All users (any role) who currently have access to this school — owners/managers
+    (implicit org-wide access) plus advisors covered by restrict_access_to / advisor_schools.
+    Used to populate the offline-work user multi-select in MeetingActualDetail."""
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            school = _require_school_access_for_meeting_activity(db, user, school_id)
+
+            profiles = db.table("profiles").select("id, full_name, role").eq("org_id", user["org_id"]).execute().data or []
+            adv_rows = db.table("advisor_schools").select("advisor_id").eq("school_id", school_id).execute().data or []
+            explicit_ids = {r["advisor_id"] for r in adv_rows}
+            rat = school.get("restrict_access_to")
+
+            result = []
+            for p in profiles:
+                if p["role"] in ("owner", "manager") or rat is None or p["id"] in (rat or []) or p["id"] in explicit_ids:
+                    result.append({"id": p["id"], "full_name": p["full_name"], "role": p["role"]})
+            return result
+        except HTTPException:
+            raise
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("list_users_with_access attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("list_users_with_access failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+
 @router.get("/{school_id}/meetings/{meeting_id}/actual-detail")
 def get_meeting_actual_detail(school_id: str, meeting_id: str, user: Annotated[dict, Depends(get_current_user)]):
     """Powers the meeting row's expanded 'בפועל' panel: calls attributed to this meeting +
@@ -5510,6 +5559,22 @@ def get_meeting_actual_detail(school_id: str, meeting_id: str, user: Annotated[d
         except Exception as exc:
             logger.warning("actual-detail AI enrichment failed (non-fatal): %s", exc)
 
+    offline_entries = meeting.get("offline_work_entries") or []
+
+    # Non-fatal enrichment: resolve advisor_id (calls) and user_ids/created_by (offline entries)
+    # to display names in one batched profiles query.
+    names_by_id: dict = {}
+    try:
+        needed_ids = {r["advisor_id"] for r in link_rows if r.get("advisor_id")}
+        for e in offline_entries:
+            for uid in (e.get("user_ids") or ([e["created_by"]] if e.get("created_by") else [])):
+                needed_ids.add(uid)
+        if needed_ids:
+            p_rows = db.table("profiles").select("id, full_name").in_("id", list(needed_ids)).execute().data or []
+            names_by_id = {p["id"]: p["full_name"] for p in p_rows}
+    except Exception as exc:
+        logger.warning("actual-detail user-name enrichment failed (non-fatal): %s", exc)
+
     calls_out = []
     for r in link_rows:
         ai = ai_by_call_id.get(r["call_id"])
@@ -5522,9 +5587,15 @@ def get_meeting_actual_detail(school_id: str, meeting_id: str, user: Annotated[d
             "counterpart_phone": r.get("counterpart_phone"),
             "notes": r.get("notes"),
             "source": r["source"],
+            "advisor_id": r.get("advisor_id"),
+            "advisor_name": names_by_id.get(r.get("advisor_id")),
             "ai_summary": ai["summary"] if ai else None,
             "ai_transcript_available": bool(ai and ai.get("transcript_path")),
         })
+
+    for e in offline_entries:
+        user_ids = e.get("user_ids") or ([e["created_by"]] if e.get("created_by") else [])
+        e["users"] = [{"id": uid, "full_name": names_by_id.get(uid)} for uid in user_ids]
 
     other_meetings_same_day = []
     if meeting.get("meeting_date"):
@@ -5534,7 +5605,6 @@ def get_meeting_actual_detail(school_id: str, meeting_id: str, user: Annotated[d
             .neq("id", meeting_id).execute()
         ).data or []
 
-    offline_entries = meeting.get("offline_work_entries") or []
     offline_seconds = _sum_offline_seconds(offline_entries)
     calls_seconds = meeting.get("calls_duration_seconds") or 0
 
@@ -5606,18 +5676,21 @@ def reassign_call_link(meeting_id: str, call_id: str, body: ReassignCallIn, user
 class OfflineWorkIn(BaseModel):
     start_time: str
     end_time: str
-    notes: str | None = None
+    notes: str
 
 
 class OfflineWorkPatchIn(BaseModel):
     start_time: str | None = None
     end_time: str | None = None
     notes: str | None = None
+    user_ids: list[str] | None = None
 
 
 @router.post("/{school_id}/meetings/{meeting_id}/offline-work")
 def add_offline_work(school_id: str, meeting_id: str, body: OfflineWorkIn, user: Annotated[dict, Depends(get_current_user)]):
     import uuid
+    if len(body.notes.strip()) < 10:
+        raise HTTPException(status_code=400, detail="יש להוסיף הערה של לפחות 10 תווים")
     db = get_admin_client()
     _require_school_access_for_meeting_activity(db, user, school_id)
     m_res = db.table("meetings").select("id, offline_work_entries").eq("id", meeting_id).eq("school_id", school_id).execute()
@@ -5630,6 +5703,7 @@ def add_offline_work(school_id: str, meeting_id: str, body: OfflineWorkIn, user:
         "end_time": body.end_time,
         "notes": body.notes,
         "created_by": user["id"],
+        "user_ids": [user["id"]],
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     entries.append(entry)
@@ -5645,6 +5719,8 @@ def update_offline_work(school_id: str, meeting_id: str, entry_id: str, body: Of
     m_res = db.table("meetings").select("id, offline_work_entries").eq("id", meeting_id).eq("school_id", school_id).execute()
     if not m_res.data:
         raise HTTPException(status_code=404, detail="פגישה לא נמצאה")
+    if body.user_ids is not None and len(body.user_ids) == 0:
+        raise HTTPException(status_code=400, detail="חייב להישאר לפחות משתמש אחד ברשומת עבודה עצמאית")
     entries = m_res.data[0].get("offline_work_entries") or []
     found = False
     for e in entries:
@@ -5652,6 +5728,7 @@ def update_offline_work(school_id: str, meeting_id: str, entry_id: str, body: Of
             if body.start_time is not None: e["start_time"] = body.start_time
             if body.end_time is not None: e["end_time"] = body.end_time
             if body.notes is not None: e["notes"] = body.notes
+            if body.user_ids is not None: e["user_ids"] = body.user_ids
             found = True
             break
     if not found:
@@ -5823,7 +5900,10 @@ def create_meeting(school_id: str, body: MeetingIn, user: Annotated[dict, Depend
     if body.meeting_date: data["meeting_date"] = body.meeting_date
     if body.start_time: data["start_time"] = body.start_time
     if body.end_time: data["end_time"] = body.end_time
-    if body.meeting_type: data["meeting_type"] = body.meeting_type
+    # Defaults to "remote" ("מרחוק") when not explicitly chosen — server-side safety net so
+    # every meeting-creation path lands on the same default, not just whichever ones the
+    # frontend happens to hardcode it for.
+    data["meeting_type"] = body.meeting_type or "remote"
     if body.meeting_service_type is not None: data["meeting_service_type"] = body.meeting_service_type
     if body.actual_duration: data["actual_duration"] = body.actual_duration
     if body.notes: data["notes"] = body.notes

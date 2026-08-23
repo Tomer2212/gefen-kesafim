@@ -12,6 +12,7 @@ export default defineConfig({
       "/calendar": { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/chatbot": { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/contact/send": { target: "http://127.0.0.1:8000", changeOrigin: true },
+      "/performance": { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/person-tasks": { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/public": { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/schools": { target: "http://127.0.0.1:8000", changeOrigin: true },

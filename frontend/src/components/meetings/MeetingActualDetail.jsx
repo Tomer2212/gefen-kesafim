@@ -1,7 +1,11 @@
 import { useEffect, useState } from "react";
+import { useBlocker } from "react-router-dom";
 import axios from "axios";
 import { useCallNoteWindows } from "../../context/CallNoteWindowsContext";
-import { normalizeTimeValue } from "./TimeInput";
+import { normalizeTimeValue, TimeInput } from "./TimeInput";
+import { UserMultiSelect } from "./UserMultiSelect";
+import { NotesPopover } from "./NotesPopover";
+import { useFocusTrap } from "../../hooks/useFocusTrap";
 
 function formatDuration(seconds) {
   if (!seconds) return "0:00";
@@ -27,25 +31,47 @@ function computeCallEndHM(iso, durationSeconds) {
   return `${String(eh).padStart(2, "0")}:${String(em).padStart(2, "0")}`;
 }
 
-function NotesCell({ value, onSave }) {
-  const [open, setOpen] = useState(false);
-  if (value || open) {
-    return (
-      <textarea
-        rows={1}
-        defaultValue={value || ""}
-        onBlur={e => { if (e.target.value !== (value || "")) onSave(e.target.value); }}
-        placeholder="הערה..."
-        aria-label="הערה"
-        className="w-40 text-xs border border-transparent hover:border-slate-200 focus:border-blue-400 rounded-lg px-2 py-1 outline-none bg-transparent focus:bg-white resize-y align-top"
-      />
-    );
-  }
+function UnsavedOfflineWorkModal({ missing, saving, onSave, onDiscard, onCancel }) {
+  const { ref, handleKeyDown } = useFocusTrap(onCancel);
   return (
-    <button type="button" aria-label="הוספת הערה" onClick={() => setOpen(true)}
-      className="text-sm w-6 h-6 flex items-center justify-center rounded-lg font-bold bg-slate-100 text-slate-500 hover:bg-slate-200">
-      +
-    </button>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ background: "rgba(15,23,42,0.55)" }}
+      onClick={e => { if (e.target === e.currentTarget) onCancel(); }}
+    >
+      <div
+        ref={ref}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="unsaved-offline-modal-title"
+        onKeyDown={handleKeyDown}
+        dir="rtl"
+        className="glass-card rounded-2xl p-6 w-full max-w-lg flex flex-col gap-5"
+      >
+        <div>
+          <h2 id="unsaved-offline-modal-title" className="font-bold text-slate-900 text-lg">נא לשים לב!</h2>
+          <p className="text-sm text-slate-500 mt-1">
+            רשומת "עבודה עצמאית" טרם נשמרה, מה ברצונך לעשות?
+          </p>
+          {missing.length > 0 && (
+            <p className="text-xs text-red-600 mt-2" role="alert">
+              יש להשלים לפני שמירה: {missing.join(", ")}
+            </p>
+          )}
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={onSave}
+            disabled={saving || missing.length > 0}
+            className="btn-green-light flex-1 whitespace-nowrap text-sm px-4 py-2"
+          >
+            {saving ? "שומר..." : "שמור שינויים"}
+          </button>
+          <button onClick={onCancel} disabled={saving} className="btn-ghost flex-1 whitespace-nowrap text-sm px-4 py-2">ביטול</button>
+          <button onClick={onDiscard} disabled={saving} className="btn-ghost flex-1 whitespace-nowrap text-sm px-4 py-2">אל תשמור</button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -74,8 +100,11 @@ export function MeetingActualDetail({ meeting }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [detail, setDetail] = useState(null);
+  const [usersWithAccess, setUsersWithAccess] = useState([]);
+  const [currentUser, setCurrentUser] = useState(null);
   const [addingOffline, setAddingOffline] = useState(false);
-  const [newEntry, setNewEntry] = useState({ start_time: "", end_time: "" });
+  const [draft, setDraft] = useState({ start_time: "", end_time: "", notes: "" });
+  const [savingDraft, setSavingDraft] = useState(false);
   const [reassignOpenFor, setReassignOpenFor] = useState(null);
 
   async function load() {
@@ -91,7 +120,48 @@ export function MeetingActualDetail({ meeting }) {
     }
   }
 
-  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [meeting.id]);
+  useEffect(() => {
+    load();
+    axios.get(`/schools/${meeting.school_id}/users-with-access`)
+      .then(res => setUsersWithAccess(res.data || []))
+      .catch(() => { /* non-fatal */ });
+    axios.get("/schools/users/me")
+      .then(res => setCurrentUser(res.data || null))
+      .catch(() => { /* non-fatal */ });
+    /* eslint-disable-next-line react-hooks/exhaustive-deps */
+  }, [meeting.id]);
+
+  const draftMissing = [];
+  if (!normalizeTimeValue(draft.start_time)) draftMissing.push("שעת התחלה");
+  if (!normalizeTimeValue(draft.end_time)) draftMissing.push("שעת סיום");
+  if (draft.notes.trim().length < 10) draftMissing.push("הערות (לפחות 10 תווים)");
+
+  const draftDirty = addingOffline && (draft.start_time || draft.end_time || draft.notes);
+  const blocker = useBlocker(!!draftDirty);
+
+  function resetDraft() {
+    setAddingOffline(false);
+    setDraft({ start_time: "", end_time: "", notes: "" });
+  }
+
+  async function saveDraft() {
+    if (draftMissing.length > 0) return false;
+    setSavingDraft(true);
+    try {
+      await axios.post(`/schools/${meeting.school_id}/meetings/${meeting.id}/offline-work`, {
+        start_time: normalizeTimeValue(draft.start_time),
+        end_time: normalizeTimeValue(draft.end_time),
+        notes: draft.notes.trim(),
+      });
+      resetDraft();
+      load();
+      return true;
+    } catch {
+      return false;
+    } finally {
+      setSavingDraft(false);
+    }
+  }
 
   async function saveCallNote(callId, notes) {
     try { await axios.patch(`/schools/meetings/${meeting.id}/call-links/${callId}/notes`, { notes }); } catch { /* non-fatal */ }
@@ -105,18 +175,6 @@ export function MeetingActualDetail({ meeting }) {
 
   async function deleteOffline(entryId) {
     try { await axios.delete(`/schools/${meeting.school_id}/meetings/${meeting.id}/offline-work/${entryId}`); } catch { /* non-fatal */ }
-    load();
-  }
-
-  async function submitNewEntry() {
-    const st = normalizeTimeValue(newEntry.start_time);
-    const et = normalizeTimeValue(newEntry.end_time);
-    if (!st || !et) return;
-    try {
-      await axios.post(`/schools/${meeting.school_id}/meetings/${meeting.id}/offline-work`, { start_time: st, end_time: et });
-    } catch { /* non-fatal */ }
-    setAddingOffline(false);
-    setNewEntry({ start_time: "", end_time: "" });
     load();
   }
 
@@ -152,6 +210,7 @@ export function MeetingActualDetail({ meeting }) {
         <thead>
           <tr className="text-xs text-slate-400 border-b border-slate-200">
             <th scope="col" className="text-right font-medium pb-1.5 pl-2">סוג</th>
+            <th scope="col" className="text-right font-medium pb-1.5 pl-2">משתמש</th>
             <th scope="col" className="text-right font-medium pb-1.5 pl-2">תפקיד צד שני</th>
             <th scope="col" className="text-right font-medium pb-1.5 pl-2">שם צד שני</th>
             <th scope="col" className="text-right font-medium pb-1.5 pl-2">שעת התחלה</th>
@@ -160,20 +219,29 @@ export function MeetingActualDetail({ meeting }) {
             <th scope="col" className="text-right font-medium pb-1.5 pl-2">סה"כ</th>
             <th scope="col" className="text-center font-medium pb-1.5 pl-2">סיכום AI</th>
             <th scope="col" className="text-center font-medium pb-1.5">תמלול</th>
+            <th scope="col" className="text-center font-medium pb-1.5"><span className="sr-only">פעולות</span></th>
           </tr>
         </thead>
         <tbody>
           {calls.length === 0 && offlineEntries.length === 0 && (
-            <tr><td colSpan={9} className="text-center text-slate-400 text-xs py-3">אין פעילות רשומה עבור פגישה זו</td></tr>
+            <tr><td colSpan={11} className="text-center text-slate-400 text-xs py-3">אין פעילות רשומה עבור פגישה זו</td></tr>
           )}
           {calls.map(c => (
             <tr key={c.call_id} className="border-b border-slate-100 last:border-0">
               <td className="py-1.5 pl-2 text-slate-600 whitespace-nowrap">שיחה</td>
+              <td className="py-1.5 pl-2 text-slate-600 whitespace-nowrap">{c.advisor_name || "—"}</td>
               <td className="py-1.5 pl-2 text-slate-600 whitespace-nowrap">{c.contact_role || "—"}</td>
               <td className="py-1.5 pl-2 text-slate-600 whitespace-nowrap">{c.contact_name || "—"}</td>
               <td className="py-1.5 pl-2 text-slate-600 whitespace-nowrap" dir="ltr">{formatCallTime(c.call_time)}</td>
               <td className="py-1.5 pl-2 text-slate-600 whitespace-nowrap" dir="ltr">{computeCallEndHM(c.call_time, c.duration_seconds)}</td>
-              <td className="py-1.5 pl-2"><NotesCell value={c.notes} onSave={v => saveCallNote(c.call_id, v)} /></td>
+              <td className="py-1.5 pl-2">
+                <NotesPopover
+                  value={c.notes}
+                  canEdit={!!currentUser && (!c.advisor_id || c.advisor_id === currentUser.id)}
+                  onSave={v => saveCallNote(c.call_id, v)}
+                  ariaLabel="הערה לשיחה"
+                />
+              </td>
               <td className="py-1.5 pl-2 text-slate-600 whitespace-nowrap" dir="ltr">{formatDuration(c.duration_seconds)}</td>
               <td className="py-1.5 pl-2 text-center">
                 {c.ai_summary ? (
@@ -207,6 +275,7 @@ export function MeetingActualDetail({ meeting }) {
                   )}
                 </div>
               </td>
+              <td className="py-1.5 text-center text-slate-300 text-xs">—</td>
             </tr>
           ))}
           {offlineEntries.map(e => {
@@ -218,6 +287,13 @@ export function MeetingActualDetail({ meeting }) {
             return (
               <tr key={e.id} className="border-b border-slate-100 last:border-0">
                 <td className="py-1.5 pl-2 text-slate-600 whitespace-nowrap">עבודה עצמאית</td>
+                <td className="py-1.5 pl-2">
+                  <UserMultiSelect
+                    options={usersWithAccess.map(u => ({ key: u.id, name: u.full_name }))}
+                    selected={(e.users || []).map(u => ({ key: u.id, name: u.full_name }))}
+                    onChange={sel => patchOffline(e.id, { user_ids: sel.map(s => s.key) })}
+                  />
+                </td>
                 <td className="py-1.5 pl-2 text-slate-300">—</td>
                 <td className="py-1.5 pl-2 text-slate-300">—</td>
                 <td className="py-1.5 pl-2">
@@ -226,42 +302,121 @@ export function MeetingActualDetail({ meeting }) {
                 <td className="py-1.5 pl-2">
                   <OfflineTimeInput value={e.end_time} ariaLabel="שעת סיום" onSave={v => patchOffline(e.id, { end_time: v })} />
                 </td>
-                <td className="py-1.5 pl-2"><NotesCell value={e.notes} onSave={v => patchOffline(e.id, { notes: v })} /></td>
+                <td className="py-1.5 pl-2">
+                  <NotesPopover
+                    value={e.notes}
+                    canEdit={!!currentUser && (!e.created_by || e.created_by === currentUser.id)}
+                    onSave={v => patchOffline(e.id, { notes: v })}
+                    ariaLabel="הערה לעבודה עצמאית"
+                  />
+                </td>
                 <td className="py-1.5 pl-2 text-slate-600 whitespace-nowrap" dir="ltr">{formatDuration(durSeconds)}</td>
                 <td className="py-1.5 pl-2 text-center text-slate-300 text-xs">—</td>
+                <td className="py-1.5 text-center text-slate-300 text-xs">—</td>
                 <td className="py-1.5 text-center">
                   <button type="button" onClick={() => deleteOffline(e.id)} aria-label="מחק רשומת עבודה עצמאית"
-                    className="text-slate-400 hover:text-red-600 transition-colors text-xs">מחק</button>
+                    className="text-slate-400 hover:text-red-600 transition-colors">🗑️</button>
                 </td>
               </tr>
             );
           })}
+          {addingOffline && (
+            <tr className="border-b border-slate-100 last:border-0 bg-slate-50/60">
+              <td className="py-1.5 pl-2 text-slate-600 whitespace-nowrap">עבודה עצמאית</td>
+              <td className="py-1.5 pl-2 text-slate-600 whitespace-nowrap">{currentUser?.full_name || "—"}</td>
+              <td className="py-1.5 pl-2 text-slate-300">—</td>
+              <td className="py-1.5 pl-2 text-slate-300">—</td>
+              <td className="py-1.5 pl-2">
+                <TimeInput
+                  value={draft.start_time}
+                  onChange={v => setDraft(p => ({ ...p, start_time: v }))}
+                  ariaLabel="שעת התחלה (חובה)"
+                  hasError={!normalizeTimeValue(draft.start_time)}
+                  errorMessage="שדה חובה"
+                />
+              </td>
+              <td className="py-1.5 pl-2">
+                <TimeInput
+                  value={draft.end_time}
+                  onChange={v => setDraft(p => ({ ...p, end_time: v }))}
+                  ariaLabel="שעת סיום (חובה)"
+                  hasError={!normalizeTimeValue(draft.end_time)}
+                  errorMessage="שדה חובה"
+                />
+              </td>
+              <td className="py-1.5 pl-2">
+                <label className="sr-only" htmlFor="new-offline-notes">הערות (חובה, לפחות 10 תווים)</label>
+                <textarea
+                  id="new-offline-notes"
+                  rows={1}
+                  value={draft.notes}
+                  onChange={e => setDraft(p => ({ ...p, notes: e.target.value }))}
+                  placeholder="מה בוצע? (לפחות 10 תווים)"
+                  aria-required="true"
+                  aria-invalid={draft.notes.trim().length < 10}
+                  className={`w-40 text-xs rounded-lg px-2 py-1 outline-none bg-white resize-y align-top ${
+                    draft.notes.trim().length < 10 ? "border border-red-500 ring-1 ring-red-500 text-red-700" : "border border-slate-200 focus:border-blue-400"
+                  }`}
+                />
+              </td>
+              <td className="py-1.5 pl-2 text-slate-600 whitespace-nowrap" dir="ltr">
+                {draftMissing.includes("שעת התחלה") || draftMissing.includes("שעת סיום")
+                  ? "—"
+                  : formatDuration(Math.max(0, (() => {
+                      const [sh, sm] = normalizeTimeValue(draft.start_time).split(":").map(Number);
+                      const [eh, em] = normalizeTimeValue(draft.end_time).split(":").map(Number);
+                      return ((eh * 60 + em) - (sh * 60 + sm)) * 60;
+                    })()))
+                }
+              </td>
+              <td className="py-1.5 pl-2 text-center text-slate-300 text-xs">—</td>
+              <td className="py-1.5 text-center text-slate-300 text-xs">—</td>
+              <td className="py-1.5 pl-2">
+                <div className="flex flex-col items-start gap-1">
+                  {draftMissing.length > 0 && (
+                    <p className="text-red-600 text-[11px] leading-tight" role="alert">
+                      יש למלא: {draftMissing.join(", ")}
+                    </p>
+                  )}
+                  <div className="flex items-center gap-2">
+                    <button type="button" onClick={saveDraft} disabled={savingDraft || draftMissing.length > 0}
+                      className="btn-blue text-xs px-3 py-1.5">
+                      {savingDraft ? "שומר..." : "שמור"}
+                    </button>
+                    <button type="button" onClick={resetDraft} disabled={savingDraft}
+                      className="btn-ghost text-xs px-3 py-1.5">ביטול</button>
+                  </div>
+                </div>
+              </td>
+            </tr>
+          )}
         </tbody>
       </table>
 
-      <div className="mt-3">
-        {addingOffline ? (
-          <div className="flex items-center gap-2 text-sm">
-            <label className="sr-only" htmlFor="new-offline-start">שעת התחלה</label>
-            <input id="new-offline-start" type="text" inputMode="numeric" maxLength={5} dir="ltr" placeholder="שעת התחלה"
-              value={newEntry.start_time} onChange={e => setNewEntry(p => ({ ...p, start_time: e.target.value.replace(/[^\d:]/g, "").slice(0, 5) }))}
-              className="w-24 text-sm border border-slate-200 rounded-lg px-2 py-1 outline-none focus:border-blue-400" />
-            <span className="text-slate-400">—</span>
-            <label className="sr-only" htmlFor="new-offline-end">שעת סיום</label>
-            <input id="new-offline-end" type="text" inputMode="numeric" maxLength={5} dir="ltr" placeholder="שעת סיום"
-              value={newEntry.end_time} onChange={e => setNewEntry(p => ({ ...p, end_time: e.target.value.replace(/[^\d:]/g, "").slice(0, 5) }))}
-              className="w-24 text-sm border border-slate-200 rounded-lg px-2 py-1 outline-none focus:border-blue-400" />
-            <button type="button" onClick={submitNewEntry} className="btn-blue text-xs px-3 py-1.5">שמור</button>
-            <button type="button" onClick={() => { setAddingOffline(false); setNewEntry({ start_time: "", end_time: "" }); }}
-              className="btn-ghost text-xs px-3 py-1.5">ביטול</button>
-          </div>
-        ) : (
+      {!addingOffline && (
+        <div className="mt-3">
           <button type="button" onClick={() => setAddingOffline(true)}
             className="text-xs font-medium text-blue-700 hover:text-blue-900 hover:underline">
             + הוסף עבודה עצמאית
           </button>
-        )}
-      </div>
+        </div>
+      )}
+
+      {blocker.state === "blocked" && (
+        <UnsavedOfflineWorkModal
+          missing={draftMissing}
+          saving={savingDraft}
+          onSave={async () => {
+            const ok = await saveDraft();
+            if (ok) blocker.proceed();
+          }}
+          onDiscard={() => {
+            resetDraft();
+            blocker.proceed();
+          }}
+          onCancel={() => blocker.reset()}
+        />
+      )}
     </div>
   );
 }

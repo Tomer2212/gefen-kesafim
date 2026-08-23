@@ -1,4 +1,5 @@
-﻿import { Fragment, useEffect, useRef, useState } from "react";
+﻿import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useBlocker, useLocation, useNavigate } from "react-router-dom";
 import axios from "axios";
 import * as XLSX from "xlsx";
@@ -8,6 +9,7 @@ import { useFocusTrap } from "../hooks/useFocusTrap";
 import { supabase } from "../lib/supabase";
 import AdminCallsTab from "./AdminCallsTab";
 import AdminCollectionTab from "./AdminCollectionTab";
+import AdminPerformanceTab from "./AdminPerformanceTab";
 import AdminIntegrationsTab from "./AdminIntegrationsTab";
 import AdminMeetingsTab from "./AdminMeetingsTab";
 import AgentChatWidget from "../components/AgentChatWidget";
@@ -23,6 +25,174 @@ import { AdvisorSearch } from "../components/AdvisorSearch";
 import HourMinuteInput from "../components/HourMinuteInput";
 import { AccessSelector } from "../components/AccessSelector";
 import AdminTasksTab from "./AdminTasksTab";
+
+// Plain-text-looking single-select dropdown (portal-based, like MultiSelectChips) used for the
+// "תפקיד" column — looks like static text until clicked, opens a wide modern popover instead of
+// the browser's native <select> list.
+function RoleSelect({ value, options, onChange, disabled, title, ariaLabel }) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState(null);
+  const triggerRef = useRef(null);
+  const dropdownRef = useRef(null);
+
+  useLayoutEffect(() => {
+    if (!open || !triggerRef.current) return;
+    const rect = triggerRef.current.getBoundingClientRect();
+    setPos({ top: rect.bottom + 4, left: rect.left, width: rect.width * 1.3 });
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    function handler(e) {
+      if (triggerRef.current?.contains(e.target)) return;
+      if (dropdownRef.current?.contains(e.target)) return;
+      setOpen(false);
+    }
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = () => setOpen(false);
+    window.addEventListener("scroll", handler, { capture: true, passive: true });
+    return () => window.removeEventListener("scroll", handler, { capture: true });
+  }, [open]);
+
+  const current = options.find(o => o.value === value);
+
+  return (
+    <>
+      <button
+        ref={triggerRef}
+        type="button"
+        disabled={disabled}
+        title={title}
+        aria-label={ariaLabel}
+        onClick={() => setOpen(o => !o)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        className={`text-sm text-slate-900 bg-transparent border-0 p-0 m-0 text-right ${disabled ? "opacity-40 cursor-not-allowed" : "cursor-pointer hover:text-blue-600"}`}
+      >
+        {current ? current.label : value}
+      </button>
+      {open && pos && createPortal(
+        <div
+          ref={dropdownRef}
+          className="fixed z-[9999] border border-slate-200 rounded-2xl bg-white shadow-xl overflow-hidden"
+          style={{ top: pos.top, left: pos.left, width: Math.max(pos.width, 150) }}
+        >
+          <div className="py-1.5" role="listbox">
+            {options.map(o => (
+              <button
+                key={o.value}
+                type="button"
+                role="option"
+                aria-selected={o.value === value}
+                onClick={() => { onChange(o.value); setOpen(false); }}
+                className={`w-full text-right px-4 py-2.5 text-sm flex items-center justify-between gap-2 transition-colors hover:bg-blue-50 ${o.value === value ? "text-blue-600 font-semibold bg-blue-50/60" : "text-slate-700"}`}
+              >
+                {o.label}
+                {o.value === value && <span aria-hidden="true">✓</span>}
+              </button>
+            ))}
+          </div>
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
+
+// Portal-based "..." row actions menu (like RoleSelect above) — rendered into <body> with
+// `position: fixed` so it never gets silently clipped/covered by a sibling table row (plain
+// `position: absolute` dropdowns nested in the table lose click hit-testing to later DOM
+// siblings that also happen to be positioned elements — see MultiSelectChips.jsx for the same
+// issue with a different symptom).
+function UserActionsMenu({ open, onToggle, onClose, showResend, resending, resendResult, onResend, onDelete, ariaLabel }) {
+  const [pos, setPos] = useState(null);
+  const triggerRef = useRef(null);
+  const dropdownRef = useRef(null);
+
+  useLayoutEffect(() => {
+    if (!open || !triggerRef.current) return;
+    const rect = triggerRef.current.getBoundingClientRect();
+    setPos({ top: rect.bottom + 4, left: rect.left });
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    function handler(e) {
+      if (triggerRef.current?.contains(e.target)) return;
+      if (dropdownRef.current?.contains(e.target)) return;
+      onClose();
+    }
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open, onClose]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = () => onClose();
+    window.addEventListener("scroll", handler, { capture: true, passive: true });
+    return () => window.removeEventListener("scroll", handler, { capture: true });
+  }, [open, onClose]);
+
+  return (
+    <>
+      <button
+        ref={triggerRef}
+        type="button"
+        onClick={onToggle}
+        aria-label={ariaLabel}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100 transition-colors"
+      >
+        <svg aria-hidden="true" className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+          <circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/>
+        </svg>
+      </button>
+      {open && pos && createPortal(
+        <div
+          ref={dropdownRef}
+          role="menu"
+          className="fixed z-[9999] bg-white rounded-xl shadow-lg border border-slate-100 py-1 min-w-[120px]"
+          style={{ top: pos.top, left: pos.left }}
+        >
+          {showResend && (
+            <>
+              <button
+                role="menuitem"
+                type="button"
+                onClick={onResend}
+                disabled={resending}
+                className="w-full text-right px-4 py-2 text-sm text-amber-600 hover:bg-amber-50 transition-colors disabled:opacity-40"
+              >
+                {resending ? "שולח..." : "שלח מחדש"}
+              </button>
+              {resendResult && (
+                <p className={`px-4 pb-1 text-xs font-medium ${resendResult === "ok" ? "text-green-600" : "text-red-500"}`}>
+                  {resendResult === "ok" ? "✓ נשלח" : "שגיאה"}
+                </p>
+              )}
+              <div className="border-t border-slate-100 my-1" />
+            </>
+          )}
+          <button
+            role="menuitem"
+            type="button"
+            onClick={onDelete}
+            className="w-full text-right px-4 py-2 text-sm text-red-500 hover:bg-red-50 transition-colors"
+          >
+            מחק
+          </button>
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
 
 // --- Admin schools table (ניהול → בתי ספר) ------------------------------------------------
 
@@ -445,9 +615,10 @@ const IMPORT_FIELD_CONFIG = [
 ];
 
 const USER_IMPORT_FIELD_CONFIG = [
-  { key: "email",     label: "אימייל",  required: true },
-  { key: "full_name", label: "שם מלא",  required: true },
-  { key: "role",      label: "תפקיד",   required: false, hint: "יועץ / מנהל / בעלים — ברירת מחדל: יועץ" },
+  { key: "email",       label: "אימייל",         required: true },
+  { key: "full_name",   label: "שם מלא",         required: true },
+  { key: "role",        label: "תפקיד",          required: false, hint: "יועץ / מנהל / בעלים — ברירת מחדל: יועץ" },
+  { key: "work_phone",  label: "טלפון עבודה",    required: false, hint: "10 ספרות המתחילות ב-05" },
 ];
 
 function normalizeStage(raw) {
@@ -649,6 +820,95 @@ function RestoreSuccessModal({ schoolName, onClose }) {
             אישור
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function AddUserModal({
+  inviteForm, setInviteForm, myRole, inviteUser, inviting, inviteMsg, WORK_PHONE_REGEX,
+  userImportRef, handleUserImport, importingUsers, userImportProgressMsg, userImportResult,
+  onClose,
+}) {
+  const { ref, handleKeyDown } = useFocusTrap(onClose);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4" role="dialog" aria-modal="true" aria-labelledby="add-user-modal-title">
+      <div ref={ref} onKeyDown={handleKeyDown} className="bg-white rounded-2xl shadow-2xl w-full max-w-[76.8rem] p-6 flex flex-col gap-4 text-right max-h-[90vh] overflow-y-auto" dir="rtl">
+        <div className="flex items-center justify-between gap-4">
+          <h2 id="add-user-modal-title" className="text-lg font-bold text-slate-900">הזמן משתמש חדש</h2>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            <input ref={userImportRef} type="file" accept=".xlsx,.xls" className="hidden" onChange={handleUserImport} aria-label="ייבוא משתמשים מאקסל" />
+            <button onClick={() => userImportRef.current?.click()} disabled={importingUsers} className="btn-ghost text-sm px-4 py-2">
+              {importingUsers ? (userImportProgressMsg || "מייבא...") : "ייבוא מאקסל"}
+            </button>
+            <button
+              onClick={onClose}
+              aria-label="סגור"
+              className="p-2 rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition-colors"
+            >
+              <svg aria-hidden="true" className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        {userImportResult && (
+          <div className={`glass-card rounded-xl p-4 border ${userImportResult.errors.length > 0 ? "border-orange-200" : "border-green-200"}`}>
+            <p className="font-medium text-slate-800 text-sm">
+              {userImportResult.imported > 0 ? `הוזמנו ${userImportResult.imported} משתמשים בהצלחה` : "לא הוזמנו משתמשים"}
+              {userImportResult.errors.length > 0 && ` · ${userImportResult.errors.length} שגיאות`}
+            </p>
+            {userImportResult.errors.map((e, i) => <p key={i} className="text-red-500 text-xs mt-1">{e}</p>)}
+          </div>
+        )}
+
+        <div className="grid grid-cols-6 gap-4 items-end">
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="invite-name" className="text-xs text-slate-800">שם מלא *</label>
+            <input id="invite-name" className="input-field" value={inviteForm.full_name}
+              onChange={e => setInviteForm(p => ({ ...p, full_name: e.target.value }))} placeholder="שם מלא" />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="invite-email" className="text-xs text-slate-800">אימייל *</label>
+            <input id="invite-email" className="input-field" type="email" dir="ltr" value={inviteForm.email}
+              onChange={e => setInviteForm(p => ({ ...p, email: e.target.value }))} placeholder="user@example.com" />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="invite-phone" className="text-xs text-slate-800">טלפון עבודה</label>
+            <input id="invite-phone" className="input-field" type="tel" inputMode="numeric" dir="ltr"
+              value={inviteForm.work_phone}
+              onChange={e => setInviteForm(p => ({ ...p, work_phone: e.target.value.replace(/\D/g, "").slice(0, 10) }))}
+              maxLength={10} />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="invite-role" className="text-xs text-slate-800">תפקיד</label>
+            <select id="invite-role" className="input-field text-sm" value={inviteForm.role}
+              onChange={e => setInviteForm(p => ({ ...p, role: e.target.value }))}>
+              <option value="advisor">יועץ</option>
+              <option value="manager">מנהל</option>
+              {myRole === "owner" && <option value="owner">בעלים</option>}
+            </select>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <span className="text-xs text-slate-800">תחומי ידע</span>
+            <MultiSelectChips neutral options={DOMAIN_OPTIONS}
+              selected={inviteForm.control_domains}
+              onChange={v => setInviteForm(p => ({ ...p, control_domains: v }))}
+              placeholder="בחר תחומים" />
+          </div>
+          <button onClick={inviteUser} disabled={!inviteForm.email || !inviteForm.full_name || inviting || (inviteForm.work_phone && !WORK_PHONE_REGEX.test(inviteForm.work_phone))} className="btn-blue text-sm px-5 py-2">
+            {inviting ? "שולח..." : "שלח הזמנה"}
+          </button>
+        </div>
+        {inviteForm.work_phone && !WORK_PHONE_REGEX.test(inviteForm.work_phone) && (
+          <p role="alert" className="text-xs text-red-500">יש להזין 10 ספרות המתחילות ב-05</p>
+        )}
+        {inviteMsg && (
+          <div>
+            <span className={`text-sm ${inviteMsg.includes("שגיאה") ? "text-red-500" : "text-green-600"}`}>{inviteMsg}</span>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1052,12 +1312,24 @@ export default function AdminPage() {
   const [users, setUsers] = useState([]);
   const [loadingUsers, setLoadingUsers] = useState(false);
   const [overrideCounts, setOverrideCounts] = useState({});  // { [userId]: count }
+  const [voicenterEnabled, setVoicenterEnabled] = useState(false);
+  const [voicenterKnownReps, setVoicenterKnownReps] = useState([]); // [{ representative_code, representative_name }]
+  const [voicenterMappings, setVoicenterMappings] = useState([]); // [{ id, representative_code, representative_name, advisor_id }]
   const [openActionsMenu, setOpenActionsMenu] = useState(null); // userId of open 3-dot menu
   const [roleError, setRoleError] = useState("");
   const [roleChangeConfirm, setRoleChangeConfirm] = useState(null); // { userId, userName, oldRole, newRole }
-  const [inviteForm, setInviteForm] = useState({ email: "", full_name: "", role: "advisor", control_domains: [] });
+  const [inviteForm, setInviteForm] = useState({ email: "", full_name: "", role: "advisor", control_domains: [], work_phone: "" });
   const [inviting, setInviting] = useState(false);
   const [inviteMsg, setInviteMsg] = useState("");
+  const [showAddUserModal, setShowAddUserModal] = useState(false);
+  const [phoneDrafts, setPhoneDrafts] = useState({});
+  const [phoneErrors, setPhoneErrors] = useState({});
+  const [phoneEditingIds, setPhoneEditingIds] = useState(() => new Set());
+  const WORK_PHONE_REGEX = /^05\d{8}$/;
+  function formatWorkPhone(phone) {
+    if (!phone) return "";
+    return `${phone.slice(0, 3)}-${phone.slice(3)}`;
+  }
   const [userImportMappingData, setUserImportMappingData] = useState(null);
   const [importingUsers, setImportingUsers] = useState(false);
   const [userImportResult, setUserImportResult] = useState(null);
@@ -1104,7 +1376,7 @@ export default function AdminPage() {
     if (inviteForm.email && inviteForm.full_name) {
       await inviteUser();
     }
-    setInviteForm({ email: "", full_name: "", role: "advisor", control_domains: [] });
+    setInviteForm({ email: "", full_name: "", role: "advisor", control_domains: [], work_phone: "" });
     blocker.proceed?.();
   }
 
@@ -1120,7 +1392,7 @@ export default function AdminPage() {
     setAccessLinkedToAdvisors(false);
     setEditingUser(null);
     setEditingUserName("");
-    setInviteForm({ email: "", full_name: "", role: "advisor", control_domains: [] });
+    setInviteForm({ email: "", full_name: "", role: "advisor", control_domains: [], work_phone: "" });
     setInviteMsg("");
     blocker.proceed?.();
   }
@@ -1213,12 +1485,6 @@ export default function AdminPage() {
     }
   }
 
-  useEffect(() => {
-    if (!openActionsMenu) return;
-    const close = () => setOpenActionsMenu(null);
-    document.addEventListener("click", close);
-    return () => document.removeEventListener("click", close);
-  }, [openActionsMenu]);
 
   useEffect(() => {
     loadSchools();
@@ -1510,14 +1776,59 @@ export default function AdminPage() {
   async function loadUsers() {
     setLoadingUsers(true);
     try {
-      const [usersRes, countsRes] = await Promise.all([
+      const [usersRes, countsRes, voicenterSettingsRes] = await Promise.all([
         axios.get("/schools/users/all"),
         axios.get("/schools/permissions/overrides/counts").catch(() => ({ data: {} })),
+        axios.get("/voicenter/settings").catch(() => ({ data: { enabled: false } })),
       ]);
       setUsers(Array.isArray(usersRes.data) ? usersRes.data : []);
       setOverrideCounts(countsRes.data || {});
+      const enabled = !!voicenterSettingsRes.data?.enabled;
+      setVoicenterEnabled(enabled);
+      if (enabled) {
+        const [repsRes, mappingsRes] = await Promise.all([
+          axios.get("/voicenter/known-reps").catch(() => ({ data: [] })),
+          axios.get("/voicenter/mappings").catch(() => ({ data: [] })),
+        ]);
+        setVoicenterKnownReps(Array.isArray(repsRes.data) ? repsRes.data : []);
+        setVoicenterMappings(Array.isArray(mappingsRes.data) ? mappingsRes.data : []);
+      }
     } finally {
       setLoadingUsers(false);
+    }
+  }
+
+  async function loadVoicenterMappings() {
+    try {
+      const res = await axios.get("/voicenter/mappings");
+      setVoicenterMappings(Array.isArray(res.data) ? res.data : []);
+    } catch {
+      /* non-fatal */
+    }
+  }
+
+  async function saveUserVoicenterMapping(u, newCodes) {
+    const current = voicenterMappings.filter(m => m.advisor_id === u.id);
+    const currentCodes = current.map(m => m.representative_code);
+    const added = newCodes.filter(c => !currentCodes.includes(c));
+    const removed = current.filter(m => !newCodes.includes(m.representative_code));
+    try {
+      for (const code of added) {
+        const rep = voicenterKnownReps.find(r => r.representative_code === code);
+        await axios.post("/voicenter/mappings", {
+          representative_code: code,
+          representative_name: rep?.representative_name || null,
+          advisor_id: u.id,
+        });
+      }
+      for (const m of removed) {
+        await axios.delete(`/voicenter/mappings/${m.id}`);
+      }
+    } finally {
+      // A code added here may have been reassigned away from another user (upsert is keyed
+      // by representative_code, not advisor_id) — refetch the full list so that user's row
+      // updates too, not just this one.
+      loadVoicenterMappings();
     }
   }
 
@@ -1825,6 +2136,37 @@ export default function AdminPage() {
     }
   }
 
+  function startEditPhone(u) {
+    setPhoneDrafts(p => ({ ...p, [u.id]: u.work_phone || "" }));
+    setPhoneEditingIds(prev => new Set(prev).add(u.id));
+  }
+
+  function cancelEditPhone(u) {
+    setPhoneDrafts(p => { const n = { ...p }; delete n[u.id]; return n; });
+    setPhoneErrors(p => { const n = { ...p }; delete n[u.id]; return n; });
+    setPhoneEditingIds(prev => { const n = new Set(prev); n.delete(u.id); return n; });
+  }
+
+  async function saveUserPhone(u) {
+    const draft = phoneDrafts[u.id];
+    if (draft === undefined) { cancelEditPhone(u); return; }
+    const value = draft.trim();
+    if (value !== "" && !WORK_PHONE_REGEX.test(value)) {
+      setPhoneErrors(p => ({ ...p, [u.id]: "יש להזין 10 ספרות המתחילות ב-05" }));
+      return;
+    }
+    setPhoneErrors(p => { const n = { ...p }; delete n[u.id]; return n; });
+    setPhoneDrafts(p => { const n = { ...p }; delete n[u.id]; return n; });
+    setPhoneEditingIds(prev => { const n = new Set(prev); n.delete(u.id); return n; });
+    if (value === (u.work_phone || "")) return;
+    setUsers(prev => prev.map(x => x.id === u.id ? { ...x, work_phone: value } : x));
+    try {
+      await axios.patch(`/schools/users/${u.id}`, { work_phone: value });
+    } catch {
+      loadUsers();
+    }
+  }
+
   async function handleDeleteButtonClick(u) {
     setOpenActionsMenu(null);
     try {
@@ -1868,12 +2210,16 @@ export default function AdminPage() {
   }
 
   async function inviteUser() {
+    if (inviteForm.work_phone && !WORK_PHONE_REGEX.test(inviteForm.work_phone)) {
+      setInviteMsg("שגיאה: טלפון עבודה חייב להיות 10 ספרות המתחילות ב-05");
+      return;
+    }
     setInviting(true);
     setInviteMsg("");
     try {
       await axios.post("/schools/users/invite", inviteForm);
       setInviteMsg("הזמנה נשלחה בהצלחה לאימייל המשתמש");
-      setInviteForm({ email: "", full_name: "", role: "advisor", control_domains: [] });
+      setInviteForm({ email: "", full_name: "", role: "advisor", control_domains: [], work_phone: "" });
       await loadUsers();
     } catch {
       setInviteMsg("שגיאה בשליחת ההזמנה");
@@ -1941,13 +2287,20 @@ export default function AdminPage() {
       const role = mapping.role !== null
         ? normalizeRole(String(row[mapping.role] ?? "").trim())
         : "advisor";
+      const work_phone = mapping.work_phone !== null
+        ? String(row[mapping.work_phone] ?? "").replace(/\D/g, "").slice(0, 10)
+        : "";
 
       if (!email || !full_name) {
         errors.push(`שורה ${i + 2}: חסר אימייל או שם מלא`);
         continue;
       }
+      if (work_phone && !WORK_PHONE_REGEX.test(work_phone)) {
+        errors.push(`שורה ${i + 2} (${email}): טלפון עבודה לא תקין — נדרשות 10 ספרות המתחילות ב-05`);
+        continue;
+      }
       try {
-        await axios.post("/schools/users/invite", { email, full_name, role });
+        await axios.post("/schools/users/invite", { email, full_name, role, work_phone });
         imported++;
       } catch (err) {
         const detail = err.response?.data?.detail || "שגיאה לא ידועה";
@@ -2067,6 +2420,7 @@ export default function AdminPage() {
   const showBillingTab = myRole === "owner" || (myRole === "manager" && permDefaults?.can_view_billing?.manager === true);
   const showIntegrationsTab = myRole === "owner" || myRole === "manager";
   const showCallsTab = myRole === "owner" || myRole === "manager";
+  const showPerformanceTab = myRole === "owner" || myRole === "manager";
   const showCollectionTab = myRole === "owner" || myRole === "manager";
   const AGENT_WIDGET_ENABLED = false; // temporarily hidden from frontend while under improvement — flip to true to restore
   const showAgentWidget = AGENT_WIDGET_ENABLED && (myRole === "owner" || myRole === "manager");
@@ -2178,6 +2532,7 @@ export default function AdminPage() {
     { id: "users", label: "משתמשים" },
     { id: "meetings", label: "פגישות" },
     ...(showCallsTab ? [{ id: "calls", label: "שיחות" }] : []),
+    ...(showPerformanceTab ? [{ id: "performance", label: "ביצועים" }] : []),
     ...(showCollectionTab ? [{ id: "collection", label: "גבייה" }] : []),
     { id: "permissions", label: "הרשאות" },
     ...(showIntegrationsTab ? [{ id: "integrations", label: "אינטגרציות" }] : []),
@@ -2217,7 +2572,7 @@ export default function AdminPage() {
 
         <div className={`mx-auto px-6 pb-10 ${
           activeTab === "users" ? "max-w-[95rem]" :
-          ["schools", "meetings", "calls", "collection", "tasks"].includes(activeTab) ? "max-w-[100rem]" : "max-w-4xl"
+          ["schools", "meetings", "calls", "performance", "collection", "tasks"].includes(activeTab) ? "max-w-[100rem]" : "max-w-4xl"
         }`}>
           {/* Schools Tab */}
           {activeTab === "schools" && (
@@ -3224,64 +3579,29 @@ export default function AdminPage() {
           {activeTab === "users" && (
             <div>
               {(myRole === "owner" || canInviteUsers) && (
-                <>
-                  <div className="flex justify-end mb-4">
-                    <input ref={userImportRef} type="file" accept=".xlsx,.xls" className="hidden" onChange={handleUserImport} aria-label="ייבוא משתמשים מאקסל" />
-                    <button onClick={() => userImportRef.current?.click()} disabled={importingUsers} className="btn-ghost text-sm px-4 py-2">
-                      {importingUsers ? (userImportProgressMsg || "מייבא...") : "ייבוא מאקסל"}
-                    </button>
-                  </div>
+                <div className="flex justify-end mb-4">
+                  <button onClick={() => setShowAddUserModal(true)} className="btn-blue text-sm px-4 py-2">
+                    הוסף משתמש
+                  </button>
+                </div>
+              )}
 
-                  {userImportResult && (
-                    <div className={`glass-card rounded-xl p-4 mb-4 border ${userImportResult.errors.length > 0 ? "border-orange-200" : "border-green-200"}`}>
-                      <p className="font-medium text-slate-800 text-sm">
-                        {userImportResult.imported > 0 ? `הוזמנו ${userImportResult.imported} משתמשים בהצלחה` : "לא הוזמנו משתמשים"}
-                        {userImportResult.errors.length > 0 && ` · ${userImportResult.errors.length} שגיאות`}
-                      </p>
-                      {userImportResult.errors.map((e, i) => <p key={i} className="text-red-500 text-xs mt-1">{e}</p>)}
-                    </div>
-                  )}
-
-                  <div className="glass-card rounded-2xl p-6 mb-6">
-                    <h3 className="font-bold text-slate-800 mb-4">הזמן משתמש חדש</h3>
-                    <div className="grid grid-cols-5 gap-4 items-end">
-                      <div className="flex flex-col gap-1.5">
-                        <label htmlFor="invite-name" className="text-xs text-slate-800">שם מלא *</label>
-                        <input id="invite-name" className="input-field" value={inviteForm.full_name}
-                          onChange={e => setInviteForm(p => ({ ...p, full_name: e.target.value }))} placeholder="שם מלא" />
-                      </div>
-                      <div className="flex flex-col gap-1.5">
-                        <label htmlFor="invite-email" className="text-xs text-slate-800">אימייל *</label>
-                        <input id="invite-email" className="input-field" type="email" dir="ltr" value={inviteForm.email}
-                          onChange={e => setInviteForm(p => ({ ...p, email: e.target.value }))} placeholder="user@example.com" />
-                      </div>
-                      <div className="flex flex-col gap-1.5">
-                        <label htmlFor="invite-role" className="text-xs text-slate-800">תפקיד</label>
-                        <select id="invite-role" className="input-field text-sm" value={inviteForm.role}
-                          onChange={e => setInviteForm(p => ({ ...p, role: e.target.value }))}>
-                          <option value="advisor">יועץ</option>
-                          <option value="manager">מנהל</option>
-                          {myRole === "owner" && <option value="owner">בעלים</option>}
-                        </select>
-                      </div>
-                      <div className="flex flex-col gap-1.5">
-                        <span className="text-xs text-slate-800">תחומי ידע</span>
-                        <MultiSelectChips neutral options={DOMAIN_OPTIONS}
-                          selected={inviteForm.control_domains}
-                          onChange={v => setInviteForm(p => ({ ...p, control_domains: v }))}
-                          placeholder="בחר תחומים" />
-                      </div>
-                      <button onClick={inviteUser} disabled={!inviteForm.email || !inviteForm.full_name || inviting} className="btn-blue text-sm px-5 py-2">
-                        {inviting ? "שולח..." : "שלח הזמנה"}
-                      </button>
-                    </div>
-                    {inviteMsg && (
-                      <div className="mt-3">
-                        <span className={`text-sm ${inviteMsg.includes("שגיאה") ? "text-red-500" : "text-green-600"}`}>{inviteMsg}</span>
-                      </div>
-                    )}
-                  </div>
-                </>
+              {showAddUserModal && (myRole === "owner" || canInviteUsers) && (
+                <AddUserModal
+                  inviteForm={inviteForm}
+                  setInviteForm={setInviteForm}
+                  myRole={myRole}
+                  inviteUser={inviteUser}
+                  inviting={inviting}
+                  inviteMsg={inviteMsg}
+                  WORK_PHONE_REGEX={WORK_PHONE_REGEX}
+                  userImportRef={userImportRef}
+                  handleUserImport={handleUserImport}
+                  importingUsers={importingUsers}
+                  userImportProgressMsg={userImportProgressMsg}
+                  userImportResult={userImportResult}
+                  onClose={() => setShowAddUserModal(false)}
+                />
               )}
 
               {loadingUsers && (
@@ -3300,17 +3620,40 @@ export default function AdminPage() {
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-slate-100">
+                      <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium whitespace-nowrap">תפקיד</th>
                       <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium whitespace-nowrap">שם</th>
                       <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium whitespace-nowrap">אימייל</th>
-                      <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium whitespace-nowrap">תפקיד</th>
-                      <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium whitespace-nowrap">סטטוס</th>
+                      <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium whitespace-nowrap">טלפון עבודה</th>
                       <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium whitespace-nowrap">תחומי ידע</th>
                       <th scope="col" className="px-5 py-3 text-center text-slate-500 font-medium whitespace-nowrap">הרשאות בהתאמה אישית</th>
+                      {voicenterEnabled && (
+                        <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium whitespace-nowrap">שיוך VOICENTER</th>
+                      )}
+                      <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium whitespace-nowrap">סטטוס</th>
                     </tr>
                   </thead>
                   <tbody>
                     {sortByRole(users).map(u => (
                       <tr key={u.id} className="border-b border-slate-50 hover:bg-slate-50 transition-colors">
+                        <td className="px-5 py-3 whitespace-nowrap">
+                          <RoleSelect
+                            value={u.role}
+                            onChange={v => requestRoleChange(u, v)}
+                            disabled={canChangeRole !== true || (myRole === "manager" && u.role === "owner") || (myRole === "manager" && u.id === myUserId)}
+                            ariaLabel={`תפקיד ${u.full_name || u.email}`}
+                            title={
+                              myRole === "manager" && u.id === myUserId ? "מנהל לא יכול לשנות את תפקיד עצמו" :
+                              canChangeRole !== true ? "אין הרשאה לשנות תפקידים" :
+                              myRole === "manager" && u.role === "owner" ? "מנהל לא יכול לשנות תפקיד של בעלים" :
+                              undefined
+                            }
+                            options={[
+                              { value: "advisor", label: "יועץ" },
+                              { value: "manager", label: "מנהל" },
+                              ...((myRole === "owner" || u.role === "owner") ? [{ value: "owner", label: "בעלים" }] : []),
+                            ]}
+                          />
+                        </td>
                         <td className="px-5 py-3 whitespace-nowrap">
                           {editingUser?.id === u.id ? (
                             <div className="flex items-center gap-2">
@@ -3330,97 +3673,92 @@ export default function AdminPage() {
                           )}
                         </td>
                         <td className="px-5 py-3 text-slate-600 whitespace-nowrap" dir="ltr">{u.email}</td>
-                        <td className="px-5 py-3 whitespace-nowrap">
-                          <div className="flex items-center gap-2">
-                            <label htmlFor={`role-${u.id}`} className="sr-only">תפקיד {u.full_name || u.email}</label>
-                            <select id={`role-${u.id}`} value={u.role}
-                              onChange={e => requestRoleChange(u, e.target.value)}
-                              disabled={canChangeRole !== true || (myRole === "manager" && u.role === "owner") || (myRole === "manager" && u.id === myUserId)}
-                              title={
-                                myRole === "manager" && u.id === myUserId ? "מנהל לא יכול לשנות את תפקיד עצמו" :
-                                canChangeRole !== true ? "אין הרשאה לשנות תפקידים" :
-                                myRole === "manager" && u.role === "owner" ? "מנהל לא יכול לשנות תפקיד של בעלים" :
-                                undefined
-                              }
-                              className={`text-sm text-slate-700 border border-slate-200 rounded-lg px-2 py-1 bg-white ${canChangeRole !== true || (myRole === "manager" && u.role === "owner") || (myRole === "manager" && u.id === myUserId) ? "opacity-40 cursor-not-allowed" : ""}`}>
-                              <option value="advisor">יועץ</option>
-                              <option value="manager">מנהל</option>
-                              {(myRole === "owner" || u.role === "owner") && <option value="owner">בעלים</option>}
-                            </select>
-                          </div>
-                        </td>
-                        <td className="px-5 py-3 whitespace-nowrap">
-                          {u.status === "pending" ? (
-                            <span className="text-xs px-2.5 py-1 rounded-full font-medium"
-                              style={{ background: "rgba(245,158,11,0.12)", color: "#b45309" }}>
-                              ממתין לאישור
-                            </span>
+                        <td className="px-5 py-3 whitespace-nowrap" dir="ltr">
+                          {phoneEditingIds.has(u.id) ? (
+                            <>
+                              <label htmlFor={`phone-${u.id}`} className="sr-only">טלפון עבודה {u.full_name || u.email}</label>
+                              <input id={`phone-${u.id}`} autoFocus type="tel" inputMode="numeric" dir="ltr"
+                                className={`input-field text-sm w-32 ${phoneErrors[u.id] ? "border-red-400" : ""}`}
+                                value={phoneDrafts[u.id] !== undefined ? phoneDrafts[u.id] : (u.work_phone || "")}
+                                maxLength={10}
+                                onChange={e => setPhoneDrafts(p => ({ ...p, [u.id]: e.target.value.replace(/\D/g, "").slice(0, 10) }))}
+                                onBlur={() => saveUserPhone(u)}
+                                onKeyDown={e => { if (e.key === "Enter") e.target.blur(); if (e.key === "Escape") cancelEditPhone(u); }}
+                              />
+                              {phoneErrors[u.id] && (
+                                <p role="alert" className="text-xs text-red-500 mt-1 whitespace-normal">{phoneErrors[u.id]}</p>
+                              )}
+                            </>
+                          ) : u.work_phone ? (
+                            <button type="button" onClick={() => startEditPhone(u)}
+                              className="text-slate-900 bg-transparent border-0 p-0 m-0 cursor-pointer hover:text-blue-600">
+                              {formatWorkPhone(u.work_phone)}
+                            </button>
                           ) : (
-                            <span className="text-xs px-2.5 py-1 rounded-full font-medium"
-                              style={{ background: "rgba(34,197,94,0.12)", color: "#15803d" }}>
-                              רשום
-                            </span>
+                            <div className="flex justify-center">
+                              <button
+                                type="button"
+                                onClick={() => startEditPhone(u)}
+                                aria-label={`הוסף טלפון עבודה: ${u.full_name || u.email}`}
+                                className="w-7 h-7 flex items-center justify-center rounded-lg border border-dashed border-slate-300 text-slate-400 hover:text-blue-600 hover:border-blue-400 hover:bg-blue-50 transition-colors"
+                              >
+                                <span aria-hidden="true" className="text-base leading-none">+</span>
+                              </button>
+                            </div>
                           )}
                         </td>
                         <td className="px-5 py-3">
                           <MultiSelectChips compact options={DOMAIN_OPTIONS}
+                            className={(u.control_domains || []).length === 0 ? "flex justify-center" : ""}
                             selected={u.control_domains || []}
                             onChange={v => saveUserDomains(u, v)}
                             placeholder="בחר תחומים"
                             emptyIcon />
                         </td>
-                        <td className="px-5 py-3 whitespace-nowrap relative">
-                          <div className={`flex gap-1 items-center justify-center ${(myRole === "owner" || canDeleteUsers) ? "pl-9" : ""}`}>
-                            {u.status === "pending" && (
-                              <>
-                                <button
-                                  onClick={() => resendInvite(u)}
-                                  disabled={resendingUserId === u.id}
-                                  className="text-xs px-3 py-1.5 rounded-lg text-amber-600 hover:bg-amber-50 transition-colors disabled:opacity-40"
-                                >
-                                  {resendingUserId === u.id ? "שולח..." : "שלח מחדש"}
-                                </button>
-                                {resendMsg?.id === u.id && (
-                                  <span className={`text-xs font-medium ${resendMsg.ok ? "text-green-600" : "text-red-500"}`}>
-                                    {resendMsg.ok ? "✓ נשלח" : "שגיאה"}
-                                  </span>
-                                )}
-                              </>
-                            )}
+                        <td className="px-5 py-3 whitespace-nowrap">
+                          <div className="flex items-center justify-center">
                             {u.role !== "owner" && (
                               <button onClick={() => openOverridePanel(u)}
                                 aria-label={`הרשאות אישיות: ${u.full_name || u.email}`}
-                                className="text-xs px-3 py-1.5 rounded-lg text-slate-500 hover:bg-slate-100 transition-colors inline-flex items-center gap-1.5">
+                                className="relative w-7 h-7 flex items-center justify-center rounded-lg border border-dashed border-slate-300 text-slate-400 hover:text-blue-600 hover:border-blue-400 hover:bg-blue-50 transition-colors">
+                                <span aria-hidden="true" className="text-base leading-none">+</span>
                                 {overrideCounts[u.id] > 0 && (
-                                  <span className="inline-flex items-center justify-center w-4 h-4 text-[10px] font-bold bg-blue-500 text-white rounded-full leading-none">
+                                  <span className="absolute -top-1.5 -right-1.5 inline-flex items-center justify-center w-4 h-4 text-[10px] font-bold bg-blue-500 text-white rounded-full leading-none">
                                     {overrideCounts[u.id]}
                                   </span>
                                 )}
-                                הוסף
                               </button>
                             )}
                           </div>
+                        </td>
+                        {voicenterEnabled && (
+                          <td className="px-5 py-3">
+                            <MultiSelectChips compact
+                              options={voicenterKnownReps.map(r => ({ value: r.representative_code, label: r.representative_name || r.representative_code }))}
+                              className={voicenterMappings.filter(m => m.advisor_id === u.id).length === 0 ? "flex justify-center" : ""}
+                              selected={voicenterMappings.filter(m => m.advisor_id === u.id).map(m => m.representative_code)}
+                              onChange={codes => saveUserVoicenterMapping(u, codes)}
+                              placeholder="בחר שם ב-VOICENTER"
+                              emptyIcon />
+                          </td>
+                        )}
+                        <td className={`px-5 py-3 whitespace-nowrap relative ${(myRole === "owner" || canDeleteUsers) ? "pl-9" : ""}`}>
+                          <span className="text-slate-600">
+                            {u.status === "pending" ? "ממתין לאישור" : "פעיל"}
+                          </span>
                           {(myRole === "owner" || canDeleteUsers) && (
-                            <div className="absolute left-2 top-1/2 -translate-y-1/2" onClick={e => e.stopPropagation()}>
-                              <div className="relative">
-                                <button
-                                  onClick={() => setOpenActionsMenu(openActionsMenu === u.id ? null : u.id)}
-                                  aria-label="פעולות נוספות"
-                                  className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100 transition-colors"
-                                >
-                                  <svg aria-hidden="true" className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-                                    <circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/>
-                                  </svg>
-                                </button>
-                                {openActionsMenu === u.id && (
-                                  <div className="absolute left-0 top-full mt-1 z-20 bg-white rounded-xl shadow-lg border border-slate-100 py-1 min-w-[80px]">
-                                    <button
-                                      onClick={() => handleDeleteButtonClick(u)}
-                                      className="w-full text-right px-4 py-2 text-sm text-red-500 hover:bg-red-50 transition-colors"
-                                    >מחק</button>
-                                  </div>
-                                )}
-                              </div>
+                            <div className="absolute left-2 top-1/2 -translate-y-1/2">
+                              <UserActionsMenu
+                                open={openActionsMenu === u.id}
+                                onToggle={() => setOpenActionsMenu(openActionsMenu === u.id ? null : u.id)}
+                                onClose={() => setOpenActionsMenu(null)}
+                                ariaLabel={`פעולות נוספות: ${u.full_name || u.email}`}
+                                showResend={u.status === "pending"}
+                                resending={resendingUserId === u.id}
+                                resendResult={resendMsg?.id === u.id ? (resendMsg.ok ? "ok" : "error") : null}
+                                onResend={() => resendInvite(u)}
+                                onDelete={() => { setOpenActionsMenu(null); handleDeleteButtonClick(u); }}
+                              />
                             </div>
                           )}
                         </td>
@@ -3517,6 +3855,11 @@ export default function AdminPage() {
           {/* Calls Tab */}
           {activeTab === "calls" && showCallsTab && (
             <AdminCallsTab users={users} />
+          )}
+
+          {/* Performance Tab */}
+          {activeTab === "performance" && showPerformanceTab && (
+            <AdminPerformanceTab users={users} loadingUsers={loadingUsers} loadUsers={loadUsers} />
           )}
 
           {/* Collection Tab */}
@@ -3776,3 +4119,4 @@ export default function AdminPage() {
     </div>
   );
 }
+

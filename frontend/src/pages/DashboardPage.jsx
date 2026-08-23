@@ -500,6 +500,8 @@ const CONTROL_LETTER_COLUMNS = [
   { key: "control_letter_response_file",  label: "מכתב בקרה - מכתב תשובה",   field: "response_letter_file_name", fmt: "file" },
 ];
 
+const DEFAULT_VISIBLE_MOVABLE_KEYS = ["symbol", "stage", "city", "meetings_completed", "authority", "meetings_hours"];
+
 const ALL_COLUMNS = [...MOVABLE_COLUMNS, ...SUMMARY_COLUMNS, ...CLOSURE_COLUMNS, ...CONTROL_LETTER_COLUMNS];
 const DEFAULT_COL_ORDER = ALL_COLUMNS.map(c => c.key);
 
@@ -1631,7 +1633,7 @@ export default function DashboardPage() {
   const [filtersPersistKey, setFiltersPersistKey] = useState(null);
   const [colOrder, setColOrder] = useState(DEFAULT_COL_ORDER);
   const [colVisible, setColVisible] = useState(() => ({
-    ...Object.fromEntries(MOVABLE_COLUMNS.map(c => [c.key, true])),
+    ...Object.fromEntries(MOVABLE_COLUMNS.map(c => [c.key, DEFAULT_VISIBLE_MOVABLE_KEYS.includes(c.key)])),
     ...Object.fromEntries(SUMMARY_COLUMNS.map(c => [c.key, false])),
     ...Object.fromEntries(CLOSURE_COLUMNS.map(c => [c.key, false])),
     ...Object.fromEntries(CONTROL_LETTER_COLUMNS.map(c => [c.key, false])),
