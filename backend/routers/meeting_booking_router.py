@@ -332,6 +332,9 @@ def book_meeting_slot(token: str, body: dict):
         "academic_year": DEFAULT_ACADEMIC_YEAR,
         "reminder_enabled": True,
         "notes": "נקבע ע\"י בית הספר דרך קישור שריון עצמאי",
+        # Same default as every other meeting-creation path — editable afterward like any
+        # other meeting_type value, but should never land unset.
+        "meeting_type": "remote",
     }
     try:
         res = db.table("meetings").insert(meeting_data).execute()
@@ -342,9 +345,11 @@ def book_meeting_slot(token: str, body: dict):
 
     calendar_synced = False
     try:
+        from routers.schools_router import _build_meeting_subject
         with graph_client.calendar_sync_lock(db, meeting["id"]) as acquired:
             if acquired:
-                sync_map = graph_client.sync_meeting_create(db, token_row["org_id"], meeting, subject=f"פגישת ליווי כלכלי - {school['name']}")
+                subject = _build_meeting_subject(db, token_row["school_id"], meeting.get("participants"), meeting.get("primary_contact_key"))
+                sync_map = graph_client.sync_meeting_create(db, token_row["org_id"], meeting, subject=subject)
                 if sync_map:
                     graph_client.persist_calendar_sync(db, meeting["id"], sync_map)
                     calendar_synced = any(v.get("status") == "synced" for v in sync_map.values())
@@ -427,6 +432,8 @@ def _book_range_slot(db, token_row: dict, range_key: str, body: dict) -> dict:
         # _find_existing_meeting and task_logic.py's success-check can tell a "separate"
         # condition's two sibling ranges apart instead of treating either one as satisfying both.
         "stage_scope": range_row.get("stage_scope"),
+        # Same default as every other meeting-creation path.
+        "meeting_type": "remote",
     }
     try:
         res = db.table("meetings").insert(meeting_data).execute()
@@ -437,9 +444,10 @@ def _book_range_slot(db, token_row: dict, range_key: str, body: dict) -> dict:
 
     calendar_synced = False
     try:
+        from routers.schools_router import _build_meeting_subject
         with graph_client.calendar_sync_lock(db, meeting["id"]) as acquired:
             if acquired:
-                subject = f"{range_row.get('label') or 'פגישה'} - {school['name']}"
+                subject = _build_meeting_subject(db, token_row["school_id"], meeting.get("participants"), meeting.get("primary_contact_key"))
                 sync_map = graph_client.sync_meeting_create(db, token_row["org_id"], meeting, subject=subject)
                 if sync_map:
                     graph_client.persist_calendar_sync(db, meeting["id"], sync_map)

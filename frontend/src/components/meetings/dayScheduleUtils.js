@@ -107,6 +107,33 @@ export async function fetchMonthBusyByDay(advisorId, viewYear, viewMonth) {
   }
 }
 
+// Like fetchMonthBusyByDay, but keyed by full ISO date ("YYYY-MM-DD") instead of day-of-month
+// — a month-keyed map breaks the moment a 7-day window spans two different months (day 31 in
+// one month collides with day 1/2/etc. in the next). Used by the "ביצועים" admin tab, which
+// looks at an arbitrary day/week window rather than a fixed calendar month.
+export async function fetchRangeBusyByDate(advisorId, startDateStr, endDateStrExclusive) {
+  if (!advisorId) return {};
+  const cacheKey = `range:${advisorId}:${startDateStr}:${endDateStrExclusive}`;
+  const cached = getCached(cacheKey);
+  if (cached) return cached;
+  const start = new Date(`${startDateStr}T00:00:00`).toISOString();
+  const end = new Date(`${endDateStrExclusive}T00:00:00`).toISOString();
+  try {
+    const res = await axios.get("/calendar/freebusy", { params: { advisor_id: advisorId, start, end } });
+    if (res.data?.ok === false) return null;
+    const byDate = {};
+    for (const b of (res.data?.busy || [])) {
+      const dateKey = b.start.slice(0, 10);
+      if (!byDate[dateKey]) byDate[dateKey] = [];
+      byDate[dateKey].push({ id: b.id, startHM: b.start.slice(11, 16), endHM: b.end.slice(11, 16), subject: b.subject });
+    }
+    setCached(cacheKey, byDate);
+    return byDate;
+  } catch {
+    return null;
+  }
+}
+
 // Traffic-light classification for the day dot, restricted to 08:00–17:00: "green" = no
 // events at all in that window, "orange" = a free gap bigger than 30 min exists, "red" =
 // no gap bigger than 30 min (exactly 30 doesn't count as "enough").

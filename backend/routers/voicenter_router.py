@@ -857,6 +857,37 @@ def delete_mapping(user: Annotated[dict, Depends(get_current_user)], mapping_id:
     return {"ok": True}
 
 
+@router.get("/known-reps")
+def list_known_reps(user: Annotated[dict, Depends(get_current_user)]):
+    """Every (representative_code, representative_name) pair ever seen in this org's calls —
+    populated by process_new_calls below. This is the option list for the VOICENTER-mapping
+    picker in ניהול-משתמשים: it lets the picker show every rep that has ever called without
+    hitting Voicenter's live API (which has no "list all agents" endpoint) on every page load."""
+    _require_manager(user)
+
+    rows: list = []
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            rows = (
+                db.table("voicenter_known_reps")
+                .select("representative_code, representative_name, last_seen_at")
+                .eq("org_id", user["org_id"])
+                .order("representative_name")
+                .execute()
+            ).data or []
+            break
+        except Exception as exc:
+            if attempt == 0:
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("voicenter list_known_reps failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Scheduled job — detects new calls with an ambiguous contact (same phone number
 # is a contact at more than one school) and notifies who needs to resolve it.
@@ -898,6 +929,23 @@ def process_new_calls(request: Request):
         except Exception as exc:
             logger.warning("process_new_calls: skipping org=%s (unexpected error: %s)", org_id, exc)
             continue
+
+        # Record every rep code/name seen in this scan window — feeds the option list for the
+        # VOICENTER-mapping picker in ניהול-משתמשים (see list_known_reps above). Non-fatal:
+        # a failure here must never block the ambiguous-contact notification logic below.
+        try:
+            seen_reps = {c["representative_code"]: c.get("representative_name") for c in result["calls"] if c.get("representative_code")}
+            if seen_reps:
+                now_iso = now.isoformat()
+                db.table("voicenter_known_reps").upsert(
+                    [
+                        {"org_id": org_id, "representative_code": code, "representative_name": name, "last_seen_at": now_iso}
+                        for code, name in seen_reps.items()
+                    ],
+                    on_conflict="org_id,representative_code",
+                ).execute()
+        except Exception as exc:
+            logger.warning("process_new_calls: known-reps upsert failed (non-fatal) for org=%s: %s", org_id, exc)
 
         ambiguous_calls = [c for c in result["calls"] if c.get("pending_school_resolution")]
         if ambiguous_calls:
