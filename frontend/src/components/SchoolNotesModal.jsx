@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import axios from "axios";
+import { StickyNote } from "lucide-react";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 
 export const AUTHOR_COLORS = [
@@ -144,7 +145,12 @@ export function NotesThread({ groups, currentUser, onCreate, onEdit, onDelete, c
           )}
           {groups.length === 0 && newRecordText === null && (
             <tr>
-              <td colSpan={3} className="px-3 py-6 text-center text-xs text-slate-400">אין עדיין הערות</td>
+              <td colSpan={3} className="px-3 py-6">
+                <div className="flex flex-col items-center gap-1.5 text-slate-400">
+                  <StickyNote className="w-5 h-5 opacity-40" aria-hidden="true" />
+                  <span className="text-xs">אין עדיין הערות</span>
+                </div>
+              </td>
             </tr>
           )}
           {groups.map(group => (

@@ -72,7 +72,7 @@ export default function MeetingAutomationsModal({ onClose }) {
                 const active = !!settings?.[a.key];
                 const saving = savingKey === a.key;
                 return (
-                  <tr key={a.key} className="border-b border-slate-100">
+                  <tr key={a.key} className="border-b border-slate-300">
                     <td className="py-3 px-2 text-slate-700">{a.description}</td>
                     <td className="py-3 px-2">
                       <button

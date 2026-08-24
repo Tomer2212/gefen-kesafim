@@ -184,6 +184,7 @@ def freebusy(
     advisor_id: str,
     start: str = Query(..., description="ISO datetime, e.g. 2026-07-20T00:00:00"),
     end: str = Query(..., description="ISO datetime, e.g. 2026-07-21T00:00:00"),
+    raw: bool = Query(False, description="Skip reconcile_busy_blocks — return the calendar exactly as Outlook shows it, including events tied to meetings we've since marked completed/cancelled. Used by the 'ביצועים' historical view; the scheduling popovers (DayScheduleBlocks) must keep the reconciled version so a stale event doesn't block re-booking a slot."),
     user: Annotated[dict, Depends(get_current_user)] = None,
 ):
     for attempt in range(2):
@@ -196,6 +197,8 @@ def freebusy(
             # if the advisor were genuinely free.
             if blocks is None:
                 return {"busy": [], "ok": False}
+            if raw:
+                return {"busy": blocks, "ok": True}
             return {"busy": graph_client.reconcile_busy_blocks(db, blocks), "ok": True}
         except Exception as exc:
             if attempt == 0:

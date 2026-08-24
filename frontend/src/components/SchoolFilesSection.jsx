@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { FolderOpen } from "lucide-react";
 import { buildAuthorColorMap, canDeleteSegment, canEditSegment, formatUpdateDate } from "./SchoolNotesModal";
 
 export function FilesThread({ files, currentUser, onUpload, onEditDescription, onDelete, onDownload, title }) {
@@ -83,7 +84,12 @@ export function FilesThread({ files, currentUser, onUpload, onEditDescription, o
         <tbody>
           {files.length === 0 && (
             <tr>
-              <td colSpan={4} className="px-3 py-6 text-center text-xs text-slate-400">אין עדיין קבצים</td>
+              <td colSpan={4} className="px-3 py-6">
+                <div className="flex flex-col items-center gap-1.5 text-slate-400">
+                  <FolderOpen className="w-5 h-5 opacity-40" aria-hidden="true" />
+                  <span className="text-xs">אין עדיין קבצים</span>
+                </div>
+              </td>
             </tr>
           )}
           {files.map(f => {

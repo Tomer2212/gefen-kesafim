@@ -40,10 +40,8 @@ export const ALL_TASK_COLUMNS = [
     getValue: t => t.cached_total_schools ?? 0,
   },
   {
-    key: "actions_needed", label: "פעולות נחוצות", kind: "number", defaultVisible: true,
-    getValue: t => t.cached_actions_needed ?? 0,
-  },
-  {
+    // Displayed as "X/Y" (completed/needed) — see GenericCell's cached_actions_completed
+    // special-case in TaskRow.jsx. getValue stays the plain completed-count for sorting/filtering.
     key: "cached_actions_completed", label: "פעולות שהושלמו", kind: "number", defaultVisible: true,
     getValue: t => t.cached_actions_completed ?? 0,
   },

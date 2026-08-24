@@ -28,6 +28,9 @@ function GenericCell({ col, task }) {
   if (col.key === "cached_progress_pct") {
     return <td className="px-3 py-2 text-center text-slate-700 text-xs font-semibold">{task.cached_progress_pct ?? 0}%</td>;
   }
+  if (col.key === "cached_actions_completed") {
+    return <td className="px-3 py-2 text-center text-slate-700 text-xs">{task.cached_actions_completed ?? 0}/{task.cached_actions_needed ?? 0}</td>;
+  }
   const raw = col.getValue(task);
   const display = col.kind === "enum" && col.options ? (col.options.find(o => o.value === raw)?.label ?? raw ?? "—") : (raw === "" || raw === null || raw === undefined ? "—" : raw);
   const align = col.kind === "number" ? "text-center" : "";
@@ -75,7 +78,7 @@ export default function TaskRow({ task, visibleColumns, expanded, onToggleExpand
       <tr
         onClick={() => onToggleExpand(task.id)}
         aria-expanded={expanded}
-        className={`border-b border-slate-100 cursor-pointer transition-colors ${hasProblems ? "bg-red-50/50 hover:bg-red-50" : "hover:bg-slate-50"}`}
+        className={`border-b border-slate-300 cursor-pointer transition-colors ${hasProblems ? "bg-red-50/50 hover:bg-red-50" : "hover:bg-slate-50"}`}
       >
         <td className="px-2 py-2 text-center text-slate-400" aria-hidden="true">{expanded ? "▼" : "◀"}</td>
         {visibleColumns.map(col => {
@@ -127,7 +130,7 @@ export default function TaskRow({ task, visibleColumns, expanded, onToggleExpand
         </td>
       </tr>
       {expanded && (
-        <tr className="border-b border-slate-100 bg-slate-50/40">
+        <tr className="border-b border-slate-300 bg-slate-50/40">
           <td colSpan={colSpan} className="px-3 py-3">
             <TaskRowExpandedDetail taskId={task.id} onTaskChange={onTaskRefreshed} />
           </td>

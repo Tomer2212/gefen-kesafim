@@ -471,7 +471,7 @@ export function MeetingRow({
         />
       )}
       <tr ref={rowRef} onBlur={handleRowBlur}
-        className="border-b border-slate-100 hover:bg-slate-50/50 transition-colors group">
+        className="border-b border-slate-300 hover:bg-slate-50/50 transition-colors group">
         {selectable && (
           <td className="py-2.5 px-2 text-center">
             <input type="checkbox" checked={!!selected} onChange={() => onToggleSelect?.(meeting.id)}
@@ -828,7 +828,7 @@ export function MeetingRow({
       </tr>
       {expanded && (
         <tr>
-          <td colSpan={colSpanTotal} className="p-0 border-b border-slate-100 bg-slate-50/50">
+          <td colSpan={colSpanTotal} className="p-0 border-b border-slate-300 bg-slate-50/50">
             <MeetingActualDetail meeting={meeting} />
           </td>
         </tr>

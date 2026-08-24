@@ -23,6 +23,7 @@ import { AdvisorSearch } from "../components/AdvisorSearch";
 import { AccessSelector } from "../components/AccessSelector";
 import HourMinuteInput from "../components/HourMinuteInput";
 import { MultiSelectChips } from "../components/MultiSelectChips";
+import { School, Users, Handshake, Briefcase, StickyNote, Folder, CalendarRange } from "lucide-react";
 import { defaultMeetingServiceType, resolveDefaultAdvisorIds } from "../components/meetings/constants";
 import { AdvisorCell } from "../components/meetings/AdvisorCell";
 import AdvisorAccessGrantModal from "../components/meetings/AdvisorAccessGrantModal";
@@ -213,12 +214,10 @@ function UpdateRequestSuccessModal({ changes, originalValues, onClose }) {
   );
 }
 
-const EMPTY_BORDER_STYLE = {
-  border: "1px solid #fca5a5",
-  borderRadius: "4px",
-  padding: "1px 5px",
-  display: "inline-block",
-};
+// No info to show → rendered in plain slate-400 text (via valCls/contactValStyle's className),
+// no box/border. Kept as a style object (now empty) so existing valStyle()/contactValStyle()
+// call sites don't need to change.
+const EMPTY_BORDER_STYLE = {};
 
 function formatDate(iso) {
   if (!iso) return "—";
@@ -391,10 +390,12 @@ function validateEmail(email) {
   return "";
 }
 
+// `isEmpty` is accepted for call-site compatibility but no longer reddens the border —
+// only a genuine validation error (hasErr, e.g. after a failed save attempt) does that.
+// An empty-but-not-yet-required field should look neutral, not alarming.
 function editFieldCls(hasErr, isEmpty = false) {
   const base = "w-full text-sm font-semibold text-slate-800 border rounded-md px-2 py-0.5 bg-transparent focus:outline-none focus:ring-1";
   if (hasErr) return `${base} border-red-400 focus:border-red-400 focus:ring-red-100`;
-  if (isEmpty) return `${base} border-red-300 focus:border-blue-400 focus:ring-blue-100`;
   return `${base} border-slate-300 focus:border-blue-400 focus:ring-blue-100`;
 }
 
@@ -3267,6 +3268,33 @@ export default function SchoolPage() {
   const labelCls = "text-sm text-slate-500 py-1.5 whitespace-nowrap flex-shrink-0";
   const editLabelCls = "text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]";
 
+  // ── Section card styling (visual grouping for פרטי בית הספר tab) ──
+  // Each logical section (פרטי מוסד / אנשי קשר / ליווי / ...) renders as its own
+  // white card with a subtle border+shadow and a small branded icon badge in the
+  // header, so the eye can separate sections at a glance. Purely presentational —
+  // no change to which fields exist or how they behave.
+  const sectionCardCls = "bg-white rounded-xl border border-slate-200/80 shadow-sm px-6 py-5";
+  // Centered header: title (with icon badge) sits in the middle; an optional side
+  // action (edit button / dots menu) is pinned to the left via absolute positioning
+  // so it doesn't push the title off-center.
+  const sectionHeaderRowCls = "relative flex items-center justify-center mb-4 pb-3 border-b border-slate-100";
+  const sectionTitleCls = "text-[15px] font-bold text-slate-800 flex items-center gap-2";
+  function iconBadge(Icon) {
+    return (
+      <span aria-hidden="true" className="inline-flex items-center justify-center w-7 h-7 rounded-full bg-blue-50 text-blue-600 flex-shrink-0">
+        <Icon className="w-4 h-4" strokeWidth={2} />
+      </span>
+    );
+  }
+  const colDividerCls = "border-slate-200/80";
+  const pillCls = "inline-flex items-center bg-slate-100 text-slate-700 font-medium text-xs px-2 py-0.5 rounded-full";
+  const CLIENT_STATUS_BADGE_CLS = {
+    active: "bg-emerald-50 text-emerald-700 border-emerald-200",
+    inactive: "bg-slate-100 text-slate-500 border-slate-200",
+    in_progress: "bg-amber-50 text-amber-700 border-amber-200",
+    former: "bg-rose-50 text-rose-600 border-rose-200",
+  };
+
   function valCls(val) {
     return `text-sm py-1.5 ${val ? "font-semibold text-slate-800" : "text-slate-400 font-normal"}`;
   }
@@ -3490,17 +3518,18 @@ export default function SchoolPage() {
           {/* ─── TAB: פרטי בית הספר ─── */}
           {activeTab === "info" && (
             <div>
-              <div className="glass-card rounded-2xl px-6 py-5 mb-6">
+              <div className="rounded-xl mb-6 p-5 bg-slate-50/50">
 
                 {/* ─── EDIT MODE ─── */}
                 {isEditing ? (
-                <div>
-                  {/* Header */}
+                <div className="space-y-5">
+                  {/* פרטי מוסד card */}
+                  <div className={sectionCardCls}>
                   <div className="mb-4">
-                    <div className="flex items-center justify-between">
-                      <p className="text-sm font-semibold text-slate-700">פרטי מוסד</p>
+                    <div className={sectionHeaderRowCls}>
+                      <p className={sectionTitleCls}>{iconBadge(School)}פרטי מוסד</p>
                       {(isRequestMode || canDeleteSchool) && (
-                        <div className="relative" ref={editDotsRef}>
+                        <div className="absolute left-0" ref={editDotsRef}>
                           <button
                             type="button"
                             onClick={() => setShowEditDots(o => !o)}
@@ -3538,7 +3567,7 @@ export default function SchoolPage() {
                   {/* 3-column grid — each column is its own label/input grid */}
                   <div className="grid grid-cols-3 gap-x-8">
                     {/* Right column */}
-                    <div style={editColGridStyle}>
+                    <div style={editColGridStyle} className={`border-l ${colDividerCls} pl-8`}>
                       <label htmlFor="edit-name" className={editLabelCls}>שם מוסד:</label>
                       <div className="py-0.5">
                         <input id="edit-name" className={editFieldCls(triedSave && !editForm.name, !editForm.name)} value={editForm.name}
@@ -3570,7 +3599,7 @@ export default function SchoolPage() {
                     </div>
 
                     {/* Middle column */}
-                    <div style={editColGridStyle}>
+                    <div style={editColGridStyle} className={`border-l ${colDividerCls} pl-8`}>
                       <label htmlFor="edit-city" className={editLabelCls}>עיר:</label>
                       <div className="py-0.5">
                         <input id="edit-city" className={editFieldCls(false, !editForm.city)} value={editForm.city}
@@ -3620,19 +3649,21 @@ export default function SchoolPage() {
                       </div>
                     </div>
                   </div>
+                  </div>
 
-                  {/* Contact table */}
-                  <div className="mt-8 mb-2">
-                    <p className="text-sm font-semibold text-slate-700 text-right mb-4">אנשי קשר</p>
-                    <table className="w-full text-sm">
+                  {/* אנשי קשר card */}
+                  <div className={sectionCardCls}>
+                  <div>
+                    <p className={`${sectionTitleCls} justify-center mb-4 pb-3 border-b border-slate-100`}>{iconBadge(Users)}אנשי קשר</p>
+                    <table className="w-full text-sm border-separate" style={{ borderSpacing: 0 }}>
                       <thead>
-                        <tr>
-                          <th scope="col" className="text-right pb-2 text-xs text-slate-400 font-semibold uppercase tracking-wide">תפקיד</th>
-                          <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-400 font-semibold uppercase tracking-wide">שם</th>
-                          <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-400 font-semibold uppercase tracking-wide">טלפון</th>
-                          <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-400 font-semibold uppercase tracking-wide">מייל</th>
-                          <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-400 font-semibold uppercase tracking-wide">יום חופשי</th>
-                          <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-400 font-semibold uppercase tracking-wide">אחראי תיאום פגישות</th>
+                        <tr className="bg-slate-50">
+                          <th scope="col" className="text-right py-2 px-2 rounded-r-lg text-xs text-slate-500 font-semibold uppercase tracking-wide">תפקיד</th>
+                          <th scope="col" className="text-right py-2 px-2 text-xs text-slate-500 font-semibold uppercase tracking-wide">שם</th>
+                          <th scope="col" className="text-right py-2 px-2 text-xs text-slate-500 font-semibold uppercase tracking-wide">טלפון</th>
+                          <th scope="col" className="text-right py-2 px-2 text-xs text-slate-500 font-semibold uppercase tracking-wide">מייל</th>
+                          <th scope="col" className="text-right py-2 px-2 text-xs text-slate-500 font-semibold uppercase tracking-wide">יום חופשי</th>
+                          <th scope="col" className="text-right py-2 px-2 rounded-l-lg text-xs text-slate-500 font-semibold uppercase tracking-wide">אחראי תיאום פגישות</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -3640,12 +3671,12 @@ export default function SchoolPage() {
                           editForm.stage === "sheshshnati" ? PRINCIPAL_TICHON_ROW : PRINCIPAL_SINGLE_ROW,
                           ...(editForm.stage === "sheshshnati" && !editForm.principal_same_person ? [PRINCIPAL_CHATIVA_ROW] : []),
                           ...CONTACT_ROWS,
-                        ].map(row => {
+                        ].map((row, ri) => {
                           const phoneErr = validateContactPhone(editForm[row.phoneField]);
                           const emailErr = validateEmail(editForm[row.emailField]);
                           return (
-                            <tr key={row.nameField} className="border-t border-slate-100">
-                              <td className="py-2.5 pr-1 text-[10px] font-semibold text-slate-400 uppercase tracking-wide whitespace-nowrap">{row.label}</td>
+                            <tr key={row.nameField} className={`border-t border-slate-100 ${ri % 2 === 1 ? "bg-slate-50/50" : ""}`}>
+                              <td className="py-2.5 pr-1 whitespace-nowrap"><span className={pillCls}>{row.label}</span></td>
                               <td className="py-1.5 px-2">
                                 <label htmlFor={`edit-cn-${row.nameField}`} className="sr-only">{row.label} שם</label>
                                 <input id={`edit-cn-${row.nameField}`} className={editFieldCls(false, !editForm[row.nameField])}
@@ -3763,15 +3794,16 @@ export default function SchoolPage() {
                       <p className="text-xs text-red-500 mt-1.5" role="alert">יש לבחור אחראי/ת לתיאום פגישות</p>
                     )}
                   </div>
+                  </div>
 
                   {/* ליווי — same 3-column label/field grid format as פרטי מוסד. Advisor/access/
                       client-status/service-type/order-method are owner/manager only; order-amount
                       is visible/editable to all roles reaching this section (incl. advisor). */}
-                  {(role === "owner" || role === "manager" || role === "advisor") && <div className="mt-6 pt-5 border-t border-slate-100">
-                    <p className="text-sm font-semibold text-slate-700 text-right mb-3">ליווי</p>
+                  {(role === "owner" || role === "manager" || role === "advisor") && <div className={sectionCardCls}>
+                    <p className={`${sectionTitleCls} justify-center mb-4 pb-3 border-b border-slate-100`}>{iconBadge(Handshake)}ליווי</p>
                     <div className="grid grid-cols-3 gap-x-8">
                       {/* Right column */}
-                      <div style={editColGridStyle}>
+                      <div style={editColGridStyle} className={`border-l ${colDividerCls} pl-8`}>
                         {(role === "owner" || role === "manager") && (
                           <>
                             <label htmlFor="client-status-select" className={editLabelCls}>סטטוס לקוח:</label>
@@ -3801,7 +3833,7 @@ export default function SchoolPage() {
                       </div>
 
                       {/* Middle column */}
-                      <div style={editColGridStyle}>
+                      <div style={editColGridStyle} className={`border-l ${colDividerCls} pl-8`}>
                         {(role === "owner" || role === "manager") && (
                           <>
                             <span className={editLabelCls}>אמצעי הזמנה:</span>
@@ -3862,13 +3894,13 @@ export default function SchoolPage() {
                         each with יועץ מלווה / הקצאת פגישות / זמן לפגישה stacked below its
                         header — replaces the old single general "יועץ מלווה" field above. */}
                     {(role === "owner" || role === "manager") && (
-                      <div className="mt-5 pt-4 border-t border-slate-100 grid grid-cols-3">
+                      <div className="mt-5 grid grid-cols-3 gap-4">
                         {TYPED_SERVICE_TYPES.map(({ key, label }, idx) => {
                           const isRequired = activeServiceTypes(yearAdminData.service_type).includes(key);
                           const invalid = triedSave && isRequired && draftTypedAdvisorIds[key].length === 0;
                           return (
-                            <div key={key} className={`px-4 first:pr-0 last:pl-0 ${idx < TYPED_SERVICE_TYPES.length - 1 ? "border-l border-slate-100" : ""}`}>
-                              <p className="text-sm font-semibold text-slate-700 text-center mb-3">{label}{isRequired && <span className="text-red-500"> *</span>}</p>
+                            <div key={key} className="rounded-lg border border-slate-300/80 bg-slate-50/60 p-4">
+                              <p className="text-sm font-semibold text-slate-700 text-center mb-3 pb-2 border-b border-slate-200">{label}{isRequired && <span className="text-red-500"> *</span>}</p>
                               <div style={editColGridStyle}>
                                 <span className={editLabelCls}>יועץ מלווה:</span>
                                 <div className="py-0.5">
@@ -3917,11 +3949,13 @@ export default function SchoolPage() {
 
                 ) : (
                 /* ─── DISPLAY MODE ─── */
-                <div>
+                <div className="space-y-5">
+                  {/* פרטי מוסד card */}
+                  <div className={sectionCardCls}>
                   {/* Header */}
-                  <div className="flex items-center justify-between mb-4">
-                    <p className="text-sm font-semibold text-slate-700">פרטי מוסד</p>
-                    <div className="flex items-center gap-2 flex-wrap">
+                  <div className={sectionHeaderRowCls}>
+                    <p className={sectionTitleCls}>{iconBadge(School)}פרטי מוסד</p>
+                    <div className="absolute left-0 flex items-center gap-2 flex-wrap">
                       {(role === "owner" || role === "manager" || (role === "advisor" && canEditDirectly)) && (
                         <button onClick={() => startEdit(false)} className="btn-ghost text-sm px-4 py-2 min-w-[120px] inline-flex items-center justify-center gap-1.5">✏️ ערוך פרטים</button>
                       )}
@@ -3934,7 +3968,7 @@ export default function SchoolPage() {
                   {/* 3-column grid — each column is its own label/value grid */}
                   <div className="grid grid-cols-3 gap-x-8">
                     {/* Right column */}
-                    <div style={colGridStyle}>
+                    <div style={colGridStyle} className={`border-l ${colDividerCls} pl-8`}>
                       <span className={labelCls}>שם מוסד:</span>
                       <span className={valCls(school?.name)} style={valStyle(school?.name)}>{school?.name || "—"}</span>
 
@@ -3948,7 +3982,7 @@ export default function SchoolPage() {
                     </div>
 
                     {/* Middle column */}
-                    <div style={colGridStyle}>
+                    <div style={colGridStyle} className={`border-l ${colDividerCls} pl-8`}>
                       <span className={labelCls}>עיר:</span>
                       <span className={valCls(school?.city)} style={valStyle(school?.city)}>{school?.city || "—"}</span>
 
@@ -3976,19 +4010,20 @@ export default function SchoolPage() {
                       <span className={valCls(school?.address)} style={valStyle(school?.address)}>{school?.address || "—"}</span>
                     </div>
                   </div>
+                  </div>
 
-                  {/* Contact table (read-only) */}
-                  <div className="mt-8 mb-2">
-                    <p className="text-sm font-semibold text-slate-700 text-right mb-4">אנשי קשר</p>
-                    <table className="w-full text-sm table-fixed">
+                  {/* אנשי קשר card */}
+                  <div className={sectionCardCls}>
+                    <p className={`${sectionTitleCls} justify-center mb-4 pb-3 border-b border-slate-100`}>{iconBadge(Users)}אנשי קשר</p>
+                    <table className="w-full text-sm table-fixed border-separate" style={{ borderSpacing: 0 }}>
                       <thead>
-                        <tr>
-                          <th scope="col" className="text-right pb-2 text-xs text-slate-400 font-semibold uppercase tracking-wide w-[9%]">תפקיד</th>
-                          <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-400 font-semibold uppercase tracking-wide w-[13%]">שם</th>
-                          <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-400 font-semibold uppercase tracking-wide w-[17%]">טלפון</th>
-                          <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-400 font-semibold uppercase tracking-wide w-[31%]">מייל</th>
-                          <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-400 font-semibold uppercase tracking-wide w-[15%]">יום חופשי</th>
-                          <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-400 font-semibold uppercase tracking-wide w-[15%]">אחראי תיאום פגישות</th>
+                        <tr className="bg-slate-50">
+                          <th scope="col" className="text-right py-2 px-2 rounded-r-lg text-xs text-slate-500 font-semibold uppercase tracking-wide w-[9%]">תפקיד</th>
+                          <th scope="col" className="text-right py-2 px-2 text-xs text-slate-500 font-semibold uppercase tracking-wide w-[13%]">שם</th>
+                          <th scope="col" className="text-right py-2 px-2 text-xs text-slate-500 font-semibold uppercase tracking-wide w-[17%]">טלפון</th>
+                          <th scope="col" className="text-right py-2 px-2 text-xs text-slate-500 font-semibold uppercase tracking-wide w-[31%]">מייל</th>
+                          <th scope="col" className="text-right py-2 px-2 text-xs text-slate-500 font-semibold uppercase tracking-wide w-[15%]">יום חופשי</th>
+                          <th scope="col" className="text-right py-2 px-2 rounded-l-lg text-xs text-slate-500 font-semibold uppercase tracking-wide w-[15%]">אחראי תיאום פגישות</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -3998,9 +4033,9 @@ export default function SchoolPage() {
                             : PRINCIPAL_SINGLE_ROW,
                           ...(school?.stage === "sheshshnati" && school?.principal_same_person === false ? [PRINCIPAL_CHATIVA_ROW] : []),
                           ...CONTACT_ROWS,
-                        ].map(row => (
-                          <tr key={row.nameField} className="border-t border-slate-100">
-                            <td className="py-2.5 pr-1 text-[10px] font-semibold text-slate-400 uppercase tracking-wide whitespace-nowrap">{row.label}</td>
+                        ].map((row, ri) => (
+                          <tr key={row.nameField} className={`border-t border-slate-100 ${ri % 2 === 1 ? "bg-slate-50/50" : ""}`}>
+                            <td className="py-2.5 pr-1 whitespace-nowrap"><span className={pillCls}>{row.label}</span></td>
                             <td className="py-2.5 px-2">
                               <span className={`text-sm ${school?.[row.nameField] ? "font-medium text-slate-800" : "text-slate-400 font-normal"}`}
                                 style={contactValStyle(school?.[row.nameField])}>
@@ -4042,8 +4077,8 @@ export default function SchoolPage() {
                         {/* Extra contacts (display) */}
                         {(school?.extra_contacts || []).map((ec, i) => (
                           <tr key={`extra-disp-${i}`} className="border-t border-slate-100">
-                            <td className="py-2.5 pr-1 text-[10px] font-semibold text-slate-400 uppercase tracking-wide whitespace-nowrap">
-                              {ec.role || "—"}
+                            <td className="py-2.5 pr-1 whitespace-nowrap">
+                              {ec.role ? <span className={pillCls}>{ec.role}</span> : <span className="text-xs text-slate-400">—</span>}
                             </td>
                             <td className="py-2.5 px-2">
                               <span className={`text-sm ${ec.name ? "font-medium text-slate-800" : "text-slate-400 font-normal"}`}
@@ -4087,16 +4122,21 @@ export default function SchoolPage() {
                   </div>
 
                   {/* ליווי section — same 3-column label/value grid format as פרטי מוסד */}
-                  <div className="mt-6 pt-5 border-t border-slate-100">
-                    <p className="text-sm font-semibold text-slate-700 text-right mb-3">ליווי</p>
+                  <div className={sectionCardCls}>
+                    <p className={`${sectionTitleCls} justify-center mb-4 pb-3 border-b border-slate-100`}>{iconBadge(Handshake)}ליווי</p>
                     <div className="grid grid-cols-3 gap-x-8">
                       {/* Right column */}
-                      <div style={colGridStyle}>
+                      <div style={colGridStyle} className={`border-l ${colDividerCls} pl-8`}>
                         <span className={labelCls}>סטטוס לקוח:</span>
-                        <span className={valCls(CLIENT_STATUS_OPTIONS.find(o => o.value === yearAdminData.client_status)?.label)}
-                          style={valStyle(CLIENT_STATUS_OPTIONS.find(o => o.value === yearAdminData.client_status)?.label)}>
-                          {CLIENT_STATUS_OPTIONS.find(o => o.value === yearAdminData.client_status)?.label || "—"}
-                        </span>
+                        {yearAdminData.client_status ? (
+                          <span className="py-1.5">
+                            <span className={`inline-flex items-center text-xs font-medium px-2.5 py-1 rounded-full border ${CLIENT_STATUS_BADGE_CLS[yearAdminData.client_status] || "bg-slate-100 text-slate-500 border-slate-200"}`}>
+                              {CLIENT_STATUS_OPTIONS.find(o => o.value === yearAdminData.client_status)?.label}
+                            </span>
+                          </span>
+                        ) : (
+                          <span className={valCls()}>—</span>
+                        )}
 
                         <span className={labelCls}>סוג שירות:</span>
                         <span className={valCls(SERVICE_TYPE_OPTIONS.find(o => o.value === yearAdminData.service_type)?.label)}
@@ -4106,7 +4146,7 @@ export default function SchoolPage() {
                       </div>
 
                       {/* Middle column */}
-                      <div style={colGridStyle}>
+                      <div style={colGridStyle} className={`border-l ${colDividerCls} pl-8`}>
                         <span className={labelCls}>אמצעי הזמנה:</span>
                         <div className="py-1.5 flex flex-wrap gap-1">
                           {(yearAdminData.order_method || []).length === 0 ? (
@@ -4150,13 +4190,16 @@ export default function SchoolPage() {
                         </div>
                       </div>
                     </div>
+                  </div>
 
-                    {/* Per-service-type read-only columns: 3 columns side by side (גפן/שוטף/
-                        מחוז), each with יועץ מלווה / הקצאת פגישות / זמן לפגישה stacked below. */}
-                    <div className="mt-5 pt-4 border-t border-slate-100 grid grid-cols-3">
-                      {TYPED_SERVICE_TYPES.map(({ key, label }, idx) => (
-                        <div key={key} className={`px-4 first:pr-0 last:pl-0 ${idx < TYPED_SERVICE_TYPES.length - 1 ? "border-l border-slate-100" : ""}`}>
-                          <p className="text-sm font-semibold text-slate-700 text-center mb-3">{label}</p>
+                  {/* Per-service-type read-only columns: 3 columns side by side (גפן/שוטף/
+                      מחוז), each with יועץ מלווה / הקצאת פגישות / זמן לפגישה stacked below. */}
+                  <div className={sectionCardCls}>
+                    <p className={`${sectionTitleCls} justify-center mb-4 pb-3 border-b border-slate-100`}>{iconBadge(Briefcase)}יועצים לפי סוג שירות</p>
+                    <div className="grid grid-cols-3 gap-4">
+                      {TYPED_SERVICE_TYPES.map(({ key, label }) => (
+                        <div key={key} className="rounded-lg border border-slate-300/80 bg-slate-50/60 p-4">
+                          <p className="text-sm font-semibold text-slate-700 text-center mb-3 pb-2 border-b border-slate-200">{label}</p>
                           <div style={colGridStyle}>
                             <span className={labelCls}>יועץ מלווה:</span>
                             <div className="py-1.5 flex flex-wrap gap-1">
@@ -4182,12 +4225,13 @@ export default function SchoolPage() {
                         </div>
                       ))}
                     </div>
+                  </div>
 
-                    {/* הערות — visible to everyone (including advisors) */}
-                    <div className="mt-5 pt-4 border-t border-slate-100">
+                  {/* הערות — visible to everyone (including advisors) */}
+                  <div className={sectionCardCls}>
                       {notesData && (
                         <NotesThread
-                          title="הערות"
+                          title={<span className="inline-flex items-center gap-2">{iconBadge(StickyNote)}הערות</span>}
                           groups={notesData.general || []}
                           currentUser={currentUser}
                           onCreate={content => createSchoolNote("general", null, content)}
@@ -4195,13 +4239,13 @@ export default function SchoolPage() {
                           onDelete={(groupId, segmentId) => deleteSchoolNote("general", null, groupId, segmentId)}
                         />
                       )}
-                    </div>
+                  </div>
 
-                    {/* קבצים — visible to everyone (including advisors) */}
-                    <div className="mt-5 pt-4 border-t border-slate-100">
+                  {/* קבצים — visible to everyone (including advisors) */}
+                  <div className={sectionCardCls}>
                       {filesData && (
                         <FilesThread
-                          title="קבצים"
+                          title={<span className="inline-flex items-center gap-2">{iconBadge(Folder)}קבצים</span>}
                           files={filesData}
                           currentUser={currentUser}
                           onUpload={uploadSchoolFile}
@@ -4212,32 +4256,31 @@ export default function SchoolPage() {
                       )}
                     </div>
 
-                    {/* הערות רבעוניות — manager/owner only */}
-                    {(role === "owner" || role === "manager") && (
-                      <div className="mt-5 pt-4 border-t border-slate-100">
-                        <p className="text-sm font-semibold text-slate-700 mb-3 text-center">הערות רבעוניות</p>
-                        {notesData && (
-                          <div className="overflow-x-auto">
-                            <div className="grid grid-cols-4 gap-3" style={{ minWidth: "980px" }}>
-                              {[1, 2, 3, 4].map(q => (
-                                <div key={q} className="border border-slate-200 rounded-xl p-2 bg-white/60">
-                                  <NotesThread
-                                    compact
-                                    title={`רבעון ${q}`}
-                                    groups={notesData.quarterly?.[q] || []}
-                                    currentUser={currentUser}
-                                    onCreate={content => createSchoolNote("quarterly", q, content)}
-                                    onEdit={(segmentId, groupId, content) => editSchoolNote("quarterly", q, segmentId, groupId, content)}
-                                    onDelete={(groupId, segmentId) => deleteSchoolNote("quarterly", q, groupId, segmentId)}
-                                  />
-                                </div>
-                              ))}
-                            </div>
+                  {/* הערות רבעוניות — manager/owner only */}
+                  {(role === "owner" || role === "manager") && (
+                    <div className={sectionCardCls}>
+                      <p className={`${sectionTitleCls} justify-center mb-4 pb-3 border-b border-slate-100`}>{iconBadge(CalendarRange)}הערות רבעוניות</p>
+                      {notesData && (
+                        <div className="overflow-x-auto">
+                          <div className="grid grid-cols-4 gap-4" style={{ minWidth: "980px" }}>
+                            {[1, 2, 3, 4].map(q => (
+                              <div key={q} className="border border-slate-300/80 rounded-lg p-2 bg-slate-50/60">
+                                <NotesThread
+                                  compact
+                                  title={`רבעון ${q}`}
+                                  groups={notesData.quarterly?.[q] || []}
+                                  currentUser={currentUser}
+                                  onCreate={content => createSchoolNote("quarterly", q, content)}
+                                  onEdit={(segmentId, groupId, content) => editSchoolNote("quarterly", q, segmentId, groupId, content)}
+                                  onDelete={(groupId, segmentId) => deleteSchoolNote("quarterly", q, groupId, segmentId)}
+                                />
+                              </div>
+                            ))}
                           </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
               </div>
