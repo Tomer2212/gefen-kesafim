@@ -169,7 +169,7 @@ export function AdvisorFinderModal({ onClose, schools, users, onBook }) {
                 </thead>
                 <tbody>
                   {results.map(a => (
-                    <tr key={a.advisor_id} className="border-b border-slate-100 align-top">
+                    <tr key={a.advisor_id} className="border-b border-slate-300 align-top">
                       <td className="py-2 px-3 font-medium text-slate-800 whitespace-nowrap">{a.full_name}</td>
                       {allDates.map(d => {
                         const day = a.days.find(x => x.date === d);

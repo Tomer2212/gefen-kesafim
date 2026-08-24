@@ -111,6 +111,12 @@ export async function fetchMonthBusyByDay(advisorId, viewYear, viewMonth) {
 // — a month-keyed map breaks the moment a 7-day window spans two different months (day 31 in
 // one month collides with day 1/2/etc. in the next). Used by the "ביצועים" admin tab, which
 // looks at an arbitrary day/week window rather than a fixed calendar month.
+//
+// Passes raw:true — unlike the scheduling popovers (fetchDayBusy/fetchMonthBusyByDay), which
+// need reconcile_busy_blocks to hide events tied to meetings we've since marked non-scheduled
+// (so a stale Outlook event doesn't block re-booking that slot), "ביצועים" is a historical
+// record: a meeting that got marked completed absolutely was still "on the calendar" that day,
+// and hiding it would defeat the whole planned-vs-actual comparison this tab exists for.
 export async function fetchRangeBusyByDate(advisorId, startDateStr, endDateStrExclusive) {
   if (!advisorId) return {};
   const cacheKey = `range:${advisorId}:${startDateStr}:${endDateStrExclusive}`;
@@ -119,7 +125,7 @@ export async function fetchRangeBusyByDate(advisorId, startDateStr, endDateStrEx
   const start = new Date(`${startDateStr}T00:00:00`).toISOString();
   const end = new Date(`${endDateStrExclusive}T00:00:00`).toISOString();
   try {
-    const res = await axios.get("/calendar/freebusy", { params: { advisor_id: advisorId, start, end } });
+    const res = await axios.get("/calendar/freebusy", { params: { advisor_id: advisorId, start, end, raw: true } });
     if (res.data?.ok === false) return null;
     const byDate = {};
     for (const b of (res.data?.busy || [])) {

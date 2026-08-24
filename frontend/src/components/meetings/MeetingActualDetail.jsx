@@ -17,18 +17,23 @@ function formatDuration(seconds) {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
+// call_time from the backend is a UTC ISO timestamp (Voicenter's raw format) — `new Date`
+// parses the UTC offset correctly and `getHours`/`getMinutes` then localize to the browser's
+// timezone (Israel), same conversion already used for calls elsewhere (e.g. CallRow.jsx).
+// A naive `iso.slice(11, 16)` grabs the raw UTC digits instead, which is 2-3 hours off.
 function formatCallTime(iso) {
-  return iso ? (iso.slice(11, 16) || "—") : "—";
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d)) return "—";
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
 function computeCallEndHM(iso, durationSeconds) {
   if (!iso) return "—";
-  const [h, m] = iso.slice(11, 16).split(":").map(Number);
-  if (Number.isNaN(h) || Number.isNaN(m)) return "—";
-  const total = h * 60 + m + Math.round((durationSeconds || 0) / 60);
-  const eh = Math.floor(total / 60) % 24;
-  const em = total % 60;
-  return `${String(eh).padStart(2, "0")}:${String(em).padStart(2, "0")}`;
+  const start = new Date(iso);
+  if (isNaN(start)) return "—";
+  const end = new Date(start.getTime() + (durationSeconds || 0) * 1000);
+  return `${String(end.getHours()).padStart(2, "0")}:${String(end.getMinutes()).padStart(2, "0")}`;
 }
 
 function UnsavedOfflineWorkModal({ missing, saving, onSave, onDiscard, onCancel }) {
@@ -227,7 +232,7 @@ export function MeetingActualDetail({ meeting }) {
             <tr><td colSpan={11} className="text-center text-slate-400 text-xs py-3">אין פעילות רשומה עבור פגישה זו</td></tr>
           )}
           {calls.map(c => (
-            <tr key={c.call_id} className="border-b border-slate-100 last:border-0">
+            <tr key={c.call_id} className="border-b border-slate-300 last:border-0">
               <td className="py-1.5 pl-2 text-slate-600 whitespace-nowrap">שיחה</td>
               <td className="py-1.5 pl-2 text-slate-600 whitespace-nowrap">{c.advisor_name || "—"}</td>
               <td className="py-1.5 pl-2 text-slate-600 whitespace-nowrap">{c.contact_role || "—"}</td>
@@ -285,7 +290,7 @@ export function MeetingActualDetail({ meeting }) {
               ? Math.max(0, (eh * 60 + em) - (sh * 60 + sm)) * 60
               : 0;
             return (
-              <tr key={e.id} className="border-b border-slate-100 last:border-0">
+              <tr key={e.id} className="border-b border-slate-300 last:border-0">
                 <td className="py-1.5 pl-2 text-slate-600 whitespace-nowrap">עבודה עצמאית</td>
                 <td className="py-1.5 pl-2">
                   <UserMultiSelect
@@ -321,7 +326,7 @@ export function MeetingActualDetail({ meeting }) {
             );
           })}
           {addingOffline && (
-            <tr className="border-b border-slate-100 last:border-0 bg-slate-50/60">
+            <tr className="border-b border-slate-300 last:border-0 bg-slate-50/60">
               <td className="py-1.5 pl-2 text-slate-600 whitespace-nowrap">עבודה עצמאית</td>
               <td className="py-1.5 pl-2 text-slate-600 whitespace-nowrap">{currentUser?.full_name || "—"}</td>
               <td className="py-1.5 pl-2 text-slate-300">—</td>

@@ -161,7 +161,7 @@ export default function PersonTaskRow({ task, visibleColumns, expanded, onToggle
       <tr
         onClick={() => onToggleExpand(task.id)}
         aria-expanded={expanded}
-        className="border-b border-slate-100 cursor-pointer transition-colors hover:bg-slate-50"
+        className="border-b border-slate-300 cursor-pointer transition-colors hover:bg-slate-50"
       >
         <td className="px-2 py-2 text-center text-slate-400" aria-hidden="true">{expanded ? "▼" : "◀"}</td>
         {visibleColumns.map(col => {
@@ -212,7 +212,7 @@ export default function PersonTaskRow({ task, visibleColumns, expanded, onToggle
         </td>
       </tr>
       {expanded && (
-        <tr className="border-b border-slate-100 bg-slate-50/40">
+        <tr className="border-b border-slate-300 bg-slate-50/40">
           <td colSpan={colSpan} className="px-3 py-3">
             <PersonTaskRowExpandedDetail taskId={task.id} onTaskChange={onTaskRefreshed} groupByAssignee={groupByAssignee} onlyCurrentUser={onlyCurrentUser} />
           </td>

@@ -5321,6 +5321,26 @@ def list_school_calls(
 # logged offline work, feeding both display and (opt-in) auto-completion.
 # ---------------------------------------------------------------------------
 
+def _call_time_to_israel_hm(call_time_iso: str | None) -> str | None:
+    """Voicenter's `date`/call_time field is a UTC ISO timestamp (e.g. "...T07:12:43Z").
+    Naively slicing characters [11:16] grabs the raw UTC wall-clock time, not Israel local
+    time — off by 2-3 hours depending on DST. Every other place that shows this same data
+    (שיחות tab, ביצועים tab) converts via a JS `Date` object, which localizes correctly to
+    the browser's Israel timezone; this does the equivalent conversion on the backend for
+    values that get stored/compared as plain "HH:MM" (meeting.calls_start_time, and the
+    time-bucket attribution fallback below)."""
+    if not call_time_iso:
+        return None
+    from zoneinfo import ZoneInfo
+    try:
+        dt = datetime.fromisoformat(call_time_iso.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(ZoneInfo("Asia/Jerusalem")).strftime("%H:%M")
+    except Exception:
+        return call_time_iso[11:16] if len(call_time_iso) >= 16 else None
+
+
 def _attribute_calls_to_meetings(calls: list[dict], meetings_for_day: list[dict]) -> dict:
     """Two-tier attribution for a school with possibly more than one meeting the same day:
     1) role/stage match (מנהל/ת -&gt; tichon, מנהל/ת חט"ב -&gt; chativa) IF it uniquely matches
@@ -5340,7 +5360,7 @@ def _attribute_calls_to_meetings(calls: list[dict], meetings_for_day: list[dict]
             if len(matches) == 1:
                 target = matches[0]
         if target is None:
-            call_time_hm = (call.get("start_time") or "")[11:16]
+            call_time_hm = _call_time_to_israel_hm(call.get("start_time")) or ""
             candidates = [m for m in meetings_sorted if m.get("end_time") and m["end_time"] >= call_time_hm]
             target = candidates[0] if candidates else meetings_sorted[-1]
         assignments[call["call_id"]] = target["id"]
@@ -5353,7 +5373,7 @@ def _recompute_meeting_aggregates(db, meeting_id: str) -> None:
     rows = db.table("meeting_call_links").select("call_time, duration_seconds").eq("meeting_id", meeting_id).execute().data or []
     if rows:
         earliest = min(rows, key=lambda r: r.get("call_time") or "")
-        calls_start_time = (earliest.get("call_time") or "")[11:16] or None
+        calls_start_time = _call_time_to_israel_hm(earliest.get("call_time"))
         calls_duration_seconds = sum(r.get("duration_seconds") or 0 for r in rows)
     else:
         calls_start_time = None
@@ -5511,10 +5531,13 @@ def list_users_with_access(school_id: str, user: Annotated[dict, Depends(get_cur
 @router.get("/{school_id}/meetings/{meeting_id}/actual-detail")
 def get_meeting_actual_detail(school_id: str, meeting_id: str, user: Annotated[dict, Depends(get_current_user)]):
     """Powers the meeting row's expanded 'בפועל' panel: calls attributed to this meeting +
-    manually logged offline-work entries. If this meeting was never synced yet (and its date
-    isn't in the future), runs a one-off recompute for just this school+date first, so
-    historical/never-cron-touched meetings still show correct data the first time they're
-    opened."""
+    manually logged offline-work entries.
+
+    For today's/yesterday's meetings, ALWAYS re-syncs from Voicenter before returning — same
+    "pull fresh on open" behavior as the שיחות and ביצועים tabs, so a call placed minutes ago
+    shows up immediately instead of waiting for the 10-minute cron (recompute-call-activity)
+    to catch up. Older meetings only bootstrap once (first-ever open) since their calls are
+    long settled and re-pulling them on every view would be pure waste."""
     from zoneinfo import ZoneInfo
 
     db = get_admin_client()
@@ -5525,8 +5548,13 @@ def get_meeting_actual_detail(school_id: str, meeting_id: str, user: Annotated[d
         raise HTTPException(status_code=404, detail="פגישה לא נמצאה")
     meeting = m_res.data[0]
 
-    today_il = datetime.now(ZoneInfo("Asia/Jerusalem")).date().isoformat()
-    if not meeting.get("calls_synced_at") and meeting.get("meeting_date") and meeting["meeting_date"] <= today_il:
+    today_il_date = datetime.now(ZoneInfo("Asia/Jerusalem")).date()
+    today_il = today_il_date.isoformat()
+    yesterday_il = (today_il_date - timedelta(days=1)).isoformat()
+    meeting_date = meeting.get("meeting_date")
+    is_recent = meeting_date in (today_il, yesterday_il)
+    should_sync = meeting_date and meeting_date <= today_il and (is_recent or not meeting.get("calls_synced_at"))
+    if should_sync:
         try:
             from routers.voicenter_router import _pull_org_calls
             d = meeting["meeting_date"]

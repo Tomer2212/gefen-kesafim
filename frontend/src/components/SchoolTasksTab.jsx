@@ -226,13 +226,13 @@ export default function SchoolTasksTab({ schoolId }) {
               <Fragment key={t.id}>
                 <tr
                   onClick={() => setExpandedId(prev => (prev === t.id ? null : t.id))}
-                  className="border-b border-slate-100 cursor-pointer hover:bg-slate-50"
+                  className="border-b border-slate-300 cursor-pointer hover:bg-slate-50"
                 >
                   <td className="px-2 py-2 text-center text-slate-400" aria-hidden="true">{expandedId === t.id ? "▼" : "◀"}</td>
                   {visibleColumns.map(col => <GenericCell key={col.key} col={col} task={t} />)}
                 </tr>
                 {expandedId === t.id && (
-                  <tr className="border-b border-slate-100 bg-slate-50/40">
+                  <tr className="border-b border-slate-300 bg-slate-50/40">
                     <td colSpan={visibleColumns.length + 1} className="px-3 py-3">
                       <PersonTaskRowExpandedDetail taskId={t.id} onTaskChange={() => loadTasks({ silent: true })} scopeSchoolId={schoolId} />
                     </td>
