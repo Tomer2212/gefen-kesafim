@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { School, UserCog, CalendarClock, MessageSquareText } from "lucide-react";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
 
 // Entry-point fork shown before TaskCreateWizard/PersonTaskCreateWizard opens — two sequential
@@ -18,7 +19,7 @@ export default function TaskTypeChooser({ onClose, onChooseSchools, onChooseUser
         aria-modal="true"
         aria-labelledby="task-type-chooser-title"
         onKeyDown={handleKeyDown}
-        className="bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4"
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl mx-4"
       >
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
           <div className="flex items-center gap-2">
@@ -30,52 +31,67 @@ export default function TaskTypeChooser({ onClose, onChooseSchools, onChooseUser
               </button>
             )}
             <h2 id="task-type-chooser-title" className="font-bold text-black">
-              {level === 1 ? "יצירת משימה — מי צריך לבצע אותה?" : "יצירת משימה — מה סוג המשימה?"}
+              {level === 1 ? "משימה חדשה — מי צריך לבצע אותה?" : "משימה חדשה — מה סוג המשימה?"}
             </h2>
           </div>
           <button type="button" onClick={onClose} aria-label="סגור" className="text-slate-400 hover:text-slate-600 text-xl leading-none">×</button>
         </div>
 
         {level === 1 && (
-          <div className="p-6 grid grid-cols-1 gap-3">
+          <div className="p-6 grid grid-cols-2 gap-3">
             <button
               type="button"
               onClick={() => setLevel(2)}
-              className="text-right border border-slate-200 rounded-xl p-4 hover:border-blue-400 hover:bg-blue-50/50 transition-colors"
+              className="text-right border border-slate-200 rounded-xl p-4 hover:border-blue-400 hover:bg-blue-50/50 transition-colors flex items-center gap-3"
             >
-              <div className="font-semibold text-slate-800 mb-1">בתי ספר</div>
-              <div className="text-sm text-slate-500">קביעת פגישות או שליחת הודעות לבתי ספר לפי קריטריונים.</div>
+              <div className="min-w-0 flex-1">
+                <div className="font-semibold text-slate-800 mb-1">בתי ספר</div>
+                <div className="text-sm text-slate-500 space-y-0.5">
+                  <div>קביעת פגישות</div>
+                  <div>שליחת הודעות</div>
+                </div>
+              </div>
+              <School aria-hidden="true" className="text-blue-500 shrink-0" size={28} strokeWidth={1.75} />
             </button>
 
             <button
               type="button"
               onClick={() => onChooseUsers()}
-              className="text-right border border-slate-200 rounded-xl p-4 hover:border-blue-400 hover:bg-blue-50/50 transition-colors"
+              className="text-right border border-slate-200 rounded-xl p-4 hover:border-blue-400 hover:bg-blue-50/50 transition-colors flex items-center gap-3"
             >
-              <div className="font-semibold text-slate-800 mb-1">אנשי הארגון</div>
-              <div className="text-sm text-slate-500">הטלת משימה אישית על משתמש/י מערכת (או אוטומטית ליועץ המלווה של בית ספר), עם דדליין ומעקב השלמה.</div>
+              <div className="min-w-0 flex-1">
+                <div className="font-semibold text-slate-800 mb-1">יועצים</div>
+                <div className="text-sm text-slate-500">יועץ ספציפי / כלל היועצים המלווים מסוג מסוים [גפן, שוטף, מחוז]</div>
+              </div>
+              <UserCog aria-hidden="true" className="text-blue-500 shrink-0" size={28} strokeWidth={1.75} />
             </button>
           </div>
         )}
 
         {level === 2 && (
-          <div className="p-6 grid grid-cols-1 gap-3">
+          <div className="p-6 grid grid-cols-2 gap-3">
             <button
               type="button"
               onClick={() => onChooseSchools(true)}
-              className="text-right border border-slate-200 rounded-xl p-4 hover:border-blue-400 hover:bg-blue-50/50 transition-colors"
+              className="text-right border border-slate-200 rounded-xl p-4 hover:border-blue-400 hover:bg-blue-50/50 transition-colors flex items-center gap-3"
             >
-              <div className="font-semibold text-slate-800 mb-1">קביעת פגישות</div>
-              <div className="text-sm text-slate-500">בחירת בתי ספר (סינון או ידנית) ושליחת בקשה לקביעת פגישה — הצלחה נקבעת אוטומטית: נקבעה פגישה בטווח שהוגדר.</div>
+              <div className="min-w-0 flex-1">
+                <div className="font-semibold text-slate-800 mb-1">קביעת פגישות</div>
+                <div className="text-sm text-slate-500">שיבוץ עצמי של בתי הספר בטווח תאריכים מוגדר מראש.</div>
+              </div>
+              <CalendarClock aria-hidden="true" className="text-blue-500 shrink-0" size={28} strokeWidth={1.75} />
             </button>
 
             <button
               type="button"
               onClick={() => onChooseSchools(false)}
-              className="text-right border border-slate-200 rounded-xl p-4 hover:border-blue-400 hover:bg-blue-50/50 transition-colors"
+              className="text-right border border-slate-200 rounded-xl p-4 hover:border-blue-400 hover:bg-blue-50/50 transition-colors flex items-center gap-3"
             >
-              <div className="font-semibold text-slate-800 mb-1">שליחת הודעה</div>
-              <div className="text-sm text-slate-500">שליחת הודעות לפי קריטריונים לכל מטרה אחרת — למשל "כל מי שלא שלח חוזה". תוכל להגדיר בעצמך מה נחשב הצלחה.</div>
+              <div className="min-w-0 flex-1">
+                <div className="font-semibold text-slate-800 mb-1">שליחת הודעה</div>
+                <div className="text-sm text-slate-500">תפוצה רחבה לבתי ספר לפי סינון מדויק.</div>
+              </div>
+              <MessageSquareText aria-hidden="true" className="text-blue-500 shrink-0" size={28} strokeWidth={1.75} />
             </button>
           </div>
         )}

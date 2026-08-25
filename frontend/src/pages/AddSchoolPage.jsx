@@ -1,12 +1,30 @@
 import { useEffect, useRef, useState } from "react";
 import { useBlocker, useNavigate } from "react-router-dom";
 import axios from "axios";
+import { Building2, Phone, Handshake, UsersRound } from "lucide-react";
 import Sidebar from "../components/Sidebar";
 import { MultiSelectChips } from "../components/MultiSelectChips";
 import { AdvisorSearch } from "../components/AdvisorSearch";
 import HourMinuteInput from "../components/HourMinuteInput";
 import { DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+
+// ── Shared visual language with SchoolPage.jsx's "פרטי בית הספר" tab ──
+const SECTION_TITLE_CLS = "text-[23px] font-bold text-black flex items-center gap-2";
+function sectionIcon(Icon, accentCls) {
+  return (
+    <span aria-hidden="true" className={`inline-flex items-center justify-center p-2 rounded-xl flex-shrink-0 ${accentCls}`}>
+      <Icon className="w-4 h-4" strokeWidth={2} />
+    </span>
+  );
+}
+function sectionTitle(Icon, text, accentCls) {
+  return <p className={SECTION_TITLE_CLS}>{text}{sectionIcon(Icon, accentCls)}</p>;
+}
+const SECTION_HEADER_CLS = "flex items-center justify-between pb-3 mb-4 border-b border-slate-200/60";
+const TILE_CLS = "bg-slate-100/70 border border-slate-200/90 rounded-xl py-3.5 px-3 min-h-[76px]";
+const TILE_LABEL_CLS = "text-[13px] font-medium text-gray-500 mb-1 block";
+const OUTLINE_BTN_CLS = "border border-slate-300 hover:border-slate-400 text-slate-700 bg-white text-xs font-semibold px-3.5 py-2 rounded-lg transition-all";
 
 // ---- constants (mirrored from AdminPage) ----
 
@@ -381,7 +399,7 @@ export default function AddSchoolPage() {
     if (!schoolStage) return;
     if (canSeeAllUsers) {
       const requiredTypes = activeServiceTypes(yearAdminForm.service_type);
-      if (requiredTypes.some(t => typedAdvisorIds[t].length === 0)) {
+      if (yearAdminForm.client_status === "active" && requiredTypes.some(t => typedAdvisorIds[t].length === 0)) {
         setSaveError("יש לבחור לפחות יועץ מלווה אחד עבור כל סוג שירות פעיל (גפן/שוטף/מחוז).");
         return;
       }
@@ -469,103 +487,96 @@ export default function AddSchoolPage() {
           </div>
 
           {/* Form card */}
-          <div className="glass-card rounded-2xl px-6 py-5">
-            <p className="text-sm font-semibold text-slate-700 mb-3">פרטי בית הספר</p>
+          <div className="bg-white rounded-2xl border border-slate-200/60 shadow-sm px-6 py-5">
+            <div className={SECTION_HEADER_CLS}>
+              {sectionTitle(Building2, "פרטי בית הספר", "bg-blue-50 text-blue-600")}
+            </div>
 
-            {/* 3-column grid identical to AdminPage */}
-            <div className="grid grid-cols-3 gap-x-8">
-              {/* Right: שם | סמל | שלב */}
-              <div style={{ display: "grid", gridTemplateColumns: "max-content 1fr", columnGap: 10, alignItems: "start" }}>
-                <label htmlFor="school-name" className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">שם מוסד:</label>
-                <div className="py-0.5">
-                  <input id="school-name" className={`input-field ${triedSave && !schoolForm.name ? "border-red-400" : ""}`}
-                    autoComplete="off" value={schoolForm.name}
-                    onChange={e => setSchoolForm(p => ({ ...p, name: e.target.value }))} />
-                  {triedSave && !schoolForm.name && <span className="text-xs text-red-500 block mt-0.5" role="alert">שדה חובה</span>}
-                </div>
-
-                <label htmlFor="school-symbol" className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">סמל מוסד:</label>
-                <div className="py-0.5">
-                  <input id="school-symbol"
-                    className={`input-field ${triedSave && symbolError ? "border-red-400" : ""}`}
-                    autoComplete="off" value={schoolForm.symbol}
-                    onChange={e => setSchoolForm(p => ({ ...p, symbol: e.target.value.replace(/\D/g, "").slice(0, 6) }))}
-                    dir="ltr" inputMode="numeric" maxLength={6} />
-                  {schoolForm.symbol.length > 0 && symbolError && <span className="text-xs text-red-500 block mt-0.5" role="alert">{symbolError}</span>}
-                  {triedSave && !schoolForm.symbol && <span className="text-xs text-red-500 block mt-0.5" role="alert">שדה חובה</span>}
-                  {triedSave && schoolForm.symbol && !symbolError && existingSymbols.includes(schoolForm.symbol) && (
-                    <span className="text-xs text-red-500 block mt-0.5" role="alert">סמל זה כבר קיים בארגון</span>
-                  )}
-                </div>
-
-                <label htmlFor="school-stage" className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">שלב מוסד:</label>
-                <div className="py-0.5">
-                  <select id="school-stage"
-                    className={`input-field text-sm ${triedSave && !schoolStage ? "border-red-400" : ""}`}
-                    value={schoolStage}
-                    onChange={e => {
-                      setSchoolStage(e.target.value);
-                      if (e.target.value === "sheshshnati" || e.target.value === "other") setCustomDivisions(DEFAULT_CUSTOM_DIVISIONS);
-                    }}>
-                    {SCHOOL_STAGE_OPTIONS.map(s => <option key={s.value} value={s.value} disabled={s.value === ""}>{s.label}</option>)}
-                  </select>
-                  {triedSave && !schoolStage && <span className="text-xs text-red-500 block mt-0.5" role="alert">שדה חובה</span>}
-                </div>
+            {/* 3×3 tile grid — same visual language as SchoolPage.jsx's פרטי מוסד */}
+            <div className="grid grid-cols-3 gap-3">
+              <div className={TILE_CLS}>
+                <label htmlFor="school-name" className={TILE_LABEL_CLS}>שם מוסד</label>
+                <input id="school-name" className={`input-field ${triedSave && !schoolForm.name ? "border-red-400" : ""}`}
+                  autoComplete="off" value={schoolForm.name}
+                  onChange={e => setSchoolForm(p => ({ ...p, name: e.target.value }))} />
+                {triedSave && !schoolForm.name && <span className="text-xs text-red-500 block mt-0.5" role="alert">שדה חובה</span>}
               </div>
 
-              {/* Middle: עיר | בעלות | מחוז */}
-              <div style={{ display: "grid", gridTemplateColumns: "max-content 1fr", columnGap: 10, alignItems: "start" }}>
-                <label htmlFor="school-city" className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">עיר:</label>
-                <div className="py-0.5">
-                  <input id="school-city" className="input-field" autoComplete="off" value={schoolForm.city}
-                    onChange={e => setSchoolForm(p => ({ ...p, city: e.target.value }))} />
-                </div>
-
-                <label htmlFor="school-authority" className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">בעלות:</label>
-                <div className="py-0.5">
-                  <input id="school-authority" className="input-field" autoComplete="off" value={schoolForm.authority}
-                    onChange={e => setSchoolForm(p => ({ ...p, authority: e.target.value }))} />
-                </div>
-
-                <label htmlFor="school-district" className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">מחוז:</label>
-                <div className="py-0.5">
-                  <select id="school-district" className="input-field text-sm"
-                    value={schoolForm.district}
-                    onChange={e => setSchoolForm(p => ({ ...p, district: e.target.value }))}>
-                    <option value="">בחר</option>
-                    {DISTRICT_OPTIONS.map(d => <option key={d} value={d}>{d}</option>)}
-                  </select>
-                </div>
+              <div className={TILE_CLS}>
+                <label htmlFor="school-city" className={TILE_LABEL_CLS}>עיר</label>
+                <input id="school-city" className="input-field" autoComplete="off" value={schoolForm.city}
+                  onChange={e => setSchoolForm(p => ({ ...p, city: e.target.value }))} />
               </div>
 
-              {/* Left: תוכנת כספים | טלפון | כתובת */}
-              <div style={{ display: "grid", gridTemplateColumns: "max-content 1fr", columnGap: 10, alignItems: "start" }}>
-                <label htmlFor="school-finance-software" className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">תוכנת כספים:</label>
-                <div className="py-0.5">
-                  <select id="school-finance-software" className="input-field text-sm"
-                    value={schoolForm.finance_software}
-                    onChange={e => setSchoolForm(p => ({ ...p, finance_software: e.target.value }))}>
-                    {FINANCE_SOFTWARE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                  </select>
-                </div>
+              <div className={TILE_CLS}>
+                <label htmlFor="school-finance-software" className={TILE_LABEL_CLS}>תוכנת כספים</label>
+                <select id="school-finance-software" className="input-field text-sm"
+                  value={schoolForm.finance_software}
+                  onChange={e => setSchoolForm(p => ({ ...p, finance_software: e.target.value }))}>
+                  {FINANCE_SOFTWARE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </select>
+              </div>
 
-                <label htmlFor="school-phone" className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">טלפון בית הספר:</label>
-                <div className="py-0.5">
-                  <input id="school-phone"
-                    className={`input-field ${schoolForm.school_phone && schoolPhoneError ? "border-red-400" : ""}`}
-                    autoComplete="off" value={schoolForm.school_phone}
-                    onChange={e => setSchoolForm(p => ({ ...p, school_phone: e.target.value.replace(/\D/g, "").slice(0, 10) }))}
-                    dir="ltr" inputMode="numeric" />
-                  {schoolForm.school_phone && schoolPhoneError && (
-                    <span className="text-xs text-red-500 block mt-0.5" role="alert">{schoolPhoneError}</span>
-                  )}
-                </div>
+              <div className={TILE_CLS}>
+                <label htmlFor="school-symbol" className={TILE_LABEL_CLS}>סמל מוסד</label>
+                <input id="school-symbol"
+                  className={`input-field ${triedSave && symbolError ? "border-red-400" : ""}`}
+                  autoComplete="off" value={schoolForm.symbol}
+                  onChange={e => setSchoolForm(p => ({ ...p, symbol: e.target.value.replace(/\D/g, "").slice(0, 6) }))}
+                  dir="ltr" inputMode="numeric" maxLength={6} />
+                {schoolForm.symbol.length > 0 && symbolError && <span className="text-xs text-red-500 block mt-0.5" role="alert">{symbolError}</span>}
+                {triedSave && !schoolForm.symbol && <span className="text-xs text-red-500 block mt-0.5" role="alert">שדה חובה</span>}
+                {triedSave && schoolForm.symbol && !symbolError && existingSymbols.includes(schoolForm.symbol) && (
+                  <span className="text-xs text-red-500 block mt-0.5" role="alert">סמל זה כבר קיים בארגון</span>
+                )}
+              </div>
 
-                <label htmlFor="school-address" className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">כתובת:</label>
-                <div className="py-0.5">
-                  <input id="school-address" className="input-field" autoComplete="off" value={schoolForm.address}
-                    onChange={e => setSchoolForm(p => ({ ...p, address: e.target.value }))} />
-                </div>
+              <div className={TILE_CLS}>
+                <label htmlFor="school-authority" className={TILE_LABEL_CLS}>בעלות</label>
+                <input id="school-authority" className="input-field" autoComplete="off" value={schoolForm.authority}
+                  onChange={e => setSchoolForm(p => ({ ...p, authority: e.target.value }))} />
+              </div>
+
+              <div className={TILE_CLS}>
+                <label htmlFor="school-phone" className={TILE_LABEL_CLS}>טלפון בית הספר</label>
+                <input id="school-phone"
+                  className={`input-field ${schoolForm.school_phone && schoolPhoneError ? "border-red-400" : ""}`}
+                  autoComplete="off" value={schoolForm.school_phone}
+                  onChange={e => setSchoolForm(p => ({ ...p, school_phone: e.target.value.replace(/\D/g, "").slice(0, 10) }))}
+                  dir="ltr" inputMode="numeric" />
+                {schoolForm.school_phone && schoolPhoneError && (
+                  <span className="text-xs text-red-500 block mt-0.5" role="alert">{schoolPhoneError}</span>
+                )}
+              </div>
+
+              <div className={TILE_CLS}>
+                <label htmlFor="school-stage" className={TILE_LABEL_CLS}>שלב מוסד</label>
+                <select id="school-stage"
+                  className={`input-field text-sm ${triedSave && !schoolStage ? "border-red-400" : ""}`}
+                  value={schoolStage}
+                  onChange={e => {
+                    setSchoolStage(e.target.value);
+                    if (e.target.value === "sheshshnati" || e.target.value === "other") setCustomDivisions(DEFAULT_CUSTOM_DIVISIONS);
+                  }}>
+                  {SCHOOL_STAGE_OPTIONS.map(s => <option key={s.value} value={s.value} disabled={s.value === ""}>{s.label}</option>)}
+                </select>
+                {triedSave && !schoolStage && <span className="text-xs text-red-500 block mt-0.5" role="alert">שדה חובה</span>}
+              </div>
+
+              <div className={TILE_CLS}>
+                <label htmlFor="school-district" className={TILE_LABEL_CLS}>מחוז</label>
+                <select id="school-district" className="input-field text-sm"
+                  value={schoolForm.district}
+                  onChange={e => setSchoolForm(p => ({ ...p, district: e.target.value }))}>
+                  <option value="">בחר</option>
+                  {DISTRICT_OPTIONS.map(d => <option key={d} value={d}>{d}</option>)}
+                </select>
+              </div>
+
+              <div className={TILE_CLS}>
+                <label htmlFor="school-address" className={TILE_LABEL_CLS}>כתובת</label>
+                <input id="school-address" className="input-field" autoComplete="off" value={schoolForm.address}
+                  onChange={e => setSchoolForm(p => ({ ...p, address: e.target.value }))} />
               </div>
             </div>
 
@@ -591,7 +602,7 @@ export default function AddSchoolPage() {
                 </div>
                 <button type="button"
                   onClick={() => setCustomDivisions(prev => [...prev, { id: Date.now(), division_type: "tikkon" }])}
-                  className="btn-ghost text-xs px-3 py-1.5">+ הוסף שורה</button>
+                  className={OUTLINE_BTN_CLS}>+ הוסף שורה</button>
                 {triedSave && customDivisions.length === 0 && (
                   <p className="text-xs text-red-500 mt-1" role="alert">יש להוסיף לפחות חטיבה אחת</p>
                 )}
@@ -599,35 +610,37 @@ export default function AddSchoolPage() {
             )}
 
             {/* Contact table */}
-            <div className="mt-16 mb-2">
-              <p className="text-sm font-semibold text-slate-700 mb-4">אנשי קשר</p>
-              <table className="w-full text-sm">
+            <div className="mt-10 mb-2 pt-6 border-t border-slate-200/60">
+              <div className={SECTION_HEADER_CLS}>
+                {sectionTitle(Phone, "אנשי קשר", "bg-indigo-50 text-indigo-600")}
+              </div>
+              <table className="w-full text-sm border border-slate-200 border-collapse font-sans">
                 <thead>
-                  <tr>
-                    <th scope="col" className="text-right pb-2 text-xs text-slate-500 font-semibold w-28"></th>
-                    <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-500 font-semibold">שם</th>
-                    <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-500 font-semibold">טלפון</th>
-                    <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-500 font-semibold">מייל</th>
-                    <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-500 font-semibold">יום חופשי</th>
-                    <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-500 font-semibold">אחראי תיאום פגישות</th>
+                  <tr className="bg-slate-100 divide-x divide-slate-200">
+                    <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700 whitespace-nowrap w-28"></th>
+                    <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700">שם</th>
+                    <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700">טלפון</th>
+                    <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700">מייל</th>
+                    <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700">יום חופשי</th>
+                    <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700">מתאם פגישות</th>
                   </tr>
                 </thead>
-                <tbody>
+                <tbody className="divide-y divide-slate-200">
                   {[
                     schoolStage === "sheshshnati" ? PRINCIPAL_TICHON_ROW : PRINCIPAL_SINGLE_ROW,
                     ...(schoolStage === "sheshshnati" && !schoolForm.principal_same_person ? [PRINCIPAL_CHATIVA_ROW] : []),
                     ...CONTACT_ROWS,
                   ].map(row => (
-                    <tr key={row.nameField} className="border-t border-slate-100">
-                      <td className="py-2 pr-1 text-xs text-slate-700 font-medium whitespace-nowrap">{row.label}</td>
-                      <td className="py-2 px-2">
+                    <tr key={row.nameField} className="divide-x divide-slate-200">
+                      <td className="py-3 pr-1 text-sm font-normal text-gray-900 align-top">{row.label}</td>
+                      <td className="py-3 px-2">
                         <label htmlFor={`cname-${row.nameField}`} className="sr-only">{row.label} שם</label>
                         <input id={`cname-${row.nameField}`} className="input-field text-sm" autoComplete="off"
                           value={schoolForm[row.nameField]}
                           onChange={e => setSchoolForm(p => ({ ...p, [row.nameField]: e.target.value }))}
                           placeholder="שם..." />
                       </td>
-                      <td className="py-2 px-2">
+                      <td className="py-3 px-2">
                         <label htmlFor={`cphone-${row.phoneField}`} className="sr-only">{row.label} טלפון</label>
                         <input id={`cphone-${row.phoneField}`}
                           className={`input-field text-sm ${schoolForm[row.phoneField] && validateSecretaryPhone(schoolForm[row.phoneField]) ? "border-red-400" : ""}`}
@@ -638,19 +651,19 @@ export default function AddSchoolPage() {
                           <span className="text-xs text-red-500 block mt-0.5" role="alert">{validateSecretaryPhone(schoolForm[row.phoneField])}</span>
                         )}
                       </td>
-                      <td className="py-2 px-2">
+                      <td className="py-3 px-2">
                         <label htmlFor={`cemail-${row.emailField}`} className="sr-only">{row.label} מייל</label>
                         <input id={`cemail-${row.emailField}`} className="input-field text-sm" autoComplete="off"
                           value={schoolForm[row.emailField]}
                           onChange={e => setSchoolForm(p => ({ ...p, [row.emailField]: e.target.value }))}
                           placeholder="מייל..." dir="ltr" type="email" />
                       </td>
-                      <td className="py-2 px-2">
+                      <td className="py-3 px-2">
                         <MultiSelectChips compact options={WEEKDAY_OPTIONS}
                           selected={schoolForm[row.dayOffField] || []}
                           onChange={v => setSchoolForm(p => ({ ...p, [row.dayOffField]: v }))} />
                       </td>
-                      <td className="py-2 px-2 text-center">
+                      <td className="py-3 px-2 text-center">
                         <label htmlFor={`add-coord-${row.coordValue}`} className="sr-only">{row.label} אחראי/ת לתיאום פגישות</label>
                         <input id={`add-coord-${row.coordValue}`} type="radio" name="add-meeting-coordinator"
                           className="w-4 h-4 accent-blue-600"
@@ -662,9 +675,9 @@ export default function AddSchoolPage() {
                   ))}
 
                   {schoolStage === "sheshshnati" && (
-                    <tr className="border-t border-slate-100">
+                    <tr className="divide-x divide-slate-200">
                       <td></td>
-                      <td colSpan={5} className="py-2 px-2">
+                      <td colSpan={5} className="py-3 px-2">
                         <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
                           <input type="checkbox" className="w-3.5 h-3.5 rounded accent-blue-600"
                             checked={!!schoolForm.principal_same_person}
@@ -676,26 +689,26 @@ export default function AddSchoolPage() {
                   )}
 
                   {(schoolForm.extra_contacts || []).map((ec, i) => (
-                    <tr key={`extra-${i}`} className="border-t border-slate-100">
-                      <td className="py-1.5 pr-1">
+                    <tr key={`extra-${i}`} className="divide-x divide-slate-200">
+                      <td className="py-3 pr-1">
                         <label htmlFor={`erole-${i}`} className="sr-only">תפקיד</label>
                         <input id={`erole-${i}`} className="input-field text-sm" value={ec.role}
                           onChange={e => setSchoolForm(p => { const ec2 = [...(p.extra_contacts || [])]; ec2[i] = { ...ec2[i], role: e.target.value }; return { ...p, extra_contacts: ec2 }; })}
                           autoComplete="off" placeholder="תפקיד..." />
                       </td>
-                      <td className="py-1.5 px-2">
+                      <td className="py-3 px-2">
                         <label htmlFor={`ename-${i}`} className="sr-only">שם</label>
                         <input id={`ename-${i}`} className="input-field text-sm" value={ec.name}
                           onChange={e => setSchoolForm(p => { const ec2 = [...(p.extra_contacts || [])]; ec2[i] = { ...ec2[i], name: e.target.value }; return { ...p, extra_contacts: ec2 }; })}
                           autoComplete="off" placeholder="שם..." />
                       </td>
-                      <td className="py-1.5 px-2">
+                      <td className="py-3 px-2">
                         <label htmlFor={`ephone-${i}`} className="sr-only">טלפון</label>
                         <input id={`ephone-${i}`} className="input-field text-sm" value={ec.phone}
                           onChange={e => setSchoolForm(p => { const ec2 = [...(p.extra_contacts || [])]; ec2[i] = { ...ec2[i], phone: e.target.value.replace(/\D/g, "").slice(0, 10) }; return { ...p, extra_contacts: ec2 }; })}
                           dir="ltr" inputMode="numeric" autoComplete="off" placeholder="טלפון..." />
                       </td>
-                      <td className="py-1.5 px-2">
+                      <td className="py-3 px-2">
                         <div className="flex items-center gap-1">
                           <label htmlFor={`eemail-${i}`} className="sr-only">מייל</label>
                           <input id={`eemail-${i}`} className="input-field text-sm" value={ec.email}
@@ -715,12 +728,12 @@ export default function AddSchoolPage() {
                             aria-label="הסר שורת איש קשר">✕</button>
                         </div>
                       </td>
-                      <td className="py-1.5 px-2">
+                      <td className="py-3 px-2">
                         <MultiSelectChips compact options={WEEKDAY_OPTIONS}
                           selected={ec.day_off || []}
                           onChange={v => setSchoolForm(p => { const ec2 = [...(p.extra_contacts || [])]; ec2[i] = { ...ec2[i], day_off: v }; return { ...p, extra_contacts: ec2 }; })} />
                       </td>
-                      <td className="py-1.5 px-2 text-center">
+                      <td className="py-3 px-2 text-center">
                         <label htmlFor={`add-coord-extra-${i}`} className="sr-only">איש קשר נוסף {i + 1} אחראי/ת לתיאום פגישות</label>
                         <input id={`add-coord-extra-${i}`} type="radio" name="add-meeting-coordinator"
                           className="w-4 h-4 accent-blue-600"
@@ -736,7 +749,7 @@ export default function AddSchoolPage() {
                       <td colSpan={6} className="pt-3 pb-1">
                         <button type="button"
                           onClick={() => setSchoolForm(p => ({ ...p, extra_contacts: [...(p.extra_contacts || []), { role: "", name: "", phone: "", email: "" }] }))}
-                          className="text-sm text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1 transition-colors">
+                          className={`${OUTLINE_BTN_CLS} inline-flex items-center gap-1`}>
                           <span aria-hidden="true">+</span> הוסף איש קשר
                         </button>
                       </td>
@@ -750,67 +763,63 @@ export default function AddSchoolPage() {
             </div>
 
             {/* ליווי — mirrors SchoolPage.jsx's ליווי section (school_year_admin_data fields) */}
-            <div className="mt-4 pt-4 border-t border-slate-100">
-              <p className="text-sm font-semibold text-slate-700 mb-4">ליווי</p>
-              <div className={`grid gap-6 ${canSeeAllUsers ? "grid-cols-3" : "grid-cols-1"}`}>
-                {/* Right column */}
+            <div className="mt-10 pt-6 border-t border-slate-200/60">
+              <div className={SECTION_HEADER_CLS}>
+                {sectionTitle(Handshake, "פרטי ליווי", "bg-emerald-50 text-emerald-600")}
+              </div>
+              <div className={`grid gap-3 ${canSeeAllUsers ? "grid-cols-3" : "grid-cols-1"}`}>
                 {canSeeAllUsers && (
-                  <div style={{ display: "grid", gridTemplateColumns: "max-content 1fr", columnGap: 10, alignItems: "start" }}>
-                    <label htmlFor="ys-client-status" className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">סטטוס לקוח:</label>
-                    <div className="py-0.5">
-                      <select id="ys-client-status" className="input-field text-sm"
-                        value={yearAdminForm.client_status || ""}
-                        onChange={e => setYearAdminForm(p => ({ ...p, client_status: e.target.value || null }))}>
-                        <option value="">בחר</option>
-                        {CLIENT_STATUS_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                      </select>
-                    </div>
-
-                    <label htmlFor="ys-service-type" className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">סוג שירות:</label>
-                    <div className="py-0.5">
-                      <select id="ys-service-type" className="input-field text-sm"
-                        value={yearAdminForm.service_type || ""}
-                        onChange={e => setYearAdminForm(p => ({ ...p, service_type: e.target.value || null }))}>
-                        <option value="">בחר</option>
-                        {SERVICE_TYPE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                      </select>
-                    </div>
+                  <div className={TILE_CLS}>
+                    <label htmlFor="ys-client-status" className={TILE_LABEL_CLS}>סטטוס לקוח</label>
+                    <select id="ys-client-status" className="input-field text-sm"
+                      value={yearAdminForm.client_status || ""}
+                      onChange={e => setYearAdminForm(p => ({ ...p, client_status: e.target.value || null }))}>
+                      <option value="">בחר</option>
+                      {CLIENT_STATUS_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
                   </div>
                 )}
 
-                {/* Middle column */}
-                <div style={{ display: "grid", gridTemplateColumns: "max-content 1fr", columnGap: 10, alignItems: "start" }}>
-                  {canSeeAllUsers && (
-                    <>
-                      <span className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">אמצעי הזמנה:</span>
-                      <div className="py-0.5">
-                        <MultiSelectChips compact options={FUNDING_METHOD_OPTIONS}
-                          selected={yearAdminForm.order_method || []}
-                          onChange={v => setYearAdminForm(p => ({ ...p, order_method: v.length ? v : [] }))} />
-                      </div>
-                    </>
-                  )}
-                  <label htmlFor="ys-order-amount" className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">מחיר כולל מע"מ:</label>
-                  <div className="py-0.5">
-                    <input id="ys-order-amount" className="input-field text-sm" type="text" inputMode="numeric" autoComplete="off"
-                      defaultValue={formatAmount(yearAdminForm.order_amount_gefen)}
-                      onBlur={e => {
-                        const v = parseAmount(e.target.value);
-                        e.target.value = formatAmount(v);
-                        setYearAdminForm(p => ({ ...p, order_amount_gefen: v }));
-                      }} />
+                {canSeeAllUsers && (
+                  <div className={TILE_CLS}>
+                    <label htmlFor="ys-service-type" className={TILE_LABEL_CLS}>סוג שירות</label>
+                    <select id="ys-service-type" className="input-field text-sm"
+                      value={yearAdminForm.service_type || ""}
+                      onChange={e => setYearAdminForm(p => ({ ...p, service_type: e.target.value || null }))}>
+                      <option value="">בחר</option>
+                      {SERVICE_TYPE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
                   </div>
+                )}
+
+                <div className={TILE_CLS}>
+                  <label htmlFor="ys-order-amount" className={TILE_LABEL_CLS}>מחיר כולל מע"מ</label>
+                  <input id="ys-order-amount" className="input-field text-sm" type="text" inputMode="numeric" autoComplete="off"
+                    defaultValue={formatAmount(yearAdminForm.order_amount_gefen)}
+                    onBlur={e => {
+                      const v = parseAmount(e.target.value);
+                      e.target.value = formatAmount(v);
+                      setYearAdminForm(p => ({ ...p, order_amount_gefen: v }));
+                    }} />
                 </div>
 
-                {/* Left column — גישה, managers/owners only */}
                 {canSeeAllUsers && (
-                  <div>
-                    <div className="flex items-center gap-1.5 mb-2">
-                      <p className="text-xs text-slate-800 font-medium">גישה</p>
+                  <div className={TILE_CLS}>
+                    <span className={TILE_LABEL_CLS}>אמצעי הזמנה</span>
+                    <MultiSelectChips compact options={FUNDING_METHOD_OPTIONS}
+                      selected={yearAdminForm.order_method || []}
+                      onChange={v => setYearAdminForm(p => ({ ...p, order_method: v.length ? v : [] }))} />
+                  </div>
+                )}
+
+                {canSeeAllUsers && (
+                  <div className={`${TILE_CLS} col-span-2`}>
+                    <span className={`${TILE_LABEL_CLS} inline-flex items-center gap-1.5`}>
+                      גישה
                       <span title="בחר למי תהיה גישה לצפות בנתוני בית הספר."
                         className="w-4 h-4 rounded-full border border-slate-300 text-slate-400 text-xs flex items-center justify-center flex-shrink-0 cursor-help"
                         aria-label="מידע על הגדרת גישה">?</span>
-                    </div>
+                    </span>
                     <AccessSelector
                       restrictTo={schoolForm.restrict_access_to}
                       users={users}
@@ -830,12 +839,16 @@ export default function AddSchoolPage() {
               {/* Per-service-type sub-sections: יועץ מלווה / הקצאת פגישות / זמן לפגישה, per
                   גפן/שוטף/מחוז — replaces the old single flat "יועצים אחראיים" field. */}
               {canSeeAllUsers && (
-                <div className="mt-5 pt-4 border-t border-slate-100 grid grid-cols-3 gap-4">
-                  {TYPED_SERVICE_TYPES.map(({ key, label }, idx) => {
+                <div className="mt-6 pt-6 border-t border-slate-200/60">
+                  <div className={SECTION_HEADER_CLS}>
+                    {sectionTitle(UsersRound, "יועצים מלווים", "bg-violet-50 text-violet-600")}
+                  </div>
+                  <div className="grid grid-cols-3 gap-4">
+                  {TYPED_SERVICE_TYPES.map(({ key, label }) => {
                     const isRequired = activeServiceTypes(yearAdminForm.service_type).includes(key);
                     const invalid = triedSave && isRequired && typedAdvisorIds[key].length === 0;
                     return (
-                      <div key={key} className={idx < TYPED_SERVICE_TYPES.length - 1 ? "border-l border-slate-100 pl-4" : ""}>
+                      <div key={key} className="bg-slate-50/70 border border-slate-200/70 rounded-xl p-3">
                         <p className="text-sm font-semibold text-slate-700 text-center mb-3">
                           {label}{isRequired && <span className="text-red-500"> *</span>}
                         </p>
@@ -870,6 +883,7 @@ export default function AddSchoolPage() {
                       </div>
                     );
                   })}
+                  </div>
                 </div>
               )}
             </div>

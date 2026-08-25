@@ -13,3 +13,16 @@ def get_academic_year_date_range(academic_year: str) -> tuple[date, date]:
     through Aug 31 of the next — falls back to DEFAULT_ACADEMIC_YEAR for unknown labels."""
     start_year = _ACADEMIC_YEAR_START_GREGORIAN.get(academic_year) or _ACADEMIC_YEAR_START_GREGORIAN[DEFAULT_ACADEMIC_YEAR]
     return date(start_year, 9, 1), date(start_year + 1, 8, 31)
+
+
+def get_academic_year_for_date(d: date) -> str | None:
+    """Reverse lookup: which known academic year (if any) contains date `d`.
+
+    Returns None when `d` predates the earliest known academic year's start —
+    callers MUST treat None as a condition requiring explicit user resolution,
+    never silently default it to DEFAULT_ACADEMIC_YEAR."""
+    for year in ACADEMIC_YEARS:
+        start, end = get_academic_year_date_range(year)
+        if start <= d <= end:
+            return year
+    return None

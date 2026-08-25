@@ -48,7 +48,7 @@ export default function AdminPersonTasksTab() {
     <div dir="rtl">
       <div className="flex items-center justify-between mb-4">
         <div>
-          <h2 className="text-lg font-bold text-slate-800">משימות אנשי הארגון</h2>
+          <h2 className="text-lg font-bold text-slate-800">משימות יועצים</h2>
           <p className="text-sm text-slate-500">הטלת משימות אישיות על אנשי צוות ומעקב אחר ביצוען</p>
         </div>
         <div className="flex items-center gap-2">
