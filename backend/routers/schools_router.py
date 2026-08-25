@@ -7,11 +7,12 @@ import secrets
 import smtplib
 import time
 from concurrent.futures import ThreadPoolExecutor, wait as futures_wait, FIRST_COMPLETED
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Annotated
+from uuid import uuid4
 
 import httpx
 from bidi.algorithm import get_display
@@ -28,7 +29,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 import graph_client
-from academic_years import ACADEMIC_YEARS, DEFAULT_ACADEMIC_YEAR
+from academic_years import ACADEMIC_YEARS, DEFAULT_ACADEMIC_YEAR, get_academic_year_for_date
 from auth import get_current_user, invalidate_profile_cache
 from email_resend import send_resend_email
 from meeting_upload_logic import build_upload_checklist, get_or_create_upload_token
@@ -280,6 +281,47 @@ class MeetingStatusPatchIn(BaseModel):
     notes: str | None = None
     start_time: str | None = None
     end_time: str | None = None
+
+
+class MeetingImportRowIn(BaseModel):
+    row_index: int
+    meeting_date: str | None = None
+    start_time: str | None = None
+    end_time: str | None = None
+    school_name: str | None = None
+    school_symbol: str | None = None
+    stage_scope: str | None = None
+    advisor_name_or_email: str | None = None   # future mode
+    advisor_name_text: str | None = None        # past mode free text
+    meeting_type: str | None = None
+    meeting_service_type: str | None = None
+    participant_name: str | None = None
+    participant_phone: str | None = None
+    participant_email: str | None = None
+    notes: str | None = None
+    status: str | None = None
+    # reminder_enabled is intentionally NOT importable from the file — every other meeting
+    # creation path in this app defaults it to False and leaves it as a manual post-creation
+    # toggle (MeetingRow's reminder switch); imported meetings must behave identically, not
+    # let a spreadsheet column silently opt schools into reminder emails.
+    # resolution fields — set by the client on the /commit call only
+    excluded: bool = False
+    school_id: str | None = None
+    resolved_advisor_id: str | None = None
+    academic_year_override: str | None = None
+    accept_mode_mismatch: bool = False
+    accept_conflict: bool = False
+    accept_duplicate: bool = False
+
+
+class MeetingImportValidateIn(BaseModel):
+    mode: str  # "past" | "future"
+    rows: list[MeetingImportRowIn]
+
+
+class MeetingImportCommitIn(BaseModel):
+    mode: str
+    rows: list[MeetingImportRowIn]
 
 
 class DirectCoordinationParticipantIn(BaseModel):
@@ -5118,85 +5160,6 @@ def download_school_file(
 
 
 # ---------------------------------------------------------------------------
-# Bulk import from Excel
-# ---------------------------------------------------------------------------
-
-DIVISION_HEB_MAP = {
-    "חטיבה עליונה": "tikkon", "תיכון": "tikkon", "tikkon": "tikkon",
-    "חטיבת ביניים": "beinayim", "ביניים": "beinayim", "beinayim": "beinayim",
-    "יסודי": "yesodi", "yesodi": "yesodi",
-    "אחר": "other", "other": "other",
-}
-
-
-@router.post("/import")
-async def import_schools(
-    file: UploadFile,
-    user: Annotated[dict, Depends(get_current_user)],
-):
-    _require_manager(user)
-    if not (file.filename or "").lower().endswith((".xlsx", ".xls")):
-        raise HTTPException(400, "יש להעלות קובץ Excel בלבד (.xlsx)")
-
-    content = await file.read()
-    wb = load_workbook(io.BytesIO(content), data_only=True)
-    ws = wb.active
-
-    rows = list(ws.iter_rows(values_only=True))
-    if not rows:
-        return {"imported": 0, "errors": ["הקובץ ריק"]}
-
-    # Skip header row if first cell looks like a column title
-    first_cell = str(rows[0][0] or "").strip()
-    start = 1 if first_cell in ("שם בית ספר", "שם", "name", "Name") else 0
-
-    db = get_admin_client()
-    imported = 0
-    errors = []
-
-    for i, row in enumerate(rows[start:], start=start + 2):
-        name = str(row[0] or "").strip() if len(row) > 0 else ""
-        symbol = str(row[1] or "").strip().split(".")[0] if len(row) > 1 else ""
-        city = str(row[2] or "").strip() if len(row) > 2 else ""
-        notes = str(row[3] or "").strip() if len(row) > 3 else ""
-        divisions_raw = str(row[4] or "").strip() if len(row) > 4 else ""
-
-        if not name:
-            continue
-
-        if not symbol or not symbol.isdigit() or len(symbol) not in (5, 6):
-            errors.append(f"שורה {i}: סמל מוסד לא תקין — '{symbol}'")
-            continue
-
-        try:
-            school_data: dict = {"name": name, "symbol": symbol, "org_id": user["org_id"]}
-            if city:
-                school_data["city"] = city
-            if notes:
-                school_data["notes"] = notes
-
-            res = db.table("schools").insert(school_data).execute()
-            school_id = res.data[0]["id"]
-
-            if divisions_raw:
-                for div_str in divisions_raw.split(","):
-                    div_type = DIVISION_HEB_MAP.get(div_str.strip())
-                    if div_type:
-                        try:
-                            db.table("gefen_accounts").insert(
-                                {"school_id": school_id, "division_type": div_type}
-                            ).execute()
-                        except Exception:
-                            pass
-
-            imported += 1
-        except Exception as exc:
-            errors.append(f"שורה {i}: {str(exc)[:80]}")
-
-    return {"imported": imported, "errors": errors}
-
-
-# ---------------------------------------------------------------------------
 # Meetings
 # ---------------------------------------------------------------------------
 
@@ -5950,18 +5913,335 @@ def create_meeting(school_id: str, body: MeetingIn, user: Annotated[dict, Depend
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"שגיאת DB: {str(e)}")
 
+    _sync_new_meeting_calendar(db, user["org_id"], school_id, meeting, user["id"])
+
+    return meeting
+
+
+def _sync_new_meeting_calendar(db, org_id: str, school_id: str, meeting: dict, user_id: str) -> None:
+    """Shared Outlook-sync block for a just-inserted meeting row — used by create_meeting()
+    and by the future-mode meeting-import commit endpoint so both paths behave identically.
+    Non-fatal: any failure here must never fail the caller's request."""
     try:
         with graph_client.calendar_sync_lock(db, meeting["id"]) as acquired:
             if acquired:
                 subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"))
-                sync_map = graph_client.sync_meeting_create(db, user["org_id"], meeting, subject)
+                sync_map = graph_client.sync_meeting_create(db, org_id, meeting, subject)
                 if sync_map:
                     graph_client.persist_calendar_sync(db, meeting["id"], sync_map)
                     meeting["calendar_sync"] = sync_map
     except Exception as exc:
         logger.warning("calendar sync failed for new meeting %s (non-fatal): %s", meeting.get("id"), exc)
 
-    return meeting
+
+# ---------------------------------------------------------------------------
+# Meeting import (bulk Excel import of past/future meetings)
+# ---------------------------------------------------------------------------
+
+def _normalize_match_str(s: str | None) -> str:
+    return (s or "").strip().lower()
+
+
+def _resolve_advisor_match(profiles_by_email: dict, profiles_by_name: dict, query: str | None) -> str | None:
+    q = _normalize_match_str(query)
+    if not q:
+        return None
+    if q in profiles_by_email:
+        return profiles_by_email[q]
+    ids = profiles_by_name.get(q)
+    if ids and len(ids) == 1:
+        return ids[0]
+    return None
+
+
+def _normalize_stage_scope(raw: str | None) -> str | None:
+    t = (raw or "").strip()
+    if t in ("tichon", "chativa", "both"):
+        return t
+    if "שתי" in t:
+        return "both"
+    if "תיכון" in t or "עליונה" in t:
+        return "tichon"
+    if "ביניים" in t or "חטיבה" in t:
+        return "chativa"
+    return None
+
+
+def _parse_import_date(raw: str | None) -> date | None:
+    t = (raw or "").strip()
+    if not t:
+        return None
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y"):
+        try:
+            return datetime.strptime(t, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _run_meeting_import_validation(db, org_id: str, mode: str, rows: list) -> list[dict]:
+    """Shared row-by-row validation used by both /meetings/import/validate (first pass) and
+    /meetings/import/commit (mandatory server-side re-check before committing). Batch-fetches
+    schools/profiles/existing-meetings once (CLAUDE.md rule 7 — no per-row queries)."""
+    today = date.today()
+
+    schools_res = db.table("schools").select("id, symbol, name, stage").eq("org_id", org_id).execute()
+    schools = schools_res.data or []
+    schools_by_symbol = {}
+    schools_by_id = {}
+    for s in schools:
+        schools_by_id[s["id"]] = s
+        sym = str(s.get("symbol") or "").strip()
+        if sym:
+            schools_by_symbol[sym] = s
+
+    profiles_res = db.table("profiles").select("id, full_name, email").eq("org_id", org_id).execute()
+    profiles = profiles_res.data or []
+    profiles_by_email, profiles_by_name, profiles_by_id = {}, {}, {}
+    for p in profiles:
+        profiles_by_id[p["id"]] = p
+        e = _normalize_match_str(p.get("email"))
+        n = _normalize_match_str(p.get("full_name"))
+        if e:
+            profiles_by_email[e] = p["id"]
+        if n:
+            profiles_by_name.setdefault(n, []).append(p["id"])
+
+    candidate_school_ids = set()
+    for row in rows:
+        if row.school_id and row.school_id in schools_by_id:
+            candidate_school_ids.add(row.school_id)
+        else:
+            sym = str(row.school_symbol or "").strip()
+            s = schools_by_symbol.get(sym)
+            if s:
+                candidate_school_ids.add(s["id"])
+
+    existing_keys = set()
+    if candidate_school_ids:
+        try:
+            m_res = db.table("meetings").select("school_id, meeting_date, start_time").in_("school_id", list(candidate_school_ids)).execute()
+            for m in (m_res.data or []):
+                if m.get("meeting_date") and m.get("start_time"):
+                    existing_keys.add((m["school_id"], m["meeting_date"], m["start_time"]))
+        except Exception as exc:
+            logger.warning("meeting import duplicate lookup failed (non-fatal): %s", exc)
+
+    results = []
+    for row in rows:
+        problems = []
+
+        school = None
+        if row.school_id and row.school_id in schools_by_id:
+            school = schools_by_id[row.school_id]
+        else:
+            sym = str(row.school_symbol or "").strip()
+            school = schools_by_symbol.get(sym)
+        if not school:
+            problems.append({"type": "school_not_found", "detail": f"סמל מוסד '{row.school_symbol or ''}' לא נמצא במערכת"})
+
+        true_date = _parse_import_date(row.meeting_date)
+        academic_year = None
+        effective_mode = mode
+        if true_date is None:
+            problems.append({"type": "academic_year_out_of_range", "detail": "לא ניתן לזהות תאריך תקין בשורה"})
+        else:
+            academic_year = get_academic_year_for_date(true_date)
+            if academic_year is None:
+                if row.academic_year_override and row.academic_year_override in ACADEMIC_YEARS:
+                    academic_year = row.academic_year_override
+                else:
+                    problems.append({"type": "academic_year_out_of_range", "detail": f"התאריך {true_date.isoformat()} קודם לתחילת שנת הלימודים המוכרת הראשונה במערכת"})
+            effective_mode = "future" if true_date >= today else "past"
+            if effective_mode != mode and not row.accept_mode_mismatch:
+                mode_label = "פגישות עתידיות" if mode == "future" else "תיעוד פגישות עבר"
+                problems.append({"type": "mode_date_mismatch", "detail": f"התאריך {true_date.isoformat()} הוא {'עתידי' if effective_mode == 'future' else 'עבר'}, בעוד שנבחר מצב ייבוא '{mode_label}'"})
+
+        advisor_id = None
+        if effective_mode == "future":
+            if row.resolved_advisor_id and row.resolved_advisor_id in profiles_by_id:
+                advisor_id = row.resolved_advisor_id
+            else:
+                advisor_id = _resolve_advisor_match(profiles_by_email, profiles_by_name, row.advisor_name_or_email)
+            if not advisor_id:
+                problems.append({"type": "advisor_unresolved", "detail": f"לא נמצא יועץ תואם ל-'{row.advisor_name_or_email or ''}'"})
+
+        stage_scope = _normalize_stage_scope(row.stage_scope)
+        if school and school.get("stage") == "sheshshnati" and not stage_scope:
+            problems.append({"type": "stage_scope_ambiguous", "detail": 'בית ספר שש-שנתי — יש לבחור היקף פגישה (תיכון/חט"ב/שתיהן)'})
+
+        if effective_mode == "future" and advisor_id and true_date and row.start_time and row.end_time:
+            try:
+                has_conflict = graph_client._check_meeting_conflict(
+                    db, org_id, advisor_id,
+                    {"meeting_date": true_date.isoformat(), "start_time": row.start_time, "end_time": row.end_time},
+                    None,
+                )
+            except Exception as exc:
+                logger.warning("meeting import conflict check failed (non-fatal): %s", exc)
+                has_conflict = False
+            if has_conflict and not row.accept_conflict:
+                problems.append({"type": "calendar_conflict", "detail": "קיימת התנגשות ביומן ה-Outlook של היועץ בטווח השעות שצוין"})
+
+        if school and true_date and row.start_time:
+            key = (school["id"], true_date.isoformat(), row.start_time)
+            if key in existing_keys and not row.accept_duplicate:
+                problems.append({"type": "possible_duplicate", "detail": "קיימת כבר פגישה עם אותו בית ספר, תאריך ושעת התחלה"})
+
+        results.append({
+            "row_index": row.row_index,
+            "data": {
+                **row.model_dump(),
+                "resolved_school_id": school["id"] if school else None,
+                "resolved_school_name": school.get("name") if school else None,
+                "resolved_advisor_id": advisor_id,
+                "resolved_advisor_name": profiles_by_id.get(advisor_id, {}).get("full_name") if advisor_id else None,
+                "effective_mode": effective_mode,
+                "academic_year": academic_year,
+                "true_date": true_date.isoformat() if true_date else None,
+                "stage_scope_normalized": stage_scope,
+            },
+            "problems": problems,
+        })
+    return results
+
+
+@router.post("/meetings/import/validate")
+def validate_meeting_import(body: MeetingImportValidateIn, user: Annotated[dict, Depends(get_current_user)]):
+    _require_manager(user)
+    results = None
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            results = _run_meeting_import_validation(db, user["org_id"], body.mode, body.rows)
+            break
+        except HTTPException:
+            raise
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("validate_meeting_import attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("validate_meeting_import failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+    ok_count = sum(1 for r in results if not r["problems"])
+    problem_count = len(results) - ok_count
+    return {"rows": results, "ok_count": ok_count, "problem_count": problem_count}
+
+
+@router.post("/meetings/import/commit")
+def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Depends(get_current_user)]):
+    _require_manager(user)
+    db = get_admin_client()
+    active_rows = [r for r in body.rows if not r.excluded]
+    revalidated = _run_meeting_import_validation(db, user["org_id"], body.mode, active_rows)
+
+    unresolved_row_indexes = []
+    for row, val in zip(active_rows, revalidated):
+        remaining = []
+        for p in val["problems"]:
+            t = p["type"]
+            if t == "school_not_found" and row.school_id:
+                continue
+            if t == "academic_year_out_of_range" and row.academic_year_override in ACADEMIC_YEARS:
+                continue
+            if t == "mode_date_mismatch" and row.accept_mode_mismatch:
+                continue
+            if t == "advisor_unresolved" and row.resolved_advisor_id:
+                continue
+            if t == "stage_scope_ambiguous" and row.stage_scope:
+                continue
+            if t == "calendar_conflict" and row.accept_conflict:
+                continue
+            if t == "possible_duplicate" and row.accept_duplicate:
+                continue
+            remaining.append(p)
+        if remaining:
+            unresolved_row_indexes.append(row.row_index)
+    if unresolved_row_indexes:
+        raise HTTPException(status_code=400, detail=f"שורות עם בעיות שלא טופלו: {unresolved_row_indexes}")
+
+    import_batch_id = str(uuid4())
+    imported, past_count, future_count = 0, 0, 0
+    errors: list[str] = []
+
+    for row, val in zip(active_rows, revalidated):
+        data_ctx = val["data"]
+        try:
+            school_id = row.school_id or data_ctx.get("resolved_school_id")
+            if not school_id:
+                errors.append(f"שורה {row.row_index}: לא נמצא בית ספר")
+                continue
+            true_date = data_ctx.get("true_date") or row.meeting_date
+            academic_year = (row.academic_year_override if row.academic_year_override in ACADEMIC_YEARS else None) or data_ctx.get("academic_year") or DEFAULT_ACADEMIC_YEAR
+            stage_scope = _normalize_stage_scope(row.stage_scope) or data_ctx.get("stage_scope_normalized")
+
+            participants = []
+            if row.participant_name or row.participant_phone or row.participant_email:
+                participants = [{
+                    "key": "extra:import",
+                    "name": row.participant_name or "",
+                    "phone": row.participant_phone or None,
+                    "email": row.participant_email or None,
+                }]
+
+            effective_mode = data_ctx.get("effective_mode") or body.mode
+
+            if effective_mode == "past":
+                insert_data = {
+                    "school_id": school_id,
+                    "created_by": user["id"],
+                    "status": row.status or "completed",
+                    "meeting_type": row.meeting_type or "remote",
+                    "meeting_service_type": row.meeting_service_type,
+                    "stage_scope": stage_scope,
+                    "advisor_ids": [],
+                    "advisor_name_text": row.advisor_name_text,
+                    "participants": participants,
+                    "notes": row.notes,
+                    "reminder_enabled": False,
+                    "academic_year": academic_year,
+                    "created_via": "import",
+                    "import_batch_id": import_batch_id,
+                }
+                if true_date: insert_data["meeting_date"] = true_date
+                if row.start_time: insert_data["start_time"] = row.start_time
+                if row.end_time: insert_data["end_time"] = row.end_time
+                db.table("meetings").insert(insert_data).execute()
+                imported += 1
+                past_count += 1
+            else:
+                advisor_id = row.resolved_advisor_id or data_ctx.get("resolved_advisor_id")
+                insert_data = {
+                    "school_id": school_id,
+                    "created_by": user["id"],
+                    "status": row.status or "scheduled",
+                    "reminder_enabled": False,
+                    "participants": participants,
+                    "academic_year": academic_year,
+                    "meeting_type": row.meeting_type or "remote",
+                    "advisor_ids": [advisor_id] if advisor_id else [],
+                    "created_via": "import",
+                    "import_batch_id": import_batch_id,
+                }
+                if true_date: insert_data["meeting_date"] = true_date
+                if row.start_time: insert_data["start_time"] = row.start_time
+                if row.end_time: insert_data["end_time"] = row.end_time
+                if row.meeting_service_type is not None: insert_data["meeting_service_type"] = row.meeting_service_type
+                if row.notes: insert_data["notes"] = row.notes
+                if stage_scope is not None: insert_data["stage_scope"] = stage_scope
+
+                res = db.table("meetings").insert(insert_data).execute()
+                meeting = res.data[0]
+                _sync_new_meeting_calendar(db, user["org_id"], school_id, meeting, user["id"])
+                imported += 1
+                future_count += 1
+        except Exception as exc:
+            logger.warning("meeting import row %s failed: %s", row.row_index, exc)
+            errors.append(f"שורה {row.row_index}: {str(exc)}")
+
+    return {"imported": imported, "past": past_count, "future": future_count, "errors": errors}
 
 
 _DIRECT_COORDINATION_SERVICE_TYPES = {"gefen": "גפן", "current": "שוטף", "district": "מחוז"}

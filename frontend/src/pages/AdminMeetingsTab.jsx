@@ -11,6 +11,7 @@ import { StageScopeModal } from "../components/meetings/StageScopeModal";
 import { DirectCoordinationModal } from "../components/meetings/DirectCoordinationModal";
 import AdvisorAccessGrantModal from "../components/meetings/AdvisorAccessGrantModal";
 import MeetingAutomationsModal from "../components/meetings/MeetingAutomationsModal";
+import ImportMeetingsModal from "../components/meetings/ImportMeetingsModal";
 import { AdvisorFinderModal } from "../components/meetings/AdvisorFinderModal";
 import { MEETING_STATUS_OPTIONS, MEETING_TYPE_OPTIONS, MEETING_SERVICE_TYPE_OPTIONS, STATUS_MAP, formatMeetingDate, defaultMeetingServiceType, resolveDefaultAdvisorIds } from "../components/meetings/constants";
 import { AcademicYearSelector } from "../components/AcademicYearSelector";
@@ -66,7 +67,9 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
   const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false);
   const [automationsModalOpen, setAutomationsModalOpen] = useState(false);
   const showAutomationsButton = myRole === "owner" || canEditAutomations;
+  const showImportMeetingsButton = myRole === "owner" || myRole === "manager";
   const [advisorFinderOpen, setAdvisorFinderOpen] = useState(false);
+  const [importMeetingsOpen, setImportMeetingsOpen] = useState(false);
 
   // Status reminder states
   const [alreadySentModal, setAlreadySentModal] = useState(null); // { meeting, lastSentAt, recipients }
@@ -799,6 +802,15 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
         <MeetingAutomationsModal onClose={() => setAutomationsModalOpen(false)} />
       )}
 
+      {importMeetingsOpen && (
+        <ImportMeetingsModal
+          orgUsers={users}
+          academicYear={academicYear}
+          onClose={() => setImportMeetingsOpen(false)}
+          onImported={() => loadAllMeetings(filters)}
+        />
+      )}
+
       {advisorFinderOpen && (
         <AdvisorFinderModal schools={schools} users={users} onClose={() => setAdvisorFinderOpen(false)}
           onBook={createMeetingFromAdvisorFinder} />
@@ -844,6 +856,14 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
               <button type="button" onClick={() => setAutomationsModalOpen(true)}
                 className="btn-ghost flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-xl font-medium">
                 <span aria-hidden="true">⚙️</span> אוטומציות
+              </button>
+            </div>
+          )}
+          {showImportMeetingsButton && (
+            <div className="relative">
+              <button type="button" onClick={() => setImportMeetingsOpen(true)}
+                className="btn-ghost flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-xl font-medium">
+                <span aria-hidden="true">📥</span> ייבא פגישות
               </button>
             </div>
           )}

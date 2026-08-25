@@ -55,33 +55,36 @@ export function FilesThread({ files, currentUser, onUpload, onEditDescription, o
     <>
       <input ref={fileInputRef} type="file" className="hidden" onChange={handleFileChosen} aria-label="בחירת קובץ להעלאה" />
       <button type="button" onClick={() => fileInputRef.current?.click()} disabled={saving}
-        className="btn-ghost text-xs px-3 py-1.5">
+        className="border border-slate-300 hover:border-slate-400 text-slate-700 bg-white text-xs font-semibold px-3.5 py-2 rounded-lg transition-all">
         + הוסף קובץ
       </button>
     </>
   );
 
   return (
-    <div className="flex flex-col gap-2">
+    <div className="flex flex-col">
       {title ? (
-        <div className="relative flex items-center justify-center mb-1">
-          <p className="text-sm font-semibold text-slate-700">{title}</p>
-          <div className="absolute left-0">{addButton}</div>
+        <div className="flex items-center justify-between bg-white border-b border-black/20 px-4 py-3">
+          <p className="text-[23px] font-bold text-black flex items-center gap-2">{title}</p>
+          {addButton}
         </div>
-      ) : addButton}
+      ) : (
+        <div className="mb-2">{addButton}</div>
+      )}
 
+      <div className={title ? "flex flex-col gap-2 px-4 py-4" : "flex flex-col gap-2"}>
       {error && <div role="alert" className="text-xs text-red-600">{error}</div>}
 
-      <table className="w-full text-sm border-collapse" dir="rtl">
+      <table className="w-full text-sm border border-slate-200 border-collapse font-sans" dir="rtl">
         <thead>
-          <tr>
-            <th scope="col" className="text-right text-xs font-700 text-slate-500 px-3 py-2" style={{ width: "110px" }}>תאריך</th>
-            <th scope="col" className="text-right text-xs font-700 text-slate-500 px-3 py-2" style={{ width: "120px" }}>משתמש</th>
-            <th scope="col" className="text-right text-xs font-700 text-slate-500 px-3 py-2">תיאור</th>
-            <th scope="col" className="text-right text-xs font-700 text-slate-500 px-3 py-2" style={{ width: "160px" }}>קובץ</th>
+          <tr className="bg-slate-100 divide-x divide-slate-200">
+            <th scope="col" className="text-right text-xs font-semibold text-gray-700 px-3 py-3" style={{ width: "110px" }}>תאריך</th>
+            <th scope="col" className="text-right text-xs font-semibold text-gray-700 px-3 py-3" style={{ width: "120px" }}>משתמש</th>
+            <th scope="col" className="text-right text-xs font-semibold text-gray-700 px-3 py-3">תיאור</th>
+            <th scope="col" className="text-right text-xs font-semibold text-gray-700 px-3 py-3" style={{ width: "160px" }}>קובץ</th>
           </tr>
         </thead>
-        <tbody>
+        <tbody className="divide-y divide-slate-200">
           {files.length === 0 && (
             <tr>
               <td colSpan={4} className="px-3 py-6">
@@ -98,19 +101,19 @@ export function FilesThread({ files, currentUser, onUpload, onEditDescription, o
             const isEditing = editDraft?.fileId === f.id;
             const color = authorColorMap[f.author_id];
             return (
-              <tr key={f.id} className="border-t border-slate-100">
-                <td className="px-3 py-2 align-top">
-                  <div className="text-xs px-1.5 py-1 rounded" style={{ background: color?.bg, color: color?.text }}>
+              <tr key={f.id} className="divide-x divide-slate-200 even:bg-slate-100/80 hover:bg-blue-50/60 transition-colors">
+                <td className="px-3 py-3 align-top">
+                  <div className="text-sm px-2 py-1 rounded" style={{ background: color?.bg, color: color?.text }}>
                     {formatUpdateDate(f.created_at)}
                   </div>
                 </td>
-                <td className="px-3 py-2 align-top">
-                  <div className="text-xs px-1.5 py-1 rounded" style={{ background: color?.bg, color: color?.text }}>
+                <td className="px-3 py-3 align-top">
+                  <div className="text-sm px-2 py-1 rounded" style={{ background: color?.bg, color: color?.text }}>
                     {f.author_name || "—"}
                   </div>
                 </td>
-                <td className="px-3 py-2 align-top">
-                  <div className="text-xs px-1.5 py-1 rounded flex items-start justify-between gap-2"
+                <td className="px-3 py-3 align-top">
+                  <div className="text-sm px-2 py-1 rounded flex items-start justify-between gap-2"
                     style={{ background: color?.bg, color: color?.text }}
                     onClick={() => {
                       if (!editable) return;
@@ -138,9 +141,9 @@ export function FilesThread({ files, currentUser, onUpload, onEditDescription, o
                     )}
                   </div>
                 </td>
-                <td className="px-3 py-2 align-top">
+                <td className="px-3 py-3 align-top">
                   <button type="button" onClick={() => onDownload(f.id, f.file_name)}
-                    className="text-xs text-blue-600 hover:underline truncate max-w-[150px] block text-right">
+                    className="text-sm text-blue-600 hover:underline truncate max-w-[150px] block text-right">
                     {f.file_name}
                   </button>
                 </td>
@@ -149,6 +152,7 @@ export function FilesThread({ files, currentUser, onUpload, onEditDescription, o
           })}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }

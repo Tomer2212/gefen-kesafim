@@ -5,7 +5,7 @@ import AdminPersonTasksTab from "./AdminPersonTasksTab";
 const SUB_TAB_IDS = ["schools", "users"];
 const SUB_TABS = [
   { id: "schools", label: "בתי ספר" },
-  { id: "users", label: "אנשי הארגון" },
+  { id: "users", label: "יועצים" },
 ];
 
 // 'משימות' tab (ניהול → משימות) — thin container with 2 sub-tabs: school-targeted tasks

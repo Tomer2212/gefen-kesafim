@@ -3,9 +3,28 @@ import { createPortal } from "react-dom";
 import { useBlocker, useLocation, useNavigate } from "react-router-dom";
 import axios from "axios";
 import * as XLSX from "xlsx";
+import { Building2, Phone, Handshake, UsersRound } from "lucide-react";
 import Sidebar from "../components/Sidebar";
+
+// ── Shared visual language with SchoolPage.jsx's "פרטי בית הספר" tab ──
+const SECTION_TITLE_CLS = "text-[23px] font-bold text-black flex items-center gap-2";
+function sectionIcon(Icon, accentCls) {
+  return (
+    <span aria-hidden="true" className={`inline-flex items-center justify-center p-2 rounded-xl flex-shrink-0 ${accentCls}`}>
+      <Icon className="w-4 h-4" strokeWidth={2} />
+    </span>
+  );
+}
+function sectionTitle(Icon, text, accentCls) {
+  return <p className={SECTION_TITLE_CLS}>{text}{sectionIcon(Icon, accentCls)}</p>;
+}
+const SECTION_HEADER_CLS = "flex items-center justify-between pb-3 mb-4 border-b border-slate-200/60";
+const TILE_CLS = "bg-slate-100/70 border border-slate-200/90 rounded-xl py-3.5 px-3 min-h-[76px]";
+const TILE_LABEL_CLS = "text-[13px] font-medium text-gray-500 mb-1 block";
+const OUTLINE_BTN_CLS = "border border-slate-300 hover:border-slate-400 text-slate-700 bg-white text-xs font-semibold px-3.5 py-2 rounded-lg transition-all";
 import { MultiSelectChips } from "../components/MultiSelectChips";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { ImportMappingModal } from "../components/ImportMappingModal";
 import { supabase } from "../lib/supabase";
 import AdminCallsTab from "./AdminCallsTab";
 import AdminCollectionTab from "./AdminCollectionTab";
@@ -238,6 +257,23 @@ const FUNDING_METHOD_OPTIONS = [
   { value: "authority", label: "רשות" },
   { value: "district", label: "מחוז" },
 ];
+
+const CLIENT_STATUS_OPTIONS = [
+  { value: "active", label: "פעיל" },
+  { value: "inactive", label: "לא פעיל" },
+  { value: "in_progress", label: "בתהליך" },
+  { value: "former", label: "לקוח עבר" },
+];
+
+// Which of the 3 typed advisor lists are mandatory, given the school's own "סוג שירות" value —
+// gefen_current requires both גפן and שוטף advisors to be set. Mirrors SchoolPage.jsx/AddSchoolPage.jsx.
+function activeServiceTypes(serviceType) {
+  if (serviceType === "gefen") return ["gefen"];
+  if (serviceType === "current") return ["current"];
+  if (serviceType === "district") return ["district"];
+  if (serviceType === "gefen_current") return ["gefen", "current"];
+  return [];
+}
 
 // New admin/financial columns, per-school-year (stored in school_year_admin_data).
 const ADMIN_DATA_COLUMNS = [
@@ -605,13 +641,19 @@ const IMPORT_FIELD_CONFIG = [
   { key: "school_phone",          label: "טלפון בית הספר",       required: false },
   { key: "principal_name",        label: "שם מנהל/ת",            required: false },
   { key: "principal_phone",       label: "טלפון מנהל/ת",         required: false },
+  { key: "principal_email",       label: "מייל מנהל/ת",           required: false },
   { key: "secretary_name",        label: "שם מנהלנ/ית",          required: false },
   { key: "secretary_phone",       label: "טלפון מנהלנ/ית",       required: false },
+  { key: "secretary_email",       label: "מייל מנהלנ/ית",         required: false },
   { key: "finance_contact_name",  label: "שם אחראי/ת כספים",     required: false },
   { key: "finance_contact_phone", label: "טלפון אחראי/ת כספים",  required: false },
-  { key: "principal_email",       label: "מייל מנהל/ת",           required: false },
-  { key: "secretary_email",       label: "מייל מנהלנ/ית",         required: false },
   { key: "finance_contact_email", label: "מייל אחראי/ת כספים",    required: false },
+  { key: "meeting_coordinator",   label: "מתאם פגישות",           required: true, hint: "מנהל/ת / מנהלנ/ית / אחראי/ת כספים" },
+  { key: "service_type",          label: "סוג שירות",             required: true, hint: "גפן / שוטף / גפן+שוטף / מחוז" },
+  { key: "client_status",         label: "סטטוס לקוח",            required: true, hint: "פעיל / לא פעיל / בתהליך / לקוח עבר" },
+  { key: "advisor_gefen",         label: "יועץ מלווה — גפן",      required: true, hint: "אימייל אחד או כמה, מופרדים בפסיק (ניתן להשאיר תא ריק בשורה שלא נדרש לה)" },
+  { key: "advisor_current",       label: "יועץ מלווה — שוטף",     required: true, hint: "אימייל אחד או כמה, מופרדים בפסיק (ניתן להשאיר תא ריק בשורה שלא נדרש לה)" },
+  { key: "advisor_district",      label: "יועץ מלווה — מחוז",     required: true, hint: "אימייל אחד או כמה, מופרדים בפסיק (ניתן להשאיר תא ריק בשורה שלא נדרש לה)" },
 ];
 
 const USER_IMPORT_FIELD_CONFIG = [
@@ -654,6 +696,34 @@ function normalizeFinanceSoftware(raw) {
   return "";
 }
 
+function normalizeServiceType(raw) {
+  const t = String(raw || "").trim();
+  if (!t) return null;
+  if (t.includes("גפן") && t.includes("שוטף")) return "gefen_current";
+  if (t.includes("גפן")) return "gefen";
+  if (t.includes("שוטף")) return "current";
+  if (t.includes("מחוז")) return "district";
+  return null;
+}
+
+function normalizeMeetingCoordinator(raw) {
+  const t = String(raw || "").trim();
+  if (!t) return null;
+  if (t.includes("מנהלנ")) return "secretary";
+  if (t.includes("כספים")) return "finance_contact";
+  if (t.includes("מנהל")) return "principal";
+  return null;
+}
+
+function normalizeClientStatus(raw) {
+  const t = String(raw || "").trim();
+  if (t === "פעיל") return "active";
+  if (t === "לא פעיל") return "inactive";
+  if (t.includes("בתהליך")) return "in_progress";
+  if (t.includes("לקוח עבר")) return "former";
+  return null;
+}
+
 function normalizeRole(raw) {
   const t = String(raw || "").trim().toLowerCase();
   if (t.includes("בעלים") || t === "owner") return "owner";
@@ -661,109 +731,41 @@ function normalizeRole(raw) {
   return "advisor";
 }
 
-function FieldMappingRow({ label, hint, required, headers, previewRow, value, error, onChange }) {
+function ImportProblemsModal({ problems, onClose }) {
+  const { ref, handleKeyDown } = useFocusTrap(onClose);
   return (
-    <div className="flex items-start gap-3">
-      <div className="w-44 flex-shrink-0 text-right pt-2">
-        <span className="text-sm text-slate-700">{label}</span>
-        {required && <span className="text-red-500 mr-1 text-xs">*</span>}
-        {hint && <p className="text-[10px] text-slate-400 mt-0.5 leading-tight">{hint}</p>}
-      </div>
-      <div className="flex-1">
-        <select
-          className={`input-field text-sm ${error ? "border-red-400" : ""}`}
-          value={value === null ? "" : String(value)}
-          onChange={e => onChange(e.target.value === "" ? null : Number(e.target.value))}
-        >
-          <option value="">{required ? "— בחר עמודה —" : "— לא ממפה —"}</option>
-          {headers.map((h, i) => {
-            const preview = previewRow[i] ? String(previewRow[i]).slice(0, 35) : "";
-            return (
-              <option key={i} value={String(i)}>
-                {h || `עמודה ${i + 1}`}{preview ? `  (${preview})` : ""}
-              </option>
-            );
-          })}
-        </select>
-        {error && <span className="text-xs text-red-500 block mt-0.5" role="alert">נדרש מיפוי</span>}
-      </div>
-    </div>
-  );
-}
-
-function ImportMappingModal({ headers, previewRow, totalRows, fieldConfig, confirmLabel, onConfirm, onCancel }) {
-  const { ref, handleKeyDown } = useFocusTrap(onCancel);
-  const [mapping, setMapping] = useState(() => Object.fromEntries(fieldConfig.map(f => [f.key, null])));
-  const [tried, setTried] = useState(false);
-
-  function handleConfirm() {
-    setTried(true);
-    if (fieldConfig.some(f => f.required && mapping[f.key] === null)) return;
-    onConfirm(mapping);
-  }
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: "rgba(15,23,42,0.55)" }}
-      onClick={e => { if (e.target === e.currentTarget) onCancel(); }}
-    >
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4" dir="rtl">
       <div
         ref={ref}
         role="dialog"
         aria-modal="true"
-        aria-labelledby="import-modal-title"
+        aria-labelledby="import-problems-title"
         onKeyDown={handleKeyDown}
-        dir="rtl"
-        className="glass-card rounded-2xl w-full flex flex-col"
-        style={{ maxWidth: 640, maxHeight: "88vh" }}
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col"
       >
-        <div className="px-6 pt-5 pb-3 border-b border-slate-100 flex-shrink-0">
-          <h2 id="import-modal-title" className="font-bold text-slate-900 text-lg">מיפוי עמודות לייבוא</h2>
-          <p className="text-sm text-slate-500 mt-0.5">
-            נמצאו <strong>{totalRows}</strong> שורות · התאם כל שדה לעמודה המתאימה בקובץ
+        <div className="px-6 py-4 border-b border-slate-100 flex-shrink-0">
+          <h2 id="import-problems-title" className="font-bold text-slate-900 text-lg">בעיות בייבוא</h2>
+          <p className="text-sm text-slate-600 mt-1">
+            בתי הספר הבאים יובאו בהצלחה, אך נותרו בהם פרטים חסרים שכדאי להשלים ידנית — <b className="text-slate-800">{problems.length}</b> בתי ספר.
           </p>
         </div>
-
-        <div className="flex-1 overflow-y-auto px-6 py-4">
-          <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide mb-3">שדות חובה</p>
-          <div className="flex flex-col gap-3 mb-6">
-            {fieldConfig.filter(f => f.required).map(f => (
-              <FieldMappingRow
-                key={f.key}
-                label={f.label}
-                hint={f.hint}
-                required
-                headers={headers}
-                previewRow={previewRow}
-                value={mapping[f.key]}
-                error={tried && mapping[f.key] === null}
-                onChange={v => setMapping(p => ({ ...p, [f.key]: v }))}
-              />
-            ))}
-          </div>
-          <div className="h-px bg-slate-100 mb-5" />
-          <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide mb-3">שדות אופציונליים</p>
-          <div className="flex flex-col gap-3">
-            {fieldConfig.filter(f => !f.required).map(f => (
-              <FieldMappingRow
-                key={f.key}
-                label={f.label}
-                hint={f.hint}
-                headers={headers}
-                previewRow={previewRow}
-                value={mapping[f.key]}
-                onChange={v => setMapping(p => ({ ...p, [f.key]: v }))}
-              />
-            ))}
-          </div>
+        <div className="flex-1 overflow-y-auto px-6 py-4 flex flex-col gap-3">
+          {problems.map((p, i) => (
+            <div key={i} className="border border-amber-200 bg-amber-50/50 rounded-xl p-3 space-y-1.5">
+              <div className="text-sm">
+                <b className="text-slate-800">{p.name}</b>{" "}
+                {p.symbol && <bdi className="text-slate-400 text-xs">({p.symbol})</bdi>}
+              </div>
+              <ul className="list-disc pr-5 space-y-0.5">
+                {p.issues.map((issue, j) => (
+                  <li key={j} className="text-xs text-slate-700">{issue}</li>
+                ))}
+              </ul>
+            </div>
+          ))}
         </div>
-
-        <div className="px-6 py-4 border-t border-slate-100 flex items-center gap-3 flex-shrink-0">
-          <button onClick={handleConfirm} className="btn-blue text-sm px-5 py-2">
-            {confirmLabel}
-          </button>
-          <button onClick={onCancel} className="btn-ghost text-sm px-5 py-2">ביטול</button>
+        <div className="px-6 py-4 border-t border-slate-100 flex justify-end flex-shrink-0">
+          <button type="button" onClick={onClose} className="btn-blue text-sm px-5 py-2">הבנתי</button>
         </div>
       </div>
     </div>
@@ -1255,6 +1257,7 @@ export default function AdminPage() {
   const [importing, setImporting] = useState(false);
   const [importMappingData, setImportMappingData] = useState(null);
   const [importProgressMsg, setImportProgressMsg] = useState("");
+  const [importProblems, setImportProblems] = useState(null);
 
   // Admin schools table state (ניהול → בתי ספר: מחירים/חוזים/תשלומים, per school year)
   const [adminAcademicYear, setAdminAcademicYear] = useState(DEFAULT_ACADEMIC_YEAR);
@@ -1284,9 +1287,6 @@ export default function AdminPage() {
   const [editingAccount, setEditingAccount] = useState(null);
   const [accountForm, setAccountForm] = useState({ finance_software: "", tmura_model: false });
 
-  // Advisor selection for new school form (multi-select)
-  const [selectedAdvisors, setSelectedAdvisors] = useState([]);
-
   // Advisors per school in expanded panel
   const [schoolAdvisors, setSchoolAdvisors] = useState({});
 
@@ -1294,11 +1294,23 @@ export default function AdminPage() {
   // the old single general list there, one independent set per service type per school.
   const [typedSchoolAdvisors, setTypedSchoolAdvisors] = useState({});
 
-  // Draft advisor selection while editing an existing school — kept purely local until
-  // saveSchool() diffs it against originalAdvisorIds and only sends the net add/remove
-  // calls (and notifications) on save.
-  const [draftAdvisorIds, setDraftAdvisorIds] = useState([]);
-  const [originalAdvisorIds, setOriginalAdvisorIds] = useState([]);
+  // Per-service-type "יועץ מלווה [גפן/שוטף/מחוז]" draft selection for the school form
+  // (add + edit) — same pattern as SchoolPage.jsx/AddSchoolPage.jsx: diffed against
+  // originalTypedAdvisorIds and only the net add/remove calls sent on save.
+  const EMPTY_TYPED_ADVISOR_IDS = { gefen: [], current: [], district: [] };
+  const [draftTypedAdvisorIds, setDraftTypedAdvisorIds] = useState(EMPTY_TYPED_ADVISOR_IDS);
+  const [originalTypedAdvisorIds, setOriginalTypedAdvisorIds] = useState(EMPTY_TYPED_ADVISOR_IDS);
+
+  // "פרטי ליווי" draft form for the school form (add + edit) — school_year_admin_data fields,
+  // same shape as AddSchoolPage.jsx's yearAdminForm. Loaded from the server when editing an
+  // existing school, sent as one PUT .../year-admin-data on save (not per-field, unlike
+  // SchoolPage.jsx's own ליווי tab which saves each field immediately on change).
+  const EMPTY_YEAR_ADMIN_FORM = {
+    client_status: null, service_type: null, order_method: [], order_amount_gefen: null,
+    meeting_allocation_gefen: null, meeting_allocation_current: null, meeting_allocation_district: null,
+    meeting_duration_gefen: null, meeting_duration_current: null, meeting_duration_district: null,
+  };
+  const [yearAdminForm, setYearAdminForm] = useState(EMPTY_YEAR_ADMIN_FORM);
 
   // Delete confirmation modal
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -1347,9 +1359,15 @@ export default function AdminPage() {
   const [confirmingUserDelete, setConfirmingUserDelete] = useState(false);
   const [userDeleteError, setUserDeleteError] = useState("");
 
+  // Union of the 3 typed advisor lists — source for "גישה" when linked to "היועצים המלווים",
+  // same pattern as AddSchoolPage.jsx's draftLinkedAdvisorIds.
+  const draftLinkedAdvisorIds = [...new Set([
+    ...draftTypedAdvisorIds.gefen, ...draftTypedAdvisorIds.current, ...draftTypedAdvisorIds.district,
+  ])];
+
   const schoolFormDirty = showSchoolForm && (
     editingSchool !== null ||
-    !!(schoolForm.name || schoolForm.symbol || schoolStage || selectedAdvisors.length > 0)
+    !!(schoolForm.name || schoolForm.symbol || schoolStage || draftLinkedAdvisorIds.length > 0)
   );
 
   const effectiveSchoolFormStage = editingSchool ? schoolForm.stage : schoolStage;
@@ -1384,8 +1402,9 @@ export default function AdminPage() {
     setShowSchoolForm(false);
     setEditingSchool(null);
     setSchoolForm(EMPTY_FORM);
-    setSelectedAdvisors([]);
-    setDraftAdvisorIds([]);
+    setDraftTypedAdvisorIds(EMPTY_TYPED_ADVISOR_IDS);
+    setOriginalTypedAdvisorIds(EMPTY_TYPED_ADVISOR_IDS);
+    setYearAdminForm(EMPTY_YEAR_ADMIN_FORM);
     setSchoolStage("");
     setCustomDivisions(DEFAULT_CUSTOM_DIVISIONS);
     setTriedSave(false);
@@ -1745,12 +1764,13 @@ export default function AdminPage() {
     return () => document.removeEventListener("mousedown", handler);
   }, []);
 
-  // When "היועצים המלווים שנבחרו" mode is active, keep restrict_access_to in sync with selected advisors
+  // When "היועצים המלווים שנבחרו" mode is active, keep restrict_access_to in sync with the
+  // union of the 3 typed advisor lists.
   useEffect(() => {
     if (!accessLinkedToAdvisors) return;
-    const ids = editingSchool ? draftAdvisorIds : selectedAdvisors;
-    setSchoolForm(p => ({ ...p, restrict_access_to: ids.length > 0 ? ids : null }));
-  }, [selectedAdvisors, draftAdvisorIds, editingSchool, accessLinkedToAdvisors]);
+    setSchoolForm(p => ({ ...p, restrict_access_to: draftLinkedAdvisorIds.length > 0 ? draftLinkedAdvisorIds : null }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftTypedAdvisorIds, accessLinkedToAdvisors]);
 
   async function loadSchools() {
     setLoadingSchools(true);
@@ -1837,8 +1857,8 @@ export default function AdminPage() {
     if (!schoolForm.name || validateSymbol(schoolForm.symbol)) return;
     if (!editingSchool && schools.some(s => s.symbol === schoolForm.symbol)) return;
     if (!editingSchool && !schoolStage) return;
-    if (!editingSchool && selectedAdvisors.length === 0) return;
-    if (editingSchool && draftAdvisorIds.length === 0) return;
+    const requiredServiceTypes = activeServiceTypes(yearAdminForm.service_type);
+    if (yearAdminForm.client_status === "active" && requiredServiceTypes.some(t => draftTypedAdvisorIds[t].length === 0)) return;
     if (!editingSchool && (schoolStage === "sheshshnati" || schoolStage === "other") && customDivisions.length === 0) return;
     if (schoolForm.principal_phone && validateSecretaryPhone(schoolForm.principal_phone)) return;
     if (schoolForm.secretary_phone && validateSecretaryPhone(schoolForm.secretary_phone)) return;
@@ -1860,26 +1880,35 @@ export default function AdminPage() {
     setSavingSchool(true);
     try {
       if (editingSchool) {
-        // Apply only the net advisor changes (adds before removes, so the backend's
-        // "last advisor" guard never sees a false zero-advisor state) — this is what
-        // keeps notifications limited to real, saved changes instead of every click.
-        const added = draftAdvisorIds.filter(id => !originalAdvisorIds.includes(id));
-        const removed = originalAdvisorIds.filter(id => !draftAdvisorIds.includes(id));
+        // Apply only the net advisor changes per type (adds before removes, so the backend's
+        // "last advisor" guard never sees a false zero-advisor state) — this is what keeps
+        // notifications limited to real, saved changes instead of every click. Each typed
+        // assign/unassign call also keeps the general advisor_schools access table in sync
+        // server-side, so there's no separate flat-advisor diff to send here anymore.
         try {
-          for (const id of added) {
-            await axios.post(`/schools/${editingSchool.id}/advisors`, { advisor_id: id });
-          }
-          for (const id of removed) {
-            await axios.delete(`/schools/${editingSchool.id}/advisors/${id}`);
+          for (const t of ["gefen", "current", "district"]) {
+            const addedT = draftTypedAdvisorIds[t].filter(id => !originalTypedAdvisorIds[t].includes(id));
+            const removedT = originalTypedAdvisorIds[t].filter(id => !draftTypedAdvisorIds[t].includes(id));
+            for (const id of addedT) {
+              await axios.post(`/schools/${editingSchool.id}/advisors/${t}`, { advisor_id: id });
+            }
+            for (const id of removedT) {
+              await axios.delete(`/schools/${editingSchool.id}/advisors/${t}/${id}`);
+            }
           }
         } catch (err) {
           window.alert(err.response?.data?.detail || "שגיאה בעדכון היועצים המלווים");
           return false;
         }
         await axios.put(`/schools/${editingSchool.id}`, { ...schoolForm, ...chativaSync });
-        const updatedAdvisors = draftAdvisorIds.map(id => users.find(u => u.id === id)).filter(Boolean);
-        setSchoolAdvisors(prev => ({ ...prev, [editingSchool.id]: updatedAdvisors }));
-        setOriginalAdvisorIds(draftAdvisorIds);
+        await axios.put(`/schools/${editingSchool.id}/year-admin-data`, yearAdminForm, { params: { academic_year: DEFAULT_ACADEMIC_YEAR } });
+        try {
+          const res = await axios.get(`/schools/${editingSchool.id}/advisors`);
+          setSchoolAdvisors(prev => ({ ...prev, [editingSchool.id]: res.data || [] }));
+        } catch {
+          // non-fatal — schoolAdvisors just stays at its previous value until next reload
+        }
+        setOriginalTypedAdvisorIds(draftTypedAdvisorIds);
       } else {
         const res = await axios.post("/schools/", { ...schoolForm, ...chativaSync, stage: schoolStage });
         const newId = res.data.id;
@@ -1893,14 +1922,19 @@ export default function AdminPage() {
             }
           }
         }
-        for (const advisorId of selectedAdvisors) {
-          await axios.post(`/schools/${newId}/advisors`, { advisor_id: advisorId });
+        for (const t of ["gefen", "current", "district"]) {
+          for (const advisorId of draftTypedAdvisorIds[t]) {
+            await axios.post(`/schools/${newId}/advisors/${t}`, { advisor_id: advisorId });
+          }
         }
+        await axios.put(`/schools/${newId}/year-admin-data`, yearAdminForm, { params: { academic_year: DEFAULT_ACADEMIC_YEAR } });
       }
       setShowSchoolForm(false);
       setEditingSchool(null);
       setSchoolForm(EMPTY_FORM);
-      setSelectedAdvisors([]);
+      setDraftTypedAdvisorIds(EMPTY_TYPED_ADVISOR_IDS);
+      setOriginalTypedAdvisorIds(EMPTY_TYPED_ADVISOR_IDS);
+      setYearAdminForm(EMPTY_YEAR_ADMIN_FORM);
       setSchoolStage("");
       setCustomDivisions(DEFAULT_CUSTOM_DIVISIONS);
       setTriedSave(false);
@@ -1957,12 +1991,24 @@ export default function AdminPage() {
     setShowSchoolForm(true);
     window.scrollTo({ top: 0, behavior: "smooth" });
     axios.get(`/schools/${school.id}/advisors`).then(res => {
-      const advisors = res.data || [];
-      setSchoolAdvisors(prev => ({ ...prev, [school.id]: advisors }));
-      const ids = advisors.map(a => a.id);
-      setDraftAdvisorIds(ids);
-      setOriginalAdvisorIds(ids);
+      setSchoolAdvisors(prev => ({ ...prev, [school.id]: res.data || [] }));
     }).catch(() => {});
+    axios.get(`/schools/${school.id}/year-admin-data`, { params: { academic_year: DEFAULT_ACADEMIC_YEAR } })
+      .then(res => setYearAdminForm({ ...EMPTY_YEAR_ADMIN_FORM, ...(res.data || {}) }))
+      .catch(() => setYearAdminForm(EMPTY_YEAR_ADMIN_FORM));
+    Promise.allSettled([
+      axios.get(`/schools/${school.id}/advisors/gefen`),
+      axios.get(`/schools/${school.id}/advisors/current`),
+      axios.get(`/schools/${school.id}/advisors/district`),
+    ]).then(([g, c, d]) => {
+      const ids = {
+        gefen: g.status === "fulfilled" ? (g.value.data || []).map(a => a.id) : [],
+        current: c.status === "fulfilled" ? (c.value.data || []).map(a => a.id) : [],
+        district: d.status === "fulfilled" ? (d.value.data || []).map(a => a.id) : [],
+      };
+      setDraftTypedAdvisorIds(ids);
+      setOriginalTypedAdvisorIds(ids);
+    });
     loadUsers();
   }
 
@@ -1988,11 +2034,13 @@ export default function AdminPage() {
   function openNewForm() {
     setEditingSchool(null);
     setSchoolForm(EMPTY_FORM);
-    setSelectedAdvisors([]);
     setSchoolStage("");
     setCustomDivisions(DEFAULT_CUSTOM_DIVISIONS);
     setTriedSave(false);
     setAccessLinkedToAdvisors(false);
+    setDraftTypedAdvisorIds(EMPTY_TYPED_ADVISOR_IDS);
+    setOriginalTypedAdvisorIds(EMPTY_TYPED_ADVISOR_IDS);
+    setYearAdminForm(EMPTY_YEAR_ADMIN_FORM);
     setShowSchoolForm(true);
     loadUsers();
   }
@@ -2341,25 +2389,41 @@ export default function AdminPage() {
     reader.readAsArrayBuffer(file);
   }
 
+  // Fields that don't belong on the SchoolIn payload (POST /schools/) — they're written
+  // separately to school_year_admin_data / the typed advisor endpoints after creation.
+  const IMPORT_YEAR_ADMIN_KEYS = ["service_type", "client_status"];
+  const IMPORT_ADVISOR_KEYS = { advisor_gefen: "gefen", advisor_current: "current", advisor_district: "district" };
+
   async function confirmImport(mapping) {
     if (!importMappingData) return;
     setImportMappingData(null);
     setImporting(true);
     setImportResult(null);
+    setImportProblems(null);
     const { dataRows } = importMappingData;
     let imported = 0;
     const errors = [];
+    const problems = [];
 
     for (let i = 0; i < dataRows.length; i++) {
       const row = dataRows[i];
       setImportProgressMsg(`מייבא... ${i + 1} / ${dataRows.length}`);
       const school = {};
+      const yearAdmin = {};
+      const advisorEmailsByType = { gefen: [], current: [], district: [] };
+      let coordinatorRaw = null;
       IMPORT_FIELD_CONFIG.forEach(f => {
         if (mapping[f.key] === null) return;
         const raw = String(row[mapping[f.key]] ?? "").trim();
         if (f.key === "stage") school[f.key] = normalizeStage(raw);
         else if (f.key === "finance_software") school[f.key] = normalizeFinanceSoftware(raw);
         else if (f.key === "district") school[f.key] = normalizeDistrict(raw);
+        else if (f.key === "service_type") yearAdmin.service_type = normalizeServiceType(raw);
+        else if (f.key === "client_status") yearAdmin.client_status = normalizeClientStatus(raw);
+        else if (f.key === "meeting_coordinator") coordinatorRaw = raw;
+        else if (IMPORT_ADVISOR_KEYS[f.key]) {
+          advisorEmailsByType[IMPORT_ADVISOR_KEYS[f.key]] = raw.split(/[,;]/).map(s => s.trim()).filter(Boolean);
+        }
         else if (f.key.includes("phone")) school[f.key] = raw.replace(/\D/g, "");
         else school[f.key] = raw;
       });
@@ -2367,15 +2431,61 @@ export default function AdminPage() {
         errors.push(`שורה ${i + 2}: חסר שם בית ספר או סמל מוסד`);
         continue;
       }
-      if (school.secretary_name) school.meeting_coordinator = "secretary";
-      else if (school.principal_name) school.meeting_coordinator = "principal";
-      else {
-        errors.push(`שורה ${i + 2}: לא ניתן לקבוע אחראי/ת לתיאום פגישות (חסר שם מנהלנ/ית או מנהל/ת)`);
+      const coordinator = normalizeMeetingCoordinator(coordinatorRaw);
+      const coordinatorNameField = { principal: "principal_name", secretary: "secretary_name", finance_contact: "finance_contact_name" }[coordinator];
+      if (!coordinator) {
+        errors.push(`שורה ${i + 2}: ערך לא תקין בעמודת "מתאם פגישות" — יש לציין מנהל/ת, מנהלנ/ית או אחראי/ת כספים`);
         continue;
       }
+      if (!school[coordinatorNameField]) {
+        errors.push(`שורה ${i + 2}: נבחר/ה "${coordinatorRaw}" כמתאם/ת פגישות אך חסר שם עבור תפקיד זה`);
+        continue;
+      }
+      school.meeting_coordinator = coordinator;
       try {
-        await axios.post("/schools/", school);
+        const res = await axios.post("/schools/", school);
+        const newId = res.data.id;
         imported++;
+
+        const rowProblems = [];
+
+        if (yearAdmin.service_type || yearAdmin.client_status) {
+          try {
+            await axios.put(`/schools/${newId}/year-admin-data`, yearAdmin, { params: { academic_year: DEFAULT_ACADEMIC_YEAR } });
+          } catch {
+            rowProblems.push("שמירת סוג השירות/סטטוס הלקוח נכשלה");
+          }
+        }
+
+        const matchedTypes = { gefen: [], current: [], district: [] };
+        for (const t of ["gefen", "current", "district"]) {
+          for (const email of advisorEmailsByType[t]) {
+            const match = users.find(u => (u.email || "").toLowerCase() === email.toLowerCase());
+            if (!match) {
+              rowProblems.push(`האימייל '${email}' בעמודת יועץ ${SERVICE_TYPE_TABS.find(s => s.key === t)?.label || t} לא נמצא במערכת`);
+              continue;
+            }
+            try {
+              await axios.post(`/schools/${newId}/advisors/${t}`, { advisor_id: match.id });
+              matchedTypes[t].push(match.id);
+            } catch {
+              rowProblems.push(`שיוך היועץ '${email}' (${SERVICE_TYPE_TABS.find(s => s.key === t)?.label || t}) נכשל`);
+            }
+          }
+        }
+
+        if (yearAdmin.client_status === "active") {
+          const required = activeServiceTypes(yearAdmin.service_type);
+          for (const t of required) {
+            if (matchedTypes[t].length === 0) {
+              rowProblems.push(`לא נמצא יועץ מלווה מסוג ${SERVICE_TYPE_TABS.find(s => s.key === t)?.label || t} כנדרש לפי סוג השירות שנבחר`);
+            }
+          }
+        }
+
+        if (rowProblems.length > 0) {
+          problems.push({ name: school.name, symbol: school.symbol, issues: rowProblems });
+        }
       } catch (err) {
         const detail = err.response?.data?.detail || "שגיאה לא ידועה";
         errors.push(`שורה ${i + 2} (${school.name}): ${detail}`);
@@ -2385,6 +2495,7 @@ export default function AdminPage() {
     setImportProgressMsg("");
     setImporting(false);
     setImportResult({ imported, errors });
+    if (problems.length > 0) setImportProblems(problems);
     if (imported > 0) await loadSchools();
   }
 
@@ -2528,8 +2639,8 @@ export default function AdminPage() {
 
   const tabs = [
     { id: "schools", label: "בתי ספר" },
-    { id: "tasks", label: "משימות" },
     { id: "users", label: "משתמשים" },
+    { id: "tasks", label: "משימות" },
     { id: "meetings", label: "פגישות" },
     ...(showCallsTab ? [{ id: "calls", label: "שיחות" }] : []),
     ...(showPerformanceTab ? [{ id: "performance", label: "ביצועים" }] : []),
@@ -2609,13 +2720,11 @@ export default function AdminPage() {
 
               {/* School form */}
               {showSchoolForm && (
-                <div className="glass-card rounded-2xl p-6 mb-4">
-                  <div className="relative flex items-center justify-center mb-5">
-                    <h3 className="font-bold text-slate-800 text-center">
-                      {editingSchool ? "עריכת פרטי בית הספר" : "הוספת בית ספר חדש"}
-                    </h3>
+                <div className="bg-white rounded-2xl border border-slate-200/60 shadow-sm p-6 mb-4">
+                  <div className={SECTION_HEADER_CLS}>
+                    {sectionTitle(Building2, editingSchool ? "עריכת פרטי בית הספר" : "הוספת בית ספר חדש", "bg-blue-50 text-blue-600")}
                     {editingSchool && canDeleteSchool && (
-                      <div className="absolute left-0" ref={schoolFormDotsRef}>
+                      <div className="relative" ref={schoolFormDotsRef}>
                         <button
                           type="button"
                           onClick={() => setShowSchoolFormDots(o => !o)}
@@ -2642,116 +2751,105 @@ export default function AdminPage() {
                     )}
                   </div>
 
-                  <p className="text-sm font-semibold text-slate-700 mb-3">פרטי בית הספר</p>
+                  {/* 3×3 tile grid — same visual language as SchoolPage.jsx's פרטי מוסד */}
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className={TILE_CLS}>
+                      <label htmlFor="school-name" className={TILE_LABEL_CLS}>שם מוסד</label>
+                      <input id="school-name" className={`input-field ${triedSave && !schoolForm.name ? "border-red-400" : ""}`}
+                        autoComplete="off" value={schoolForm.name}
+                        onChange={e => setSchoolForm(p => ({ ...p, name: e.target.value }))} />
+                      {triedSave && !schoolForm.name && <span className="text-xs text-red-500 block mt-0.5" role="alert">שדה חובה</span>}
+                    </div>
 
-                  {/* 3-column grid matching SchoolPage.jsx edit layout */}
-                  <div className="grid grid-cols-3 gap-x-8">
-                    {/* Right column: שם | סמל | שלב */}
-                    <div style={{ display: "grid", gridTemplateColumns: "max-content 1fr", columnGap: 10, alignItems: "start" }}>
-                      <label htmlFor="school-name" className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">שם מוסד:</label>
-                      <div className="py-0.5">
-                        <input id="school-name" className={`input-field ${triedSave && !schoolForm.name ? "border-red-400" : ""}`}
-                          autoComplete="off" value={schoolForm.name}
-                          onChange={e => setSchoolForm(p => ({ ...p, name: e.target.value }))} />
-                        {triedSave && !schoolForm.name && <span className="text-xs text-red-500 block mt-0.5" role="alert">שדה חובה</span>}
-                      </div>
+                    <div className={TILE_CLS}>
+                      <label htmlFor="school-city" className={TILE_LABEL_CLS}>עיר</label>
+                      <input id="school-city" className="input-field" autoComplete="off" value={schoolForm.city}
+                        onChange={e => setSchoolForm(p => ({ ...p, city: e.target.value }))} />
+                    </div>
 
-                      <label htmlFor="school-symbol" className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">סמל מוסד:</label>
-                      <div className="py-0.5">
-                        <input id="school-symbol" className={`input-field ${(triedSave && symbolError) ? "border-red-400" : ""}`}
-                          autoComplete="off" value={schoolForm.symbol}
-                          onChange={e => setSchoolForm(p => ({ ...p, symbol: e.target.value.replace(/\D/g, "").slice(0, 6) }))}
-                          dir="ltr" inputMode="numeric" maxLength={6} />
-                        {schoolForm.symbol.length > 0 && symbolError && <span className="text-xs text-red-500 block mt-0.5" role="alert">{symbolError}</span>}
-                        {triedSave && !schoolForm.symbol && <span className="text-xs text-red-500 block mt-0.5" role="alert">שדה חובה</span>}
-                        {!editingSchool && triedSave && schoolForm.symbol && !symbolError && schools.some(s => s.symbol === schoolForm.symbol) && (
-                          <span className="text-xs text-red-500 block mt-0.5" role="alert">סמל זה כבר קיים בארגון</span>
-                        )}
-                      </div>
+                    <div className={TILE_CLS}>
+                      <label htmlFor="school-finance-software" className={TILE_LABEL_CLS}>תוכנת כספים</label>
+                      <select id="school-finance-software" className="input-field text-sm"
+                        value={schoolForm.finance_software}
+                        onChange={e => setSchoolForm(p => ({ ...p, finance_software: e.target.value }))}>
+                        {FINANCE_SOFTWARE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                      </select>
+                    </div>
 
-                      <label htmlFor={editingSchool ? "school-stage-edit" : "school-stage"} className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">שלב מוסד:</label>
-                      <div className="py-0.5">
-                        {editingSchool ? (
-                          <select id="school-stage-edit" className="input-field text-sm"
-                            value={schoolForm.stage || ""}
-                            onChange={e => setSchoolForm(p => ({ ...p, stage: e.target.value }))}>
-                            {SCHOOL_STAGE_OPTIONS.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
+                    <div className={TILE_CLS}>
+                      <label htmlFor="school-symbol" className={TILE_LABEL_CLS}>סמל מוסד</label>
+                      <input id="school-symbol" className={`input-field ${(triedSave && symbolError) ? "border-red-400" : ""}`}
+                        autoComplete="off" value={schoolForm.symbol}
+                        onChange={e => setSchoolForm(p => ({ ...p, symbol: e.target.value.replace(/\D/g, "").slice(0, 6) }))}
+                        dir="ltr" inputMode="numeric" maxLength={6} />
+                      {schoolForm.symbol.length > 0 && symbolError && <span className="text-xs text-red-500 block mt-0.5" role="alert">{symbolError}</span>}
+                      {triedSave && !schoolForm.symbol && <span className="text-xs text-red-500 block mt-0.5" role="alert">שדה חובה</span>}
+                      {!editingSchool && triedSave && schoolForm.symbol && !symbolError && schools.some(s => s.symbol === schoolForm.symbol) && (
+                        <span className="text-xs text-red-500 block mt-0.5" role="alert">סמל זה כבר קיים בארגון</span>
+                      )}
+                    </div>
+
+                    <div className={TILE_CLS}>
+                      <label htmlFor="school-authority" className={TILE_LABEL_CLS}>בעלות</label>
+                      <input id="school-authority" className="input-field" autoComplete="off" value={schoolForm.authority}
+                        onChange={e => setSchoolForm(p => ({ ...p, authority: e.target.value }))} />
+                    </div>
+
+                    <div className={TILE_CLS}>
+                      <label htmlFor="school-phone" className={TILE_LABEL_CLS}>טלפון בית הספר</label>
+                      <input id="school-phone"
+                        className={`input-field ${schoolForm.school_phone && schoolPhoneError ? "border-red-400" : ""}`}
+                        autoComplete="off" value={schoolForm.school_phone}
+                        onChange={e => setSchoolForm(p => ({ ...p, school_phone: e.target.value.replace(/\D/g, "").slice(0, 10) }))}
+                        dir="ltr" inputMode="numeric" />
+                      {schoolForm.school_phone && schoolPhoneError && (
+                        <span className="text-xs text-red-500 block mt-0.5" role="alert">{schoolPhoneError}</span>
+                      )}
+                    </div>
+
+                    <div className={TILE_CLS}>
+                      <label htmlFor={editingSchool ? "school-stage-edit" : "school-stage"} className={TILE_LABEL_CLS}>שלב מוסד</label>
+                      {editingSchool ? (
+                        <select id="school-stage-edit" className="input-field text-sm"
+                          value={schoolForm.stage || ""}
+                          onChange={e => setSchoolForm(p => ({ ...p, stage: e.target.value }))}>
+                          {SCHOOL_STAGE_OPTIONS.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
+                        </select>
+                      ) : (
+                        <>
+                          <select id="school-stage"
+                            className={`input-field text-sm ${triedSave && !schoolStage ? "border-red-400" : ""}`}
+                            value={schoolStage}
+                            onChange={e => {
+                              setSchoolStage(e.target.value);
+                              if (e.target.value === "sheshshnati" || e.target.value === "other") {
+                                setCustomDivisions(DEFAULT_CUSTOM_DIVISIONS);
+                              }
+                            }}
+                          >
+                            {SCHOOL_STAGE_OPTIONS.map(s => (
+                              <option key={s.value} value={s.value} disabled={s.value === ""}>{s.label}</option>
+                            ))}
                           </select>
-                        ) : (
-                          <>
-                            <select id="school-stage"
-                              className={`input-field text-sm ${triedSave && !schoolStage ? "border-red-400" : ""}`}
-                              value={schoolStage}
-                              onChange={e => {
-                                setSchoolStage(e.target.value);
-                                if (e.target.value === "sheshshnati" || e.target.value === "other") {
-                                  setCustomDivisions(DEFAULT_CUSTOM_DIVISIONS);
-                                }
-                              }}
-                            >
-                              {SCHOOL_STAGE_OPTIONS.map(s => (
-                                <option key={s.value} value={s.value} disabled={s.value === ""}>{s.label}</option>
-                              ))}
-                            </select>
-                            {triedSave && !schoolStage && <span className="text-xs text-red-500 block mt-0.5" role="alert">שדה חובה</span>}
-                          </>
+                          {triedSave && !schoolStage && <span className="text-xs text-red-500 block mt-0.5" role="alert">שדה חובה</span>}
+                        </>
                         )}
-                      </div>
                     </div>
 
-                    {/* Middle column: עיר | בעלות | מחוז */}
-                    <div style={{ display: "grid", gridTemplateColumns: "max-content 1fr", columnGap: 10, alignItems: "start" }}>
-                      <label htmlFor="school-city" className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">עיר:</label>
-                      <div className="py-0.5">
-                        <input id="school-city" className="input-field" autoComplete="off" value={schoolForm.city}
-                          onChange={e => setSchoolForm(p => ({ ...p, city: e.target.value }))} />
-                      </div>
-
-                      <label htmlFor="school-authority" className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">בעלות:</label>
-                      <div className="py-0.5">
-                        <input id="school-authority" className="input-field" autoComplete="off" value={schoolForm.authority}
-                          onChange={e => setSchoolForm(p => ({ ...p, authority: e.target.value }))} />
-                      </div>
-
-                      <label htmlFor="school-district" className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">מחוז:</label>
-                      <div className="py-0.5">
-                        <select id="school-district" className="input-field text-sm"
-                          value={schoolForm.district}
-                          onChange={e => setSchoolForm(p => ({ ...p, district: e.target.value }))}>
-                          <option value="">בחר</option>
-                          {DISTRICT_OPTIONS.map(d => <option key={d} value={d}>{d}</option>)}
-                        </select>
-                      </div>
+                    <div className={TILE_CLS}>
+                      <label htmlFor="school-district" className={TILE_LABEL_CLS}>מחוז</label>
+                      <select id="school-district" className="input-field text-sm"
+                        value={schoolForm.district}
+                        onChange={e => setSchoolForm(p => ({ ...p, district: e.target.value }))}>
+                        <option value="">בחר</option>
+                        {DISTRICT_OPTIONS.map(d => <option key={d} value={d}>{d}</option>)}
+                      </select>
                     </div>
 
-                    {/* Left column: תוכנת כספים | טלפון | כתובת */}
-                    <div style={{ display: "grid", gridTemplateColumns: "max-content 1fr", columnGap: 10, alignItems: "start" }}>
-                      <label htmlFor="school-finance-software" className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">תוכנת כספים:</label>
-                      <div className="py-0.5">
-                        <select id="school-finance-software" className="input-field text-sm"
-                          value={schoolForm.finance_software}
-                          onChange={e => setSchoolForm(p => ({ ...p, finance_software: e.target.value }))}>
-                          {FINANCE_SOFTWARE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                        </select>
-                      </div>
-
-                      <label htmlFor="school-phone" className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">טלפון בית הספר:</label>
-                      <div className="py-0.5">
-                        <input id="school-phone"
-                          className={`input-field ${schoolForm.school_phone && schoolPhoneError ? "border-red-400" : ""}`}
-                          autoComplete="off" value={schoolForm.school_phone}
-                          onChange={e => setSchoolForm(p => ({ ...p, school_phone: e.target.value.replace(/\D/g, "").slice(0, 10) }))}
-                          dir="ltr" inputMode="numeric" />
-                        {schoolForm.school_phone && schoolPhoneError && (
-                          <span className="text-xs text-red-500 block mt-0.5" role="alert">{schoolPhoneError}</span>
-                        )}
-                      </div>
-
-                      <label htmlFor="school-address" className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">כתובת:</label>
-                      <div className="py-0.5">
-                        <input id="school-address" className="input-field" autoComplete="off" value={schoolForm.address}
-                          onChange={e => setSchoolForm(p => ({ ...p, address: e.target.value }))} />
-                      </div>
+                    <div className={TILE_CLS}>
+                      <label htmlFor="school-address" className={TILE_LABEL_CLS}>כתובת</label>
+                      <input id="school-address" className="input-field" autoComplete="off" value={schoolForm.address}
+                        onChange={e => setSchoolForm(p => ({ ...p, address: e.target.value }))} />
                     </div>
                   </div>
 
@@ -2777,7 +2875,7 @@ export default function AdminPage() {
                       </div>
                       <button type="button"
                         onClick={() => setCustomDivisions(prev => [...prev, { id: Date.now(), division_type: "tikkon" }])}
-                        className="btn-ghost text-xs px-3 py-1.5">+ הוסף שורה</button>
+                        className={OUTLINE_BTN_CLS}>+ הוסף שורה</button>
                       {triedSave && customDivisions.length === 0 && (
                         <p className="text-xs text-red-500 mt-1" role="alert">יש להוסיף לפחות חטיבה אחת</p>
                       )}
@@ -2785,28 +2883,30 @@ export default function AdminPage() {
                   )}
 
                   {/* Contact table — אנשי קשר */}
-                  <div className="mt-16 mb-2">
-                    <p className="text-sm font-semibold text-slate-700 mb-4">אנשי קשר</p>
-                    <table className="w-full text-sm">
+                  <div className="mt-10 mb-2 pt-6 border-t border-slate-200/60">
+                    <div className={SECTION_HEADER_CLS}>
+                      {sectionTitle(Phone, "אנשי קשר", "bg-indigo-50 text-indigo-600")}
+                    </div>
+                    <table className="w-full text-sm border border-slate-200 border-collapse font-sans">
                       <thead>
-                        <tr>
-                          <th scope="col" className="text-right pb-2 text-xs text-slate-500 font-semibold w-28"></th>
-                          <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-500 font-semibold">שם</th>
-                          <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-500 font-semibold">טלפון</th>
-                          <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-500 font-semibold">מייל</th>
-                          <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-500 font-semibold">יום חופשי</th>
-                          <th scope="col" className="text-right pb-2 px-2 text-xs text-slate-500 font-semibold">אחראי תיאום פגישות</th>
+                        <tr className="bg-slate-100 divide-x divide-slate-200">
+                          <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700 whitespace-nowrap w-28"></th>
+                          <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700">שם</th>
+                          <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700">טלפון</th>
+                          <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700">מייל</th>
+                          <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700">יום חופשי</th>
+                          <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700">מתאם פגישות</th>
                         </tr>
                       </thead>
-                      <tbody>
+                      <tbody className="divide-y divide-slate-200">
                         {[
                           effectiveSchoolFormStage === "sheshshnati" ? PRINCIPAL_TICHON_ROW : PRINCIPAL_SINGLE_ROW,
                           ...(effectiveSchoolFormStage === "sheshshnati" && !schoolForm.principal_same_person ? [PRINCIPAL_CHATIVA_ROW] : []),
                           ...CONTACT_ROWS,
                         ].map(row => (
-                          <tr key={row.nameField} className="border-t border-slate-100">
-                            <td className="py-2 pr-1 text-xs text-slate-700 font-medium whitespace-nowrap">{row.label}</td>
-                            <td className="py-2 px-2">
+                          <tr key={row.nameField} className="divide-x divide-slate-200">
+                            <td className="py-3 pr-1 text-sm font-normal text-gray-900 align-top">{row.label}</td>
+                            <td className="py-3 px-2">
                               <label htmlFor={`contact-name-${row.nameField}`} className="sr-only">{row.label} שם</label>
                               <input
                                 id={`contact-name-${row.nameField}`}
@@ -2817,7 +2917,7 @@ export default function AdminPage() {
                                 placeholder="שם..."
                               />
                             </td>
-                            <td className="py-2 px-2">
+                            <td className="py-3 px-2">
                               <label htmlFor={`contact-phone-${row.phoneField}`} className="sr-only">{row.label} טלפון</label>
                               <input
                                 id={`contact-phone-${row.phoneField}`}
@@ -2836,7 +2936,7 @@ export default function AdminPage() {
                                 <span className="text-xs text-red-500 block mt-0.5" role="alert">{validateSecretaryPhone(schoolForm[row.phoneField])}</span>
                               )}
                             </td>
-                            <td className="py-2 px-2">
+                            <td className="py-3 px-2">
                               <label htmlFor={`contact-email-${row.emailField}`} className="sr-only">{row.label} מייל</label>
                               <input
                                 id={`contact-email-${row.emailField}`}
@@ -2849,12 +2949,12 @@ export default function AdminPage() {
                                 type="email"
                               />
                             </td>
-                            <td className="py-2 px-2">
+                            <td className="py-3 px-2">
                               <MultiSelectChips compact options={WEEKDAY_OPTIONS}
                                 selected={schoolForm[row.dayOffField] || []}
                                 onChange={v => setSchoolForm(p => ({ ...p, [row.dayOffField]: v }))} />
                             </td>
-                            <td className="py-2 px-2 text-center">
+                            <td className="py-3 px-2 text-center">
                               <label htmlFor={`admin-coord-${row.coordValue}`} className="sr-only">{row.label} אחראי/ת לתיאום פגישות</label>
                               <input id={`admin-coord-${row.coordValue}`} type="radio" name="admin-meeting-coordinator"
                                 className="w-4 h-4 accent-blue-600"
@@ -2866,9 +2966,9 @@ export default function AdminPage() {
                         ))}
 
                         {effectiveSchoolFormStage === "sheshshnati" && (
-                          <tr className="border-t border-slate-100">
+                          <tr className="divide-x divide-slate-200">
                             <td></td>
-                            <td colSpan={5} className="py-2 px-2">
+                            <td colSpan={5} className="py-3 px-2">
                               <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
                                 <input type="checkbox" className="w-3.5 h-3.5 rounded accent-blue-600"
                                   checked={!!schoolForm.principal_same_person}
@@ -2881,26 +2981,26 @@ export default function AdminPage() {
 
                         {/* Extra contact rows */}
                         {(schoolForm.extra_contacts || []).map((ec, i) => (
-                          <tr key={`extra-${i}`} className="border-t border-slate-100">
-                            <td className="py-1.5 pr-1">
+                          <tr key={`extra-${i}`} className="divide-x divide-slate-200">
+                            <td className="py-3 pr-1">
                               <label htmlFor={`extra-role-${i}`} className="sr-only">תפקיד</label>
                               <input id={`extra-role-${i}`} className="input-field text-sm" value={ec.role}
                                 onChange={e => setSchoolForm(p => { const ec2 = [...(p.extra_contacts || [])]; ec2[i] = { ...ec2[i], role: e.target.value }; return { ...p, extra_contacts: ec2 }; })}
                                 autoComplete="off" placeholder="תפקיד..." />
                             </td>
-                            <td className="py-1.5 px-2">
+                            <td className="py-3 px-2">
                               <label htmlFor={`extra-name-${i}`} className="sr-only">שם</label>
                               <input id={`extra-name-${i}`} className="input-field text-sm" value={ec.name}
                                 onChange={e => setSchoolForm(p => { const ec2 = [...(p.extra_contacts || [])]; ec2[i] = { ...ec2[i], name: e.target.value }; return { ...p, extra_contacts: ec2 }; })}
                                 autoComplete="off" placeholder="שם..." />
                             </td>
-                            <td className="py-1.5 px-2">
+                            <td className="py-3 px-2">
                               <label htmlFor={`extra-phone-${i}`} className="sr-only">טלפון</label>
                               <input id={`extra-phone-${i}`} className="input-field text-sm" value={ec.phone}
                                 onChange={e => setSchoolForm(p => { const ec2 = [...(p.extra_contacts || [])]; ec2[i] = { ...ec2[i], phone: e.target.value.replace(/\D/g, "").slice(0, 10) }; return { ...p, extra_contacts: ec2 }; })}
                                 dir="ltr" inputMode="numeric" autoComplete="off" placeholder="טלפון..." />
                             </td>
-                            <td className="py-1.5 px-2">
+                            <td className="py-3 px-2">
                               <div className="flex items-center gap-1">
                                 <label htmlFor={`extra-email-${i}`} className="sr-only">מייל</label>
                                 <input id={`extra-email-${i}`} className="input-field text-sm" value={ec.email}
@@ -2920,12 +3020,12 @@ export default function AdminPage() {
                                   aria-label="הסר שורת איש קשר">✕</button>
                               </div>
                             </td>
-                            <td className="py-1.5 px-2">
+                            <td className="py-3 px-2">
                               <MultiSelectChips compact options={WEEKDAY_OPTIONS}
                                 selected={ec.day_off || []}
                                 onChange={v => setSchoolForm(p => { const ec2 = [...(p.extra_contacts || [])]; ec2[i] = { ...ec2[i], day_off: v }; return { ...p, extra_contacts: ec2 }; })} />
                             </td>
-                            <td className="py-1.5 px-2 text-center">
+                            <td className="py-3 px-2 text-center">
                               <label htmlFor={`admin-coord-extra-${i}`} className="sr-only">איש קשר נוסף {i + 1} אחראי/ת לתיאום פגישות</label>
                               <input id={`admin-coord-extra-${i}`} type="radio" name="admin-meeting-coordinator"
                                 className="w-4 h-4 accent-blue-600"
@@ -2942,7 +3042,7 @@ export default function AdminPage() {
                             <td colSpan={6} className="pt-3 pb-1">
                               <button type="button"
                                 onClick={() => setSchoolForm(p => ({ ...p, extra_contacts: [...(p.extra_contacts || []), { role: "", name: "", phone: "", email: "" }] }))}
-                                className="text-sm text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1 transition-colors">
+                                className={`${OUTLINE_BTN_CLS} inline-flex items-center gap-1`}>
                                 <span aria-hidden="true">+</span> הוסף איש קשר
                               </button>
                             </td>
@@ -2955,77 +3055,114 @@ export default function AdminPage() {
                     )}
                   </div>
 
-                  {/* ליווי */}
-                  <div className="mt-4 pt-4 border-t border-slate-100">
-                    <p className="text-sm font-semibold text-slate-700 mb-4">ליווי</p>
-                    <div className="grid grid-cols-2 gap-6">
-                      {/* יועצים אחראיים */}
-                      <div>
-                        <p className="text-xs text-slate-800 mb-2 font-medium">
-                          יועצים אחראיים {!editingSchool && <span className="text-red-500">*</span>}
-                        </p>
-                        {editingSchool ? (
-                          <>
-                            <AdvisorSearch
-                              schoolId={editingSchool.id}
-                              selectedIds={draftAdvisorIds}
-                              users={users}
-                              loadingUsers={loadingUsers}
-                              onChange={setDraftAdvisorIds}
-                              onRetry={loadUsers}
-                              invalid={triedSave && draftAdvisorIds.length === 0}
-                            />
-                            {triedSave && draftAdvisorIds.length === 0 && (
-                              <span className="text-xs text-red-500 mt-1 block" role="alert">יש לבחור לפחות יועץ אחד</span>
-                            )}
-                          </>
-                        ) : (
-                          <>
-                            <AdvisorSearch
-                              schoolId="new"
-                              selectedIds={selectedAdvisors}
-                              users={users}
-                              loadingUsers={loadingUsers}
-                              onRetry={loadUsers}
-                              invalid={triedSave && selectedAdvisors.length === 0}
-                              onChange={newIds => {
-                                setSelectedAdvisors(newIds);
-                                if (newIds.length === 0) {
-                                  setAccessLinkedToAdvisors(false);
-                                  setSchoolForm(p => ({ ...p, restrict_access_to: [] }));
-                                } else if (selectedAdvisors.length === 0) {
-                                  setAccessLinkedToAdvisors(true);
-                                }
-                              }}
-                            />
-                            {triedSave && selectedAdvisors.length === 0 && (
-                              <span className="text-xs text-red-500 mt-1 block" role="alert">יש לבחור לפחות יועץ אחד</span>
-                            )}
-                          </>
-                        )}
+                  {/* פרטי ליווי — school_year_admin_data fields, same tiles as SchoolPage.jsx/AddSchoolPage.jsx */}
+                  <div className="mt-10 pt-6 border-t border-slate-200/60">
+                    <div className={SECTION_HEADER_CLS}>
+                      {sectionTitle(Handshake, "פרטי ליווי", "bg-emerald-50 text-emerald-600")}
+                    </div>
+                    <div className="grid grid-cols-3 gap-3">
+                      <div className={TILE_CLS}>
+                        <label htmlFor="admin-ys-client-status" className={TILE_LABEL_CLS}>סטטוס לקוח</label>
+                        <select id="admin-ys-client-status" className="input-field text-sm"
+                          value={yearAdminForm.client_status || ""}
+                          onChange={e => setYearAdminForm(p => ({ ...p, client_status: e.target.value || null }))}>
+                          <option value="">בחר</option>
+                          {CLIENT_STATUS_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                        </select>
                       </div>
 
-                      {/* גישה */}
-                      <div>
-                        <div className="flex items-center gap-1.5 mb-2">
-                          <p className="text-xs text-slate-800 font-medium">גישה</p>
-                          <span
-                            title="בחר למי תהיה גישה לצפות בנתוני בית הספר. 'כולם' מאפשר לכל היועצים במערכת לראות את בית הספר."
+                      <div className={TILE_CLS}>
+                        <label htmlFor="admin-ys-service-type" className={TILE_LABEL_CLS}>סוג שירות</label>
+                        <select id="admin-ys-service-type" className="input-field text-sm"
+                          value={yearAdminForm.service_type || ""}
+                          onChange={e => setYearAdminForm(p => ({ ...p, service_type: e.target.value || null }))}>
+                          <option value="">בחר</option>
+                          {SERVICE_TYPE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                        </select>
+                      </div>
+
+                      <div className={TILE_CLS}>
+                        <label htmlFor="admin-ys-order-amount" className={TILE_LABEL_CLS}>מחיר כולל מע"מ</label>
+                        <input id="admin-ys-order-amount" className="input-field text-sm" type="text" inputMode="numeric" autoComplete="off"
+                          defaultValue={formatAmount(yearAdminForm.order_amount_gefen)}
+                          onBlur={e => {
+                            const v = parseAmount(e.target.value);
+                            e.target.value = formatAmount(v);
+                            setYearAdminForm(p => ({ ...p, order_amount_gefen: v }));
+                          }} />
+                      </div>
+
+                      <div className={TILE_CLS}>
+                        <span className={TILE_LABEL_CLS}>אמצעי הזמנה</span>
+                        <MultiSelectChips compact options={FUNDING_METHOD_OPTIONS}
+                          selected={yearAdminForm.order_method || []}
+                          onChange={v => setYearAdminForm(p => ({ ...p, order_method: v.length ? v : [] }))} />
+                      </div>
+
+                      <div className={`${TILE_CLS} col-span-2`}>
+                        <span className={`${TILE_LABEL_CLS} inline-flex items-center gap-1.5`}>
+                          גישה
+                          <span title="בחר למי תהיה גישה לצפות בנתוני בית הספר. 'כולם' מאפשר לכל היועצים במערכת לראות את בית הספר."
                             className="w-4 h-4 rounded-full border border-slate-300 text-slate-400 text-xs flex items-center justify-center flex-shrink-0 cursor-help"
-                            aria-label="מידע על הגדרת גישה"
-                          >?</span>
-                        </div>
+                            aria-label="מידע על הגדרת גישה">?</span>
+                        </span>
                         <AccessSelector
                           restrictTo={schoolForm.restrict_access_to}
                           users={users}
                           loadingUsers={loadingUsers}
                           onChange={val => { setAccessLinkedToAdvisors(false); setSchoolForm(p => ({ ...p, restrict_access_to: val })); }}
                           onSelectAdvisors={() => setAccessLinkedToAdvisors(true)}
-                          schoolAdvisors={
-                            (editingSchool ? draftAdvisorIds : selectedAdvisors)
-                              .map(id => users.find(u => u.id === id)).filter(Boolean)
-                          }
+                          schoolAdvisors={draftLinkedAdvisorIds.map(id => users.find(u => u.id === id)).filter(Boolean)}
                         />
+                      </div>
+                    </div>
+
+                    {/* יועצים מלווים — per-service-type advisor editor (גפן/שוטף/מחוז) */}
+                    <div className="mt-6 pt-6 border-t border-slate-200/60">
+                      <div className={SECTION_HEADER_CLS}>
+                        {sectionTitle(UsersRound, "יועצים מלווים", "bg-violet-50 text-violet-600")}
+                      </div>
+                      <div className="grid grid-cols-3 gap-4">
+                        {SERVICE_TYPE_TABS.map(({ key, label }) => {
+                          const isRequired = activeServiceTypes(yearAdminForm.service_type).includes(key);
+                          const invalid = triedSave && isRequired && draftTypedAdvisorIds[key].length === 0;
+                          return (
+                            <div key={key} className="bg-slate-50/70 border border-slate-200/70 rounded-xl p-3">
+                              <p className="text-sm font-semibold text-slate-700 text-center mb-3">
+                                {label}{isRequired && <span className="text-red-500"> *</span>}
+                              </p>
+                              <div style={{ display: "grid", gridTemplateColumns: "max-content 1fr", columnGap: 10, alignItems: "start" }}>
+                                <span className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">יועץ מלווה:</span>
+                                <div className="py-0.5">
+                                  <AdvisorSearch compact schoolId={editingSchool ? editingSchool.id : "new"}
+                                    selectedIds={draftTypedAdvisorIds[key]} users={users} loadingUsers={loadingUsers}
+                                    onChange={ids => setDraftTypedAdvisorIds(p => ({ ...p, [key]: ids }))}
+                                    onRetry={loadUsers} invalid={invalid} />
+                                  {invalid && (
+                                    <span className="text-xs text-red-500 mt-1 block" role="alert">יש לבחור לפחות יועץ אחד</span>
+                                  )}
+                                </div>
+
+                                <label htmlFor={`admin-ys-alloc-${key}`} className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">הקצאת פגישות:</label>
+                                <div className="py-0.5">
+                                  <input id={`admin-ys-alloc-${key}`} type="number" min="0" className="input-field text-sm"
+                                    value={yearAdminForm[`meeting_allocation_${key}`] ?? ""}
+                                    onChange={e => {
+                                      const v = e.target.value === "" ? null : Number(e.target.value);
+                                      setYearAdminForm(p => ({ ...p, [`meeting_allocation_${key}`]: v }));
+                                    }} />
+                                </div>
+
+                                <span className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">זמן לפגישה:</span>
+                                <div className="py-0.5">
+                                  <HourMinuteInput idPrefix={`admin-ys-duration-${key}`} label={`זמן לפגישה [${label}]`}
+                                    minutes={yearAdminForm[`meeting_duration_${key}`] ?? null}
+                                    onChange={v => setYearAdminForm(p => ({ ...p, [`meeting_duration_${key}`]: v }))} />
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
                   </div>
@@ -3034,7 +3171,7 @@ export default function AdminPage() {
                     <button onClick={saveSchool} disabled={savingSchool} className={`${editingSchool ? "btn-green-light" : "btn-blue"} text-sm px-5 py-2`}>
                       {savingSchool ? "שומר..." : editingSchool ? "שמור שינויים" : "שמור"}
                     </button>
-                    <button onClick={() => { setShowSchoolForm(false); setDraftAdvisorIds(originalAdvisorIds); }} className="btn-ghost text-sm px-5 py-2">ביטול</button>
+                    <button onClick={() => { setShowSchoolForm(false); setDraftTypedAdvisorIds(originalTypedAdvisorIds); }} className="btn-ghost text-sm px-5 py-2">ביטול</button>
                   </div>
                 </div>
               )}
@@ -3980,6 +4117,9 @@ export default function AdminPage() {
           onConfirm={confirmImport}
           onCancel={() => setImportMappingData(null)}
         />
+      )}
+      {importProblems && (
+        <ImportProblemsModal problems={importProblems} onClose={() => setImportProblems(null)} />
       )}
       {userImportMappingData && (
         <ImportMappingModal

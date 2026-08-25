@@ -23,7 +23,7 @@ import { AdvisorSearch } from "../components/AdvisorSearch";
 import { AccessSelector } from "../components/AccessSelector";
 import HourMinuteInput from "../components/HourMinuteInput";
 import { MultiSelectChips } from "../components/MultiSelectChips";
-import { School, Users, Handshake, Briefcase, StickyNote, Folder, CalendarRange } from "lucide-react";
+import { Building2, Phone, Handshake, UsersRound, MessageSquareText, Folder, CalendarDays, Pencil } from "lucide-react";
 import { defaultMeetingServiceType, resolveDefaultAdvisorIds } from "../components/meetings/constants";
 import { AdvisorCell } from "../components/meetings/AdvisorCell";
 import AdvisorAccessGrantModal from "../components/meetings/AdvisorAccessGrantModal";
@@ -3097,7 +3097,7 @@ export default function SchoolPage() {
     }
     const managingAdvisors = role === "owner" || role === "manager";
     const requiredServiceTypes = activeServiceTypes(yearAdminData.service_type);
-    if (managingAdvisors && requiredServiceTypes.some(t => draftTypedAdvisorIds[t].length === 0)) {
+    if (managingAdvisors && yearAdminData.client_status === "active" && requiredServiceTypes.some(t => draftTypedAdvisorIds[t].length === 0)) {
       setSaveError("יש לבחור לפחות יועץ מלווה אחד עבור כל סוג שירות פעיל (גפן/שוטף/מחוז).");
       return false;
     }
@@ -3265,38 +3265,58 @@ export default function SchoolPage() {
     alignItems: "start",
   };
 
-  const labelCls = "text-sm text-slate-500 py-1.5 whitespace-nowrap flex-shrink-0";
-  const editLabelCls = "text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]";
+  const labelCls = "text-sm font-medium text-slate-500 py-1.5 whitespace-nowrap flex-shrink-0";
+  const editLabelCls = "text-sm font-medium text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]";
 
   // ── Section card styling (visual grouping for פרטי בית הספר tab) ──
   // Each logical section (פרטי מוסד / אנשי קשר / ליווי / ...) renders as its own
-  // white card with a subtle border+shadow and a small branded icon badge in the
-  // header, so the eye can separate sections at a glance. Purely presentational —
-  // no change to which fields exist or how they behave.
-  const sectionCardCls = "bg-white rounded-xl border border-slate-200/80 shadow-sm px-6 py-5";
-  // Centered header: title (with icon badge) sits in the middle; an optional side
-  // action (edit button / dots menu) is pinned to the left via absolute positioning
-  // so it doesn't push the title off-center.
-  const sectionHeaderRowCls = "relative flex items-center justify-center mb-4 pb-3 border-b border-slate-100";
-  const sectionTitleCls = "text-[15px] font-bold text-slate-800 flex items-center gap-2";
-  function iconBadge(Icon) {
+  // white card: a distinct header bar (tinted background + bottom border) and a
+  // padded body below it — the shadcn Card/CardHeader/CardContent split. Purely
+  // presentational — no change to which fields exist or how they behave.
+  const sectionCardCls = "bg-white rounded-2xl border border-slate-200/60 shadow-sm hover:shadow-md transition-shadow overflow-hidden";
+  const sectionHeaderCls = "bg-white border-b border-slate-200/60 px-4 py-3 flex items-center justify-between gap-2";
+  const sectionTitleCls = "text-[23px] font-bold text-black flex items-center gap-2";
+  const sectionBodyCls = "px-6 py-5";
+  // Per-section accent color for the header icon box — gives each area its own identity
+  // at a glance (Stripe/Linear-style colored icon chips), matching the section's role.
+  const ACCENT_BLUE = "bg-blue-50 text-blue-600";
+  const ACCENT_INDIGO = "bg-indigo-50 text-indigo-600";
+  const ACCENT_EMERALD = "bg-emerald-50 text-emerald-600";
+  const ACCENT_VIOLET = "bg-violet-50 text-violet-600";
+  const ACCENT_AMBER = "bg-amber-50 text-amber-600";
+  function iconBadge(Icon, accentCls = ACCENT_BLUE) {
     return (
-      <span aria-hidden="true" className="inline-flex items-center justify-center w-7 h-7 rounded-full bg-blue-50 text-blue-600 flex-shrink-0">
+      <span aria-hidden="true" className={`inline-flex items-center justify-center p-2 rounded-xl flex-shrink-0 ${accentCls}`}>
         <Icon className="w-4 h-4" strokeWidth={2} />
       </span>
     );
   }
+  // Title text comes before the icon in DOM order so that, under dir="rtl", the
+  // icon renders to the LEFT of the text (RTL inline flow starts at the right).
+  function sectionTitle(Icon, text, accentCls = ACCENT_BLUE) {
+    return <p className={sectionTitleCls}>{text}{iconBadge(Icon, accentCls)}</p>;
+  }
   const colDividerCls = "border-slate-200/80";
-  const pillCls = "inline-flex items-center bg-slate-100 text-slate-700 font-medium text-xs px-2 py-0.5 rounded-full";
+  // Elegant outline button (Stripe/Linear-style) for secondary "+ add" actions.
+  const outlineBtnCls = "border border-slate-300 hover:border-slate-400 text-slate-700 bg-white text-xs font-semibold px-3.5 py-2 rounded-lg transition-all";
+  // "Live" data tiles inside פרטי מוסד / ליווי — stacked label-over-value stat tiles.
+  // min-h keeps every tile the same height (whether it holds plain text or wrapping chips) so
+  // the first row of tiles in "פרטי מוסד" and "פרטי ליווי" line up on the same horizontal line
+  // when the two cards sit side by side.
+  const tileCls = "bg-slate-100/70 hover:bg-slate-200/60 transition-colors border border-slate-200/90 rounded-xl py-3.5 px-3 min-h-[76px]";
+  const tileLabelCls = "text-[13px] font-medium text-gray-500 mb-1";
+  const tileValueCls = "text-base font-normal text-gray-900";
   const CLIENT_STATUS_BADGE_CLS = {
     active: "bg-emerald-50 text-emerald-700 border-emerald-200",
     inactive: "bg-slate-100 text-slate-500 border-slate-200",
     in_progress: "bg-amber-50 text-amber-700 border-amber-200",
     former: "bg-rose-50 text-rose-600 border-rose-200",
   };
+  // Zebra striping + hover for every table row in this tab.
+  const rowStripeCls = "even:bg-slate-100/80 hover:bg-blue-50/60 transition-colors";
 
   function valCls(val) {
-    return `text-sm py-1.5 ${val ? "font-semibold text-slate-800" : "text-slate-400 font-normal"}`;
+    return `text-base py-1.5 ${val ? "font-normal text-gray-900" : "text-slate-400 font-normal"}`;
   }
 
   function valStyle(val) {
@@ -3510,6 +3530,24 @@ export default function SchoolPage() {
             )}
             {/* Academic year selector — far left; scopes פגישות/יעדים/בדיקות */}
             {!((activeTab === "checks" || activeTab === "goals") && school?.stage === "sheshshnati") && <div className="flex-1" />}
+            {activeTab === "info" && !isEditing && (
+              <div className="pb-1.5 flex items-center gap-2">
+                {(role === "owner" || role === "manager" || (role === "advisor" && canEditDirectly)) && (
+                  <button onClick={() => startEdit(false)}
+                    className="flex items-center gap-1.5 bg-white border border-slate-200 text-slate-700 font-medium text-sm rounded-xl px-3.5 py-2 hover:bg-slate-50 transition-colors">
+                    <Pencil className="w-3.5 h-3.5" strokeWidth={2} aria-hidden="true" />
+                    ערוך פרטים
+                  </button>
+                )}
+                {role === "advisor" && !canEditDirectly && canRequestUpdate && (
+                  <button onClick={() => startEdit(true)}
+                    className="flex items-center gap-1.5 bg-white border border-slate-200 text-slate-700 font-medium text-sm rounded-xl px-3.5 py-2 hover:bg-slate-50 transition-colors">
+                    <Pencil className="w-3.5 h-3.5" strokeWidth={2} aria-hidden="true" />
+                    בקש עדכון פרטים
+                  </button>
+                )}
+              </div>
+            )}
             <div className="pb-1.5">
               <AcademicYearSelector value={academicYear} onChange={setAcademicYear} />
             </div>
@@ -3518,173 +3556,252 @@ export default function SchoolPage() {
           {/* ─── TAB: פרטי בית הספר ─── */}
           {activeTab === "info" && (
             <div>
-              <div className="rounded-xl mb-6 p-5 bg-slate-50/50">
+              <div className="rounded-xl mb-6 p-5 bg-gradient-to-br from-slate-50 via-blue-50/30 to-slate-50">
 
                 {/* ─── EDIT MODE ─── */}
                 {isEditing ? (
-                <div className="space-y-5">
+                <div className="space-y-10">
+                  {/* פרטי מוסד + ליווי side by side at the top of the page */}
+                  <div className="grid grid-cols-2 gap-4">
                   {/* פרטי מוסד card */}
                   <div className={sectionCardCls}>
-                  <div className="mb-4">
-                    <div className={sectionHeaderRowCls}>
-                      <p className={sectionTitleCls}>{iconBadge(School)}פרטי מוסד</p>
-                      {(isRequestMode || canDeleteSchool) && (
-                        <div className="absolute left-0" ref={editDotsRef}>
-                          <button
-                            type="button"
-                            onClick={() => setShowEditDots(o => !o)}
-                            className="p-1.5 rounded-lg hover:bg-slate-100 transition-colors text-slate-400"
-                            aria-label="אפשרויות נוספות"
-                            aria-expanded={showEditDots}
-                          >
-                            <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                              <circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/>
-                            </svg>
-                          </button>
-                          {showEditDots && (
-                            <div className="absolute left-0 top-full mt-1 z-20 bg-white rounded-xl py-1 shadow-lg border border-slate-100" style={{ minWidth: 150 }} dir="rtl">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setShowEditDots(false);
-                                  if (isRequestMode) setShowDeleteRequestConfirm(true);
-                                  else setShowSchoolDeleteConfirm(true);
-                                }}
-                                className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-red-500 hover:bg-red-50 text-right transition-colors"
-                              >
-                                מחק בית ספר
-                              </button>
-                            </div>
-                          )}
+                  <div className={sectionHeaderCls}>
+                    {sectionTitle(Building2, "פרטי מוסד")}
+                    {(isRequestMode || canDeleteSchool) && (
+                      <div className="relative" ref={editDotsRef}>
+                        <button
+                          type="button"
+                          onClick={() => setShowEditDots(o => !o)}
+                          className="p-1.5 rounded-lg hover:bg-slate-100 transition-colors text-slate-400"
+                          aria-label="אפשרויות נוספות"
+                          aria-expanded={showEditDots}
+                        >
+                          <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                            <circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/>
+                          </svg>
+                        </button>
+                        {showEditDots && (
+                          <div className="absolute left-0 top-full mt-1 z-20 bg-white rounded-xl py-1 shadow-lg border border-slate-100" style={{ minWidth: 150 }} dir="rtl">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setShowEditDots(false);
+                                if (isRequestMode) setShowDeleteRequestConfirm(true);
+                                else setShowSchoolDeleteConfirm(true);
+                              }}
+                              className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-red-500 hover:bg-red-50 text-right transition-colors"
+                            >
+                              מחק בית ספר
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  <div className={sectionBodyCls}>
+                  {saveError && (
+                    <p role="alert" className="text-sm text-red-600 mb-3 text-right">{saveError}</p>
+                  )}
+
+                  {/* Live data tiles — 3×3 grid, one editable stat-tile per field */}
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className={`${tileCls} min-w-0`}>
+                      <label htmlFor="edit-name" className={`${tileLabelCls} block`}>שם מוסד</label>
+                      <input id="edit-name" className={`${editFieldCls(triedSave && !editForm.name, !editForm.name)} truncate`} value={editForm.name}
+                        onChange={e => setEditForm(p => ({ ...p, name: e.target.value }))} autoComplete="off" />
+                      {triedSave && !editForm.name && <span className="text-xs text-red-500 block mt-0.5" role="alert">שדה חובה</span>}
+                    </div>
+
+                    <div className={`${tileCls} min-w-0`}>
+                      <label htmlFor="edit-city" className={`${tileLabelCls} block`}>עיר</label>
+                      <input id="edit-city" className={`${editFieldCls(false, !editForm.city)} truncate`} value={editForm.city}
+                        onChange={e => setEditForm(p => ({ ...p, city: e.target.value }))} autoComplete="off" />
+                    </div>
+
+                    <div className={tileCls}>
+                      <label htmlFor="edit-finance-software" className={`${tileLabelCls} block`}>תוכנת כספים</label>
+                      <select id="edit-finance-software" className={editFieldCls(false, !editForm.finance_software)} value={editForm.finance_software}
+                        onChange={e => setEditForm(p => ({ ...p, finance_software: e.target.value }))}>
+                        {FINANCE_SOFTWARE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                      </select>
+                    </div>
+
+                    <div className={tileCls}>
+                      <label htmlFor="edit-symbol" className={`${tileLabelCls} block`}>סמל מוסד</label>
+                      <input id="edit-symbol"
+                        className={editFieldCls((triedSave && !editForm.symbol) || (editForm.symbol.length > 0 && !!symbolError), !editForm.symbol)}
+                        value={editForm.symbol}
+                        onChange={e => setEditForm(p => ({ ...p, symbol: e.target.value.replace(/\D/g, "").slice(0, 6) }))}
+                        inputMode="numeric" maxLength={6} autoComplete="off" />
+                      {(triedSave && !editForm.symbol)
+                        ? <span className="text-xs text-red-500 block mt-0.5" role="alert">שדה חובה</span>
+                        : (editForm.symbol.length > 0 && symbolError)
+                          ? <span className="text-xs text-red-500 block mt-0.5" role="alert">{symbolError}</span>
+                          : null}
+                    </div>
+
+                    <div className={tileCls}>
+                      <label htmlFor="edit-authority" className={`${tileLabelCls} block`}>בעלות</label>
+                      <input id="edit-authority" className={editFieldCls(false, !editForm.authority)} value={editForm.authority}
+                        onChange={e => setEditForm(p => ({ ...p, authority: e.target.value }))} autoComplete="off" />
+                    </div>
+
+                    <div className={tileCls}>
+                      <label htmlFor="edit-school-phone" className={`${tileLabelCls} block`}>טלפון בית הספר</label>
+                      <input id="edit-school-phone"
+                        className={editFieldCls(!!(editForm.school_phone && schoolPhoneError), !editForm.school_phone)}
+                        value={editForm.school_phone} dir="ltr"
+                        onChange={e => setEditForm(p => ({ ...p, school_phone: e.target.value.replace(/\D/g, "").slice(0, 10) }))}
+                        inputMode="numeric" autoComplete="off" />
+                      {editForm.school_phone && schoolPhoneError && <span className="text-xs text-red-500 block mt-0.5" role="alert">{schoolPhoneError}</span>}
+                    </div>
+
+                    <div className={tileCls}>
+                      <label htmlFor="edit-stage" className={`${tileLabelCls} block`}>שלב מוסד</label>
+                      <select id="edit-stage" className={editFieldCls(false, !editForm.stage)} value={editForm.stage}
+                        onChange={e => setEditForm(p => ({ ...p, stage: e.target.value }))}>
+                        {SCHOOL_STAGE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                      </select>
+                    </div>
+
+                    <div className={tileCls}>
+                      <label htmlFor="edit-district" className={`${tileLabelCls} block`}>מחוז</label>
+                      <select id="edit-district" className={editFieldCls(false, !editForm.district)} value={editForm.district}
+                        onChange={e => setEditForm(p => ({ ...p, district: e.target.value }))}>
+                        <option value="">בחר</option>
+                        {DISTRICT_OPTIONS.map(d => <option key={d} value={d}>{d}</option>)}
+                      </select>
+                    </div>
+
+                    <div className={tileCls}>
+                      <label htmlFor="edit-address" className={`${tileLabelCls} block`}>כתובת</label>
+                      <input id="edit-address" className={editFieldCls(false, !editForm.address)} value={editForm.address}
+                        onChange={e => setEditForm(p => ({ ...p, address: e.target.value }))} autoComplete="off" />
+                    </div>
+                  </div>
+                  </div>
+                  </div>
+
+                  {/* ליווי — top 3-column grid only; the per-service-type advisor editor
+                      below it moved into its own separate "יועצים מלווים" card. */}
+                  {(role === "owner" || role === "manager" || role === "advisor") && <div className={sectionCardCls}>
+                    <div className={sectionHeaderCls}>{sectionTitle(Handshake, "פרטי ליווי", ACCENT_EMERALD)}</div>
+                    <div className={sectionBodyCls}>
+                    <div className="grid grid-cols-3 gap-3">
+                      {(role === "owner" || role === "manager") && (
+                        <div className={tileCls}>
+                          <label htmlFor="client-status-select" className={`${tileLabelCls} block`}>סטטוס לקוח</label>
+                          <select id="client-status-select" className={editFieldCls(false, !yearAdminData.client_status)}
+                            value={yearAdminData.client_status || ""}
+                            onChange={e => saveYearAdminField("client_status", e.target.value || null)}>
+                            <option value="">בחר</option>
+                            {CLIENT_STATUS_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                          </select>
+                        </div>
+                      )}
+
+                      {(role === "owner" || role === "manager") && (
+                        <div className={tileCls}>
+                          <label htmlFor="service-type-select" className={`${tileLabelCls} block`}>סוג שירות</label>
+                          <select id="service-type-select" className={editFieldCls(false, !yearAdminData.service_type)}
+                            value={yearAdminData.service_type || ""}
+                            onChange={e => saveYearAdminField("service_type", e.target.value || null)}>
+                            <option value="">בחר</option>
+                            {SERVICE_TYPE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                          </select>
+                        </div>
+                      )}
+
+                      <div className={tileCls}>
+                        <label htmlFor="order-amount-gefen" className={`${tileLabelCls} block`}>מחיר כולל מע"מ</label>
+                        <input
+                          id="order-amount-gefen"
+                          key={`${schoolId}-${academicYear}`}
+                          type="text"
+                          inputMode="numeric"
+                          defaultValue={formatAmount(yearAdminData.order_amount_gefen)}
+                          onBlur={e => {
+                            const v = parseAmount(e.target.value);
+                            e.target.value = formatAmount(v);
+                            saveOrderAmountGefen(v);
+                          }}
+                          title={yearAdminData.order_amount_gefen_updated_by_name
+                            ? `${yearAdminData.order_amount_gefen_updated_by_name} - ${formatDate(yearAdminData.order_amount_gefen_updated_at)}`
+                            : ""}
+                          className={editFieldCls(false, !yearAdminData.order_amount_gefen)}
+                        />
+                        {yearAdminData.order_amount_gefen_updated_by_name && (
+                          <p className="text-xs text-slate-400 mt-1">
+                            עודכן לאחרונה על ידי {yearAdminData.order_amount_gefen_updated_by_name} · {formatDate(yearAdminData.order_amount_gefen_updated_at)}
+                          </p>
+                        )}
+                      </div>
+
+                      {(role === "owner" || role === "manager") && (
+                        <div className={tileCls}>
+                          <span className={`${tileLabelCls} block`}>אמצעי הזמנה</span>
+                          <MultiSelectChips compact options={FUNDING_METHOD_OPTIONS}
+                            selected={yearAdminData.order_method || []}
+                            onChange={v => saveYearAdminField("order_method", v.length ? v : null)} />
+                        </div>
+                      )}
+
+                      {(role === "owner" || role === "manager") && (
+                        <div className={`${tileCls} col-span-2`}>
+                          <span className={`${tileLabelCls} inline-flex items-center gap-1`}>
+                            <QuestionTooltip text="בחר למי תהיה גישה לנתוני בית הספר." />
+                            גישה
+                          </span>
+                          <AccessSelector compact restrictTo={editForm.restrict_access_to} users={users}
+                            loadingUsers={loadingUsers}
+                            onChange={val => { setAccessLinkedToAdvisors(false); setEditForm(p => ({ ...p, restrict_access_to: val })); }}
+                            onSelectAdvisors={() => setAccessLinkedToAdvisors(true)}
+                            schoolAdvisors={draftLinkedAdvisorIds.map(id => users.find(u => u.id === id)).filter(Boolean)} />
                         </div>
                       )}
                     </div>
-                    {saveError && (
-                      <p role="alert" className="text-sm text-red-600 mt-2 text-right">{saveError}</p>
-                    )}
+                    </div>
+                  </div>}
                   </div>
 
-                  {/* 3-column grid — each column is its own label/input grid */}
-                  <div className="grid grid-cols-3 gap-x-8">
-                    {/* Right column */}
-                    <div style={editColGridStyle} className={`border-l ${colDividerCls} pl-8`}>
-                      <label htmlFor="edit-name" className={editLabelCls}>שם מוסד:</label>
-                      <div className="py-0.5">
-                        <input id="edit-name" className={editFieldCls(triedSave && !editForm.name, !editForm.name)} value={editForm.name}
-                          onChange={e => setEditForm(p => ({ ...p, name: e.target.value }))} autoComplete="off" />
-                        {triedSave && !editForm.name && <span className="text-xs text-red-500 block mt-0.5" role="alert">שדה חובה</span>}
-                      </div>
-
-                      <label htmlFor="edit-symbol" className={editLabelCls}>סמל מוסד:</label>
-                      <div className="py-0.5">
-                        <input id="edit-symbol"
-                          className={editFieldCls((triedSave && !editForm.symbol) || (editForm.symbol.length > 0 && !!symbolError), !editForm.symbol)}
-                          value={editForm.symbol}
-                          onChange={e => setEditForm(p => ({ ...p, symbol: e.target.value.replace(/\D/g, "").slice(0, 6) }))}
-                          inputMode="numeric" maxLength={6} autoComplete="off" />
-                        {(triedSave && !editForm.symbol)
-                          ? <span className="text-xs text-red-500 block mt-0.5" role="alert">שדה חובה</span>
-                          : (editForm.symbol.length > 0 && symbolError)
-                            ? <span className="text-xs text-red-500 block mt-0.5" role="alert">{symbolError}</span>
-                            : null}
-                      </div>
-
-                      <label htmlFor="edit-stage" className={editLabelCls}>שלב מוסד:</label>
-                      <div className="py-0.5">
-                        <select id="edit-stage" className={editFieldCls(false, !editForm.stage)} value={editForm.stage}
-                          onChange={e => setEditForm(p => ({ ...p, stage: e.target.value }))}>
-                          {SCHOOL_STAGE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                        </select>
-                      </div>
-                    </div>
-
-                    {/* Middle column */}
-                    <div style={editColGridStyle} className={`border-l ${colDividerCls} pl-8`}>
-                      <label htmlFor="edit-city" className={editLabelCls}>עיר:</label>
-                      <div className="py-0.5">
-                        <input id="edit-city" className={editFieldCls(false, !editForm.city)} value={editForm.city}
-                          onChange={e => setEditForm(p => ({ ...p, city: e.target.value }))} autoComplete="off" />
-                      </div>
-
-                      <label htmlFor="edit-authority" className={editLabelCls}>בעלות:</label>
-                      <div className="py-0.5">
-                        <input id="edit-authority" className={editFieldCls(false, !editForm.authority)} value={editForm.authority}
-                          onChange={e => setEditForm(p => ({ ...p, authority: e.target.value }))} autoComplete="off" />
-                      </div>
-
-                      <label htmlFor="edit-district" className={editLabelCls}>מחוז:</label>
-                      <div className="py-0.5">
-                        <select id="edit-district" className={editFieldCls(false, !editForm.district)} value={editForm.district}
-                          onChange={e => setEditForm(p => ({ ...p, district: e.target.value }))}>
-                          <option value="">בחר</option>
-                          {DISTRICT_OPTIONS.map(d => <option key={d} value={d}>{d}</option>)}
-                        </select>
-                      </div>
-                    </div>
-
-                    {/* Left column */}
-                    <div style={editColGridStyle}>
-                      <label htmlFor="edit-finance-software" className={editLabelCls}>תוכנת כספים:</label>
-                      <div className="py-0.5">
-                        <select id="edit-finance-software" className={editFieldCls(false, !editForm.finance_software)} value={editForm.finance_software}
-                          onChange={e => setEditForm(p => ({ ...p, finance_software: e.target.value }))}>
-                          {FINANCE_SOFTWARE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                        </select>
-                      </div>
-
-                      <label htmlFor="edit-school-phone" className={editLabelCls}>טלפון בית הספר:</label>
-                      <div className="py-0.5">
-                        <input id="edit-school-phone"
-                          className={editFieldCls(!!(editForm.school_phone && schoolPhoneError), !editForm.school_phone)}
-                          value={editForm.school_phone} dir="ltr"
-                          onChange={e => setEditForm(p => ({ ...p, school_phone: e.target.value.replace(/\D/g, "").slice(0, 10) }))}
-                          inputMode="numeric" autoComplete="off" />
-                        {editForm.school_phone && schoolPhoneError && <span className="text-xs text-red-500 block mt-0.5" role="alert">{schoolPhoneError}</span>}
-                      </div>
-
-                      <label htmlFor="edit-address" className={editLabelCls}>כתובת:</label>
-                      <div className="py-0.5">
-                        <input id="edit-address" className={editFieldCls(false, !editForm.address)} value={editForm.address}
-                          onChange={e => setEditForm(p => ({ ...p, address: e.target.value }))} autoComplete="off" />
-                      </div>
-                    </div>
-                  </div>
-                  </div>
-
+                  {/* אנשי קשר + יועצים מלווים side by side; אנשי קשר מימין, יועצים מלווים משמאלו */}
+                  <div className="grid grid-cols-2 gap-4">
                   {/* אנשי קשר card */}
                   <div className={sectionCardCls}>
-                  <div>
-                    <p className={`${sectionTitleCls} justify-center mb-4 pb-3 border-b border-slate-100`}>{iconBadge(Users)}אנשי קשר</p>
-                    <table className="w-full text-sm border-separate" style={{ borderSpacing: 0 }}>
+                  <div className={sectionHeaderCls}>
+                    {sectionTitle(Phone, "אנשי קשר", ACCENT_INDIGO)}
+                  </div>
+                  <div className={sectionBodyCls}>
+                    <table className="w-full text-sm border border-slate-200 border-collapse font-sans">
                       <thead>
-                        <tr className="bg-slate-50">
-                          <th scope="col" className="text-right py-2 px-2 rounded-r-lg text-xs text-slate-500 font-semibold uppercase tracking-wide">תפקיד</th>
-                          <th scope="col" className="text-right py-2 px-2 text-xs text-slate-500 font-semibold uppercase tracking-wide">שם</th>
-                          <th scope="col" className="text-right py-2 px-2 text-xs text-slate-500 font-semibold uppercase tracking-wide">טלפון</th>
-                          <th scope="col" className="text-right py-2 px-2 text-xs text-slate-500 font-semibold uppercase tracking-wide">מייל</th>
-                          <th scope="col" className="text-right py-2 px-2 text-xs text-slate-500 font-semibold uppercase tracking-wide">יום חופשי</th>
-                          <th scope="col" className="text-right py-2 px-2 rounded-l-lg text-xs text-slate-500 font-semibold uppercase tracking-wide">אחראי תיאום פגישות</th>
+                        <tr className="bg-slate-100 divide-x divide-slate-200">
+                          <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700 whitespace-nowrap">תפקיד</th>
+                          <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700">שם</th>
+                          <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700">טלפון</th>
+                          <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700">מייל</th>
+                          <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700">יום חופשי</th>
+                          <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700">מתאם פגישות</th>
                         </tr>
                       </thead>
-                      <tbody>
+                      <tbody className="divide-y divide-slate-200">
                         {[
                           editForm.stage === "sheshshnati" ? PRINCIPAL_TICHON_ROW : PRINCIPAL_SINGLE_ROW,
                           ...(editForm.stage === "sheshshnati" && !editForm.principal_same_person ? [PRINCIPAL_CHATIVA_ROW] : []),
                           ...CONTACT_ROWS,
-                        ].map((row, ri) => {
+                        ].map(row => {
                           const phoneErr = validateContactPhone(editForm[row.phoneField]);
                           const emailErr = validateEmail(editForm[row.emailField]);
                           return (
-                            <tr key={row.nameField} className={`border-t border-slate-100 ${ri % 2 === 1 ? "bg-slate-50/50" : ""}`}>
-                              <td className="py-2.5 pr-1 whitespace-nowrap"><span className={pillCls}>{row.label}</span></td>
-                              <td className="py-1.5 px-2">
+                            <tr key={row.nameField} className={`divide-x divide-slate-200 ${rowStripeCls}`}>
+                              <td className="py-3 pr-1 align-top"><span className="text-sm font-normal text-gray-900">{row.label}</span></td>
+                              <td className="py-3 px-2">
                                 <label htmlFor={`edit-cn-${row.nameField}`} className="sr-only">{row.label} שם</label>
                                 <input id={`edit-cn-${row.nameField}`} className={editFieldCls(false, !editForm[row.nameField])}
                                   value={editForm[row.nameField]}
                                   onChange={e => setEditForm(p => ({ ...p, [row.nameField]: e.target.value }))}
                                   autoComplete="off" />
                               </td>
-                              <td className="py-1.5 px-2">
+                              <td className="py-3 px-2">
                                 <label htmlFor={`edit-cp-${row.phoneField}`} className="sr-only">{row.label} טלפון</label>
                                 <input id={`edit-cp-${row.phoneField}`} className={editFieldCls(!!(editForm[row.phoneField] && phoneErr), !editForm[row.phoneField])}
                                   value={editForm[row.phoneField]}
@@ -3692,7 +3809,7 @@ export default function SchoolPage() {
                                   dir="ltr" inputMode="numeric" autoComplete="off" />
                                 {editForm[row.phoneField] && phoneErr && <span className="text-xs text-red-500 block mt-0.5" role="alert">{phoneErr}</span>}
                               </td>
-                              <td className="py-1.5 px-2">
+                              <td className="py-3 px-2">
                                 <label htmlFor={`edit-ce-${row.emailField}`} className="sr-only">{row.label} מייל</label>
                                 <input id={`edit-ce-${row.emailField}`} className={`${editFieldCls(!!(editForm[row.emailField] && emailErr), !editForm[row.emailField])} text-center`}
                                   value={editForm[row.emailField]}
@@ -3700,12 +3817,12 @@ export default function SchoolPage() {
                                   dir="ltr" type="email" autoComplete="off" />
                                 {editForm[row.emailField] && emailErr && <span className="text-xs text-red-500 block mt-0.5" role="alert">{emailErr}</span>}
                               </td>
-                              <td className="py-1.5 px-2">
+                              <td className="py-3 px-2">
                                 <MultiSelectChips compact options={WEEKDAY_OPTIONS}
                                   selected={editForm[row.dayOffField] || []}
                                   onChange={v => setEditForm(p => ({ ...p, [row.dayOffField]: v }))} />
                               </td>
-                              <td className="py-1.5 px-2 text-center">
+                              <td className="py-3 px-2 text-center">
                                 <label htmlFor={`coord-${row.coordValue}`} className="sr-only">{row.label} אחראי/ת לתיאום פגישות</label>
                                 <input id={`coord-${row.coordValue}`} type="radio" name="meeting-coordinator"
                                   className="w-4 h-4 accent-blue-600"
@@ -3718,7 +3835,7 @@ export default function SchoolPage() {
                         })}
 
                         {editForm.stage === "sheshshnati" && (
-                          <tr className="border-t border-slate-100">
+                          <tr className={`divide-x divide-slate-200 ${rowStripeCls}`}>
                             <td></td>
                             <td colSpan={5} className="py-2 px-2">
                               <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
@@ -3733,24 +3850,24 @@ export default function SchoolPage() {
 
                         {/* Extra contact rows */}
                         {(editForm.extra_contacts || []).map((ec, i) => (
-                          <tr key={`extra-${i}`} className="border-t border-slate-100">
-                            <td className="py-1.5 pr-1">
+                          <tr key={`extra-${i}`} className={`divide-x divide-slate-200 ${rowStripeCls}`}>
+                            <td className="py-3 pr-1">
                               <label htmlFor={`edit-extra-role-${i}`} className="sr-only">תפקיד</label>
                               <input id={`edit-extra-role-${i}`} className={editFieldCls(false)} value={ec.role}
                                 onChange={e => updateExtra(i, "role", e.target.value)} autoComplete="off" />
                             </td>
-                            <td className="py-1.5 px-2">
+                            <td className="py-3 px-2">
                               <label htmlFor={`edit-extra-name-${i}`} className="sr-only">שם</label>
                               <input id={`edit-extra-name-${i}`} className={editFieldCls(false)} value={ec.name}
                                 onChange={e => updateExtra(i, "name", e.target.value)} autoComplete="off" />
                             </td>
-                            <td className="py-1.5 px-2">
+                            <td className="py-3 px-2">
                               <label htmlFor={`edit-extra-phone-${i}`} className="sr-only">טלפון</label>
                               <input id={`edit-extra-phone-${i}`} className={editFieldCls(false)} value={ec.phone}
                                 onChange={e => updateExtra(i, "phone", e.target.value.replace(/\D/g, "").slice(0, 10))}
                                 dir="ltr" inputMode="numeric" autoComplete="off" />
                             </td>
-                            <td className="py-1.5 px-2">
+                            <td className="py-3 px-2">
                               <div className="flex items-center gap-1">
                                 <label htmlFor={`edit-extra-email-${i}`} className="sr-only">מייל</label>
                                 <input id={`edit-extra-email-${i}`} className={`${editFieldCls(false)} text-center`} value={ec.email}
@@ -3761,12 +3878,12 @@ export default function SchoolPage() {
                                   aria-label="הסר שורת איש קשר">✕</button>
                               </div>
                             </td>
-                            <td className="py-1.5 px-2">
+                            <td className="py-3 px-2">
                               <MultiSelectChips compact options={WEEKDAY_OPTIONS}
                                 selected={ec.day_off || []}
                                 onChange={v => updateExtra(i, "day_off", v)} />
                             </td>
-                            <td className="py-1.5 px-2 text-center">
+                            <td className="py-3 px-2 text-center">
                               <label htmlFor={`coord-extra-${i}`} className="sr-only">איש קשר נוסף {i + 1} אחראי/ת לתיאום פגישות</label>
                               <input id={`coord-extra-${i}`} type="radio" name="meeting-coordinator"
                                 className="w-4 h-4 accent-blue-600"
@@ -3782,7 +3899,7 @@ export default function SchoolPage() {
                           <tr>
                             <td colSpan={6} className="pt-3 pb-1">
                               <button type="button" onClick={addExtra}
-                                className="text-sm text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1 transition-colors">
+                                className={`${outlineBtnCls} inline-flex items-center gap-1`}>
                                 <span aria-hidden="true">+</span> הוסף איש קשר
                               </button>
                             </td>
@@ -3796,111 +3913,19 @@ export default function SchoolPage() {
                   </div>
                   </div>
 
-                  {/* ליווי — same 3-column label/field grid format as פרטי מוסד. Advisor/access/
-                      client-status/service-type/order-method are owner/manager only; order-amount
-                      is visible/editable to all roles reaching this section (incl. advisor). */}
-                  {(role === "owner" || role === "manager" || role === "advisor") && <div className={sectionCardCls}>
-                    <p className={`${sectionTitleCls} justify-center mb-4 pb-3 border-b border-slate-100`}>{iconBadge(Handshake)}ליווי</p>
-                    <div className="grid grid-cols-3 gap-x-8">
-                      {/* Right column */}
-                      <div style={editColGridStyle} className={`border-l ${colDividerCls} pl-8`}>
-                        {(role === "owner" || role === "manager") && (
-                          <>
-                            <label htmlFor="client-status-select" className={editLabelCls}>סטטוס לקוח:</label>
-                            <div className="py-0.5">
-                              <select id="client-status-select" className={editFieldCls(false, !yearAdminData.client_status)}
-                                value={yearAdminData.client_status || ""}
-                                onChange={e => saveYearAdminField("client_status", e.target.value || null)}>
-                                <option value="">בחר</option>
-                                {CLIENT_STATUS_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                              </select>
-                            </div>
-                          </>
-                        )}
-                        {(role === "owner" || role === "manager") && (
-                          <>
-                            <label htmlFor="service-type-select" className={editLabelCls}>סוג שירות:</label>
-                            <div className="py-0.5">
-                              <select id="service-type-select" className={editFieldCls(false, !yearAdminData.service_type)}
-                                value={yearAdminData.service_type || ""}
-                                onChange={e => saveYearAdminField("service_type", e.target.value || null)}>
-                                <option value="">בחר</option>
-                                {SERVICE_TYPE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                              </select>
-                            </div>
-                          </>
-                        )}
-                      </div>
-
-                      {/* Middle column */}
-                      <div style={editColGridStyle} className={`border-l ${colDividerCls} pl-8`}>
-                        {(role === "owner" || role === "manager") && (
-                          <>
-                            <span className={editLabelCls}>אמצעי הזמנה:</span>
-                            <div className="py-0.5">
-                              <MultiSelectChips compact options={FUNDING_METHOD_OPTIONS}
-                                selected={yearAdminData.order_method || []}
-                                onChange={v => saveYearAdminField("order_method", v.length ? v : null)} />
-                            </div>
-                          </>
-                        )}
-                        <label htmlFor="order-amount-gefen" className={editLabelCls}>מחיר כולל מע"מ:</label>
-                        <div className="py-0.5">
-                          <input
-                            id="order-amount-gefen"
-                            key={`${schoolId}-${academicYear}`}
-                            type="text"
-                            inputMode="numeric"
-                            defaultValue={formatAmount(yearAdminData.order_amount_gefen)}
-                            onBlur={e => {
-                              const v = parseAmount(e.target.value);
-                              e.target.value = formatAmount(v);
-                              saveOrderAmountGefen(v);
-                            }}
-                            title={yearAdminData.order_amount_gefen_updated_by_name
-                              ? `${yearAdminData.order_amount_gefen_updated_by_name} - ${formatDate(yearAdminData.order_amount_gefen_updated_at)}`
-                              : ""}
-                            className={editFieldCls(false, !yearAdminData.order_amount_gefen)}
-                          />
-                          {yearAdminData.order_amount_gefen_updated_by_name && (
-                            <p className="text-xs text-slate-400 mt-1">
-                              עודכן לאחרונה על ידי {yearAdminData.order_amount_gefen_updated_by_name} · {formatDate(yearAdminData.order_amount_gefen_updated_at)}
-                            </p>
-                          )}
-                        </div>
-                      </div>
-
-                      {/* Left column */}
-                      <div style={editColGridStyle}>
-                        {(role === "owner" || role === "manager") && (
-                          <>
-                            <span className={`${editLabelCls} inline-flex items-center gap-1`}>
-                              <QuestionTooltip text="בחר למי תהיה גישה לנתוני בית הספר." />
-                              גישה:
-                            </span>
-                            <div className="py-0.5">
-                              <AccessSelector compact restrictTo={editForm.restrict_access_to} users={users}
-                                loadingUsers={loadingUsers}
-                                onChange={val => { setAccessLinkedToAdvisors(false); setEditForm(p => ({ ...p, restrict_access_to: val })); }}
-                                onSelectAdvisors={() => setAccessLinkedToAdvisors(true)}
-                                schoolAdvisors={draftLinkedAdvisorIds.map(id => users.find(u => u.id === id)).filter(Boolean)} />
-                            </div>
-                          </>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Per-service-type sub-sections: 3 columns side by side (גפן/שוטף/מחוז),
-                        each with יועץ מלווה / הקצאת פגישות / זמן לפגישה stacked below its
-                        header — replaces the old single general "יועץ מלווה" field above. */}
-                    {(role === "owner" || role === "manager") && (
-                      <div className="mt-5 grid grid-cols-3 gap-4">
+                  {/* יועצים מלווים — per-service-type advisor editor (גפן/שוטף/מחוז), split
+                      out into its own card, mirroring display mode's separate card. */}
+                  {(role === "owner" || role === "manager") && (
+                  <div className={sectionCardCls}>
+                    <div className={sectionHeaderCls}>{sectionTitle(UsersRound, "יועצים מלווים", ACCENT_VIOLET)}</div>
+                    <div className={sectionBodyCls}>
+                      <div className="grid grid-cols-3 gap-4">
                         {TYPED_SERVICE_TYPES.map(({ key, label }, idx) => {
                           const isRequired = activeServiceTypes(yearAdminData.service_type).includes(key);
                           const invalid = triedSave && isRequired && draftTypedAdvisorIds[key].length === 0;
                           return (
-                            <div key={key} className="rounded-lg border border-slate-300/80 bg-slate-50/60 p-4">
-                              <p className="text-sm font-semibold text-slate-700 text-center mb-3 pb-2 border-b border-slate-200">{label}{isRequired && <span className="text-red-500"> *</span>}</p>
+                            <div key={key} className="bg-slate-50/70 border border-slate-200/70 rounded-xl p-3">
+                              <p className="text-sm font-semibold text-slate-700 text-center mb-3 pb-2 border-b border-black/20">{label}{isRequired && <span className="text-red-500"> *</span>}</p>
                               <div style={editColGridStyle}>
                                 <span className={editLabelCls}>יועץ מלווה:</span>
                                 <div className="py-0.5">
@@ -3935,8 +3960,10 @@ export default function SchoolPage() {
                           );
                         })}
                       </div>
-                    )}
-                  </div>}
+                    </div>
+                  </div>
+                  )}
+                  </div>
 
                   {/* Bottom actions */}
                   <div className="flex items-center justify-center gap-3 mt-6 pt-4 border-t border-slate-100">
@@ -3949,113 +3976,179 @@ export default function SchoolPage() {
 
                 ) : (
                 /* ─── DISPLAY MODE ─── */
-                <div className="space-y-5">
+                <div className="space-y-10">
+                  {/* פרטי מוסד + ליווי side by side at the top of the page */}
+                  <div className="grid grid-cols-2 gap-4">
                   {/* פרטי מוסד card */}
                   <div className={sectionCardCls}>
                   {/* Header */}
-                  <div className={sectionHeaderRowCls}>
-                    <p className={sectionTitleCls}>{iconBadge(School)}פרטי מוסד</p>
-                    <div className="absolute left-0 flex items-center gap-2 flex-wrap">
-                      {(role === "owner" || role === "manager" || (role === "advisor" && canEditDirectly)) && (
-                        <button onClick={() => startEdit(false)} className="btn-ghost text-sm px-4 py-2 min-w-[120px] inline-flex items-center justify-center gap-1.5">✏️ ערוך פרטים</button>
-                      )}
-                      {role === "advisor" && !canEditDirectly && canRequestUpdate && (
-                        <button onClick={() => startEdit(true)} className="btn-ghost text-sm px-4 py-2">📝 בקש עדכון פרטים</button>
-                      )}
-                    </div>
+                  <div className={sectionHeaderCls}>
+                    {sectionTitle(Building2, "פרטי מוסד")}
                   </div>
+                  <div className={sectionBodyCls}>
 
-                  {/* 3-column grid — each column is its own label/value grid */}
-                  <div className="grid grid-cols-3 gap-x-8">
-                    {/* Right column */}
-                    <div style={colGridStyle} className={`border-l ${colDividerCls} pl-8`}>
-                      <span className={labelCls}>שם מוסד:</span>
-                      <span className={valCls(school?.name)} style={valStyle(school?.name)}>{school?.name || "—"}</span>
-
-                      <span className={labelCls}>סמל מוסד:</span>
-                      <span className={valCls(school?.symbol)} style={valStyle(school?.symbol)}>{school?.symbol || "—"}</span>
-
-                      <span className={labelCls}>שלב מוסד:</span>
-                      <span className={valCls(SCHOOL_STAGE_LABEL[school?.stage] || school?.stage)} style={valStyle(SCHOOL_STAGE_LABEL[school?.stage] || school?.stage)}>
-                        {SCHOOL_STAGE_LABEL[school?.stage] || school?.stage || "—"}
-                      </span>
+                  {/* Live data tiles — 3×3 grid, one stat-tile per field */}
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className={`${tileCls} min-w-0`}>
+                      <p className={tileLabelCls}>שם מוסד</p>
+                      <p className={`${tileValueCls} truncate`} title={school?.name || undefined}>{school?.name || "—"}</p>
                     </div>
-
-                    {/* Middle column */}
-                    <div style={colGridStyle} className={`border-l ${colDividerCls} pl-8`}>
-                      <span className={labelCls}>עיר:</span>
-                      <span className={valCls(school?.city)} style={valStyle(school?.city)}>{school?.city || "—"}</span>
-
-                      <span className={labelCls}>בעלות:</span>
-                      <span className={valCls(school?.authority)} style={valStyle(school?.authority)}>{school?.authority || "—"}</span>
-
-                      <span className={labelCls}>מחוז:</span>
-                      <span className={valCls(school?.district)} style={valStyle(school?.district)}>{school?.district || "—"}</span>
+                    <div className={`${tileCls} min-w-0`}>
+                      <p className={tileLabelCls}>עיר</p>
+                      <p className={`${tileValueCls} truncate`} title={school?.city || undefined}>{school?.city || "—"}</p>
                     </div>
-
-                    {/* Left column */}
-                    <div style={colGridStyle}>
-                      <span className={labelCls}>תוכנת כספים:</span>
-                      <span className={valCls(FINANCE_SOFTWARE_LABEL[school?.finance_software] || school?.finance_software)}
-                        style={valStyle(FINANCE_SOFTWARE_LABEL[school?.finance_software] || school?.finance_software)}>
-                        {FINANCE_SOFTWARE_LABEL[school?.finance_software] || school?.finance_software || "—"}
-                      </span>
-
-                      <span className={labelCls}>טלפון בית הספר:</span>
-                      <span className={valCls(school?.school_phone)} dir={school?.school_phone ? "ltr" : undefined} style={valStyle(school?.school_phone)}>
-                        {school?.school_phone || "—"}
-                      </span>
-
-                      <span className={labelCls}>כתובת:</span>
-                      <span className={valCls(school?.address)} style={valStyle(school?.address)}>{school?.address || "—"}</span>
+                    <div className={tileCls}>
+                      <p className={tileLabelCls}>תוכנת כספים</p>
+                      <p className={tileValueCls}>{FINANCE_SOFTWARE_LABEL[school?.finance_software] || school?.finance_software || "—"}</p>
+                    </div>
+                    <div className={tileCls}>
+                      <p className={tileLabelCls}>סמל מוסד</p>
+                      <p className={tileValueCls}>{school?.symbol || "—"}</p>
+                    </div>
+                    <div className={tileCls}>
+                      <p className={tileLabelCls}>בעלות</p>
+                      <p className={tileValueCls}>{school?.authority || "—"}</p>
+                    </div>
+                    <div className={tileCls}>
+                      <p className={tileLabelCls}>טלפון בית הספר</p>
+                      <p className={tileValueCls} dir={school?.school_phone ? "ltr" : undefined}>{school?.school_phone || "—"}</p>
+                    </div>
+                    <div className={tileCls}>
+                      <p className={tileLabelCls}>שלב מוסד</p>
+                      <p className={tileValueCls}>{SCHOOL_STAGE_LABEL[school?.stage] || school?.stage || "—"}</p>
+                    </div>
+                    <div className={tileCls}>
+                      <p className={tileLabelCls}>מחוז</p>
+                      <p className={tileValueCls}>{school?.district || "—"}</p>
+                    </div>
+                    <div className={tileCls}>
+                      <p className={tileLabelCls}>כתובת</p>
+                      <p className={tileValueCls}>{school?.address || "—"}</p>
                     </div>
                   </div>
                   </div>
+                  </div>
 
+                  {/* ליווי section — same 3-column label/value grid format as פרטי מוסד */}
+                  <div className={sectionCardCls}>
+                    <div className={sectionHeaderCls}>{sectionTitle(Handshake, "פרטי ליווי", ACCENT_EMERALD)}</div>
+                    <div className={sectionBodyCls}>
+                    <div className="grid grid-cols-3 gap-3">
+                      <div className={tileCls}>
+                        <p className={tileLabelCls}>סטטוס לקוח</p>
+                        {yearAdminData.client_status ? (
+                          <span className={`inline-flex items-center text-xs font-medium px-2.5 py-1 rounded-full border ${CLIENT_STATUS_BADGE_CLS[yearAdminData.client_status] || "bg-slate-100 text-slate-500 border-slate-200"}`}>
+                            {CLIENT_STATUS_OPTIONS.find(o => o.value === yearAdminData.client_status)?.label}
+                          </span>
+                        ) : (
+                          <p className={tileValueCls}>—</p>
+                        )}
+                      </div>
+
+                      <div className={tileCls}>
+                        <p className={tileLabelCls}>סוג שירות</p>
+                        <p className={tileValueCls}>
+                          {SERVICE_TYPE_OPTIONS.find(o => o.value === yearAdminData.service_type)?.label || "—"}
+                        </p>
+                      </div>
+
+                      <div className={tileCls}>
+                        <p className={tileLabelCls}>מחיר כולל מע"מ</p>
+                        <p className={tileValueCls}
+                          title={yearAdminData.order_amount_gefen_updated_by_name
+                            ? `${yearAdminData.order_amount_gefen_updated_by_name} - ${formatDate(yearAdminData.order_amount_gefen_updated_at)}`
+                            : ""}>
+                          {formatAmount(yearAdminData.order_amount_gefen) || "—"}
+                        </p>
+                      </div>
+
+                      <div className={tileCls}>
+                        <p className={tileLabelCls}>אמצעי הזמנה</p>
+                        <div className="flex flex-wrap gap-1">
+                          {(yearAdminData.order_method || []).length === 0 ? (
+                            <p className={tileValueCls}>—</p>
+                          ) : yearAdminData.order_method.map(v => (
+                            <span key={v} className="inline-flex items-center text-xs font-medium px-2.5 py-1 rounded-md bg-slate-100 text-slate-700 border border-slate-200">
+                              {FUNDING_METHOD_OPTIONS.find(o => o.value === v)?.label || v}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className={`${tileCls} col-span-2`}>
+                        <p className={`${tileLabelCls} inline-flex items-center gap-1`}>
+                          <QuestionTooltip text="בחר למי תהיה גישה לנתוני בית הספר." />
+                          גישה
+                        </p>
+                        <div className="flex flex-wrap gap-1">
+                          {accessIsAll ? (
+                            <span className="text-xs font-medium px-2 py-0.5 rounded-full" style={{ background: "rgba(22,163,74,0.12)", color: "#15803d" }}>כולם</span>
+                          ) : (() => {
+                            const profiles = school?.restrict_access_profiles !== undefined
+                              ? (school.restrict_access_profiles || [])
+                              : (school?.restrict_access_to || []).map(id => users.find(u => u.id === id)).filter(Boolean);
+                            if (profiles.length === 0 && loadingUsers) return <span className="text-xs text-slate-400">טוען...</span>;
+                            if (profiles.length === 0) return <p className={tileValueCls}>—</p>;
+                            return profiles.map(u => (
+                              <span key={u.id} className="text-xs font-medium px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 border border-slate-200">
+                                {u.full_name || u.email}
+                              </span>
+                            ));
+                          })()}
+                        </div>
+                      </div>
+                    </div>
+                    </div>
+                  </div>
+                  </div>
+
+                  {/* אנשי קשר + יועצים מלווים side by side; אנשי קשר מימין, יועצים מלווים משמאלו */}
+                  <div className="grid grid-cols-2 gap-4">
                   {/* אנשי קשר card */}
                   <div className={sectionCardCls}>
-                    <p className={`${sectionTitleCls} justify-center mb-4 pb-3 border-b border-slate-100`}>{iconBadge(Users)}אנשי קשר</p>
-                    <table className="w-full text-sm table-fixed border-separate" style={{ borderSpacing: 0 }}>
+                    <div className={sectionHeaderCls}>{sectionTitle(Phone, "אנשי קשר", ACCENT_INDIGO)}</div>
+                    <div className={sectionBodyCls}>
+                    <table className="w-full text-sm table-fixed border border-slate-200 border-collapse font-sans">
                       <thead>
-                        <tr className="bg-slate-50">
-                          <th scope="col" className="text-right py-2 px-2 rounded-r-lg text-xs text-slate-500 font-semibold uppercase tracking-wide w-[9%]">תפקיד</th>
-                          <th scope="col" className="text-right py-2 px-2 text-xs text-slate-500 font-semibold uppercase tracking-wide w-[13%]">שם</th>
-                          <th scope="col" className="text-right py-2 px-2 text-xs text-slate-500 font-semibold uppercase tracking-wide w-[17%]">טלפון</th>
-                          <th scope="col" className="text-right py-2 px-2 text-xs text-slate-500 font-semibold uppercase tracking-wide w-[31%]">מייל</th>
-                          <th scope="col" className="text-right py-2 px-2 text-xs text-slate-500 font-semibold uppercase tracking-wide w-[15%]">יום חופשי</th>
-                          <th scope="col" className="text-right py-2 px-2 rounded-l-lg text-xs text-slate-500 font-semibold uppercase tracking-wide w-[15%]">אחראי תיאום פגישות</th>
+                        <tr className="bg-slate-100 divide-x divide-slate-200">
+                          <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700 whitespace-nowrap w-[13%]">תפקיד</th>
+                          <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700 w-[13%]">שם</th>
+                          <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700 w-[15%]">טלפון</th>
+                          <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700 w-[29%]">מייל</th>
+                          <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700 w-[15%]">יום חופשי</th>
+                          <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700 w-[15%]">מתאם פגישות</th>
                         </tr>
                       </thead>
-                      <tbody>
+                      <tbody className="divide-y divide-slate-200">
                         {[
                           school?.stage === "sheshshnati"
                             ? { ...PRINCIPAL_TICHON_ROW, label: school?.principal_same_person === false ? PRINCIPAL_TICHON_ROW.label : "מנהל/ת חט\"ע וחט\"ב" }
                             : PRINCIPAL_SINGLE_ROW,
                           ...(school?.stage === "sheshshnati" && school?.principal_same_person === false ? [PRINCIPAL_CHATIVA_ROW] : []),
                           ...CONTACT_ROWS,
-                        ].map((row, ri) => (
-                          <tr key={row.nameField} className={`border-t border-slate-100 ${ri % 2 === 1 ? "bg-slate-50/50" : ""}`}>
-                            <td className="py-2.5 pr-1 whitespace-nowrap"><span className={pillCls}>{row.label}</span></td>
-                            <td className="py-2.5 px-2">
-                              <span className={`text-sm ${school?.[row.nameField] ? "font-medium text-slate-800" : "text-slate-400 font-normal"}`}
+                        ].map(row => (
+                          <tr key={row.nameField} className={`divide-x divide-slate-200 ${rowStripeCls}`}>
+                            <td className="py-3 pr-1 align-top"><span className="text-sm font-normal text-gray-900">{row.label}</span></td>
+                            <td className="py-3 px-2">
+                              <span className={`text-sm ${school?.[row.nameField] ? "font-normal text-gray-900" : "text-slate-400 font-normal"}`}
                                 style={contactValStyle(school?.[row.nameField])}>
                                 {school?.[row.nameField] || "—"}
                               </span>
                             </td>
-                            <td className="py-2.5 px-2">
-                              <span className={`text-sm whitespace-nowrap ${school?.[row.phoneField] ? "font-medium text-slate-800" : "text-slate-400 font-normal"}`}
+                            <td className="py-3 px-2">
+                              <span className={`text-sm whitespace-nowrap ${school?.[row.phoneField] ? "font-normal text-gray-900" : "text-slate-400 font-normal"}`}
                                 dir={school?.[row.phoneField] ? "ltr" : undefined} style={contactValStyle(school?.[row.phoneField])}>
                                 {formatContactPhone(school?.[row.phoneField]) || "—"}
                               </span>
                             </td>
-                            <td className="py-2.5 px-2 overflow-hidden">
-                              <span className={`text-sm text-center whitespace-nowrap overflow-hidden text-ellipsis block ${school?.[row.emailField] ? "font-medium text-slate-800" : "text-slate-400 font-normal"}`}
+                            <td className="py-3 px-2 overflow-hidden">
+                              <span className={`text-sm text-center whitespace-nowrap overflow-hidden text-ellipsis block ${school?.[row.emailField] ? "font-normal text-gray-900" : "text-slate-400 font-normal"}`}
                                 dir={school?.[row.emailField] ? "ltr" : undefined} style={contactValStyle(school?.[row.emailField])}
                                 title={school?.[row.emailField] || undefined}>
                                 {school?.[row.emailField] || "—"}
                               </span>
                             </td>
-                            <td className="py-2.5 px-2 overflow-hidden">
+                            <td className="py-3 px-2 overflow-hidden">
                               <div className="flex flex-wrap gap-1 w-full">
                                 {(school?.[row.dayOffField] || []).length === 0 ? (
                                   <span className="text-sm text-slate-400 font-normal">—</span>
@@ -4066,9 +4159,9 @@ export default function SchoolPage() {
                                 ))}
                               </div>
                             </td>
-                            <td className="py-2.5 px-2 text-center">
+                            <td className="py-3 px-2 text-center">
                               {school?.meeting_coordinator === row.coordValue && (
-                                <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-blue-100 text-blue-600" title="אחראי/ת לתיאום פגישות" aria-label="אחראי/ת לתיאום פגישות">✓</span>
+                                <span className="text-emerald-600 font-bold text-[21px] leading-none" title="אחראי/ת לתיאום פגישות" aria-label="אחראי/ת לתיאום פגישות">✓</span>
                               )}
                             </td>
                           </tr>
@@ -4076,30 +4169,30 @@ export default function SchoolPage() {
 
                         {/* Extra contacts (display) */}
                         {(school?.extra_contacts || []).map((ec, i) => (
-                          <tr key={`extra-disp-${i}`} className="border-t border-slate-100">
-                            <td className="py-2.5 pr-1 whitespace-nowrap">
-                              {ec.role ? <span className={pillCls}>{ec.role}</span> : <span className="text-xs text-slate-400">—</span>}
+                          <tr key={`extra-disp-${i}`} className={`divide-x divide-slate-200 ${rowStripeCls}`}>
+                            <td className="py-3 pr-1 align-top">
+                              {ec.role ? <span className="text-sm font-normal text-gray-900">{ec.role}</span> : <span className="text-xs text-slate-400">—</span>}
                             </td>
-                            <td className="py-2.5 px-2">
-                              <span className={`text-sm ${ec.name ? "font-medium text-slate-800" : "text-slate-400 font-normal"}`}
+                            <td className="py-3 px-2">
+                              <span className={`text-sm ${ec.name ? "font-normal text-gray-900" : "text-slate-400 font-normal"}`}
                                 style={contactValStyle(ec.name)}>
                                 {ec.name || "—"}
                               </span>
                             </td>
-                            <td className="py-2.5 px-2">
-                              <span className={`text-sm whitespace-nowrap ${ec.phone ? "font-medium text-slate-800" : "text-slate-400 font-normal"}`}
+                            <td className="py-3 px-2">
+                              <span className={`text-sm whitespace-nowrap ${ec.phone ? "font-normal text-gray-900" : "text-slate-400 font-normal"}`}
                                 dir={ec.phone ? "ltr" : undefined} style={contactValStyle(ec.phone)}>
                                 {formatContactPhone(ec.phone) || "—"}
                               </span>
                             </td>
-                            <td className="py-2.5 px-2 overflow-hidden">
-                              <span className={`text-sm text-center whitespace-nowrap overflow-hidden text-ellipsis block ${ec.email ? "font-medium text-slate-800" : "text-slate-400 font-normal"}`}
+                            <td className="py-3 px-2 overflow-hidden">
+                              <span className={`text-sm text-center whitespace-nowrap overflow-hidden text-ellipsis block ${ec.email ? "font-normal text-gray-900" : "text-slate-400 font-normal"}`}
                                 dir={ec.email ? "ltr" : undefined} style={contactValStyle(ec.email)}
                                 title={ec.email || undefined}>
                                 {ec.email || "—"}
                               </span>
                             </td>
-                            <td className="py-2.5 px-2 overflow-hidden">
+                            <td className="py-3 px-2 overflow-hidden">
                               <div className="flex flex-wrap gap-1 w-full">
                                 {(ec.day_off || []).length === 0 ? (
                                   <span className="text-sm text-slate-400 font-normal">—</span>
@@ -4110,96 +4203,27 @@ export default function SchoolPage() {
                                 ))}
                               </div>
                             </td>
-                            <td className="py-2.5 px-2 text-center">
+                            <td className="py-3 px-2 text-center">
                               {school?.meeting_coordinator === `extra:${i}` && (
-                                <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-blue-100 text-blue-600" title="אחראי/ת לתיאום פגישות" aria-label="אחראי/ת לתיאום פגישות">✓</span>
+                                <span className="text-emerald-600 font-bold text-[21px] leading-none" title="אחראי/ת לתיאום פגישות" aria-label="אחראי/ת לתיאום פגישות">✓</span>
                               )}
                             </td>
                           </tr>
                         ))}
                       </tbody>
                     </table>
-                  </div>
-
-                  {/* ליווי section — same 3-column label/value grid format as פרטי מוסד */}
-                  <div className={sectionCardCls}>
-                    <p className={`${sectionTitleCls} justify-center mb-4 pb-3 border-b border-slate-100`}>{iconBadge(Handshake)}ליווי</p>
-                    <div className="grid grid-cols-3 gap-x-8">
-                      {/* Right column */}
-                      <div style={colGridStyle} className={`border-l ${colDividerCls} pl-8`}>
-                        <span className={labelCls}>סטטוס לקוח:</span>
-                        {yearAdminData.client_status ? (
-                          <span className="py-1.5">
-                            <span className={`inline-flex items-center text-xs font-medium px-2.5 py-1 rounded-full border ${CLIENT_STATUS_BADGE_CLS[yearAdminData.client_status] || "bg-slate-100 text-slate-500 border-slate-200"}`}>
-                              {CLIENT_STATUS_OPTIONS.find(o => o.value === yearAdminData.client_status)?.label}
-                            </span>
-                          </span>
-                        ) : (
-                          <span className={valCls()}>—</span>
-                        )}
-
-                        <span className={labelCls}>סוג שירות:</span>
-                        <span className={valCls(SERVICE_TYPE_OPTIONS.find(o => o.value === yearAdminData.service_type)?.label)}
-                          style={valStyle(SERVICE_TYPE_OPTIONS.find(o => o.value === yearAdminData.service_type)?.label)}>
-                          {SERVICE_TYPE_OPTIONS.find(o => o.value === yearAdminData.service_type)?.label || "—"}
-                        </span>
-                      </div>
-
-                      {/* Middle column */}
-                      <div style={colGridStyle} className={`border-l ${colDividerCls} pl-8`}>
-                        <span className={labelCls}>אמצעי הזמנה:</span>
-                        <div className="py-1.5 flex flex-wrap gap-1">
-                          {(yearAdminData.order_method || []).length === 0 ? (
-                            <span className={valCls()} style={valStyle()}>—</span>
-                          ) : yearAdminData.order_method.map(v => (
-                            <span key={v} className="inline-flex items-center text-xs font-medium px-2.5 py-1 rounded-md bg-slate-100 text-slate-700 border border-slate-200">
-                              {FUNDING_METHOD_OPTIONS.find(o => o.value === v)?.label || v}
-                            </span>
-                          ))}
-                        </div>
-                        <span className={labelCls}>מחיר כולל מע"מ:</span>
-                        <span className={valCls(yearAdminData.order_amount_gefen)} style={valStyle(yearAdminData.order_amount_gefen)}
-                          title={yearAdminData.order_amount_gefen_updated_by_name
-                            ? `${yearAdminData.order_amount_gefen_updated_by_name} - ${formatDate(yearAdminData.order_amount_gefen_updated_at)}`
-                            : ""}>
-                          {formatAmount(yearAdminData.order_amount_gefen) || "—"}
-                        </span>
-                      </div>
-
-                      {/* Left column */}
-                      <div style={colGridStyle}>
-                        <span className={`${labelCls} inline-flex items-center gap-1`}>
-                          <QuestionTooltip text="בחר למי תהיה גישה לנתוני בית הספר." />
-                          גישה:
-                        </span>
-                        <div className="py-1.5 flex flex-wrap gap-1">
-                          {accessIsAll ? (
-                            <span className="text-xs font-medium px-2 py-0.5 rounded-full" style={{ background: "rgba(22,163,74,0.12)", color: "#15803d" }}>כולם</span>
-                          ) : (() => {
-                            const profiles = school?.restrict_access_profiles !== undefined
-                              ? (school.restrict_access_profiles || [])
-                              : (school?.restrict_access_to || []).map(id => users.find(u => u.id === id)).filter(Boolean);
-                            if (profiles.length === 0 && loadingUsers) return <span className="text-xs text-slate-400">טוען...</span>;
-                            if (profiles.length === 0) return <span className={valCls()} style={valStyle()}>—</span>;
-                            return profiles.map(u => (
-                              <span key={u.id} className="text-xs font-medium px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 border border-slate-200">
-                                {u.full_name || u.email}
-                              </span>
-                            ));
-                          })()}
-                        </div>
-                      </div>
                     </div>
                   </div>
 
                   {/* Per-service-type read-only columns: 3 columns side by side (גפן/שוטף/
                       מחוז), each with יועץ מלווה / הקצאת פגישות / זמן לפגישה stacked below. */}
                   <div className={sectionCardCls}>
-                    <p className={`${sectionTitleCls} justify-center mb-4 pb-3 border-b border-slate-100`}>{iconBadge(Briefcase)}יועצים לפי סוג שירות</p>
+                    <div className={sectionHeaderCls}>{sectionTitle(UsersRound, "יועצים מלווים", ACCENT_VIOLET)}</div>
+                    <div className={sectionBodyCls}>
                     <div className="grid grid-cols-3 gap-4">
                       {TYPED_SERVICE_TYPES.map(({ key, label }) => (
-                        <div key={key} className="rounded-lg border border-slate-300/80 bg-slate-50/60 p-4">
-                          <p className="text-sm font-semibold text-slate-700 text-center mb-3 pb-2 border-b border-slate-200">{label}</p>
+                        <div key={key} className="bg-slate-50/70 border border-slate-200/70 rounded-xl p-3">
+                          <p className="text-sm font-semibold text-slate-700 text-center mb-3 pb-2 border-b border-black/20">{label}</p>
                           <div style={colGridStyle}>
                             <span className={labelCls}>יועץ מלווה:</span>
                             <div className="py-1.5 flex flex-wrap gap-1">
@@ -4225,46 +4249,51 @@ export default function SchoolPage() {
                         </div>
                       ))}
                     </div>
-                  </div>
-
-                  {/* הערות — visible to everyone (including advisors) */}
-                  <div className={sectionCardCls}>
-                      {notesData && (
-                        <NotesThread
-                          title={<span className="inline-flex items-center gap-2">{iconBadge(StickyNote)}הערות</span>}
-                          groups={notesData.general || []}
-                          currentUser={currentUser}
-                          onCreate={content => createSchoolNote("general", null, content)}
-                          onEdit={(segmentId, groupId, content) => editSchoolNote("general", null, segmentId, groupId, content)}
-                          onDelete={(groupId, segmentId) => deleteSchoolNote("general", null, groupId, segmentId)}
-                        />
-                      )}
-                  </div>
-
-                  {/* קבצים — visible to everyone (including advisors) */}
-                  <div className={sectionCardCls}>
-                      {filesData && (
-                        <FilesThread
-                          title={<span className="inline-flex items-center gap-2">{iconBadge(Folder)}קבצים</span>}
-                          files={filesData}
-                          currentUser={currentUser}
-                          onUpload={uploadSchoolFile}
-                          onEditDescription={editSchoolFileDescription}
-                          onDelete={deleteSchoolFile}
-                          onDownload={downloadSchoolFile}
-                        />
-                      )}
                     </div>
+                  </div>
+                  </div>
+
+                  {/* הערות + קבצים — visible to everyone (including advisors); side by side
+                      instead of stacked to take up less vertical space */}
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className={sectionCardCls}>
+                        {notesData && (
+                          <NotesThread
+                            title={<>הערות{iconBadge(MessageSquareText, ACCENT_AMBER)}</>}
+                            groups={notesData.general || []}
+                            currentUser={currentUser}
+                            onCreate={content => createSchoolNote("general", null, content)}
+                            onEdit={(segmentId, groupId, content) => editSchoolNote("general", null, segmentId, groupId, content)}
+                            onDelete={(groupId, segmentId) => deleteSchoolNote("general", null, groupId, segmentId)}
+                          />
+                        )}
+                    </div>
+
+                    <div className={sectionCardCls}>
+                        {filesData && (
+                          <FilesThread
+                            title={<>קבצים{iconBadge(Folder, ACCENT_AMBER)}</>}
+                            files={filesData}
+                            currentUser={currentUser}
+                            onUpload={uploadSchoolFile}
+                            onEditDescription={editSchoolFileDescription}
+                            onDelete={deleteSchoolFile}
+                            onDownload={downloadSchoolFile}
+                          />
+                        )}
+                      </div>
+                  </div>
 
                   {/* הערות רבעוניות — manager/owner only */}
                   {(role === "owner" || role === "manager") && (
                     <div className={sectionCardCls}>
-                      <p className={`${sectionTitleCls} justify-center mb-4 pb-3 border-b border-slate-100`}>{iconBadge(CalendarRange)}הערות רבעוניות</p>
+                      <div className={sectionHeaderCls}>{sectionTitle(CalendarDays, "הערות רבעוניות", ACCENT_AMBER)}</div>
+                      <div className={sectionBodyCls}>
                       {notesData && (
                         <div className="overflow-x-auto">
-                          <div className="grid grid-cols-4 gap-4" style={{ minWidth: "980px" }}>
+                          <div className="grid grid-cols-4 gap-3" style={{ minWidth: "980px" }}>
                             {[1, 2, 3, 4].map(q => (
-                              <div key={q} className="border border-slate-300/80 rounded-lg p-2 bg-slate-50/60">
+                              <div key={q} className="bg-slate-50/70 border border-slate-200/70 rounded-xl p-3">
                                 <NotesThread
                                   compact
                                   title={`רבעון ${q}`}
@@ -4279,6 +4308,7 @@ export default function SchoolPage() {
                           </div>
                         </div>
                       )}
+                      </div>
                     </div>
                   )}
                 </div>

@@ -1,5 +1,9 @@
 @import "tailwindcss";
 
+@theme {
+  --font-sans: 'Heebo', sans-serif;
+}
+
 * {
   font-family: 'Heebo', sans-serif;
   box-sizing: border-box;
@@ -19,7 +23,6 @@
 .glass-card {
   background: rgba(255, 255, 255, 0.78);
   backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
   border: 1px solid rgba(255, 255, 255, 0.65);
   box-shadow:
     0 24px 64px rgba(0, 112, 243, 0.09),
@@ -30,7 +33,6 @@
 .glass-card-dark {
   background: rgba(255, 255, 255, 0.88);
   backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
   border: 1px solid rgba(0, 112, 243, 0.12);
   box-shadow:
     0 8px 32px rgba(0, 112, 243, 0.08),
@@ -41,7 +43,6 @@
 .topbar {
   background: rgba(255, 255, 255, 0.85);
   backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
   border-bottom: 1px solid rgba(0, 112, 243, 0.1);
   box-shadow: 0 1px 12px rgba(0, 112, 243, 0.06);
 }
@@ -267,7 +268,6 @@
 .loading-overlay {
   background: rgba(248, 250, 252, 0.85);
   backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
 }
 
 /* ── Notification toast slide-in (from left, RTL layout) ── */

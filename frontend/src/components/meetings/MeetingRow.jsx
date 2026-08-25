@@ -629,6 +629,11 @@ export function MeetingRow({
         {/* יועץ מבצע */}
         {!hideAdvisorColumn && (
           <td className="py-2.5 px-2">
+            {(!draft.advisor_profiles || draft.advisor_profiles.length === 0) && draft.advisor_name_text && (
+              <span className="text-xs text-slate-500 inline-flex items-center gap-1 mb-1" title="יובא כטקסט חופשי — ללא שיוך לפרופיל משתמש">
+                <span aria-hidden="true">📥</span> {draft.advisor_name_text}
+              </span>
+            )}
             <AdvisorCell
               value={draft.advisor_profiles || []}
               usersWithAccess={usersWithAccess}
