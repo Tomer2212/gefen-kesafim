@@ -21,6 +21,13 @@ _CALL_LOG_URL = "https://api.voicenter.com/hub/cdr/"
 _TRANSCRIPTS_BUCKET = "voicenter-transcripts"
 CRON_SECRET = os.getenv("CRON_SECRET", "")
 
+# Minimum call length (seconds) for an unknown-number call to be worth prompting the
+# advisor about — filters out missed calls / hang-ups.
+UNKNOWN_CALL_MIN_SECONDS = 10
+# How many further calls from the same unknown number (to the same advisor) must arrive
+# after that advisor answered "not a school" before we prompt them about it again.
+UNKNOWN_CALL_REPROMPT_AFTER = 3
+
 
 def _build_webhook_url(org_id: str, secret_value: str) -> str:
     base_url = os.getenv("BACKEND_PUBLIC_URL", "").rstrip("/")
@@ -64,7 +71,7 @@ def _build_contact_map(org_id: str) -> dict:
         db = get_admin_client()
         rows = (
             db.table("schools")
-            .select("id, name, principal_name, principal_phone, "
+            .select("id, name, school_phone, principal_name, principal_phone, "
                      "principal_chativa_name, principal_chativa_phone, "
                      "secretary_name, secretary_phone, "
                      "finance_contact_name, finance_contact_phone, extra_contacts")
@@ -91,6 +98,17 @@ def _build_contact_map(org_id: str) -> dict:
                     contact_map.setdefault(suffix, []).append(
                         {"name": ec["name"], "role": ec.get("role") or "", "school_id": school_id, "school_name": school_name}
                     )
+            # The school's own main line (פרטי מוסד → "טלפון בית הספר") belongs to the school
+            # just as certainly as any named contact. Register it as a synthetic contact so
+            # calls from that number resolve to the school. Skip if it duplicates a number
+            # already mapped to THIS school (otherwise it would look ambiguous within one school).
+            school_suffix = _phone_suffix(s.get("school_phone"))
+            if school_suffix and not any(
+                m["school_id"] == school_id for m in contact_map.get(school_suffix, [])
+            ):
+                contact_map.setdefault(school_suffix, []).append(
+                    {"name": school_name, "role": "טלפון בית הספר", "school_id": school_id, "school_name": school_name}
+                )
     except Exception as exc:
         logger.warning("voicenter: contact map enrichment failed (non-fatal): %s", exc)
     return contact_map
@@ -610,8 +628,13 @@ def resolve_call_contact_school(
     body: ResolveCallContactSchoolIn,
     user: Annotated[dict, Depends(get_current_user)],
 ):
-    """Resolves which school an ambiguous-contact call belongs to. Only the notified
-    recipient(s) or an owner/manager may decide."""
+    """Resolves which school a call belongs to. Handles two resolution kinds:
+    - 'ambiguous' — same contact number is a contact at several schools; the chosen school
+      must be one of the candidates. Resolution flows back through _resolve_contact_for_call.
+    - 'unknown' — the counterpart number matches no school at all; any school in the org is
+      a valid target. Resolution is persisted as a manual voicenter_call_school_links row so
+      the call shows in that school's שיחות tab and is attributed to a same-day meeting.
+    Only the notified recipient(s) or an owner/manager may decide."""
     for attempt in range(2):
         try:
             db = get_admin_client()
@@ -635,14 +658,23 @@ def resolve_call_contact_school(
     if not rows:
         raise HTTPException(status_code=404, detail="לא נמצאה שיחה הממתינה לשיוך")
     resolution = rows[0]
+    kind = resolution.get("kind") or "ambiguous"
 
     is_recipient = user["id"] in (resolution.get("notified_recipient_ids") or [])
     if not is_recipient and user["role"] not in _MANAGER_ROLES:
         raise HTTPException(status_code=403, detail="אין הרשאה לשייך שיחה זו")
 
-    candidate_ids = [s["id"] for s in (resolution.get("candidate_schools") or [])]
-    if body.school_id not in candidate_ids:
-        raise HTTPException(status_code=400, detail="בית הספר שנבחר אינו אחד מהמועמדים לשיחה זו")
+    if kind == "unknown":
+        school_row = (
+            db.table("schools").select("id, name")
+            .eq("id", body.school_id).eq("org_id", user["org_id"]).limit(1).execute()
+        ).data
+        if not school_row:
+            raise HTTPException(status_code=400, detail="בית הספר שנבחר אינו תקין")
+    else:
+        candidate_ids = [s["id"] for s in (resolution.get("candidate_schools") or [])]
+        if body.school_id not in candidate_ids:
+            raise HTTPException(status_code=400, detail="בית הספר שנבחר אינו אחד מהמועמדים לשיחה זו")
 
     now_iso = datetime.now(timezone.utc).isoformat()
     for attempt in range(2):
@@ -653,6 +685,17 @@ def resolve_call_contact_school(
                 "resolved_by": user["id"],
                 "resolved_at": now_iso,
             }).eq("id", resolution["id"]).execute()
+            if kind == "unknown":
+                # Unknown numbers have no contact_map entry to flow through — persist the
+                # school attribution as a manual per-call link (same mechanism as the admin
+                # "שייך שיחה לבית ספר" action).
+                db.table("voicenter_call_school_links").upsert({
+                    "org_id": user["org_id"],
+                    "call_id": call_id,
+                    "school_id": body.school_id,
+                    "linked_by": user["id"],
+                    "state": "linked",
+                }, on_conflict="org_id,call_id,school_id").execute()
             # Mark every notification tied to this call as read for every recipient — a decision
             # made by one owner/manager shouldn't leave the same "pending" notification open for
             # the others who were notified as a fallback.
@@ -670,7 +713,235 @@ def resolve_call_contact_school(
                 logger.error("resolve_call_contact_school: update failed for call=%s: %s", call_id, exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
+    if kind == "unknown":
+        # Immediately attribute the newly-linked call to a same-day meeting + run the opt-in
+        # auto-completion check, so the effect is visible now instead of after the 10-min cron.
+        # Non-fatal: the link write above already succeeded and the cron will catch up anyway.
+        try:
+            from routers.schools_router import (
+                _maybe_auto_complete_meeting,
+                _recompute_meeting_call_activity,
+            )
+            call_time_iso = resolution.get("call_time")
+            if call_time_iso:
+                dt = datetime.fromisoformat(str(call_time_iso).replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                from zoneinfo import ZoneInfo
+                date_str = dt.astimezone(ZoneInfo("Asia/Jerusalem")).date().isoformat()
+                result = _pull_org_calls(user["org_id"], f"{date_str}T00:00:00", f"{date_str}T23:59:59")
+                calls_for_school = [
+                    c for c in result["calls"]
+                    if body.school_id not in (c.get("excluded_school_ids") or [])
+                    and (c.get("school_id") == body.school_id or body.school_id in (c.get("linked_school_ids") or []))
+                ]
+                db = get_admin_client()
+                affected = _recompute_meeting_call_activity(db, user["org_id"], body.school_id, date_str, calls_for_school)
+                for mid in affected:
+                    _maybe_auto_complete_meeting(db, user["org_id"], mid)
+        except Exception as exc:
+            logger.warning("resolve_call_contact_school: inline meeting recompute failed (non-fatal): %s", exc)
+
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Unknown-number call prompts — the interrupting popup that asks the advisor
+# whether an unrecognised number belongs to a school (and optionally saves it
+# as a contact). Rows live in voicenter_call_contact_resolutions with kind='unknown'.
+# ---------------------------------------------------------------------------
+
+def _fmt_phone(raw) -> str:
+    digits = "".join(ch for ch in str(raw or "") if ch.isdigit())
+    if len(digits) == 12 and digits.startswith("972"):
+        digits = "0" + digits[3:]
+    return digits or str(raw or "")
+
+
+@router.get("/calls/unknown/my-prompts")
+def list_my_unknown_call_prompts(user: Annotated[dict, Depends(get_current_user)]):
+    """Open 'unknown number' prompts addressed to the current user — feeds the Sidebar poll
+    that raises the interrupting popup. Denormalised call fields on the row mean no Voicenter
+    round-trip is needed here."""
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            rows = (
+                db.table("voicenter_call_contact_resolutions")
+                .select("call_id, call_time, call_direction, call_duration_seconds, counterpart_phone")
+                .eq("org_id", user["org_id"])
+                .eq("kind", "unknown")
+                .eq("caller_advisor_id", user["id"])
+                .is_("resolved_school_id", "null")
+                .is_("dismissed_at", "null")
+                .order("call_time", desc=True)
+                .execute()
+            ).data or []
+            break
+        except Exception as exc:
+            if attempt == 0:
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.warning("list_my_unknown_call_prompts failed after 2 attempts: %s", exc)
+                return {"prompts": []}
+
+    return {"prompts": [{
+        "call_id": r["call_id"],
+        "call_time": r.get("call_time"),
+        "direction": r.get("call_direction"),
+        "duration_seconds": r.get("call_duration_seconds") or 0,
+        "counterpart_phone": r.get("counterpart_phone"),
+        "counterpart_phone_display": _fmt_phone(r.get("counterpart_phone")),
+    } for r in rows]}
+
+
+@router.post("/calls/{call_id}/dismiss-unknown")
+def dismiss_unknown_call(call_id: str, user: Annotated[dict, Depends(get_current_user)]):
+    """Advisor answered 'not a school'. Per-user: mutes this number for THIS advisor only,
+    and re-prompts them after UNKNOWN_CALL_REPROMPT_AFTER further calls from it."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            rows = (
+                db.table("voicenter_call_contact_resolutions")
+                .select("*")
+                .eq("org_id", user["org_id"]).eq("call_id", call_id).eq("kind", "unknown")
+                .limit(1).execute()
+            ).data
+            break
+        except Exception as exc:
+            if attempt == 0:
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("dismiss_unknown_call failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="לא נמצאה שיחה הממתינה לשיוך")
+    resolution = rows[0]
+    if resolution.get("caller_advisor_id") != user["id"] and user["role"] not in _MANAGER_ROLES:
+        raise HTTPException(status_code=403, detail="אין הרשאה לפעולה זו")
+
+    suffix = resolution.get("contact_phone_suffix") or _phone_suffix(resolution.get("counterpart_phone"))
+    try:
+        db = get_admin_client()
+        db.table("voicenter_call_contact_resolutions").update({
+            "dismissed_at": now_iso, "dismissed_by": user["id"],
+        }).eq("id", resolution["id"]).execute()
+        if suffix:
+            db.table("voicenter_unknown_number_state").upsert({
+                "org_id": user["org_id"],
+                "advisor_id": user["id"],
+                "phone_suffix": suffix,
+                "muted": True,
+                "calls_since_prompt": 0,
+                "last_dismissed_at": now_iso,
+                "updated_at": now_iso,
+            }, on_conflict="org_id,advisor_id,phone_suffix").execute()
+        db.table("notifications").update({"read_at": now_iso}).eq(
+            "recipient_id", user["id"]
+        ).contains("data", {"call_id": call_id}).execute()
+    except Exception as exc:
+        logger.error("dismiss_unknown_call: write failed for call=%s: %s", call_id, exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    return {"ok": True}
+
+
+class SaveCallContactIn(BaseModel):
+    school_id: str
+    role: str | None = None
+    name: str
+    phone: str
+    email: str | None = None
+
+
+@router.post("/calls/{call_id}/save-contact")
+def save_call_contact(
+    call_id: str,
+    body: SaveCallContactIn,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    """Optional follow-up after an unknown call was attributed: save the number as a contact
+    of the chosen school. Immediate write if the user may edit the school directly (and, for
+    an advisor, is assigned to it); otherwise a school_update_request for owner/manager review."""
+    from routers.schools_router import (
+        _advisor_has_access_to_school_row,
+        _check_permission,
+        _create_notifications,
+        _get_approver_ids,
+    )
+
+    db = get_admin_client()
+    school_rows = (
+        db.table("schools").select("id, name, extra_contacts, restrict_access_to")
+        .eq("id", body.school_id).eq("org_id", user["org_id"]).limit(1).execute()
+    ).data
+    if not school_rows:
+        raise HTTPException(status_code=404, detail="בית ספר לא נמצא")
+    school = school_rows[0]
+
+    existing = list(school.get("extra_contacts") or [])
+    new_suffix = _phone_suffix(body.phone)
+    if any(_phone_suffix(ec.get("phone")) == new_suffix for ec in existing):
+        return {"mode": "duplicate", "detail": "המספר כבר קיים ברשימת אנשי הקשר"}
+    new_contact = {
+        "role": (body.role or "").strip(),
+        "name": body.name.strip(),
+        "phone": body.phone.strip(),
+        "email": (body.email or "").strip(),
+    }
+    next_contacts = existing + [new_contact]
+
+    is_manager = user["role"] in _MANAGER_ROLES
+    can_direct = is_manager or (
+        _check_permission(db, user, "can_edit_school_directly")
+        and _advisor_has_access_to_school_row(db, user["id"], school)
+    )
+
+    if can_direct:
+        try:
+            db.table("schools").update({"extra_contacts": next_contacts}).eq("id", body.school_id).execute()
+        except Exception as exc:
+            logger.error("save_call_contact: direct update failed for school=%s: %s", body.school_id, exc, exc_info=True)
+            raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+        return {"mode": "applied"}
+
+    if not _check_permission(db, user, "can_request_school_update"):
+        raise HTTPException(status_code=403, detail="אין הרשאה לשמור איש קשר לבית ספר זה")
+
+    try:
+        row = db.table("school_update_requests").insert({
+            "school_id": body.school_id,
+            "requester_id": user["id"],
+            "proposed_changes": {"extra_contacts": next_contacts},
+            "status": "pending",
+        }).execute()
+        req_id = row.data[0]["id"]
+        approver_ids = _get_approver_ids(db, user["org_id"])
+        notif_rows = [{
+            "recipient_id": aid,
+            "type": "update_request_submitted",
+            "ref_id": req_id,
+            "school_id": body.school_id,
+            "data": {
+                "title": f'{user.get("full_name", "יועץ")} ביקש להוסיף איש קשר ל{school.get("name", "בית ספר")}',
+                "school_name": school.get("name", ""),
+                "sender_name": user.get("full_name", ""),
+                "proposed_changes": {"extra_contacts": next_contacts},
+                "current_values": {"extra_contacts": existing},
+                "deeplink": "/notifications",
+            },
+        } for aid in approver_ids if aid != user["id"]]
+        _create_notifications(db, notif_rows, pref_key="notify_update_request_submitted")
+    except Exception as exc:
+        logger.error("save_call_contact: update-request insert failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    return {"mode": "requested"}
 
 
 @router.get("/calls/{call_id}/transcript")
@@ -834,6 +1105,19 @@ def upsert_mapping(user: Annotated[dict, Depends(get_current_user)], body: RepMa
                 logger.error("voicenter upsert_mapping failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
+    # This rep code now has an advisor — clear the "unmapped" alert marker (so a future gap
+    # re-alerts) and close any open "rep unmapped" notifications for it.
+    try:
+        db = get_admin_client()
+        db.table("voicenter_known_reps").update({"unmapped_alert_sent_at": None}).eq(
+            "org_id", user["org_id"]
+        ).eq("representative_code", body.representative_code).execute()
+        db.table("notifications").update({"read_at": datetime.now(timezone.utc).isoformat()}).eq(
+            "type", "voicenter_rep_unmapped"
+        ).contains("data", {"representative_code": body.representative_code}).is_("read_at", "null").execute()
+    except Exception as exc:
+        logger.warning("upsert_mapping: clearing unmapped-rep alert failed (non-fatal): %s", exc)
+
     return result.data[0] if result.data else row
 
 
@@ -911,6 +1195,8 @@ def process_new_calls(request: Request):
 
     processed_orgs = 0
     new_ambiguous_calls = 0
+    new_unknown_calls = 0
+    new_rep_unmapped = 0
 
     for org in orgs:
         org_id = org["org_id"]
@@ -996,6 +1282,145 @@ def process_new_calls(request: Request):
                 _create_notifications(db, notif_rows, pref_key="notify_call_contact_ambiguous")
                 new_ambiguous_calls += 1
 
+        # --- owners/managers for this org (shared by both tracks below) ---
+        owners_managers: list[str] = []
+        try:
+            om_rows = db.table("profiles").select("id").in_("role", ["owner", "manager"]).eq("org_id", org_id).execute().data or []
+            owners_managers = [r["id"] for r in om_rows]
+        except Exception as exc:
+            logger.warning("process_new_calls: failed to load owners/managers for org=%s: %s", org_id, exc)
+
+        # --- Track A: org-side number not mapped to any user ---
+        # A rep code seen in calls but with no voicenter_rep_mappings row can't be attributed
+        # to an advisor. Alert owners/managers once (they own ניהול-משתמשים → VOICENTER mapping);
+        # the marker is cleared by upsert_mapping so a future gap re-alerts.
+        try:
+            seen_now = {}
+            for c in result["calls"]:
+                code = c.get("representative_code")
+                if code and code not in seen_now:
+                    seen_now[code] = c
+            codes = list(seen_now.keys())
+            if codes:
+                mapped = {
+                    m["representative_code"]
+                    for m in (db.table("voicenter_rep_mappings").select("representative_code")
+                              .eq("org_id", org_id).in_("representative_code", codes).execute().data or [])
+                }
+                known = {
+                    r["representative_code"]: r
+                    for r in (db.table("voicenter_known_reps").select("representative_code, unmapped_alert_sent_at")
+                              .eq("org_id", org_id).in_("representative_code", codes).execute().data or [])
+                }
+                to_alert = [
+                    code for code in codes
+                    if code not in mapped and not (known.get(code) or {}).get("unmapped_alert_sent_at")
+                ]
+                for code in to_alert:
+                    if not owners_managers:
+                        break
+                    c = seen_now[code]
+                    notif_rows = [{
+                        "recipient_id": rid,
+                        "type": "voicenter_rep_unmapped",
+                        "data": {
+                            "title": "נרשמה שיחה ממספר ארגוני שאינו משויך לאף משתמש",
+                            "representative_code": code,
+                            "representative_name": c.get("representative_name"),
+                            "call_id": c.get("call_id"),
+                            "call_time": c.get("start_time"),
+                            "counterpart_phone": c.get("counterpart_phone"),
+                            "direction": c.get("direction"),
+                            "text": f"נציג {c.get('representative_name') or code} אינו משויך למשתמש. יש לשייך אותו באזור 'משתמשים'.",
+                            "deeplink": "/admin?tab=users",
+                        },
+                    } for rid in owners_managers]
+                    _create_notifications(db, notif_rows, pref_key="notify_voicenter_rep_unmapped")
+                    db.table("voicenter_known_reps").update(
+                        {"unmapped_alert_sent_at": now.isoformat()}
+                    ).eq("org_id", org_id).eq("representative_code", code).execute()
+                    new_rep_unmapped += 1
+        except Exception as exc:
+            logger.warning("process_new_calls: Track A (rep unmapped) failed for org=%s: %s", org_id, exc)
+
+        # --- Track B: counterpart number matches no school — prompt the advisor ---
+        unknown_calls = [
+            c for c in result["calls"]
+            if c.get("advisor_id") and not c.get("school_id")
+            and not c.get("pending_school_resolution")
+            and not c.get("linked_school_ids")
+            and c.get("direction") != "internal"
+            and (c.get("duration_seconds") or 0) >= UNKNOWN_CALL_MIN_SECONDS
+        ]
+        unknown_tracked = set(_get_call_resolutions(org_id, [c["call_id"] for c in unknown_calls]).keys())
+        for c in unknown_calls:
+            advisor_id = c["advisor_id"]
+            suffix = _phone_suffix(c.get("counterpart_phone"))
+            if not suffix or c["call_id"] in unknown_tracked:
+                continue
+            try:
+                open_row = (
+                    db.table("voicenter_call_contact_resolutions")
+                    .select("id, missed_calls_since_prompt")
+                    .eq("org_id", org_id).eq("kind", "unknown")
+                    .eq("caller_advisor_id", advisor_id).eq("contact_phone_suffix", suffix)
+                    .is_("resolved_school_id", "null").is_("dismissed_at", "null")
+                    .limit(1).execute()
+                ).data
+                if open_row:
+                    db.table("voicenter_call_contact_resolutions").update({
+                        "missed_calls_since_prompt": (open_row[0].get("missed_calls_since_prompt") or 0) + 1,
+                    }).eq("id", open_row[0]["id"]).execute()
+                    continue
+
+                state = (
+                    db.table("voicenter_unknown_number_state").select("*")
+                    .eq("org_id", org_id).eq("advisor_id", advisor_id).eq("phone_suffix", suffix)
+                    .limit(1).execute()
+                ).data
+                state = state[0] if state else None
+                if state and state.get("muted") and (state.get("calls_since_prompt") or 0) < UNKNOWN_CALL_REPROMPT_AFTER:
+                    db.table("voicenter_unknown_number_state").update({
+                        "calls_since_prompt": (state.get("calls_since_prompt") or 0) + 1,
+                        "updated_at": now.isoformat(),
+                    }).eq("id", state["id"]).execute()
+                    continue
+
+                db.table("voicenter_unknown_number_state").upsert({
+                    "org_id": org_id, "advisor_id": advisor_id, "phone_suffix": suffix,
+                    "muted": False, "calls_since_prompt": 0,
+                    "last_prompt_at": now.isoformat(), "updated_at": now.isoformat(),
+                }, on_conflict="org_id,advisor_id,phone_suffix").execute()
+
+                db.table("voicenter_call_contact_resolutions").insert({
+                    "org_id": org_id,
+                    "call_id": c["call_id"],
+                    "kind": "unknown",
+                    "call_time": c["start_time"],
+                    "contact_phone_suffix": suffix,
+                    "counterpart_phone": c.get("counterpart_phone"),
+                    "call_direction": c.get("direction"),
+                    "call_duration_seconds": c.get("duration_seconds") or 0,
+                    "candidate_schools": None,
+                    "caller_advisor_id": advisor_id,
+                    "notified_recipient_ids": [advisor_id],
+                }).execute()
+
+                _create_notifications(db, [{
+                    "recipient_id": advisor_id,
+                    "type": "voicenter_unknown_call",
+                    "data": {
+                        "title": "שיחה עם מספר לא מוכר — האם לשייך לבית ספר?",
+                        "call_id": c["call_id"],
+                        "counterpart_phone": c.get("counterpart_phone"),
+                        "call_time": c.get("start_time"),
+                        "text": "זיהינו שיחה עם מספר שאינו מופיע באנשי הקשר של אף בית ספר. ניתן לשייך אותה לבית ספר.",
+                    },
+                }], pref_key="notify_voicenter_unknown_call")
+                new_unknown_calls += 1
+            except Exception as exc:
+                logger.warning("process_new_calls: Track B (unknown call) failed for call=%s: %s", c.get("call_id"), exc)
+
         try:
             db.table("voicenter_integrations").update({"last_call_scan_at": now.isoformat()}).eq("org_id", org_id).execute()
         except Exception as exc:
@@ -1003,4 +1428,21 @@ def process_new_calls(request: Request):
 
         processed_orgs += 1
 
-    return {"ok": True, "processed_orgs": processed_orgs, "new_ambiguous_calls": new_ambiguous_calls}
+    # Auto-dismiss stale 'unknown' prompts (>14 days, never acted on) — the underlying call
+    # has likely aged out of Voicenter's log window, so the popup can no longer be useful.
+    try:
+        cutoff = (now - timedelta(days=14)).isoformat()
+        db.table("voicenter_call_contact_resolutions").update(
+            {"dismissed_at": now.isoformat()}
+        ).eq("kind", "unknown").is_("resolved_school_id", "null").is_("dismissed_at", "null") \
+         .lt("call_time", cutoff).execute()
+    except Exception as exc:
+        logger.warning("process_new_calls: stale unknown-prompt cleanup failed (non-fatal): %s", exc)
+
+    return {
+        "ok": True,
+        "processed_orgs": processed_orgs,
+        "new_ambiguous_calls": new_ambiguous_calls,
+        "new_unknown_calls": new_unknown_calls,
+        "new_rep_unmapped": new_rep_unmapped,
+    }

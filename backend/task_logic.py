@@ -800,6 +800,7 @@ def compute_task_progress(org_id: str, task: dict, academic_year: str = DEFAULT_
             rows.append({
                 "school_id": school_id, "school_name": school["name"],
                 "symbol": school.get("symbol"), "authority": school.get("authority"),
+                "district": school.get("district"), "city": school.get("city"),
                 "done": None, "condition_results": [],
                 "stage_label": STAGE_LABELS.get(school.get("stage"), school.get("stage")), "stage_rows": None,
             })
@@ -908,6 +909,8 @@ def compute_task_progress(org_id: str, task: dict, academic_year: str = DEFAULT_
             "school_name": school["name"],
             "symbol": school.get("symbol"),
             "authority": school.get("authority"),
+            "district": school.get("district"),
+            "city": school.get("city"),
             "done": is_done,
             "condition_results": condition_results,
             "stage_label": STAGE_LABELS.get(school.get("stage"), school.get("stage")),

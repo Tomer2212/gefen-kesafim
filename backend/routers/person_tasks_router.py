@@ -791,18 +791,33 @@ def get_person_task(task_id: str, user: Annotated[dict, Depends(get_current_user
 
         school_ids = [t["school_id"] for t in targets if t.get("school_id")]
         schools_map = {}
+        ya_map = {}
         if school_ids:
-            s_rows = db.table("schools").select("id, name, symbol, authority").in_("id", school_ids).execute().data or []
+            s_rows = db.table("schools").select("id, name, symbol, authority, city, district, stage").in_("id", school_ids).execute().data or []
             schools_map = {s["id"]: s for s in s_rows}
+            # Year-scoped fields (client_status / service_type) for the per-assignee school
+            # table's "סינון מתקדם" — same academic year the task itself targets.
+            ay = task.get("academic_year") or DEFAULT_ACADEMIC_YEAR
+            ya_rows = (
+                db.table("school_year_admin_data").select("school_id, client_status, service_type")
+                .eq("academic_year", ay).in_("school_id", school_ids).execute().data or []
+            )
+            ya_map = {r["school_id"]: r for r in ya_rows}
 
         for t in targets:
             t["assignee_names"] = [names_map.get(aid, aid) for aid in (t.get("assignee_ids") or [])]
             t["completed_by_name"] = names_map.get(t.get("completed_by")) if t.get("completed_by") else None
             if t.get("school_id"):
                 sc = schools_map.get(t["school_id"], {})
+                ya = ya_map.get(t["school_id"], {})
                 t["school_name"] = sc.get("name")
                 t["symbol"] = sc.get("symbol")
                 t["authority"] = sc.get("authority")
+                t["city"] = sc.get("city")
+                t["district"] = sc.get("district")
+                t["school_stage"] = sc.get("stage")
+                t["client_status"] = ya.get("client_status")
+                t["service_type"] = ya.get("service_type")
     except Exception as exc:
         logger.warning("get_person_task: name/school enrichment failed (non-fatal): %s", exc)
 

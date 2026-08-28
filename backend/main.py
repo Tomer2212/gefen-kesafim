@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from routers.advisor_finder_router import router as advisor_finder_router
 from routers.agent_router import router as agent_router
 from routers.analyze_router import router as analyze_router
+from routers.attendance_router import router as attendance_router
 from routers.calendar_router import router as calendar_router
 from routers.chatbot_router import router as chatbot_router
 from routers.contact_router import router as contact_router
@@ -133,6 +134,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 app.include_router(agent_router, prefix="/agent")
 app.include_router(analyze_router, prefix="/analyze")
+app.include_router(attendance_router, prefix="/attendance")
 app.include_router(calendar_router, prefix="/calendar")
 app.include_router(chatbot_router, prefix="/chatbot")
 app.include_router(contact_router, prefix="/contact")

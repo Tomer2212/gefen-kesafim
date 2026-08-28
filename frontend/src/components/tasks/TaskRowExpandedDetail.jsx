@@ -7,7 +7,7 @@ import TaskDetailContent from "./TaskDetailContent";
 // scrollable table area.
 export default function TaskRowExpandedDetail({ taskId, onTaskChange }) {
   return (
-    <div className="border border-slate-200 rounded-xl bg-white overflow-hidden flex flex-col" style={{ height: "65vh" }}>
+    <div className="border border-slate-200 rounded-xl bg-white overflow-hidden flex flex-col" style={{ height: "88vh" }}>
       <TaskDetailContent taskId={taskId} onTaskChange={onTaskChange} />
     </div>
   );

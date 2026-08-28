@@ -204,7 +204,7 @@ function CalendarSyncBadge({ calendarSync }) {
 }
 
 export function MeetingRow({
-  meeting, onSave, onRequestDelete, onOpenNotes, usersWithAccess, usersWithoutAccess,
+  meeting, onSave, onMeetingPatched, onRequestDelete, onOpenNotes, usersWithAccess, usersWithoutAccess,
   contacts, onRequestAccess, onReminderOn,
   showSchoolColumn, schoolLabel, onOpenSchoolPicker,
   selectable, selected, onToggleSelect, onSendStatusReminder, hideAdvisorColumn,
@@ -243,6 +243,15 @@ export function MeetingRow({
   const saveQueueRef = useRef(Promise.resolve());
 
   useEffect(() => { setDraft({ ...meeting }); lastSentRef.current = null; }, [meeting.id]);
+
+  // The server may auto-enable the reminder toggle when a meeting first becomes eligible
+  // (gains its first participant / a future date). `draft` only re-syncs on an id change,
+  // so pull that one field through explicitly — otherwise the toggle stays visually OFF
+  // until a reload even though it was turned on server-side.
+  useEffect(() => {
+    setDraft(d => d.reminder_enabled === meeting.reminder_enabled
+      ? d : { ...d, reminder_enabled: meeting.reminder_enabled });
+  }, [meeting.reminder_enabled]);
 
   // Background polling (useMeetingsPolling) replaces `meeting` with a fresh object on
   // every tick, but `draft` above only re-syncs on an actual id change — otherwise an
@@ -320,13 +329,19 @@ export function MeetingRow({
   }
 
   useEffect(() => {
-    if (!meeting.reminder_enabled) { setReminderStatus(null); return; }
+    // Fetch the sent/failed badge data when the toggle is on, OR when a גפן/מחוז meeting has
+    // a secretary/finance contact — automation 2 can send her the file-upload request even
+    // with the toggle off, and that send should still surface in the badge.
+    const mightHaveUploadReminder =
+      (meeting.meeting_service_type || "gefen") !== "current" &&
+      (meeting.participants || []).some(p => p.key === "secretary" || p.key === "finance");
+    if (!meeting.reminder_enabled && !mightHaveUploadReminder) { setReminderStatus(null); return; }
     let cancelled = false;
     axios.get(`/schools/meetings/${meeting.id}/reminder-status`)
       .then(res => { if (!cancelled) setReminderStatus(res.data?.reminders || []); })
       .catch(() => { if (!cancelled) setReminderStatus(null); });
     return () => { cancelled = true; };
-  }, [meeting.id, meeting.reminder_enabled]);
+  }, [meeting.id, meeting.reminder_enabled, meeting.meeting_service_type, meeting.participants]);
 
   useEffect(() => {
     function h(e) { if (!actionsMenuRef.current?.contains(e.target)) setShowActionsMenu(false); }
@@ -336,6 +351,21 @@ export function MeetingRow({
 
   function set(field, val) {
     setDraft(p => ({ ...p, [field]: val }));
+  }
+
+  // The reminder toggle writes through a dedicated PATCH — NOT the row's field autosave.
+  // A field autosave always carries the row's current reminder value, so one that races a
+  // server-side auto-enable would silently flip it back. Routing the toggle (and the
+  // "last participant removed" auto-clear) through its own PATCH keeps it race-free, and
+  // this is the only path that can turn the reminder off.
+  async function patchReminder(newVal) {
+    setDraft(p => ({ ...p, reminder_enabled: newVal }));
+    try {
+      await axios.patch(`/schools/${meeting.school_id}/meetings/${meeting.id}`, { reminder_enabled: newVal });
+      onMeetingPatched?.(meeting.id, { reminder_enabled: newVal });
+    } catch {
+      setDraft(p => ({ ...p, reminder_enabled: !newVal }));
+    }
   }
 
   function saveDraft(draftToSave) {
@@ -666,13 +696,16 @@ export function MeetingRow({
               // participant is unambiguous; otherwise ask the user.
               const principalMatches = v.filter(p => PRINCIPAL_KEYS.includes(p.key));
               const primaryContactKey = principalMatches.length === 1 ? principalMatches[0].key : v.length === 1 ? v[0].key : null;
-              const nd = { ...draft, participants: v, primary_contact_key: primaryContactKey, ...(reminderOff ? { reminder_enabled: false } : {}) };
+              const nd = { ...draft, participants: v, primary_contact_key: primaryContactKey };
               setDraft(nd);
               if (v.length > 1 && !primaryContactKey) {
                 setContactPickerOptions(v); // defer save until the user picks who to call
               } else {
                 saveDraft(nd);
               }
+              // Removing the last participant makes a reminder impossible — turn it off via
+              // its own PATCH (the field autosave above no longer carries reminder_enabled).
+              if (reminderOff) patchReminder(false);
             }} />
         </td>
         {/* מיקום */}
@@ -726,7 +759,7 @@ export function MeetingRow({
                 setShowNoParticipantsModal(true);
                 return;
               }
-              set("reminder_enabled", newVal);
+              patchReminder(newVal);
               if (newVal) onReminderOn?.();
             }}
               onMouseEnter={() => setShowReminderTip(true)}
@@ -742,7 +775,7 @@ export function MeetingRow({
                 בהפעלת הכפתור תישלח למשתתפים תזכורת יום לפני קיום הפגישה.
               </div>
             )}
-            {draft.reminder_enabled && reminderStatus && reminderStatus.length > 0 && (
+            {reminderStatus && reminderStatus.length > 0 && (
               <div className="relative inline-block mr-1" onMouseEnter={() => setShowReminderTip("sent")} onMouseLeave={() => setShowReminderTip(false)}>
                 <span
                   className={`text-[11px] font-semibold px-1.5 py-0.5 rounded-full border ${

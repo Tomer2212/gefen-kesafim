@@ -23,6 +23,18 @@ const TODAY = new Date().toISOString().slice(0, 10);
 const DEFAULT_FILTERS = { status: "", date_from: TODAY, date_to: TODAY };
 const SS_KEY = "personal_meetings_ui_state";
 const INPUT_CLS = "text-sm border border-slate-200 rounded-lg px-2.5 py-1.5 outline-none focus:border-blue-400 bg-white";
+const ACTIVE_INPUT_CLS = " border-blue-400 ring-1 ring-blue-300 bg-blue-50/50";
+
+// Subtle "this field is currently filtering the list" indicator — blue label text + a small
+// dot. Mirrors AdminMeetingsTab.jsx's identical helper.
+function FilterLabel({ htmlFor, active, children }) {
+  return (
+    <label htmlFor={htmlFor} className={`flex items-center gap-1 text-xs font-medium mb-1 ${active ? "text-blue-600" : "text-slate-500"}`}>
+      {children}
+      {active && <span aria-hidden="true" className="inline-block w-1.5 h-1.5 rounded-full bg-blue-500" />}
+    </label>
+  );
+}
 
 function readSavedState() {
   try { return JSON.parse(sessionStorage.getItem(SS_KEY) || "null"); } catch { return null; }
@@ -152,7 +164,9 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
   }
 
   async function updateMeeting(draft) {
-    const { id, school_id, ...rest } = draft;
+    // reminder_enabled is intentionally dropped — the toggle writes via its own PATCH so a
+    // racing field autosave can't flip it back. See MeetingRow.patchReminder.
+    const { id, school_id, reminder_enabled, ...rest } = draft;
     const payload = {
       ...rest,
       start_time: normalizeTimeValue(draft.start_time) || null,
@@ -197,7 +211,7 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
       meeting_service_type: defaultMeetingServiceType(schoolServiceType),
       advisor_ids: userId ? [userId] : [], participants,
       primary_contact_key: participants.length === 1 ? participants[0].key : null,
-      reminder_enabled: false, academic_year: academicYear,
+      academic_year: academicYear,
       ...(stageScope === "tichon" || stageScope === "chativa" || stageScope === "both" ? { stage_scope: stageScope } : {}),
     };
     try {
@@ -359,6 +373,20 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
   }, [meetings, nameFilter, symbolFilter, cityFilter, districtFilter]);
 
   const advancedFilterCount = (cityFilter ? 1 : 0) + (districtFilter ? 1 : 0);
+
+  // Highlights each base filter field (blue label+dot+ring) the moment its value diverges
+  // from the "hidden" default (date_from/date_to default to today, not empty) — same pattern
+  // as AdminMeetingsTab.jsx, so a filtered view is never invisible to the user.
+  const activeBaseFilters = {
+    date_from: (filters.date_from || "") !== TODAY,
+    date_to: (filters.date_to || "") !== TODAY,
+    status: !!filters.status,
+    school_name: !!nameFilter,
+    school_symbol: !!symbolFilter,
+  };
+  const activeBaseFilterCount = Object.values(activeBaseFilters).filter(Boolean).length;
+  const totalActiveFilterCount = activeBaseFilterCount + advancedFilterCount;
+
   const currentSchoolPickerMeeting = schoolPickerFor && schoolPickerFor !== "new"
     ? meetings.find(m => m.id === schoolPickerFor)
     : null;
@@ -508,35 +536,45 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
         {/* Filter fields */}
         <div className="flex flex-wrap items-end gap-4">
           <div>
-            <label htmlFor="pmt-date-from" className="block text-xs font-medium text-slate-500 mb-1">מתאריך</label>
+            <FilterLabel htmlFor="pmt-date-from" active={activeBaseFilters.date_from}>מתאריך</FilterLabel>
             <input id="pmt-date-from" type="date" value={filters.date_from || ""}
-              onChange={e => setServerFilter("date_from", e.target.value)} className={INPUT_CLS} />
+              onChange={e => setServerFilter("date_from", e.target.value)}
+              className={INPUT_CLS + (activeBaseFilters.date_from ? ACTIVE_INPUT_CLS : "")} />
           </div>
           <div>
-            <label htmlFor="pmt-date-to" className="block text-xs font-medium text-slate-500 mb-1">עד תאריך</label>
+            <FilterLabel htmlFor="pmt-date-to" active={activeBaseFilters.date_to}>עד תאריך</FilterLabel>
             <input id="pmt-date-to" type="date" value={filters.date_to || ""}
-              onChange={e => setServerFilter("date_to", e.target.value)} className={INPUT_CLS} />
+              onChange={e => setServerFilter("date_to", e.target.value)}
+              className={INPUT_CLS + (activeBaseFilters.date_to ? ACTIVE_INPUT_CLS : "")} />
           </div>
           <div>
-            <label htmlFor="pmt-status" className="block text-xs font-medium text-slate-500 mb-1">סטטוס</label>
-            <select id="pmt-status" value={filters.status || ""} onChange={e => setServerFilter("status", e.target.value)} className={INPUT_CLS}>
+            <FilterLabel htmlFor="pmt-status" active={activeBaseFilters.status}>סטטוס</FilterLabel>
+            <select id="pmt-status" value={filters.status || ""} onChange={e => setServerFilter("status", e.target.value)}
+              className={INPUT_CLS + (activeBaseFilters.status ? ACTIVE_INPUT_CLS : "")}>
               <option value="">הכל</option>
               {MEETING_STATUS_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
           </div>
           <div>
-            <label htmlFor="pmt-name" className="block text-xs font-medium text-slate-500 mb-1">שם מוסד</label>
+            <FilterLabel htmlFor="pmt-name" active={activeBaseFilters.school_name}>שם מוסד</FilterLabel>
             <input id="pmt-name" type="text" value={nameFilter}
-              onChange={e => setNameFilter(e.target.value)} placeholder="חיפוש לפי שם..." className={INPUT_CLS} />
+              onChange={e => setNameFilter(e.target.value)} placeholder="חיפוש לפי שם..."
+              className={INPUT_CLS + (activeBaseFilters.school_name ? ACTIVE_INPUT_CLS : "")} />
           </div>
           <div>
-            <label htmlFor="pmt-symbol" className="block text-xs font-medium text-slate-500 mb-1">סמל מוסד</label>
+            <FilterLabel htmlFor="pmt-symbol" active={activeBaseFilters.school_symbol}>סמל מוסד</FilterLabel>
             <input id="pmt-symbol" type="text" value={symbolFilter}
-              onChange={e => setSymbolFilter(e.target.value)} placeholder="סמל..." className={INPUT_CLS + " w-28"} />
+              onChange={e => setSymbolFilter(e.target.value)} placeholder="סמל..."
+              className={INPUT_CLS + " w-28" + (activeBaseFilters.school_symbol ? ACTIVE_INPUT_CLS : "")} />
           </div>
           <button type="button" onClick={clearFilters}
-            className="text-xs text-slate-400 hover:text-slate-600 transition-colors px-1 py-1.5 self-end">
+            className={`flex items-center gap-1 text-xs transition-colors px-1 py-1.5 self-end ${totalActiveFilterCount > 0 ? "text-blue-600 font-medium hover:text-blue-700" : "text-slate-400 hover:text-slate-600"}`}>
             נקה סינון
+            {totalActiveFilterCount > 0 && (
+              <span aria-hidden="true" className="inline-flex items-center justify-center w-4 h-4 text-[10px] font-bold rounded-full bg-blue-100 text-blue-700 leading-none">
+                {totalActiveFilterCount}
+              </span>
+            )}
           </button>
         </div>
       </div>
@@ -546,14 +584,16 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
         <div className="glass-card rounded-xl p-4 mb-3" dir="rtl">
           <div className="flex flex-wrap items-end gap-4">
             <div>
-              <label htmlFor="pmt-city" className="block text-xs font-medium text-slate-500 mb-1">עיר</label>
+              <FilterLabel htmlFor="pmt-city" active={!!cityFilter}>עיר</FilterLabel>
               <input id="pmt-city" type="text" value={cityFilter}
-                onChange={e => setCityFilter(e.target.value)} placeholder="סינון לפי עיר..." className={INPUT_CLS} />
+                onChange={e => setCityFilter(e.target.value)} placeholder="סינון לפי עיר..."
+                className={INPUT_CLS + (cityFilter ? ACTIVE_INPUT_CLS : "")} />
             </div>
             <div>
-              <label htmlFor="pmt-district" className="block text-xs font-medium text-slate-500 mb-1">מחוז</label>
+              <FilterLabel htmlFor="pmt-district" active={!!districtFilter}>מחוז</FilterLabel>
               <input id="pmt-district" type="text" value={districtFilter}
-                onChange={e => setDistrictFilter(e.target.value)} placeholder="סינון לפי מחוז..." className={INPUT_CLS} />
+                onChange={e => setDistrictFilter(e.target.value)} placeholder="סינון לפי מחוז..."
+                className={INPUT_CLS + (districtFilter ? ACTIVE_INPUT_CLS : "")} />
             </div>
           </div>
         </div>
@@ -597,6 +637,7 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
             contactsFor={m => buildSchoolContacts(schools.find(s => s.id === m.school_id))}
             schoolStageFor={m => schools.find(s => s.id === m.school_id)?.stage}
             onSave={updateMeeting}
+            onMeetingPatched={(id, patch) => setMeetings(prev => prev.map(m => m.id === id ? { ...m, ...patch } : m))}
             onDelete={deleteMeeting}
             onOpenNotes={(meetingId, notes, onSave) => setNotesModal({ meetingId, notes, onSave })}
             onRequestAccess={() => {}}

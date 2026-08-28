@@ -6,10 +6,12 @@ const AUTOMATIONS = [
   {
     key: "meeting_reminders_enabled",
     description: "שליחת תזכורת למשתתפים לפני פגישה",
+    hint: "קובע רק את מצב ברירת המחדל של מתג \"תזכורת\" בפגישה חדשה (פגישה עם משתתפים ותאריך עתידי נפתחת עם המתג דלוק). השליחה בפועל תלויה במתג שבשורת הפגישה. פגישה שנקבעת לאותו היום לא תקבל תזכורת.",
   },
   {
     key: "secretary_upload_request_enabled",
     description: "שליחת בקשה למנהלנית להעלאת קבצים יום לפני פגישת גפן/מחוז",
+    hint: "פועל באופן עצמאי — המנהלנית/כספים מקבלים את בקשת הקבצים בפגישת גפן/מחוז גם אם מתג התזכורת בשורת הפגישה כבוי.",
   },
   {
     key: "auto_complete_meetings_from_activity_enabled",
@@ -73,7 +75,10 @@ export default function MeetingAutomationsModal({ onClose }) {
                 const saving = savingKey === a.key;
                 return (
                   <tr key={a.key} className="border-b border-slate-300">
-                    <td className="py-3 px-2 text-slate-700">{a.description}</td>
+                    <td className="py-3 px-2 text-slate-700">
+                      {a.description}
+                      {a.hint && <p className="text-xs text-slate-400 mt-1 leading-relaxed">{a.hint}</p>}
+                    </td>
                     <td className="py-3 px-2">
                       <button
                         type="button"

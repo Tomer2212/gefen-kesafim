@@ -2817,7 +2817,6 @@ export default function SchoolPage() {
       advisor_ids: defaultAdvisorIds,
       participants,
       primary_contact_key: participants.length === 1 ? participants[0].key : null,
-      reminder_enabled: false,
       academic_year: academicYear,
       ...(stageScope === "tichon" || stageScope === "chativa" || stageScope === "both" ? { stage_scope: stageScope } : {}),
     };
@@ -2892,7 +2891,8 @@ export default function SchoolPage() {
       meeting_service_type: draft.meeting_service_type || null,
       actual_duration: draft.actual_duration || null,
       notes: draft.notes || null,
-      reminder_enabled: draft.reminder_enabled || false,
+      // reminder_enabled is intentionally NOT sent here — the toggle writes via its own
+      // PATCH so a racing field autosave can't flip it back. See MeetingRow.patchReminder.
       primary_contact_key: draft.primary_contact_key || null,
       stage_scope: draft.stage_scope || null,
     };
@@ -3468,7 +3468,7 @@ export default function SchoolPage() {
       )}
 
       <div style={{ marginRight: "var(--sidebar-w, 240px)", transition: "margin-right 0.25s cubic-bezier(0.4,0,0.2,1)" }}>
-        <div className={`mx-auto px-6 py-10 ${["checks", "meetings", "info", "closure", "control_letter", "tasks", "calls"].includes(activeTab) ? "max-w-[100rem]" : "max-w-4xl"}`}>
+        <div className={`mx-auto px-6 py-10 ${["checks", "meetings", "info", "closure", "control_letter", "tasks", "calls", "goals"].includes(activeTab) ? "max-w-[100rem]" : "max-w-4xl"}`}>
 
           {/* Page header */}
           <div className="mb-5 flex items-center justify-between">
@@ -4455,6 +4455,7 @@ export default function SchoolPage() {
                   contacts={getSchoolContacts()}
                   schoolStage={school?.stage}
                   onSave={updateMeeting}
+                  onMeetingPatched={(id, patch) => setMeetings(prev => prev.map(m => m.id === id ? { ...m, ...patch } : m))}
                   onDelete={deleteMeeting}
                   onOpenNotes={(meetingId, notes, onSave) => setNotesModal({ meetingId, notes, onSave })}
                   onRequestAccess={handleRequestAdvisorAccess}

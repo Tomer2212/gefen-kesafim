@@ -44,6 +44,39 @@ export function resolveDefaultAdvisorIds(serviceType, { gefenAdvisors = [], curr
 
 export const STATUS_SORT_ORDER = { completed: 0, scheduled: 1, postponed: 2, other: 3 };
 
+// Ordered service-type buckets for the "פגישות שבוצעו" breakdown — the detail rows above the
+// meetings-table summary footer, and the matching optional columns on DashboardPage / AdminPage.
+// "none" = meeting_service_type is empty/null (a meeting whose "סוג" was never set).
+export const MEETING_SERVICE_TYPE_BREAKDOWN = [
+  { key: "gefen",         label: "גפן" },
+  { key: "current",       label: "שוטף" },
+  { key: "gefen_current", label: "גפן+שוטף" },
+  { key: "district",      label: "מחוז" },
+  { key: "none",          label: "ללא סוג" },
+];
+
+// Column-picker ordering for the per-service-type "פגישות/שעות שבוצעו" breakdown columns on
+// DashboardPage / AdminPage. Same buckets as MEETING_SERVICE_TYPE_BREAKDOWN, but מחוז comes
+// before גפן+שוטף (product request). MEETING_SERVICE_TYPE_BREAKDOWN itself is left untouched
+// since it drives the meetings-table summary footer order.
+export const MEETING_SERVICE_TYPE_BREAKDOWN_COL_ORDER = [
+  { key: "gefen",         label: "גפן" },
+  { key: "current",       label: "שוטף" },
+  { key: "district",      label: "מחוז" },
+  { key: "gefen_current", label: "גפן+שוטף" },
+  { key: "none",          label: "ללא סוג" },
+];
+
+// minutes → "H:MM שעות" / "H שעות" / "M דק'" (same wording as the summary footer's total).
+export function formatMeetingMinutes(totalMinutes) {
+  if (!totalMinutes || totalMinutes <= 0) return "—";
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  if (h === 0) return `${m} דק'`;
+  if (m === 0) return `${h} שעות`;
+  return `${h}:${String(m).padStart(2, "0")} שעות`;
+}
+
 export const HEBREW_MONTHS = ["ינואר","פברואר","מרץ","אפריל","מאי","יוני","יולי","אוגוסט","ספטמבר","אוקטובר","נובמבר","דצמבר"];
 
 export function formatMeetingDate(iso) {

@@ -140,6 +140,10 @@ export default function ConditionGroupsEditor({
   goalOptions, divisionOptions, budgetNameOptions, controlLetterFields, goalValueOptions, orgUsers,
   hideGroupChrome = false, forceMeetingNegateFalse = false, addConditionLabel = "+ הוסף תנאי (וגם)",
   showValidationErrors = false, valueFieldLabel = "ערך",
+  // Optional extra class(es) for the bordered condition-group box (e.g. a "bg-slate-100" tint so
+  // the fields box stands out from its surrounding panel). Empty by default — no visual change
+  // for the other call sites.
+  groupToneClassName = "",
   // When set, "+ הוסף קבוצת 'או'" seeds the new group with these conditions instead of a single
   // blank one — used by PersonTaskCreateWizard.jsx's "יועץ מלווה" audience filter, where every
   // alternative group needs the same client_status/service_type pair the first group starts
@@ -196,7 +200,7 @@ export default function ConditionGroupsEditor({
           {!hideGroupChrome && gi > 0 && (
             <div className="text-center text-xs font-bold text-blue-600 my-2">— או —</div>
           )}
-          <div className={hideGroupChrome ? "space-y-2" : "border border-slate-200 rounded-xl p-3 space-y-2"}>
+          <div className={hideGroupChrome ? "space-y-2" : `border border-slate-200 rounded-xl p-3 space-y-2 ${groupToneClassName}`}>
             {!hideGroupChrome && (
               <div className="flex items-center justify-between">
                 <span className="text-xs font-semibold text-slate-500">קבוצת תנאים (וגם ביניהם)</span>

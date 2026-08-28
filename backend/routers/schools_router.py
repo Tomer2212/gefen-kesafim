@@ -281,6 +281,7 @@ class MeetingStatusPatchIn(BaseModel):
     notes: str | None = None
     start_time: str | None = None
     end_time: str | None = None
+    reminder_enabled: bool | None = None
 
 
 class MeetingImportRowIn(BaseModel):
@@ -309,6 +310,7 @@ class MeetingImportRowIn(BaseModel):
     school_id: str | None = None
     resolved_advisor_id: str | None = None
     academic_year_override: str | None = None
+    meeting_date_override: str | None = None
     accept_mode_mismatch: bool = False
     accept_conflict: bool = False
     accept_duplicate: bool = False
@@ -409,6 +411,8 @@ class NotificationPreferencesIn(BaseModel):
     notify_mention: bool | None = None
     notify_task_assigned: bool | None = None
     notify_call_contact_ambiguous: bool | None = None
+    notify_voicenter_unknown_call: bool | None = None
+    notify_voicenter_rep_unmapped: bool | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -563,10 +567,17 @@ def list_schools(
     if school_ids:
         try:
             stats_res = db.rpc("get_meetings_stats", {"school_ids": school_ids}).execute()
-            m_stats = {
-                r["school_id"]: {"completed": r["completed"], "total_minutes": r["total_minutes"]}
-                for r in (stats_res.data or [])
-            }
+            # RPC now returns one row per (school_id, service_type). Aggregate back into a
+            # per-school grand total + a by_type breakdown (service_type "none" = no סוג set).
+            for r in (stats_res.data or []):
+                sid = r["school_id"]
+                entry = m_stats.setdefault(sid, {"completed": 0, "total_minutes": 0, "by_type": {}})
+                entry["completed"] += r["completed"]
+                entry["total_minutes"] += r["total_minutes"]
+                entry["by_type"][r["service_type"]] = {
+                    "completed": r["completed"],
+                    "total_minutes": r["total_minutes"],
+                }
         except Exception as exc:
             logger.warning("meetings stats enrichment failed (non-fatal): %s", exc)
 
@@ -2609,6 +2620,10 @@ def update_notification_preferences(
         new_prefs["meeting_reminder_minutes"] = body.meeting_reminder_minutes
     if body.notify_call_contact_ambiguous is not None:
         new_prefs["notify_call_contact_ambiguous"] = body.notify_call_contact_ambiguous
+    if body.notify_voicenter_unknown_call is not None:
+        new_prefs["notify_voicenter_unknown_call"] = body.notify_voicenter_unknown_call
+    if body.notify_voicenter_rep_unmapped is not None:
+        new_prefs["notify_voicenter_rep_unmapped"] = body.notify_voicenter_rep_unmapped
     db.table("profiles").update({"notification_preferences": new_prefs}).eq("id", user["id"]).execute()
     invalidate_profile_cache(user["id"])
     return {"ok": True, "notification_preferences": new_prefs}
@@ -2625,7 +2640,7 @@ def get_meetings_stats(user: Annotated[dict, Depends(get_current_user)]):
     try:
         if user["role"] in ("owner", "manager"):
             # Owners/managers see all schools — skip the schools filter query entirely
-            meetings_res = db.table("meetings").select("school_id, status, start_time, end_time").execute()
+            meetings_res = db.table("meetings").select("school_id, status, start_time, end_time, meeting_service_type").execute()
         else:
             # Advisors: fetch schools + assignments in parallel, then meetings
             with ThreadPoolExecutor(max_workers=2) as pool:
@@ -2646,7 +2661,7 @@ def get_meetings_stats(user: Annotated[dict, Depends(get_current_user)]):
             ]
             if not accessible:
                 return {}
-            meetings_res = db.table("meetings").select("school_id, status, start_time, end_time").in_("school_id", accessible).execute()
+            meetings_res = db.table("meetings").select("school_id, status, start_time, end_time, meeting_service_type").in_("school_id", accessible).execute()
     except Exception as exc:
         logger.warning("get_meetings_stats failed: %s", exc)
         return {}
@@ -2654,9 +2669,12 @@ def get_meetings_stats(user: Annotated[dict, Depends(get_current_user)]):
     for m in (meetings_res.data or []):
         sid = m["school_id"]
         if sid not in stats:
-            stats[sid] = {"completed": 0, "total_minutes": 0}
+            stats[sid] = {"completed": 0, "total_minutes": 0, "by_type": {}}
         if m.get("status") == "completed":
+            svc = m.get("meeting_service_type") or "none"
+            bt = stats[sid]["by_type"].setdefault(svc, {"completed": 0, "total_minutes": 0})
             stats[sid]["completed"] += 1
+            bt["completed"] += 1
             st, et = m.get("start_time"), m.get("end_time")
             if st and et:
                 try:
@@ -2665,6 +2683,7 @@ def get_meetings_stats(user: Annotated[dict, Depends(get_current_user)]):
                     diff = (eh * 60 + em) - (sh * 60 + sm)
                     if diff > 0:
                         stats[sid]["total_minutes"] += diff
+                        bt["total_minutes"] += diff
                 except Exception:
                     pass
     return stats
@@ -3051,6 +3070,37 @@ def _day_phrases(meeting_date: str, today: "date") -> tuple[str, str]:
     return f"ל{day_name}", f"ב{day_name}"
 
 
+def _org_reminders_default_on(db, school_id: str) -> bool:
+    """Automation 1 (organizations.meeting_reminders_enabled) is used ONLY to decide the
+    default state of a new meeting's reminder toggle at creation time — it is NOT consulted
+    at send time (send_due_reminders). Fails OPEN (True) on any lookup failure."""
+    try:
+        s = db.table("schools").select("org_id").eq("id", school_id).single().execute().data or {}
+        oid = s.get("org_id")
+        if not oid:
+            return True
+        o = db.table("organizations").select("meeting_reminders_enabled").eq("id", oid).single().execute().data or {}
+        val = o.get("meeting_reminders_enabled")
+        return True if val is None else bool(val)
+    except Exception as exc:
+        logger.warning("_org_reminders_default_on lookup failed (non-fatal, fail-open): %s", exc)
+        return True
+
+
+def _reminder_eligible(meeting_date, participants, org_on: bool) -> bool:
+    """A meeting qualifies for an auto-enabled reminder toggle only if automation 1 is on,
+    it has at least one participant, and its date is strictly in the future (Asia/Jerusalem)
+    — the daily cron only ever sends 'the day before', never same-day."""
+    if not org_on or not participants or not meeting_date:
+        return False
+    try:
+        from zoneinfo import ZoneInfo
+        today_il = datetime.now(ZoneInfo("Asia/Jerusalem")).date()
+        return date.fromisoformat(str(meeting_date)) > today_il
+    except Exception:
+        return False
+
+
 def _hebrew_join(names: list[str]) -> str:
     names = [n for n in names if n]
     if not names:
@@ -3209,8 +3259,7 @@ def send_due_reminders(request: Request):
             db = get_admin_client()
             res = (
                 db.table("meetings")
-                .select("id, school_id, meeting_date, start_time, end_time, status, participants, advisor_ids, meeting_service_type")
-                .eq("reminder_enabled", True)
+                .select("id, school_id, meeting_date, start_time, end_time, status, participants, advisor_ids, meeting_service_type, reminder_enabled")
                 .eq("status", "scheduled")
                 .in_("meeting_date", due_dates)
                 .execute()
@@ -3238,16 +3287,19 @@ def send_due_reminders(request: Request):
     except Exception as exc:
         logger.warning("send_due_reminders: school name lookup failed (non-fatal): %s", exc)
 
-    # Round: per-org automation toggles (organizations.meeting_reminders_enabled /
-    # secretary_upload_request_enabled). Missing org_id or a failed lookup fails OPEN (both
-    # True) — a broken toggle lookup must never silently stop reminders that were always sent.
+    # Per-org automation toggle for the secretary/finance file-upload-request email
+    # (organizations.secretary_upload_request_enabled). This is an INDEPENDENT send-time
+    # switch — it can send the מנהלנית her upload request even when the meeting's own
+    # reminder toggle is off. Automation 1 (meeting_reminders_enabled) is NOT read here at
+    # all: it only sets the per-meeting toggle default at creation time. Missing org_id or a
+    # failed lookup fails OPEN (True).
     org_ids = list({s.get("org_id") for s in schools_map.values() if s.get("org_id")})
     org_settings_map = {}
     if org_ids:
         try:
             db = get_admin_client()
             o_res = db.table("organizations").select(
-                "id, meeting_reminders_enabled, secretary_upload_request_enabled"
+                "id, secretary_upload_request_enabled"
             ).in_("id", org_ids).execute()
             org_settings_map = {o["id"]: o for o in (o_res.data or [])}
         except Exception as exc:
@@ -3308,21 +3360,43 @@ def send_due_reminders(request: Request):
             # the plain template (same as the principal's) instead of the file-upload-request one.
             meeting_service_type = m.get("meeting_service_type") or "gefen"
             org_settings = org_settings_map.get(school.get("org_id"), {})
-            reminders_on = org_settings.get("meeting_reminders_enabled", True)
             upload_request_on = org_settings.get("secretary_upload_request_enabled", True)
+
+            # Two independent send triggers:
+            #  - row_on (meeting.reminder_enabled) → regular participants get a reminder.
+            #  - upload_request_on (automation 2) → secretary/finance on a גפן/מחוז meeting get
+            #    the file-upload request, EVEN IF row_on is false.
+            # Automation 1 is intentionally not consulted here.
+            row_on = bool(m.get("reminder_enabled"))
+            has_upload_contact = meeting_service_type != "current" and any(
+                p.get("key") in ("secretary", "finance") for p in participants
+            )
+            if not row_on and not (upload_request_on and has_upload_contact):
+                # Nothing to send for this meeting — skip before touching meeting_reminders.
+                continue
+
             for p in participants:
                 email_addr = p["email"].strip()
                 is_upload_contact = p.get("key") in ("secretary", "finance") and meeting_service_type != "current"
 
-                # Org-level automation toggle (ניהול → פגישות → אוטומציות). Skipped recipients
-                # are still logged as "skipped" in meeting_reminders — same table the "already
+                # Decide what (if anything) this recipient gets. Skipped recipients are still
+                # logged as "skipped" in meeting_reminders — the same table the "already
                 # attempted today" guard above reads from — so re-running the same day doesn't
                 # re-evaluate them, and reporting stays consistent with actually-sent recipients.
                 is_opted_out = (
                     email_addr.lower() in opted_out_emails
                     and client_status_map.get(m["school_id"]) != "active"
                 )
-                if (is_upload_contact and not upload_request_on) or (not is_upload_contact and not reminders_on) or is_opted_out:
+                if is_opted_out:
+                    send_mode = None
+                elif is_upload_contact:
+                    # Upload contact: gets the file request if automation 2 is on; otherwise
+                    # falls back to a plain reminder when the meeting's own toggle is on.
+                    send_mode = "upload" if upload_request_on else ("reminder" if row_on else None)
+                else:
+                    send_mode = "reminder" if row_on else None
+
+                if send_mode is None:
                     try:
                         db.table("meeting_reminders").insert({
                             "meeting_id": m["id"], "school_id": m["school_id"],
@@ -3340,7 +3414,7 @@ def send_due_reminders(request: Request):
                     email_lower = email_addr.lower()
                     opt_out_link = f"{os.getenv('APP_URL', '')}/tasks/opt-out?email={email_lower}&token={task_logic.make_optout_token(email_lower)}"
 
-                if is_upload_contact:
+                if send_mode == "upload":
                     try:
                         token = get_or_create_upload_token(db, m["id"], m["meeting_date"])
                         checklist = build_upload_checklist(db, school, m.get("academic_year"))
@@ -3760,7 +3834,7 @@ def get_me(user: Annotated[dict, Depends(get_current_user)]):
                 db = get_admin_client()
                 org_res = (
                     db.table("organizations")
-                    .select("subscription_status, trial_started_at, trial_ends_at, name")
+                    .select("subscription_status, trial_started_at, trial_ends_at, name, auto_complete_meetings_from_activity_enabled")
                     .eq("id", user["org_id"])
                     .single()
                     .execute()
@@ -5884,7 +5958,6 @@ def create_meeting(school_id: str, body: MeetingIn, user: Annotated[dict, Depend
         "school_id": school_id,
         "created_by": user["id"],
         "status": body.status or "scheduled",
-        "reminder_enabled": body.reminder_enabled if body.reminder_enabled is not None else False,
         "participants": body.participants if body.participants is not None else [],
         "academic_year": body.academic_year or DEFAULT_ACADEMIC_YEAR,
     }
@@ -5907,6 +5980,14 @@ def create_meeting(school_id: str, body: MeetingIn, user: Annotated[dict, Depend
         data["advisor_ids"] = [body.advisor_id]
     else:
         data["advisor_ids"] = []
+    # Reminder toggle: honour an explicit value (meeting_booking_router sends True); otherwise
+    # default it from automation 1 — ON only for a future-dated meeting that already has a
+    # participant. update_meeting flips it on later if the meeting becomes eligible.
+    if body.reminder_enabled is not None:
+        data["reminder_enabled"] = body.reminder_enabled
+    else:
+        org_on = _org_reminders_default_on(db, school_id)
+        data["reminder_enabled"] = _reminder_eligible(data.get("meeting_date"), data.get("participants"), org_on)
     try:
         res = db.table("meetings").insert(data).execute()
         meeting = res.data[0]
@@ -5967,11 +6048,37 @@ def _normalize_stage_scope(raw: str | None) -> str | None:
     return None
 
 
+_IMPORT_DATE_FORMATS = (
+    "%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d",   # ISO-ish, year-first
+    "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y",   # day-first, 4-digit year (Israeli convention)
+    "%d/%m/%y", "%d-%m-%y", "%d.%m.%y",   # day-first, 2-digit year — %y applies Python's
+                                            # standard pivot (00-68 -> 20xx, 69-99 -> 19xx)
+)
+
+
 def _parse_import_date(raw: str | None) -> date | None:
+    """Tolerant date parser for the meetings-import file. Handles the two failure modes seen
+    in practice: (1) a genuine text cell in any of the common separator/year-length variants
+    orgs use (dots/slashes/dashes, 2- or 4-digit year), and (2) an Excel *date-typed* cell
+    whose underlying value is a serial day-count number (e.g. "46027") — this happens when a
+    cell was formatted as a date in Excel; the frontend now reads those via cellDates, but this
+    is a defensive fallback in case a raw serial slips through some other reading path.
+    Deliberately day-first only (no month-first fallback): this app's orgs are Israeli, so
+    "05/04" always means April 5th, never May 4th — guessing month-first for ambiguous values
+    would silently misfile real rows rather than surface them as a problem."""
     t = (raw or "").strip()
     if not t:
         return None
-    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y"):
+
+    if re.fullmatch(r"\d+(\.0+)?", t):
+        try:
+            serial = int(float(t))
+            if 1 <= serial <= 80000:  # plausible Excel serial range (~1900 to ~2119)
+                return date(1899, 12, 30) + timedelta(days=serial)
+        except (ValueError, OverflowError):
+            pass
+
+    for fmt in _IMPORT_DATE_FORMATS:
         try:
             return datetime.strptime(t, fmt).date()
         except ValueError:
@@ -6040,11 +6147,15 @@ def _run_meeting_import_validation(db, org_id: str, mode: str, rows: list) -> li
         if not school:
             problems.append({"type": "school_not_found", "detail": f"סמל מוסד '{row.school_symbol or ''}' לא נמצא במערכת"})
 
-        true_date = _parse_import_date(row.meeting_date)
+        true_date = _parse_import_date(row.meeting_date_override) or _parse_import_date(row.meeting_date)
         academic_year = None
         effective_mode = mode
         if true_date is None:
-            problems.append({"type": "academic_year_out_of_range", "detail": "לא ניתן לזהות תאריך תקין בשורה"})
+            # Distinct from academic_year_out_of_range: here we have no valid date at all to
+            # reason about (couldn't parse the cell), so "force-assign an academic year" is
+            # meaningless — the ONLY resolution is entering a corrected date, never a silent
+            # fallback that could send an unparsed string straight into a DATE column.
+            problems.append({"type": "invalid_date", "detail": f"לא ניתן לפענח את התאריך '{row.meeting_date or ''}' — יש להזין תאריך תקין"})
         else:
             academic_year = get_academic_year_for_date(true_date)
             if academic_year is None:
@@ -6173,7 +6284,15 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
             if not school_id:
                 errors.append(f"שורה {row.row_index}: לא נמצא בית ספר")
                 continue
-            true_date = data_ctx.get("true_date") or row.meeting_date
+            # NEVER fall back to the raw row.meeting_date string here — it may be a value
+            # _parse_import_date couldn't understand (that's exactly what "invalid_date" means),
+            # and an unparsed string reaching a DATE column fails at the DB layer with a cryptic
+            # Postgres error instead of a clean, actionable one. If validation didn't resolve a
+            # real true_date, this row must be treated as a failure, not silently inserted.
+            true_date = data_ctx.get("true_date")
+            if not true_date:
+                errors.append(f"שורה {row.row_index}: לא ניתן לפענח את התאריך '{row.meeting_date or ''}'")
+                continue
             academic_year = (row.academic_year_override if row.academic_year_override in ACADEMIC_YEARS else None) or data_ctx.get("academic_year") or DEFAULT_ACADEMIC_YEAR
             stage_scope = _normalize_stage_scope(row.stage_scope) or data_ctx.get("stage_scope_normalized")
 
@@ -6187,12 +6306,25 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
                 }]
 
             effective_mode = data_ctx.get("effective_mode") or body.mode
+            # The file's status column reflects what the org filled in assuming the mode they
+            # ORIGINALLY picked (e.g. "בוצעה" throughout a file meant as past documentation) —
+            # but effective_mode is the row's TRUE classification (its real date vs today),
+            # which can differ once a mode_date_mismatch problem was accepted. A row that is
+            # truly in the future can't already be "completed" (and would wrongly go through
+            # calendar sync as if scheduling a real future meeting while marked done); a row
+            # truly in the past can't still be "scheduled" (pending). Neutral statuses that are
+            # valid regardless of timing (cancelled/postponed/other) are left untouched.
+            row_status = row.status
+            if effective_mode == "future" and row_status == "completed":
+                row_status = "scheduled"
+            elif effective_mode == "past" and row_status == "scheduled":
+                row_status = "completed"
 
             if effective_mode == "past":
                 insert_data = {
                     "school_id": school_id,
                     "created_by": user["id"],
-                    "status": row.status or "completed",
+                    "status": row_status or "completed",
                     "meeting_type": row.meeting_type or "remote",
                     "meeting_service_type": row.meeting_service_type,
                     "stage_scope": stage_scope,
@@ -6216,7 +6348,7 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
                 insert_data = {
                     "school_id": school_id,
                     "created_by": user["id"],
-                    "status": row.status or "scheduled",
+                    "status": row_status or "scheduled",
                     "reminder_enabled": False,
                     "participants": participants,
                     "academic_year": academic_year,
@@ -6359,9 +6491,14 @@ def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annot
     db = get_admin_client()
     data = {
         "status": body.status or "scheduled",
-        "reminder_enabled": body.reminder_enabled if body.reminder_enabled is not None else False,
         "participants": body.participants if body.participants is not None else [],
     }
+    # reminder_enabled is deliberately NOT mirrored from the PUT body here — every field
+    # autosave carries the row's current toggle value, so a save that races a server-side
+    # auto-enable (below) would wipe it. The toggle itself writes via PATCH /meetings/{id}.
+    # A PUT may still explicitly turn it ON (idempotent, safe); it can never turn it off.
+    if body.reminder_enabled is True:
+        data["reminder_enabled"] = True
     if body.meeting_date: data["meeting_date"] = body.meeting_date
     if body.start_time: data["start_time"] = body.start_time
     if body.end_time: data["end_time"] = body.end_time
@@ -6379,6 +6516,26 @@ def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annot
         data["advisor_ids"] = [body.advisor_id]
     else:
         data["advisor_ids"] = []
+
+    # Auto-enable the reminder the first time a meeting becomes eligible for one (gains its
+    # first participant, or a future date) — the whole point of the org "send reminders"
+    # automation. Fires only on the not-eligible -> eligible transition, so a meeting the
+    # user deliberately turned off (already eligible, still off) is left alone.
+    if not data.get("reminder_enabled"):
+        try:
+            cur = db.table("meetings").select("reminder_enabled, participants, meeting_date") \
+                .eq("id", meeting_id).eq("school_id", school_id).single().execute().data or {}
+            if not cur.get("reminder_enabled"):
+                org_on = _org_reminders_default_on(db, school_id)
+                was = _reminder_eligible(cur.get("meeting_date"), cur.get("participants"), org_on)
+                now = _reminder_eligible(
+                    data.get("meeting_date") or cur.get("meeting_date"),
+                    data.get("participants"), org_on,
+                )
+                if now and not was:
+                    data["reminder_enabled"] = True
+        except Exception as exc:
+            logger.warning("update_meeting reminder auto-enable check failed (non-fatal): %s", exc)
 
     try:
         res = db.table("meetings").update(data).eq("id", meeting_id).eq("school_id", school_id).execute()
@@ -6446,6 +6603,10 @@ def patch_meeting(school_id: str, meeting_id: str, body: MeetingStatusPatchIn, u
     if body.notes is not None: data["notes"] = body.notes
     if body.start_time is not None: data["start_time"] = body.start_time
     if body.end_time is not None: data["end_time"] = body.end_time
+    # The reminder toggle in MeetingRow writes here (a dedicated PATCH) rather than through
+    # the full PUT — so a racing field autosave can never carry a stale reminder value and
+    # silently flip it back. This is the ONLY path that turns the reminder off.
+    if body.reminder_enabled is not None: data["reminder_enabled"] = body.reminder_enabled
     return _apply_meeting_patch(db, user["org_id"], school_id, meeting_id, data)
 
 

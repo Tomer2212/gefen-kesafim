@@ -31,6 +31,7 @@ import AdminCollectionTab from "./AdminCollectionTab";
 import AdminPerformanceTab from "./AdminPerformanceTab";
 import AdminIntegrationsTab from "./AdminIntegrationsTab";
 import AdminMeetingsTab from "./AdminMeetingsTab";
+import AdminAttendanceTab from "./AdminAttendanceTab";
 import AgentChatWidget from "../components/AgentChatWidget";
 import UserMeetingsConflictModal from "./UserMeetingsConflictModal";
 import { SchoolNotesModal } from "../components/SchoolNotesModal";
@@ -40,6 +41,7 @@ import { AcademicYearSelector } from "../components/AcademicYearSelector";
 import { DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
 import { DOMAIN_OPTIONS } from "../constants/domains";
 import { CONTROL_LETTER_STATUS_MAP } from "../components/controlLetter/constants";
+import { MEETING_SERVICE_TYPE_BREAKDOWN_COL_ORDER } from "../components/meetings/constants";
 import { AdvisorSearch } from "../components/AdvisorSearch";
 import HourMinuteInput from "../components/HourMinuteInput";
 import { AccessSelector } from "../components/AccessSelector";
@@ -226,13 +228,42 @@ const ADMIN_SCHOOL_STAGE_LABEL = {
 // "Identity" columns mirror the equivalent columns on DashboardPage (same key/label), minus
 // "advisor" (not relevant to the admin/financial view) — "שם מוסד" is always the frozen first
 // column and isn't part of this movable list.
+// Per-service-type "פגישות/שעות שבוצעו" columns (גפן / שוטף / גפן+שוטף / מחוז / ללא סוג) —
+// mirror DashboardPage's MEETING_TYPE_BREAKDOWN_COLUMNS. Off by default here (unlike the rest
+// of the admin columns, which default on) — see ADMIN_DEFAULT_COL_VISIBLE below.
+const MEETING_TYPE_BREAKDOWN_COLUMNS = MEETING_SERVICE_TYPE_BREAKDOWN_COL_ORDER.flatMap(t => [
+  { key: `meetings_completed_${t.key}`, label: `סה"כ פגישות ${t.label} שבוצעו`, breakdownType: t.key, breakdownMetric: "completed" },
+  { key: `meetings_hours_${t.key}`,     label: `סה"כ שעות ${t.label} שבוצעו`,   breakdownType: t.key, breakdownMetric: "total_minutes" },
+]);
+const MEETING_TYPE_BREAKDOWN_COL_META = Object.fromEntries(
+  MEETING_TYPE_BREAKDOWN_COLUMNS.map(c => [c.key, c])
+);
+const MEETING_TYPE_BREAKDOWN_KEYS = MEETING_TYPE_BREAKDOWN_COLUMNS.map(c => c.key);
+
+// Column-picker groups, mirroring DashboardPage's "כללי" / "הקצאות" / "פגישות שבוצעו".
 const ADMIN_IDENTITY_COLUMNS = [
   { key: "symbol",             label: "סמל מוסד" },
   { key: "city",                label: "עיר" },
   { key: "authority",           label: "בעלות" },
   { key: "stage",                label: "שלב מוסד" },
+  { key: "district",            label: "מחוז" },
+  { key: "finance_software",    label: "תוכנת כספים" },
+  { key: "advisor_gefen",       label: "יועץ מלווה [גפן]" },
+  { key: "advisor_current",     label: "יועץ מלווה [שוטף]" },
+  { key: "advisor_district",    label: "יועץ מלווה [מחוז]" },
+];
+const ADMIN_ALLOCATION_COLUMNS = [
+  { key: "meeting_allocation_gefen",   label: "הקצאת פגישות [גפן]" },
+  { key: "meeting_allocation_current", label: "הקצאת פגישות [שוטף]" },
+  { key: "meeting_allocation_district", label: "הקצאת פגישות [מחוז]" },
+  { key: "meeting_duration_gefen",     label: "הקצאת זמן פגישה [גפן]" },
+  { key: "meeting_duration_current",   label: "הקצאת זמן פגישה [שוטף]" },
+  { key: "meeting_duration_district",  label: "הקצאת זמן פגישה [מחוז]" },
+];
+const ADMIN_MEETINGS_DONE_COLUMNS = [
   { key: "meetings_completed",  label: 'סה"כ פגישות שבוצעו' },
   { key: "meetings_hours",      label: 'סה"כ שעות שבוצעו' },
+  ...MEETING_TYPE_BREAKDOWN_COLUMNS.map(c => ({ key: c.key, label: c.label })),
 ];
 
 const SERVICE_TYPE_OPTIONS = [
@@ -293,15 +324,6 @@ const ADMIN_DATA_COLUMNS = [
   { key: "closure_parents_notes",    label: "הערות סגירה-הורים" },
   { key: "closure_authority_status", label: "סגירת שנה-רשות" },
   { key: "closure_authority_notes",  label: "הערות סגירה-רשות" },
-  { key: "advisor_gefen",              label: "יועץ מלווה [גפן]" },
-  { key: "advisor_current",            label: "יועץ מלווה [שוטף]" },
-  { key: "advisor_district",           label: "יועץ מלווה [מחוז]" },
-  { key: "meeting_allocation_gefen",   label: "הקצאת פגישות [גפן]" },
-  { key: "meeting_allocation_current", label: "הקצאת פגישות [שוטף]" },
-  { key: "meeting_allocation_district", label: "הקצאת פגישות [מחוז]" },
-  { key: "meeting_duration_gefen",     label: "זמן לפגישה [גפן]" },
-  { key: "meeting_duration_current",   label: "זמן לפגישה [שוטף]" },
-  { key: "meeting_duration_district",  label: "זמן לפגישה [מחוז]" },
   { key: "quarterly_notes_1", label: "הערות רבעוניות - רבעון 1" },
   { key: "quarterly_notes_2", label: "הערות רבעוניות - רבעון 2" },
   { key: "quarterly_notes_3", label: "הערות רבעוניות - רבעון 3" },
@@ -362,9 +384,17 @@ function controlLetterFieldValue(school, field) {
   return primary[field] ?? null;
 }
 
-const ADMIN_ALL_COLUMNS = [...ADMIN_IDENTITY_COLUMNS, ...ADMIN_DATA_COLUMNS, ...ADMIN_CONTROL_LETTER_COLUMNS];
+const ADMIN_ALL_COLUMNS = [
+  ...ADMIN_IDENTITY_COLUMNS, ...ADMIN_ALLOCATION_COLUMNS, ...ADMIN_MEETINGS_DONE_COLUMNS,
+  ...ADMIN_DATA_COLUMNS, ...ADMIN_CONTROL_LETTER_COLUMNS,
+];
 const ADMIN_DEFAULT_COL_ORDER = ADMIN_ALL_COLUMNS.map(c => c.key);
-const ADMIN_DEFAULT_COL_VISIBLE = Object.fromEntries(ADMIN_ALL_COLUMNS.map(c => [c.key, true]));
+const ADMIN_DEFAULT_COL_VISIBLE = {
+  ...Object.fromEntries(ADMIN_ALL_COLUMNS.map(c => [c.key, true])),
+  // The per-service-type meeting breakdown columns are the one exception — hidden by default,
+  // opt-in via "עמודות לתצוגה" (matches DashboardPage, where they're also off by default).
+  ...Object.fromEntries(MEETING_TYPE_BREAKDOWN_KEYS.map(k => [k, false])),
+};
 function isKnownAdminColumnKey(k) { return ADMIN_DEFAULT_COL_ORDER.includes(k); }
 
 // Column-filter type map for the admin schools table (ניהול → בתי ספר). "select" columns use
@@ -377,6 +407,7 @@ const ADMIN_NUMBER_FILTER_COLS = new Set([
   "meetings_completed", "meetings_hours", "requested_price", "order_amount_gefen",
   "hours_ordered", "rate", "payment_received", "payment_requests_sent", "receipts_sent",
   "meeting_allocation_gefen", "meeting_allocation_current", "meeting_allocation_district",
+  ...MEETING_TYPE_BREAKDOWN_KEYS,
 ]);
 // Advisor-name multi-select filter columns — options are populated dynamically at render
 // time from the currently-loaded schools/users (see ADMIN_SELECT_FILTER_OPTIONS usage below).
@@ -2530,6 +2561,7 @@ export default function AdminPage() {
 
   const showBillingTab = myRole === "owner" || (myRole === "manager" && permDefaults?.can_view_billing?.manager === true);
   const showIntegrationsTab = myRole === "owner" || myRole === "manager";
+  const showAttendanceTab = myRole === "owner" || myRole === "manager";
   const showCallsTab = myRole === "owner" || myRole === "manager";
   const showPerformanceTab = myRole === "owner" || myRole === "manager";
   const showCollectionTab = myRole === "owner" || myRole === "manager";
@@ -2560,10 +2592,17 @@ export default function AdminPage() {
     : activeAdminSchools;
   function getAdminSortValue(school, key) {
     const yad = yearAdminData[school.id] || {};
+    const breakdownCol = MEETING_TYPE_BREAKDOWN_COL_META[key];
+    if (breakdownCol) {
+      return school.meetings_stats?.by_type?.[breakdownCol.breakdownType]?.[breakdownCol.breakdownMetric] ?? -1;
+    }
     switch (key) {
       case "symbol": return school.symbol || "";
       case "city": return school.city || "";
       case "authority": return school.authority || "";
+      case "district": return school.district || "";
+      case "finance_software":
+        return FINANCE_SOFTWARE_OPTIONS.find(o => o.value === school.finance_software)?.label || school.finance_software || "";
       case "stage": return ADMIN_SCHOOL_STAGE_LABEL[school.stage] || school.stage || "";
       case "meetings_completed": return school.meetings_stats?.completed ?? -1;
       case "meetings_hours": return school.meetings_stats?.total_minutes ?? -1;
@@ -2634,6 +2673,8 @@ export default function AdminPage() {
   const visibleAdminColOrder = adminColOrder.filter(k => adminColVisible[k] && ADMIN_ALL_COLUMNS.some(c => c.key === k));
   const adminColumnCategories = [
     { title: "כללי", cols: ADMIN_IDENTITY_COLUMNS },
+    { title: "הקצאות", cols: ADMIN_ALLOCATION_COLUMNS },
+    { title: "פגישות שבוצעו", cols: ADMIN_MEETINGS_DONE_COLUMNS },
     { title: "ניהולי", cols: ADMIN_DATA_COLUMNS },
   ];
 
@@ -2644,6 +2685,7 @@ export default function AdminPage() {
     { id: "meetings", label: "פגישות" },
     ...(showCallsTab ? [{ id: "calls", label: "שיחות" }] : []),
     ...(showPerformanceTab ? [{ id: "performance", label: "ביצועים" }] : []),
+    ...(showAttendanceTab ? [{ id: "attendance", label: "שעון נוכחות" }] : []),
     ...(showCollectionTab ? [{ id: "collection", label: "גבייה" }] : []),
     { id: "permissions", label: "הרשאות" },
     ...(showIntegrationsTab ? [{ id: "integrations", label: "אינטגרציות" }] : []),
@@ -2683,7 +2725,7 @@ export default function AdminPage() {
 
         <div className={`mx-auto px-6 pb-10 ${
           activeTab === "users" ? "max-w-[95rem]" :
-          ["schools", "meetings", "calls", "performance", "collection", "tasks"].includes(activeTab) ? "max-w-[100rem]" : "max-w-4xl"
+          ["schools", "meetings", "calls", "performance", "collection", "tasks", "attendance"].includes(activeTab) ? "max-w-[100rem]" : "max-w-4xl"
         }`}>
           {/* Schools Tab */}
           {activeTab === "schools" && (
@@ -3325,9 +3367,20 @@ export default function AdminPage() {
                                   if (key === "symbol") return <td key={key} className={tdClass}><span className="font-mono">{school.symbol || "—"}</span></td>;
                                   if (key === "city") return <td key={key} className={tdClass}>{school.city || "—"}</td>;
                                   if (key === "authority") return <td key={key} className={tdClass}>{school.authority || "—"}</td>;
+                                  if (key === "district") return <td key={key} className={tdClass}>{school.district || "—"}</td>;
+                                  if (key === "finance_software") return <td key={key} className={tdClass}>{FINANCE_SOFTWARE_OPTIONS.find(o => o.value === school.finance_software)?.label || school.finance_software || "—"}</td>;
                                   if (key === "stage") return <td key={key} className={tdClass}>{ADMIN_SCHOOL_STAGE_LABEL[school.stage] || school.stage || "—"}</td>;
                                   if (key === "meetings_completed") return <td key={key} className={tdClass}>{school.meetings_stats ? String(school.meetings_stats.completed) : "—"}</td>;
                                   if (key === "meetings_hours") return <td key={key} className={tdClass}>{school.meetings_stats ? formatAdminMeetingHours(school.meetings_stats.total_minutes) : "—"}</td>;
+                                  if (MEETING_TYPE_BREAKDOWN_COL_META[key]) {
+                                    const bc = MEETING_TYPE_BREAKDOWN_COL_META[key];
+                                    const bucket = school.meetings_stats?.by_type?.[bc.breakdownType];
+                                    return <td key={key} className={tdClass}>{
+                                      !bucket ? "—"
+                                        : bc.breakdownMetric === "completed" ? String(bucket.completed ?? 0)
+                                        : formatAdminMeetingHours(bucket.total_minutes ?? 0)
+                                    }</td>;
+                                  }
                                   if (key === "service_type") return (
                                     <td key={key} className={tdClass}>
                                       <label htmlFor={`svc-${rowKey}`} className="sr-only">סוג שירות</label>
@@ -3987,6 +4040,11 @@ export default function AdminPage() {
               myRole={myRole}
               canEditAutomations={myRole === "owner" || (myRole === "manager" && permDefaults?.can_edit_meeting_automations?.manager === true)}
             />
+          )}
+
+          {/* Attendance Tab */}
+          {activeTab === "attendance" && showAttendanceTab && (
+            <AdminAttendanceTab users={users} loadingUsers={loadingUsers} loadUsers={loadUsers} />
           )}
 
           {/* Calls Tab */}

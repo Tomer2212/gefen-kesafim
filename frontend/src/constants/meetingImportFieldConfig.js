@@ -63,16 +63,20 @@ export function normalizeImportStatus(raw) {
   return null;
 }
 
-// Best-effort date normalization to YYYY-MM-DD before sending to the backend — the backend
-// also tolerates DD/MM/YYYY etc, but normalizing client-side lets the UI show a clean preview.
+// Best-effort date normalization to YYYY-MM-DD before sending to the backend — purely
+// cosmetic (lets the UI show a clean preview); the backend's _parse_import_date is the real
+// authority and independently handles the same format variants (plus raw Excel serials),
+// so a value this function can't normalize is still sent through as-is and re-parsed there.
 export function normalizeImportDate(raw) {
   const t = String(raw || "").trim();
   if (!t) return null;
   if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t;
-  const m = t.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})$/);
+  const m = t.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2}|\d{4})$/);
   if (m) {
-    const [, d, mo, y] = m;
+    const [, d, mo, yRaw] = m;
+    // Mirrors Python strptime's %y pivot: 2-digit years 00-68 -> 20xx, 69-99 -> 19xx.
+    const y = yRaw.length === 4 ? yRaw : String(Number(yRaw) <= 68 ? 2000 + Number(yRaw) : 1900 + Number(yRaw));
     return `${y}-${mo.padStart(2, "0")}-${d.padStart(2, "0")}`;
   }
-  return t; // leave as-is; backend has its own tolerant parser
+  return t; // leave as-is; backend has its own tolerant parser (including Excel serials)
 }

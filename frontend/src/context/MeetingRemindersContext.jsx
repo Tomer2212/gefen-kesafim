@@ -47,6 +47,17 @@ export function MeetingRemindersProvider({ children }) {
     setActiveKey(prev => prev ?? key);
   }, []);
 
+  // "שיחה עם מספר לא מוכר — לשייך לבית ספר?" — an unrecognised-number call the advisor made.
+  // Keyed by call_id so each unknown call stacks as its own toast.
+  const addCallAttribReminder = useCallback((m) => {
+    const key = `call-attrib-${m.call_id}`;
+    setReminders(prev => {
+      if (prev.some(r => r._key === key)) return prev;
+      return [...prev, { ...m, _type: "call-attrib", _key: key }];
+    });
+    setActiveKey(prev => prev ?? key);
+  }, []);
+
   const dismiss = useCallback((key) => {
     setReminders(prev => prev.filter(r => r._key !== key));
   }, []);
@@ -54,7 +65,7 @@ export function MeetingRemindersProvider({ children }) {
   return (
     <MeetingRemindersCtx.Provider value={{
       reminders, activeKey, setActiveKey,
-      addMeetingReminder, addStatusReminder, addTaskReminder, dismiss,
+      addMeetingReminder, addStatusReminder, addTaskReminder, addCallAttribReminder, dismiss,
       userName, setUserName,
     }}>
       {children}
