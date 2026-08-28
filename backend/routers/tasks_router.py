@@ -1100,7 +1100,7 @@ def create_task(body: TaskCreateIn, user: Annotated[dict, Depends(get_current_us
         else:
             send_targets = matched_school_ids
         if send_targets:
-            missing_contact_school_ids = _queue_messages_for_schools(db, task, user["org_id"], send_targets)
+            missing_contact_school_ids, _skipped_broadcast = _queue_messages_for_schools(db, task, user["org_id"], send_targets)
 
     return {**task, "missing_contact_school_ids": missing_contact_school_ids}
 
@@ -1330,11 +1330,17 @@ def get_task(task_id: str, user: Annotated[dict, Depends(get_current_user)]):
     try:
         school_ids = [r["school_id"] for r in progress["schools"]]
         notes_map = _fetch_school_notes_map(db, task_id, school_ids)
+        _today = date.today()
         for row in progress["schools"]:
             note_row = notes_map.get(row["school_id"])
             row["note"] = (note_row or {}).get("note")
             row["excluded_emails"] = (note_row or {}).get("excluded_emails") or []
             row["skip_reason"] = (note_row or {}).get("skip_reason")
+            row["broadcast_skip"] = {
+                "mode": (note_row or {}).get("broadcast_skip_mode"),
+                "until": (note_row or {}).get("broadcast_skip_until"),
+                "active": _broadcast_skip_active(note_row, _today),
+            }
     except Exception as exc:
         logger.warning("get_task notes/exclusions enrichment failed (non-fatal): %s", exc)
 
@@ -1606,6 +1612,25 @@ def _build_meeting_booking_link(
     return f"{os.getenv('APP_URL', '')}/book/{token_row['token']}", token_row["id"], ranges_data
 
 
+def _broadcast_skip_active(note_row: dict | None, today: date) -> bool:
+    """Single source of truth for "is this school currently excluded from a broadcast reminder".
+    'once'  — always active until it's consumed by the next broadcast send.
+    'until' — active while broadcast_skip_until >= today (inclusive).
+    'forever' — always.
+    Note: this is purely about *reminder delivery* — it has ZERO effect on task
+    progress/completion (compute_task_progress / recompute_task_status_and_cache never read it).
+    """
+    if not note_row:
+        return False
+    mode = note_row.get("broadcast_skip_mode")
+    if mode in ("once", "forever"):
+        return True
+    if mode == "until":
+        u = note_row.get("broadcast_skip_until")
+        return bool(u) and str(u)[:10] >= today.isoformat()
+    return False
+
+
 def _fetch_school_notes_map(db, task_id: str, school_ids: list[str]) -> dict[str, dict]:
     """Non-fatal by design at the call sites — a lookup failure here should degrade to
     'no exclusions known' rather than block sending, per Architecture Invariant #6."""
@@ -1613,7 +1638,7 @@ def _fetch_school_notes_map(db, task_id: str, school_ids: list[str]) -> dict[str
         return {}
     rows = (
         db.table("org_task_school_notes")
-        .select("school_id, note, excluded_emails, skip_reason")
+        .select("school_id, note, excluded_emails, skip_reason, broadcast_skip_mode, broadcast_skip_until")
         .eq("task_id", task_id)
         .in_("school_id", school_ids)
         .execute()
@@ -1694,11 +1719,16 @@ def _mark_already_done_schools(db, task_id: str, matched_school_ids: list[str], 
 
 
 def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[str],
-                                 scheduled_at: datetime | None = None) -> list[str]:
-    """Builds and inserts org_task_messages rows. Returns school_ids that were missing the
-    contact info required by the chosen channel/recipient_role, or whose resolved recipient
-    is excluded/opted-out (queued for none of these — surfaced the same way as a missing
-    contact so the manager sees them in the same "couldn't send" list).
+                                 scheduled_at: datetime | None = None) -> tuple[list[str], list[dict]]:
+    """Builds and inserts org_task_messages rows. Returns
+    ``(missing_contact_ids, broadcast_skipped)`` where:
+    - ``missing_contact_ids`` — school_ids missing the contact info required by the chosen
+      channel/recipient_role, or whose resolved recipient is excluded/opted-out (surfaced the
+      same way as a missing contact so the manager sees them in the same "couldn't send" list).
+    - ``broadcast_skipped`` — ``[{"id", "name"}]`` of schools deliberately skipped because they
+      have an active broadcast-reminder exclusion (see _broadcast_skip_active). NOT an error —
+      reported so the caller can tell the manager "sent, but N schools were excluded". A 'once'
+      exclusion is consumed here (cleared) since this send is its "next broadcast".
 
     Round 7: only email_outlook (real 30/min Graph rate limit) and future-scheduled messages
     (scheduled_at set) actually wait for process-message-queue's cron drain — email_resend and
@@ -1756,8 +1786,15 @@ def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[st
         opted_out_map = {}
 
     missing = []
+    skipped_broadcast = []
     queue_rows = []
+    _today = date.today()
     for school in schools:
+        # Broadcast-reminder exclusion — deliberate manager choice, checked FIRST so an excluded
+        # school is never counted as a missing-contact problem and never flips a "בעיות" flag.
+        if _broadcast_skip_active(notes_map.get(school["id"]), _today):
+            skipped_broadcast.append({"id": school["id"], "name": school.get("name")})
+            continue
         recipient = resolved_recipients[school["id"]]
         if _channel_missing_contact(channel, recipient):
             missing.append(school["id"])
@@ -1877,7 +1914,20 @@ def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[st
 
     if queue_rows:
         db.table("org_task_messages").insert(queue_rows).execute()
-    return missing
+
+    # Consume 'once' exclusions — this broadcast was their "next" one. Cleared for every school
+    # in this batch that carried mode='once' (whether or not it ended up skipped above — a
+    # done/not-targeted school simply won't be in `school_ids`). Non-fatal.
+    once_ids = [s["id"] for s in schools if (notes_map.get(s["id"]) or {}).get("broadcast_skip_mode") == "once"]
+    if once_ids:
+        try:
+            db.table("org_task_school_notes").update(
+                {"broadcast_skip_mode": None, "broadcast_skip_until": None},
+            ).eq("task_id", task["id"]).in_("school_id", once_ids).execute()
+        except Exception as exc:
+            logger.warning("_queue_messages_for_schools: failed to consume 'once' exclusions (non-fatal): %s", exc)
+
+    return missing, skipped_broadcast
 
 
 @router.post("/{task_id}/send")
@@ -1909,8 +1959,8 @@ def send_task_bulk(task_id: str, body: SendIn, user: Annotated[dict, Depends(get
             "threshold": OUTLOOK_SEND_WARN_THRESHOLD,
         })
 
-    missing = _queue_messages_for_schools(db, task, user["org_id"], target_ids, scheduled_at)
-    queued = len(target_ids) - len(missing)
+    missing, broadcast_skipped = _queue_messages_for_schools(db, task, user["org_id"], target_ids, scheduled_at)
+    queued = len(target_ids) - len(missing) - len(broadcast_skipped)
     if task.get("needs_outlook_confirmation"):
         # Manual confirmation via this endpoint (the banner's "אשר שליחה" button, see
         # process_scheduled_tasks) resolves the flag regardless of channel — a manager who
@@ -1921,9 +1971,10 @@ def send_task_bulk(task_id: str, body: SendIn, user: Annotated[dict, Depends(get
         raise HTTPException(status_code=409, detail={
             "message": "לחלק מבתי הספר חסרים פרטי קשר מתאימים לערוץ שנבחר",
             "missing_contact_school_ids": missing,
+            "broadcast_skipped_schools": broadcast_skipped,
             "queued": queued,
         })
-    return {"queued": queued, "missing_contact_school_ids": []}
+    return {"queued": queued, "missing_contact_school_ids": [], "broadcast_skipped_schools": broadcast_skipped}
 
 
 @router.post("/{task_id}/schools/{school_id}/send")
@@ -1931,7 +1982,22 @@ def send_task_single(task_id: str, school_id: str, user: Annotated[dict, Depends
     _require_manager(user)
     db = get_admin_client()
     task = _get_task_or_404(db, task_id, user["org_id"])
-    missing = _queue_messages_for_schools(db, task, user["org_id"], [school_id])
+
+    # A manual per-row send respects an active broadcast-reminder exclusion (does NOT consume a
+    # 'once' — consumption is tied to an actual broadcast send). The manager must clear the
+    # exclusion in the "החרגות" cell first.
+    skip_note = (
+        db.table("org_task_school_notes").select("broadcast_skip_mode, broadcast_skip_until")
+        .eq("task_id", task_id).eq("school_id", school_id).execute().data or []
+    )
+    if skip_note and _broadcast_skip_active(skip_note[0], date.today()):
+        raise HTTPException(status_code=409, detail={
+            "message": "בית הספר מוחרג מתזכורות גורפות — יש להסיר את ההחרגה כדי לשלוח לו תזכורת",
+            "broadcast_skipped": True,
+            "mode": skip_note[0].get("broadcast_skip_mode"),
+        })
+
+    missing, _skipped_broadcast = _queue_messages_for_schools(db, task, user["org_id"], [school_id])
     task_logic.recompute_task_status_and_cache(db, user["org_id"], task)
     if missing:
         note_rows = (
@@ -2004,6 +2070,41 @@ def put_task_school_note(task_id: str, school_id: str, body: TaskSchoolNoteIn, u
     if body.excluded_emails is not None:
         patch["excluded_emails"] = [e.strip().lower() for e in body.excluded_emails if e.strip()]
     db.table("org_task_school_notes").upsert(patch, on_conflict="task_id,school_id").execute()
+    return {"ok": True}
+
+
+class BroadcastSkipIn(BaseModel):
+    mode: str | None = None   # 'once' | 'until' | 'forever' | None (= clear the exclusion)
+    until: str | None = None  # 'YYYY-MM-DD' — required when mode == 'until'
+
+
+@router.put("/{task_id}/schools/{school_id}/broadcast-skip")
+def put_broadcast_skip(task_id: str, school_id: str, body: BroadcastSkipIn, user: Annotated[dict, Depends(get_current_user)]):
+    """Sets (or clears, mode=None) a per-(task, school) exclusion from broadcast reminder sends.
+    Separate from PUT .../note so a NULL can be written explicitly. Purely about reminder
+    delivery — never affects task progress/completion."""
+    _require_manager(user)
+    if body.mode not in (None, "once", "until", "forever"):
+        raise HTTPException(status_code=422, detail="ערך לא חוקי")
+    until_val = None
+    if body.mode == "until":
+        try:
+            until_val = date.fromisoformat((body.until or "")[:10])
+        except ValueError:
+            raise HTTPException(status_code=422, detail="יש לבחור תאריך תקין")
+        if until_val < date.today():
+            raise HTTPException(status_code=422, detail="התאריך שנבחר כבר עבר")
+    db = get_admin_client()
+    _get_task_or_404(db, task_id, user["org_id"])
+    db.table("org_task_school_notes").upsert(
+        {
+            "task_id": task_id, "school_id": school_id,
+            "broadcast_skip_mode": body.mode,
+            "broadcast_skip_until": until_val.isoformat() if until_val else None,
+            "updated_by": user["id"], "updated_at": "now()",
+        },
+        on_conflict="task_id,school_id",
+    ).execute()
     return {"ok": True}
 
 
@@ -2122,6 +2223,19 @@ def process_message_queue(request: Request):
             # exclusion/opt-out was recorded, or the school's client_status could have changed
             # since queue-time, so this is checked again right before the actual send, not only
             # at queue-time in _queue_messages_for_schools.
+
+            # Broadcast-reminder exclusion — a 'forever'/'until' exclusion may have been added
+            # after this row was queued, or an 'until' date may have "activated" between queue
+            # time and now (never 'once' — those never enter the queue). No email needed.
+            skip_note_rows = (
+                db.table("org_task_school_notes").select("broadcast_skip_mode, broadcast_skip_until")
+                .eq("task_id", row["task_id"]).eq("school_id", row["school_id"]).execute().data or []
+            )
+            if skip_note_rows and _broadcast_skip_active(skip_note_rows[0], date.today()):
+                db.table("org_task_messages").update({"status": "skipped"}).eq("id", row["id"]).execute()
+                skipped += 1
+                continue
+
             recipient_email = (row.get("recipient_email") or "").strip().lower()
             if recipient_email:
                 is_opted_out = bool(task_logic.opted_out_recipients(
@@ -2380,6 +2494,16 @@ def process_scheduled_tasks(request: Request):
         _schools_router.process_temp_advisor_access(db)
     except Exception as exc:
         logger.warning("process_scheduled_tasks: temp advisor access processing failed (non-fatal): %s", exc)
+
+    # Housekeeping — clear expired 'until' broadcast-reminder exclusions. Display/send already
+    # treat them as inactive live (via _broadcast_skip_active), so this only keeps the data tidy
+    # and covers the "check the date once a day" requirement. Non-fatal.
+    try:
+        db.table("org_task_school_notes").update(
+            {"broadcast_skip_mode": None, "broadcast_skip_until": None},
+        ).eq("broadcast_skip_mode", "until").lt("broadcast_skip_until", date.today().isoformat()).execute()
+    except Exception as exc:
+        logger.warning("process_scheduled_tasks: expired broadcast-skip cleanup failed (non-fatal): %s", exc)
 
     now_iso = datetime.now(timezone.utc).isoformat()
     rows = (

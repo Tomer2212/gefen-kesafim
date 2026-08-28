@@ -1,6 +1,9 @@
 import { Fragment, useEffect, useState } from "react";
 import axios from "axios";
 import { metricDescription, STAGE_LABELS } from "./PersonTaskDetailContent";
+import ColumnFilterButton from "../tasks/ColumnFilterButton";
+import PersonTaskTableToolbar from "./PersonTaskTableToolbar";
+import { makeSchoolColumns, distinctFor, applyPersonTaskFilters, EMPTY_SUB_FILTER } from "./personTaskSchoolFilter";
 
 // Read-only mirror of PersonTaskDetailContent's own number/file value display — the task
 // creator (who drills in here, not into the per-assignee detail view) must be able to see WHAT
@@ -41,6 +44,19 @@ function MetricValueDisplay({ taskId, target, metric }) {
   return <span className="text-slate-400">—</span>;
 }
 
+function SchoolCellValue({ col, t, taskId, metric, taskName }) {
+  if (col.key === "status") {
+    return t.completed
+      ? <span className="text-emerald-600 font-bold" aria-label="הושלם">✓</span>
+      : <span className="text-red-500 font-bold" aria-label="לא הושלם">✕</span>;
+  }
+  if (col.key === "metric") {
+    return <MetricValueDisplay taskId={taskId} target={t} metric={metric} />;
+  }
+  if (col.key === "school_name") return t.school_name || taskName || "—";
+  return col.getValue(t) || "—";
+}
+
 // Admin-only ("ניהול -> משימות -> אנשי הארגון") variant of the expanded-task detail — grouped by
 // ASSIGNEE instead of by target, so a manager can see each person's actual throughput on this
 // task (X/Y completed) at a glance, then drill into which specific schools are still open for
@@ -52,6 +68,9 @@ export default function PersonTaskAdminDetailContent({ taskId, onTaskChange }) {
   const [loading, setLoading] = useState(true);
   const [expandedAssignee, setExpandedAssignee] = useState(null);
   const [fieldMeta, setFieldMeta] = useState(null);
+  // Shared free-text / advanced / column-filter / sort state for the drill-in schools table —
+  // reset whenever a different assignee is opened (only one is open at a time).
+  const [subFilter, setSubFilter] = useState(EMPTY_SUB_FILTER);
 
   useEffect(() => {
     setLoading(true);
@@ -67,6 +86,11 @@ export default function PersonTaskAdminDetailContent({ taskId, onTaskChange }) {
       divisionOptions: r.data?.division_options || [], controlLetterFields: r.data?.control_letter_fields || [],
     })).catch(() => {});
   }, []);
+
+  function openAssignee(id) {
+    setExpandedAssignee(prev => (prev === id ? null : id));
+    setSubFilter(EMPTY_SUB_FILTER);
+  }
 
   if (loading) {
     return (
@@ -96,97 +120,148 @@ export default function PersonTaskAdminDetailContent({ taskId, onTaskChange }) {
     .map(a => ({ ...a, completed: a.targets.filter(t => t.completed).length, total: a.targets.length }))
     .sort((a, b) => a.name.localeCompare(b.name, "he"));
 
+  const hasMetricCol = metric.kind === "number" || metric.kind === "file";
+  const cols = makeSchoolColumns({ hasMetricCol });
+  const pct = Math.max(0, Math.min(100, task.cached_progress_pct ?? 0));
+  const barColor = pct <= 50 ? "bg-red-500" : pct < 100 ? "bg-orange-500" : "bg-green-500";
+  const actionsDone = task.cached_completed ?? targets.filter(t => t.completed).length;
+  const actionsTotal = task.cached_total_targets ?? targets.length;
+
+  function setColFilter(key, v) {
+    setSubFilter(s => {
+      const cf = { ...s.columnFilters };
+      if (v == null) delete cf[key]; else cf[key] = v;
+      return { ...s, columnFilters: cf };
+    });
+  }
+  function setColSort(key, dir) {
+    setSubFilter(s => ({ ...s, sortSpec: dir ? { key, dir } : null }));
+  }
+
   return (
-    <div className="space-y-3">
-      <div className="flex items-start justify-between gap-3 bg-slate-50 rounded-xl p-3">
-        <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-sm text-slate-700">
+    <div>
+      {/* Task-details + progress card */}
+      <div className="bg-slate-50 border border-slate-200/90 rounded-xl p-4 mb-4 flex items-center justify-between gap-4">
+        <div className="space-y-2">
           {task.description && (
-            <>
-              <span className="text-slate-500">הסבר משימה</span>
-              <span>{task.description}</span>
-            </>
+            <div>
+              <div className="text-xs text-slate-500">הסבר משימה</div>
+              <div className="text-sm font-medium text-slate-800">{task.description}</div>
+            </div>
           )}
-          <span className="text-slate-500">מדד הצלחה</span>
-          <span>{metricDescription(metric, fieldMeta)}</span>
+          <div>
+            <div className="text-xs text-slate-500">מדד הצלחה</div>
+            <div className="text-sm font-medium text-slate-800">{metricDescription(metric, fieldMeta)}</div>
+          </div>
         </div>
-        <span className="font-semibold text-blue-700 text-xs whitespace-nowrap">{task.cached_progress_pct ?? 0}% התקדמות</span>
+        <div className="flex flex-col items-center gap-1 shrink-0">
+          <div className="w-44 h-2 bg-slate-200 rounded-full overflow-hidden">
+            <div className={`h-full ${barColor} rounded-full transition-all`} style={{ width: `${pct}%` }} />
+          </div>
+          <div className="text-xs font-bold text-slate-700 whitespace-nowrap">
+            {pct}% · {actionsDone}/{actionsTotal} פעולות
+          </div>
+        </div>
       </div>
 
-      <div className="overflow-x-auto border border-slate-100 rounded-xl">
-        <table className="w-full text-sm">
-          <thead className="bg-slate-50 border-b border-slate-200">
-            <tr>
-              <th scope="col" className="text-right px-3 py-2 font-semibold text-slate-600">אחראי ביצוע</th>
-              <th scope="col" className="text-center px-3 py-2 font-semibold text-slate-600">סטטוס ביצוע</th>
-              <th scope="col" className="px-3 py-2" />
-            </tr>
-          </thead>
-          <tbody>
-            {assignees.length === 0 ? (
-              <tr><td colSpan={3} className="text-center text-slate-400 text-xs py-6">אין יעדים למשימה זו</td></tr>
-            ) : assignees.map(a => {
-              const done = a.total > 0 && a.completed === a.total;
-              const isOpen = expandedAssignee === a.id;
-              return (
-                <Fragment key={a.id}>
-                  <tr
-                    onClick={() => setExpandedAssignee(isOpen ? null : a.id)}
-                    className={`border-b border-slate-50 cursor-pointer hover:bg-slate-50 ${done ? "bg-emerald-50/70" : ""}`}
-                    aria-expanded={isOpen}
-                  >
-                    <td className="px-3 py-2 text-slate-800">{a.name}</td>
-                    <td className="px-3 py-2 text-center font-semibold text-slate-700">{a.completed}/{a.total}</td>
-                    <td className="px-3 py-2 text-center text-slate-400" aria-hidden="true">{isOpen ? "▼" : "◀"}</td>
-                  </tr>
-                  {isOpen && (
-                    <tr className="border-b border-slate-50 bg-slate-50/40">
-                      <td colSpan={3} className="px-3 py-2">
-                        {/* Not w-full on purpose — an unbounded "בית ספר" column stretches to
-                        fill the whole row, pushing "סטטוס" all the way to the far (left) edge.
-                        A fixed-width school column keeps the table compact so "סטטוס" sits
-                        right after it, near the seam between the right quarter and the
-                        center of the screen instead. */}
-                        <table className="text-xs">
-                          <thead>
-                            <tr>
-                              <th scope="col" className="text-right px-2 py-1 font-semibold text-slate-500 w-96">בית ספר</th>
-                              <th scope="col" className="text-right px-2 py-1 font-semibold text-slate-500 w-24 whitespace-nowrap">שלב לימוד</th>
-                              <th scope="col" className="text-center px-2 py-1 font-semibold text-slate-500 w-20">סטטוס</th>
-                              {(metric.kind === "number" || metric.kind === "file") && (
-                                <th scope="col" className="text-center px-2 py-1 font-semibold text-slate-500">מדד הצלחה</th>
-                              )}
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {a.targets.map(t => (
-                              <tr key={t.id} className="border-t border-slate-100">
-                                <td className="px-2 py-1.5 text-slate-700 w-96">
-                                  {t.school_name ? [t.school_name, t.symbol, t.authority].filter(Boolean).join(" - ") : task.name}
-                                </td>
-                                <td className="px-2 py-1.5 text-slate-600 w-24 whitespace-nowrap">{STAGE_LABELS[t.target_division_type] || "—"}</td>
-                                <td className="px-2 py-1.5 text-center w-20">
-                                  {t.completed
-                                    ? <span className="text-emerald-600 font-bold" aria-label="הושלם">✓</span>
-                                    : <span className="text-red-500 font-bold" aria-label="לא הושלם">✕</span>}
-                                </td>
-                                {(metric.kind === "number" || metric.kind === "file") && (
-                                  <td className="px-2 py-1.5 text-center">
-                                    <MetricValueDisplay taskId={taskId} target={t} metric={metric} />
-                                  </td>
-                                )}
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </td>
-                    </tr>
-                  )}
-                </Fragment>
-              );
-            })}
-          </tbody>
-        </table>
+      {/* Column headers — same grid template as every assignee card below (name column = right
+          quarter, status column starts on the right-quarter line). */}
+      <div className="grid grid-cols-[1fr_3fr] items-center gap-2 px-3 pb-2 border border-transparent text-[11px] font-bold text-slate-500">
+        <span className="pr-[22px]">אחראי לביצוע</span>
+        <span>סטטוס ביצוע</span>
       </div>
+
+      {/* Assignee accordion — each row is its own compact card */}
+      {assignees.length === 0 ? (
+        <div className="text-center text-slate-400 text-xs py-6">אין יעדים למשימה זו</div>
+      ) : assignees.map(a => {
+        const isOpen = expandedAssignee === a.id;
+        const rows = isOpen ? applyPersonTaskFilters(a.targets, subFilter, cols) : [];
+        return (
+          <Fragment key={a.id}>
+            <div
+              onClick={() => openAssignee(a.id)}
+              aria-expanded={isOpen}
+              className={`border rounded-xl p-3 mb-2 grid grid-cols-[1fr_3fr] items-center gap-2 cursor-pointer transition-colors ${
+                isOpen ? "bg-blue-50/70 border-blue-200" : "bg-white border-slate-200 hover:bg-slate-50/80"
+              }`}
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <svg
+                  aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+                  className={`text-slate-400 shrink-0 transition-transform ${isOpen ? "rotate-90" : ""}`}
+                >
+                  <path d="M15 6l-6 6 6 6" />
+                </svg>
+                <span className="font-semibold text-slate-900 text-sm truncate">{a.name}</span>
+              </div>
+              <span className="inline-flex items-center justify-self-start rounded-full px-2.5 py-1 text-xs font-semibold tabular-nums bg-slate-100 text-slate-600">
+                {a.completed}/{a.total}
+              </span>
+            </div>
+
+            {isOpen && (
+              <div className="bg-slate-50/80 border border-slate-200 rounded-xl p-3 mr-4 my-2">
+                <PersonTaskTableToolbar
+                  freeText={subFilter.freeText}
+                  setFreeText={v => setSubFilter(s => ({ ...s, freeText: v }))}
+                  advanced={subFilter.advanced}
+                  setAdvanced={v => setSubFilter(s => ({ ...s, advanced: v }))}
+                  fieldOptions={fieldMeta?.fieldOptions || []}
+                />
+                {/* inline-block + max-w-full — the bordered white box shrinks to exactly the
+                table's width (the grey panel shows to its left), and only scrolls if a school
+                name is genuinely wider than the panel. */}
+                <div className="inline-block align-top max-w-full overflow-x-auto rounded-lg border border-slate-200 bg-white">
+                  {/* width:1px + nowrap cells = the table collapses to exactly its content width. */}
+                  <table className="text-sm" style={{ width: "1px" }}>
+                    <thead>
+                      <tr className="bg-white text-slate-700 font-bold text-xs border-b border-slate-200 divide-x divide-slate-200/60">
+                        {cols.map(col => (
+                          <th
+                            key={col.key}
+                            scope="col"
+                            className={`${col.key === "status" || col.key === "metric" ? "text-center" : "text-right"} py-2 px-3 whitespace-nowrap`}
+                          >
+                            <span className="inline-flex items-center gap-1">
+                              {col.label}
+                              <ColumnFilterButton
+                                col={col}
+                                filter={subFilter.columnFilters[col.key]}
+                                onFilterChange={v => setColFilter(col.key, v)}
+                                sortDir={subFilter.sortSpec?.key === col.key ? subFilter.sortSpec.dir : null}
+                                onSort={dir => setColSort(col.key, dir)}
+                                distinctOptions={col.kind === "enum" ? distinctFor(a.targets, col) : undefined}
+                              />
+                            </span>
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows.length === 0 ? (
+                        <tr><td colSpan={cols.length} className="py-4 px-3 text-center text-xs text-slate-400">אין בתי ספר תואמים</td></tr>
+                      ) : rows.map(t => (
+                        <tr key={t.id} className="border-b border-slate-200/60 text-slate-900 last:border-b-0 divide-x divide-slate-200/60">
+                          {cols.map(col => (
+                            <td
+                              key={col.key}
+                              className={`${col.key === "status" || col.key === "metric" ? "text-center" : "text-right"} py-2 px-3 text-sm ${col.key === "stage_label" ? "text-slate-600" : ""} whitespace-nowrap`}
+                            >
+                              <SchoolCellValue col={col} t={t} taskId={taskId} metric={metric} taskName={task.name} />
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </Fragment>
+        );
+      })}
     </div>
   );
 }

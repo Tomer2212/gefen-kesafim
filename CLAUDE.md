@@ -583,6 +583,17 @@ Meetings can be scheduled/edited from **three separate places** in the app, all 
 
 **Exception — field/context mismatches:** some fields or behaviors are only relevant/visible in some of the three surfaces (e.g. the advisor picker doesn't exist in אזור אישי since the advisor is always the current user; the school column doesn't exist on כרטיס בית ספר since the school is implicit). If a requested change doesn't map cleanly onto one or more of the three surfaces because of a mismatch like this, **stop and ask the user** what to do there instead of guessing or silently skipping it.
 
+### Meeting Reminders — automations vs. the per-meeting toggle (HARD RULE)
+
+There are two org-level meeting automations (`organizations.meeting_reminders_enabled`, `organizations.secretary_upload_request_enabled`) and one per-meeting flag (`meetings.reminder_enabled`, the "תזכורת" ON/OFF toggle in `MeetingRow`). Their roles are **not symmetric**:
+
+- **`meeting_reminders_enabled` (automation 1) — creation-time default ONLY.** It is read solely by `create_meeting` / `update_meeting` (via `_org_reminders_default_on` + `_reminder_eligible`) to decide the initial state of a new meeting's `reminder_enabled` toggle: ON only when the org flag is on AND the meeting has ≥1 participant AND its date is strictly in the future (Asia/Jerusalem). `update_meeting` flips a still-off toggle ON the first time a meeting becomes eligible (gains its first participant or a future date), unless the user already turned it off. **It is NOT consulted in `send_due_reminders`** — do not re-add a send-time check on it.
+- **`meetings.reminder_enabled` (per-meeting toggle) — the single source of truth at send time** for whether regular participants get the day-before reminder.
+- **`secretary_upload_request_enabled` (automation 2) — an independent live send-time switch.** In `send_due_reminders` it sends the secretary/finance file-upload-request email for a גפן/מחוז meeting **even when `reminder_enabled` is off**. When it is off but the toggle is on, that contact falls back to the plain reminder.
+- The cron query in `send_due_reminders` intentionally does **not** filter on `reminder_enabled` (automation 2 must reach meetings whose toggle is off). It is still bounded to `status = 'scheduled'` + the one/three due dates — not a full-table scan.
+- Creation paths must send **no** `reminder_enabled` in the POST body (let the backend compute it). The Excel import path is the one exception — it always writes `false` and must never opt a school in.
+- **`reminder_enabled` is never written from the `PUT /meetings/{id}` body** (only turned ON via the auto-enable transition, or an explicit `body.reminder_enabled is True`). Every field autosave carries the row's current toggle value, so a PUT that races the server-side auto-enable would wipe it. The `MeetingRow` toggle (and the "last participant removed" auto-clear) write through **`PATCH /schools/{sid}/meetings/{mid}` with `{reminder_enabled}`** — that PATCH is the only path that can turn a reminder off. Do not "simplify" this back into the PUT.
+
 ---
 
 ## Deployment

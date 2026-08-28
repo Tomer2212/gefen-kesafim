@@ -6,7 +6,7 @@ function schoolLabel(s) {
   return `${s.name || ""} - ${s.symbol || ""} - ${s.city || ""}`;
 }
 
-function SchoolResultsList({ schools, query, setQuery, pendingId, setPendingId, onConfirm, onCancel, submittingLabel = "יוצר..." }) {
+export function SchoolResultsList({ schools, query, setQuery, pendingId, setPendingId, onConfirm, onCancel, submittingLabel = "יוצר..." }) {
   // onConfirm (e.g. createMeetingForSchool) is async and does real work (a school-
   // advisors lookup, then a POST) before the modal closes — with no per-click feedback,
   // a user who doesn't see anything happen right away tends to click again, and again;
@@ -19,7 +19,8 @@ function SchoolResultsList({ schools, query, setQuery, pendingId, setPendingId, 
     return (s.name || "").toLowerCase().includes(q)
       || (s.symbol || "").toLowerCase().includes(q)
       || (s.city || "").toLowerCase().includes(q)
-      || (s.authority || "").toLowerCase().includes(q);
+      || (s.authority || "").toLowerCase().includes(q)
+      || (s.district || "").toLowerCase().includes(q);
   });
 
   return (
@@ -31,7 +32,7 @@ function SchoolResultsList({ schools, query, setQuery, pendingId, setPendingId, 
         autoFocus
         value={query}
         onChange={e => setQuery(e.target.value)}
-        placeholder="חיפוש לפי שם מוסד, סמל מוסד, עיר או בעלות..."
+        placeholder="חיפוש לפי שם מוסד, סמל מוסד, עיר, בעלות או מחוז..."
         className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 outline-none focus:border-blue-400 bg-white"
         aria-label="חיפוש בית ספר"
       />

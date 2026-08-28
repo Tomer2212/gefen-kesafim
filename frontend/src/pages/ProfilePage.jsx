@@ -5,13 +5,17 @@ import { supabase } from "../lib/supabase";
 import Sidebar from "../components/Sidebar";
 import PersonalMeetingsTab from "./PersonalMeetingsTab";
 import PersonalTasksSection from "../components/personTasks/PersonalTasksSection";
+import PersonalAttendanceTab from "./PersonalAttendanceTab";
 
-const TABS = [
+const BASE_TABS = [
   { id: "meetings", label: "פגישות" },
   { id: "tasks", label: "משימות" },
+  { id: "attendance", label: "שעון נוכחות" },
   { id: "personal", label: "פרטים אישיים" },
 ];
-const TAB_IDS = TABS.map(t => t.id);
+const TAB_IDS = BASE_TABS.map(t => t.id);
+// "שעון נוכחות" מיועד לתפקידים advisor/manager בלבד (owner לא מדווח נוכחות).
+const canSeeAttendance = (role) => role === "advisor" || role === "manager";
 
 export default function ProfilePage() {
   const navigate = useNavigate();
@@ -120,7 +124,7 @@ export default function ProfilePage() {
           <h1 className="text-2xl font-bold text-slate-900 mb-8">אזור אישי</h1>
 
           <div className="flex items-end border-b border-slate-200 mb-6 gap-1">
-            {TABS.map(t => (
+            {BASE_TABS.filter(t => t.id !== "attendance" || canSeeAttendance(userRole)).map(t => (
               <button
                 key={t.id}
                 onClick={() => setActiveTab(t.id)}
@@ -269,6 +273,10 @@ export default function ProfilePage() {
 
                   </div>
                 </section>
+              )}
+
+              {activeTab === "attendance" && canSeeAttendance(userRole) && (
+                <PersonalAttendanceTab userName={userName} />
               )}
             </>
           )}

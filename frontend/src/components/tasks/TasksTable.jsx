@@ -98,7 +98,9 @@ export default function TasksTable({ tasks, onChanged, onTaskRefreshed, colVisib
 
   return (
     <div className="glass-card rounded-2xl border border-slate-200 flex flex-col">
-      <div className="overflow-auto rounded-2xl max-h-[70vh]">
+      {/* When a row is expanded the outer scroll box doubles its height cap (70vh → 140vh) so the
+          heavy per-school detail table has real room instead of being squeezed into a sliver. */}
+      <div className={`overflow-auto rounded-2xl ${expandedId ? "max-h-[140vh]" : "max-h-[70vh]"}`}>
           <table className="w-full text-sm min-w-[1100px] border-collapse">
             <thead style={{ position: "sticky", top: 0, zIndex: 10, background: "rgba(241,245,249,0.97)", backdropFilter: "blur(8px)" }}>
               <tr className="border-b border-slate-200">

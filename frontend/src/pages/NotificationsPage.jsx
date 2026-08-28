@@ -5,6 +5,7 @@ import { supabase } from "../lib/supabase";
 import Sidebar from "../components/Sidebar";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useTasks } from "../context/TasksContext";
+import { useMeetingReminders } from "../context/MeetingRemindersContext";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -39,6 +40,8 @@ const TYPE_ICON = {
   temp_access_granted:      "🔓",
   temp_access_expired:      "🔒",
   call_contact_ambiguous:   "📞",
+  voicenter_unknown_call:   "📞",
+  voicenter_rep_unmapped:   "☎️",
 };
 
 const FIELD_LABEL = {
@@ -233,6 +236,8 @@ function SettingsModal({ onClose, role }) {
         { label: "תפקיד של משתמש בצוות שונה",              prefKey: "notify_role_changed" },
         { label: "תויגתי בהערת פגישה",                     prefKey: "notify_mention" },
         { label: "שיחה עם איש קשר ששייך למספר בתי ספר וממתינה לשיוך", prefKey: "notify_call_contact_ambiguous" },
+        { label: "שיחה ממספר לא מוכר שלי הממתינה לשיוך לבית ספר", prefKey: "notify_voicenter_unknown_call" },
+        { label: "שיחה ממספר ארגוני שאינו משויך לאף משתמש", prefKey: "notify_voicenter_rep_unmapped" },
       ]
     : role === "manager"
     ? [
@@ -241,11 +246,14 @@ function SettingsModal({ onClose, role }) {
         { label: "תפקיד של משתמש בצוות שונה",           prefKey: "notify_role_changed" },
         { label: "תויגתי בהערת פגישה",                   prefKey: "notify_mention" },
         { label: "שיחה עם איש קשר ששייך למספר בתי ספר וממתינה לשיוך", prefKey: "notify_call_contact_ambiguous" },
+        { label: "שיחה ממספר לא מוכר שלי הממתינה לשיוך לבית ספר", prefKey: "notify_voicenter_unknown_call" },
+        { label: "שיחה ממספר ארגוני שאינו משויך לאף משתמש", prefKey: "notify_voicenter_rep_unmapped" },
       ]
     : [
         { label: "הבקשה שלי לעדכון פרטים אושרה או נדחתה", prefKey: "notify_update_request_reviewed" },
         { label: "שויכתי לבית ספר חדש או הוסרתי",          prefKey: "notify_advisor_assignment" },
         { label: "תויגתי בהערת פגישה",                      prefKey: "notify_mention" },
+        { label: "שיחה ממספר לא מוכר שלי הממתינה לשיוך לבית ספר", prefKey: "notify_voicenter_unknown_call" },
       ];
 
   return (
@@ -502,6 +510,7 @@ function MeetingFilesArrivedDetail({ meetingId, schoolId }) {
 function NotificationRow({ notif, isExpanded, onToggle, onRead, onReload, onDeleteApproved, role }) {
   const navigate = useNavigate();
   const { openTask } = useTasks();
+  const { addCallAttribReminder } = useMeetingReminders();
   const isUnread  = !notif.read_at;
   const icon      = TYPE_ICON[notif.type] || "🔔";
   const title     = notif.data?.title || "התראה";
@@ -557,6 +566,16 @@ function NotificationRow({ notif, isExpanded, onToggle, onRead, onReload, onDele
       // Sent to the task's creator (manager/owner) — the fix happens in the admin table, not
       // the personal area.
       navigate("/admin?tab=tasks");
+    } else if (notif.type === "voicenter_unknown_call" && data.call_id) {
+      // Re-open the same interrupting popup flow used by the Sidebar poll.
+      try { sessionStorage.removeItem(`call-attrib-${data.call_id}`); } catch {}
+      addCallAttribReminder({
+        call_id: data.call_id,
+        counterpart_phone: data.counterpart_phone,
+        counterpart_phone_display: data.counterpart_phone,
+        call_time: data.call_time,
+      });
+      if (isUnread) onRead(notif.id);
     } else if (isActionable || isResultExpandable || isFilesArrived || isCallResolvable) {
       onToggle(notif.id);
     } else if (data.deeplink) {

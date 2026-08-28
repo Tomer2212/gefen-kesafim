@@ -9,6 +9,12 @@ import { useMeetingReminders } from "../context/MeetingRemindersContext";
 
 const ROLE_LABEL = { owner: "בעלים", manager: "מנהל", advisor: "יועץ" };
 
+// When the "auto-complete meeting status from activity" org automation is ON, defer the
+// end-of-meeting status popup by 1h (window 1h–3h after end) so the automation has time to
+// flip the meeting to "completed" first, avoiding a race between the two mechanisms.
+const STATUS_POPUP_AUTO_DELAY_MS = 60 * 60 * 1000;
+const STATUS_POPUP_AUTO_WINDOW_END_MS = 3 * 60 * 60 * 1000;
+
 function sessionIsValid(session) {
   if (!session?.access_token) return false;
   if (!session.expires_at) return true;
@@ -283,10 +289,11 @@ export default function Sidebar({ dark = false }) {
   const [isSuperAdmin, setIsSuperAdmin] = useState(false);
   const [notifCount, setNotifCount] = useState(0);
   const [toasts, setToasts] = useState([]);
-  const { addMeetingReminder, addStatusReminder, addTaskReminder, setUserName: setCtxUserName } = useMeetingReminders();
+  const { addMeetingReminder, addStatusReminder, addTaskReminder, addCallAttribReminder, setUserName: setCtxUserName } = useMeetingReminders();
   const prevCountRef = useRef(0);
   const lastPollTimeRef = useRef(Date.now());
   const notifPrefsRef = useRef({ meeting_reminder: true, meeting_reminder_minutes: 10 });
+  const autoCompleteRef = useRef(false);
   const wakeRefreshRef = useRef(null);
 
   const dismissToast = useCallback((id) => {
@@ -320,6 +327,7 @@ export default function Sidebar({ dark = false }) {
         if (res.data.notification_preferences) {
           notifPrefsRef.current = res.data.notification_preferences;
         }
+        autoCompleteRef.current = !!res.data.org?.auto_complete_meetings_from_activity_enabled;
       } catch {
         setUserName(metaName || session.user.email || "");
         setRole(metaRole);
@@ -407,7 +415,14 @@ export default function Sidebar({ dark = false }) {
               const endTime = new Date(`${m.meeting_date}T${m.end_time}:00`);
               const msAfterEnd = now.getTime() - endTime.getTime();
               const statusKey = `status-reminder-${m.id}-${m.meeting_date}-${m.end_time}`;
-              if (msAfterEnd >= 0 && msAfterEnd <= twoHours && !sessionStorage.getItem(statusKey)) {
+              // When the org's auto-complete automation is on, defer this popup to 1h–3h after
+              // the meeting's end (instead of 0–2h) so the automation gets a chance to flip the
+              // meeting to "completed" first. If it's still "scheduled" after an hour, no linked
+              // call arrived and no offline work was logged — so it's right to ask the advisor.
+              const autoOn = autoCompleteRef.current;
+              const lowerBound = autoOn ? STATUS_POPUP_AUTO_DELAY_MS : 0;
+              const upperBound = autoOn ? STATUS_POPUP_AUTO_WINDOW_END_MS : twoHours;
+              if (msAfterEnd >= lowerBound && msAfterEnd <= upperBound && !sessionStorage.getItem(statusKey)) {
                 sessionStorage.setItem(statusKey, "1");
                 addStatusReminder({ ...m });
               }
@@ -463,9 +478,29 @@ export default function Sidebar({ dark = false }) {
       }
     }
 
+    // Unknown-number call prompts — an interrupting popup asking the advisor whether an
+    // unrecognised number belongs to a school. Detected by the Voicenter cron; surfaced here.
+    async function checkUnknownCallPrompts() {
+      if (wakeRefreshRef.current) await wakeRefreshRef.current;
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!sessionIsValid(session)) return;
+      try {
+        const res = await axios.get("/voicenter/calls/unknown/my-prompts");
+        for (const p of (res.data?.prompts || [])) {
+          const key = `call-attrib-${p.call_id}`;
+          if (sessionStorage.getItem(key)) continue;
+          sessionStorage.setItem(key, "1");
+          addCallAttribReminder({ ...p });
+        }
+      } catch {
+        // silent — must never block other polling
+      }
+    }
+
     fetchCount();
     checkMeetingReminders();
-    const t = setInterval(() => { fetchCount(); checkMeetingReminders(); }, 60000);
+    checkUnknownCallPrompts();
+    const t = setInterval(() => { fetchCount(); checkMeetingReminders(); checkUnknownCallPrompts(); }, 60000);
     return () => clearInterval(t);
   }, []);
 

@@ -3,11 +3,13 @@ import { useMeetingReminders } from "../context/MeetingRemindersContext";
 import MeetingReminderPopup from "./MeetingReminderPopup";
 import MeetingStatusUpdatePopup from "./MeetingStatusUpdatePopup";
 import TaskReminderPopup from "./TaskReminderPopup";
+import UnknownCallPopup from "./UnknownCallPopup";
 
 const HEADER_META = {
   status: { icon: "🔔", label: "עדכון סטטוס פגישה", cls: "bg-sky-50 border-sky-100 text-sky-800 hover:bg-sky-100" },
   task: { icon: "✅", label: "משימה לביצוע", cls: "bg-blue-50 border-blue-100 text-blue-800 hover:bg-blue-100" },
   reminder: { icon: "🗓️", label: "תזכורת", cls: "bg-amber-50 border-amber-100 text-amber-800 hover:bg-amber-100" },
+  "call-attrib": { icon: "📞", label: "שיחה ממספר לא מוכר", cls: "bg-violet-50 border-violet-100 text-violet-800 hover:bg-violet-100" },
 };
 
 function ReminderHeaderOnly({ reminder, onClick }) {
@@ -76,6 +78,9 @@ export default function MeetingRemindersOverlay() {
         const onDismiss = () => dismiss(r._key);
         if (r._type === "task") {
           return <TaskReminderPopup key={r._key} reminder={r} onDismiss={onDismiss} />;
+        }
+        if (r._type === "call-attrib") {
+          return <UnknownCallPopup key={r._key} reminder={r} onDismiss={onDismiss} onSuccess={showSuccess} />;
         }
         return r._type === "reminder"
           ? <MeetingReminderPopup key={r._key} reminder={r} onDismiss={onDismiss} onSuccess={showSuccess} />

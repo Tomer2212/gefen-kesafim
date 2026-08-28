@@ -26,6 +26,19 @@ const DEFAULT_FILTERS = { status: "scheduled", date_from: null, date_to: TODAY, 
 const SS_KEY = "admin_meetings_ui_state";
 
 const INPUT_CLS = "text-sm border border-slate-200 rounded-lg px-2.5 py-1.5 outline-none focus:border-blue-400 bg-white";
+const ACTIVE_INPUT_CLS = " border-blue-400 ring-1 ring-blue-300 bg-blue-50/50";
+
+// Subtle "this field is currently filtering the list" indicator — blue label text + a small
+// dot, reused by every filter field in the base and advanced panels. Deliberately mirrors the
+// existing badge language already used on the "סינון מתקדם" toggle button, just per-field.
+function FilterLabel({ htmlFor, active, children }) {
+  return (
+    <label htmlFor={htmlFor} className={`flex items-center gap-1 text-xs font-medium mb-1 ${active ? "text-blue-600" : "text-slate-500"}`}>
+      {children}
+      {active && <span aria-hidden="true" className="inline-block w-1.5 h-1.5 rounded-full bg-blue-500" />}
+    </label>
+  );
+}
 
 function readSavedState() {
   try { return JSON.parse(sessionStorage.getItem(SS_KEY) || "null"); } catch { return null; }
@@ -312,7 +325,8 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
       meeting_service_type: draft.meeting_service_type || null,
       actual_duration: draft.actual_duration || null,
       notes: draft.notes || null,
-      reminder_enabled: draft.reminder_enabled || false,
+      // reminder_enabled is intentionally NOT sent here — the toggle writes via its own
+      // PATCH so a racing field autosave can't flip it back. See MeetingRow.patchReminder.
       primary_contact_key: draft.primary_contact_key || null,
       stage_scope: draft.stage_scope || null,
     };
@@ -374,7 +388,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
       advisor_ids: defaultAdvisorIds,
       participants,
       primary_contact_key: participants.length === 1 ? participants[0].key : null,
-      reminder_enabled: false, academic_year: academicYear,
+      academic_year: academicYear,
       ...(stageScope === "tichon" || stageScope === "chativa" || stageScope === "both" ? { stage_scope: stageScope } : {}),
     };
     try {
@@ -434,7 +448,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
       advisor_ids: [advisorId],
       participants,
       primary_contact_key: participants.length === 1 ? participants[0].key : null,
-      reminder_enabled: false, academic_year: academicYear,
+      academic_year: academicYear,
     };
     try {
       const res = await axios.post(`/schools/${school.id}/meetings`, payload);
@@ -684,6 +698,22 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
     : null;
   const advisors = (users || []).filter(u => u.role === "advisor" || u.role === "manager" || u.role === "owner");
 
+  // Several base filters carry non-obvious "hidden" defaults (status defaults to "נקבעה" not
+  // "הכל"; date_to defaults to today, not empty) — a user can easily leave one of these set
+  // without realizing the list is filtered. Each field highlights (blue label+dot+ring) the
+  // moment its value diverges from that default, so the active filter is always visible at a
+  // glance without needing to open/inspect the field.
+  const activeBaseFilters = {
+    date_from: !!filters.date_from,
+    date_to: (filters.date_to || "") !== TODAY,
+    status: (filters.status || "") !== "scheduled",
+    advisor_id: !!filters.advisor_id,
+    school_name: !!nameFilter,
+    school_symbol: !!symbolFilter,
+  };
+  const activeBaseFilterCount = Object.values(activeBaseFilters).filter(Boolean).length;
+  const totalActiveFilterCount = activeBaseFilterCount + advancedFilterCount;
+
   return (
     <div>
       {/* Status reminder toasts */}
@@ -912,45 +942,55 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
         {/* Filter fields + נקה סינון in the same flex row */}
         <div className="flex flex-wrap items-end gap-4">
           <div>
-            <label htmlFor="filter-date-from" className="block text-xs font-medium text-slate-500 mb-1">מתאריך</label>
+            <FilterLabel htmlFor="filter-date-from" active={activeBaseFilters.date_from}>מתאריך</FilterLabel>
             <input id="filter-date-from" type="date" value={filters.date_from || ""}
-              onChange={e => setServerFilter("date_from", e.target.value)} className={INPUT_CLS} />
+              onChange={e => setServerFilter("date_from", e.target.value)}
+              className={INPUT_CLS + (activeBaseFilters.date_from ? ACTIVE_INPUT_CLS : "")} />
           </div>
           <div>
-            <label htmlFor="filter-date-to" className="block text-xs font-medium text-slate-500 mb-1">עד תאריך</label>
+            <FilterLabel htmlFor="filter-date-to" active={activeBaseFilters.date_to}>עד תאריך</FilterLabel>
             <input id="filter-date-to" type="date" value={filters.date_to || ""}
-              onChange={e => setServerFilter("date_to", e.target.value)} className={INPUT_CLS} />
+              onChange={e => setServerFilter("date_to", e.target.value)}
+              className={INPUT_CLS + (activeBaseFilters.date_to ? ACTIVE_INPUT_CLS : "")} />
           </div>
           <div>
-            <label htmlFor="filter-status" className="block text-xs font-medium text-slate-500 mb-1">סטטוס</label>
-            <select id="filter-status" value={filters.status || ""} onChange={e => setServerFilter("status", e.target.value)} className={INPUT_CLS}>
+            <FilterLabel htmlFor="filter-status" active={activeBaseFilters.status}>סטטוס</FilterLabel>
+            <select id="filter-status" value={filters.status || ""} onChange={e => setServerFilter("status", e.target.value)}
+              className={INPUT_CLS + (activeBaseFilters.status ? ACTIVE_INPUT_CLS : "")}>
               <option value="">הכל</option>
               {MEETING_STATUS_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
           </div>
           <div>
-            <label htmlFor="filter-advisor" className="block text-xs font-medium text-slate-500 mb-1">יועץ מבצע</label>
-            <select id="filter-advisor" value={filters.advisor_id || ""} onChange={e => setServerFilter("advisor_id", e.target.value)} className={INPUT_CLS}>
+            <FilterLabel htmlFor="filter-advisor" active={activeBaseFilters.advisor_id}>יועץ מבצע</FilterLabel>
+            <select id="filter-advisor" value={filters.advisor_id || ""} onChange={e => setServerFilter("advisor_id", e.target.value)}
+              className={INPUT_CLS + (activeBaseFilters.advisor_id ? ACTIVE_INPUT_CLS : "")}>
               <option value="">הכל</option>
               {advisors.map(u => <option key={u.id} value={u.id}>{u.full_name || u.email}</option>)}
             </select>
           </div>
           <div>
-            <label htmlFor="filter-school-name" className="block text-xs font-medium text-slate-500 mb-1">שם מוסד</label>
+            <FilterLabel htmlFor="filter-school-name" active={activeBaseFilters.school_name}>שם מוסד</FilterLabel>
             <input id="filter-school-name" type="text" value={nameFilter}
               onChange={e => setNameFilter(e.target.value)}
               placeholder="חיפוש לפי שם..."
-              className={INPUT_CLS} />
+              className={INPUT_CLS + (activeBaseFilters.school_name ? ACTIVE_INPUT_CLS : "")} />
           </div>
           <div>
-            <label htmlFor="filter-school-symbol" className="block text-xs font-medium text-slate-500 mb-1">סמל מוסד</label>
+            <FilterLabel htmlFor="filter-school-symbol" active={activeBaseFilters.school_symbol}>סמל מוסד</FilterLabel>
             <input id="filter-school-symbol" type="text" value={symbolFilter}
               onChange={e => setSymbolFilter(e.target.value)}
               placeholder="סמל..."
-              className={INPUT_CLS + " w-28"} />
+              className={INPUT_CLS + " w-28" + (activeBaseFilters.school_symbol ? ACTIVE_INPUT_CLS : "")} />
           </div>
-          <button type="button" onClick={clearFilters} className="text-xs text-slate-400 hover:text-slate-600 transition-colors px-1 py-1.5 self-end">
+          <button type="button" onClick={clearFilters}
+            className={`flex items-center gap-1 text-xs transition-colors px-1 py-1.5 self-end ${totalActiveFilterCount > 0 ? "text-blue-600 font-medium hover:text-blue-700" : "text-slate-400 hover:text-slate-600"}`}>
             נקה סינון
+            {totalActiveFilterCount > 0 && (
+              <span aria-hidden="true" className="inline-flex items-center justify-center w-4 h-4 text-[10px] font-bold rounded-full bg-blue-100 text-blue-700 leading-none">
+                {totalActiveFilterCount}
+              </span>
+            )}
           </button>
         </div>
       </div>
@@ -959,18 +999,18 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
       {showAdvanced && (
         <div className="glass-card rounded-xl p-4 mb-3 flex flex-wrap items-end gap-4" dir="rtl">
           <div>
-            <label htmlFor="filter-city" className="block text-xs font-medium text-slate-500 mb-1">עיר</label>
+            <FilterLabel htmlFor="filter-city" active={!!cityFilter}>עיר</FilterLabel>
             <input id="filter-city" type="text" value={cityFilter}
               onChange={e => setCityFilter(e.target.value)}
               placeholder="חיפוש לפי עיר..."
-              className={INPUT_CLS} />
+              className={INPUT_CLS + (cityFilter ? ACTIVE_INPUT_CLS : "")} />
           </div>
           <div>
-            <label htmlFor="filter-district" className="block text-xs font-medium text-slate-500 mb-1">מחוז</label>
+            <FilterLabel htmlFor="filter-district" active={!!districtFilter}>מחוז</FilterLabel>
             <input id="filter-district" type="text" value={districtFilter}
               onChange={e => setDistrictFilter(e.target.value)}
               placeholder="חיפוש לפי מחוז..."
-              className={INPUT_CLS} />
+              className={INPUT_CLS + (districtFilter ? ACTIVE_INPUT_CLS : "")} />
           </div>
         </div>
       )}
@@ -1010,6 +1050,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
             contactsFor={m => buildSchoolContacts(schools.find(s => s.id === m.school_id))}
             schoolStageFor={m => schools.find(s => s.id === m.school_id)?.stage}
             onSave={updateMeeting}
+            onMeetingPatched={(id, patch) => setMeetings(prev => prev.map(m => m.id === id ? { ...m, ...patch } : m))}
             onDelete={deleteMeeting}
             onOpenNotes={(meetingId, notes, onSave) => setNotesModal({ meetingId, notes, onSave })}
             onRequestAccess={handleRequestAdvisorAccess}

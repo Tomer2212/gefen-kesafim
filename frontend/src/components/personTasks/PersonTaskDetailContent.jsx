@@ -2,6 +2,9 @@ import { useEffect, useState } from "react";
 import axios from "axios";
 import { supabase } from "../../lib/supabase";
 import { describeCondition } from "../tasks/taskShared";
+import ColumnFilterButton from "../tasks/ColumnFilterButton";
+import PersonTaskTableToolbar from "./PersonTaskTableToolbar";
+import { makeSchoolColumns, distinctFor, applyPersonTaskFilters, EMPTY_SUB_FILTER } from "./personTaskSchoolFilter";
 import FieldMetricEditor, { getSingleCondition } from "./FieldMetricEditor";
 
 export const METRIC_KIND_LABELS = {
@@ -56,6 +59,9 @@ export default function PersonTaskDetailContent({ taskId, onTaskChange, onlyCurr
   const [fieldMeta, setFieldMeta] = useState(null);
   const [uploadingTargetId, setUploadingTargetId] = useState(null);
   const [openNoteIds, setOpenNoteIds] = useState(() => new Set());
+  // Free-text / advanced / column-filter / sort state for the schools table (schools-mode,
+  // multi-school views only — see showSchoolFilters below).
+  const [subFilter, setSubFilter] = useState(EMPTY_SUB_FILTER);
 
   function loadTask() {
     setLoading(true);
@@ -189,6 +195,40 @@ export default function PersonTaskDetailContent({ taskId, onTaskChange, onlyCurr
     ? (targets.length ? Math.round((targets.filter(t => t.completed).length / targets.length) * 10000) / 100 : 0)
     : (task.cached_progress_pct ?? 0);
 
+  // Identity-column search/filter/sort — only where there are actually many schools to sift
+  // through: schools-mode, and not the single-school card (hideSchoolColumn).
+  const showSchoolFilters = task.assignment_mode === "schools" && !hideSchoolColumn;
+  const filterCols = makeSchoolColumns({ hasMetricCol: false });
+  const colBy = Object.fromEntries(filterCols.map(c => [c.key, c]));
+  const displayTargets = showSchoolFilters ? applyPersonTaskFilters(targets, subFilter, filterCols) : targets;
+
+  function setColFilter(key, v) {
+    setSubFilter(s => {
+      const cf = { ...s.columnFilters };
+      if (v == null) delete cf[key]; else cf[key] = v;
+      return { ...s, columnFilters: cf };
+    });
+  }
+  function setColSort(key, dir) {
+    setSubFilter(s => ({ ...s, sortSpec: dir ? { key, dir } : null }));
+  }
+  // Plain helper (NOT a nested component) — returning a stable element tree keeps
+  // ColumnFilterButton mounted across re-renders so its open popover doesn't collapse mid-click.
+  function headerFilter(colKey) {
+    const col = colBy[colKey];
+    if (!showSchoolFilters || !col) return null;
+    return (
+      <ColumnFilterButton
+        col={col}
+        filter={subFilter.columnFilters[col.key]}
+        onFilterChange={v => setColFilter(col.key, v)}
+        sortDir={subFilter.sortSpec?.key === col.key ? subFilter.sortSpec.dir : null}
+        onSort={dir => setColSort(col.key, dir)}
+        distinctOptions={col.kind === "enum" ? distinctFor(targets, col) : undefined}
+      />
+    );
+  }
+
   return (
     <div className="space-y-3">
       <div className="flex items-start justify-between gap-3 bg-slate-50 rounded-xl p-3">
@@ -210,30 +250,63 @@ export default function PersonTaskDetailContent({ taskId, onTaskChange, onlyCurr
       screen instead (same principle as PersonTaskAdminDetailContent.jsx's own table). The
       "אחראי/ים" column is also dropped there — in a personal view it's always the current user,
       showing it adds nothing. */}
+      {showSchoolFilters && (
+        <PersonTaskTableToolbar
+          freeText={subFilter.freeText}
+          setFreeText={v => setSubFilter(s => ({ ...s, freeText: v }))}
+          advanced={subFilter.advanced}
+          setAdvanced={v => setSubFilter(s => ({ ...s, advanced: v }))}
+          fieldOptions={fieldMeta?.fieldOptions || []}
+        />
+      )}
+
       <div className="overflow-x-auto border border-slate-100 rounded-xl">
         <table className={compact ? "text-sm" : "w-full text-sm"}>
           <thead className="bg-slate-50 border-b border-slate-200">
             <tr>
               {!hideSchoolColumn && (
                 <th scope="col" className={`text-right px-3 py-2 font-semibold text-slate-600 ${onlyCurrentUser ? "w-96" : ""}`}>
-                  {task.assignment_mode === "schools" ? "בית ספר" : "משתמש"}
+                  <span className="inline-flex items-center gap-1">
+                    {task.assignment_mode === "schools" ? "בית ספר" : "משתמש"}
+                    {headerFilter("school_name")}
+                  </span>
                 </th>
+              )}
+              {showSchoolFilters && (
+                <>
+                  <th scope="col" className="text-right px-3 py-2 font-semibold text-slate-600 whitespace-nowrap">
+                    <span className="inline-flex items-center gap-1">עיר {headerFilter("city")}</span>
+                  </th>
+                  <th scope="col" className="text-right px-3 py-2 font-semibold text-slate-600 whitespace-nowrap">
+                    <span className="inline-flex items-center gap-1">סמל מוסד {headerFilter("symbol")}</span>
+                  </th>
+                  <th scope="col" className="text-right px-3 py-2 font-semibold text-slate-600 whitespace-nowrap">
+                    <span className="inline-flex items-center gap-1">בעלות {headerFilter("authority")}</span>
+                  </th>
+                </>
               )}
               {task.assignment_mode === "schools" && !compact && (
                 <th scope="col" className="text-right px-3 py-2 font-semibold text-slate-600">אחראי/ים</th>
               )}
               {task.assignment_mode === "schools" && (
                 <>
-                  <th scope="col" className="text-right px-3 py-2 font-semibold text-slate-600 whitespace-nowrap">שלב לימוד</th>
+                  <th scope="col" className="text-right px-3 py-2 font-semibold text-slate-600 whitespace-nowrap">
+                    <span className="inline-flex items-center gap-1">שלב לימוד {headerFilter("stage_label")}</span>
+                  </th>
                   <th scope="col" className="text-right px-3 py-2 font-semibold text-slate-600">הערות</th>
                 </>
               )}
-              <th scope="col" className={`text-center px-3 py-2 font-semibold text-slate-600 ${compact ? "w-32" : ""}`}>סטטוס</th>
+              <th scope="col" className={`text-center px-3 py-2 font-semibold text-slate-600 ${compact ? "w-32" : ""}`}>
+                <span className="inline-flex items-center gap-1">סטטוס {headerFilter("status")}</span>
+              </th>
               <th scope="col" className={`text-center px-3 py-2 font-semibold text-slate-600 ${compact ? "w-56" : ""}`}>מדד הצלחה</th>
             </tr>
           </thead>
           <tbody>
-            {targets.map(t => {
+            {displayTargets.length === 0 && showSchoolFilters && (
+              <tr><td colSpan={12} className="py-4 px-3 text-center text-xs text-slate-400">אין בתי ספר תואמים</td></tr>
+            )}
+            {displayTargets.map(t => {
               const isAssignee = currentUserId && (t.assignee_ids || []).includes(currentUserId);
               const canUndo = t.completed && isAssignee && (metric.kind === "checkbox" || metric.kind === "number");
               // Field-kind edits (goal/control_letter/year-admin-data) are written through to
@@ -249,12 +322,21 @@ export default function PersonTaskDetailContent({ taskId, onTaskChange, onlyCurr
                 <tr key={t.id} className={`border-b border-slate-50 ${t.completed ? "bg-emerald-50/50" : ""}`}>
                   {!hideSchoolColumn && (
                     <td className={`px-3 py-2 text-slate-800 ${onlyCurrentUser ? "w-96" : ""}`}>
-                      {task.assignment_mode === "schools" ? (
-                        onlyCurrentUser
-                          ? [t.school_name, t.symbol, t.authority].filter(Boolean).join(" - ")
-                          : <>{t.school_name}{t.symbol && <bdi className="text-slate-400 text-xs"> ({t.symbol})</bdi>}</>
-                      ) : (t.assignee_names || []).join(", ")}
+                      {task.assignment_mode === "schools"
+                        ? (showSchoolFilters
+                            ? t.school_name
+                            : (onlyCurrentUser
+                                ? [t.school_name, t.symbol, t.authority].filter(Boolean).join(" - ")
+                                : <>{t.school_name}{t.symbol && <bdi className="text-slate-400 text-xs"> ({t.symbol})</bdi>}</>))
+                        : (t.assignee_names || []).join(", ")}
                     </td>
+                  )}
+                  {showSchoolFilters && (
+                    <>
+                      <td className="px-3 py-2 text-slate-600 text-xs whitespace-nowrap">{t.city || "—"}</td>
+                      <td className="px-3 py-2 text-slate-600 text-xs whitespace-nowrap"><bdi>{t.symbol || "—"}</bdi></td>
+                      <td className="px-3 py-2 text-slate-600 text-xs whitespace-nowrap">{t.authority || "—"}</td>
+                    </>
                   )}
                   {task.assignment_mode === "schools" && !compact && (
                     <td className="px-3 py-2 text-slate-600 text-xs">{(t.assignee_names || []).join(" / ")}</td>

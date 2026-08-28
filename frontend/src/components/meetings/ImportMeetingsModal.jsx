@@ -49,19 +49,62 @@ function fieldConfigForMode(mode) {
   });
 }
 
+// Deliberately NOT using xlsx's `cellDates: true` conversion — verified directly (Node,
+// this exact library, a real file) that its serial->Date construction is broken: for a cell
+// storing an exact, correct serial (e.g. 0.5 = noon), the resulting Date object's components
+// come back off by 2+ hours. The raw numeric serial itself is always exact (Excel stores it
+// as a clean double), so we do the serial->date/time conversion ourselves with the same
+// epoch arithmetic the backend uses (academic_years.py / _parse_import_date in
+// schools_router.py) — this is exact and keeps both sides consistent.
+function excelSerialToDateISO(serial) {
+  const days = Math.floor(serial);
+  const d = new Date(Date.UTC(1899, 11, 30) + days * 86400000);
+  const pad = n => String(n).padStart(2, "0");
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+}
+function excelSerialToTimeHHMM(serial) {
+  const frac = serial - Math.floor(serial);
+  const totalMinutes = Math.round(frac * 1440); // round to nearest minute — immune to float noise
+  const h = Math.floor(totalMinutes / 60) % 24, m = totalMinutes % 60;
+  const pad = n => String(n).padStart(2, "0");
+  return `${pad(h)}:${pad(m)}`;
+}
+// Generic cell->string for non-date/time fields (headers, preview row, text columns).
+function cellDisplayValue(v) {
+  if (typeof v === "number") return String(v);
+  return v !== undefined && v !== null ? String(v).trim() : "";
+}
+
 function buildRowsFromSheet(mode, headers, dataRows, mapping) {
   function cell(row, key) {
     const idx = mapping[key];
     if (idx === null || idx === undefined) return "";
-    return row[idx] !== undefined && row[idx] !== null ? String(row[idx]).trim() : "";
+    return cellDisplayValue(row[idx]);
+  }
+  // meeting_date/start_time/end_time need serial-aware reading: a cell Excel actually
+  // formatted as a date/time comes through sheet_to_json as a raw number (no cellDates),
+  // which must be converted via the exact serial math above rather than stringified.
+  function dateCell(row, key) {
+    const idx = mapping[key];
+    if (idx === null || idx === undefined) return "";
+    const raw = row[idx];
+    if (typeof raw === "number") return excelSerialToDateISO(raw);
+    return cellDisplayValue(raw);
+  }
+  function timeCell(row, key) {
+    const idx = mapping[key];
+    if (idx === null || idx === undefined) return "";
+    const raw = row[idx];
+    if (typeof raw === "number") return excelSerialToTimeHHMM(raw);
+    return cellDisplayValue(raw);
   }
   return dataRows.map((row, i) => ({
     row_index: i,
-    meeting_date: normalizeImportDate(cell(row, "meeting_date")) || null,
+    meeting_date: normalizeImportDate(dateCell(row, "meeting_date")) || null,
     school_name: cell(row, "school_name") || null,
     school_symbol: cell(row, "school_symbol") || null,
-    start_time: cell(row, "start_time") || null,
-    end_time: cell(row, "end_time") || null,
+    start_time: timeCell(row, "start_time") || null,
+    end_time: timeCell(row, "end_time") || null,
     stage_scope: normalizeImportStageScope(cell(row, "stage_scope")),
     advisor_name_or_email: mode === "future" ? (cell(row, "advisor_name_or_email") || null) : null,
     advisor_name_text: mode === "past" ? (cell(row, "advisor_name_text") || null) : null,
@@ -97,17 +140,20 @@ export default function ImportMeetingsModal({ orgUsers, academicYear, onClose, o
     const reader = new FileReader();
     reader.onload = (ev) => {
       try {
+        // No cellDates here on purpose — date/time-formatted cells come through as raw
+        // numeric serials (e.g. 46027), converted precisely in buildRowsFromSheet's
+        // dateCell/timeCell (see the comment above excelSerialToDateISO).
         const wb = XLSX.read(ev.target.result, { type: "array" });
         const ws = wb.Sheets[wb.SheetNames[0]];
         const allRows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
-        const nonEmpty = allRows.filter(r => r.some(c => String(c).trim() !== ""));
+        const nonEmpty = allRows.filter(r => r.some(c => cellDisplayValue(c) !== ""));
         if (nonEmpty.length < 2) {
           setError("הקובץ ריק או לא מכיל נתונים");
           setSelectedFile(null);
           return;
         }
-        const headers = nonEmpty[0].map(h => String(h).trim());
-        const previewRow = nonEmpty[1].map(v => String(v).trim());
+        const headers = nonEmpty[0].map(h => cellDisplayValue(h));
+        const previewRow = nonEmpty[1].map(v => cellDisplayValue(v));
         const dataRows = nonEmpty.slice(1);
         setSheetData({ headers, previewRow, dataRows });
       } catch {

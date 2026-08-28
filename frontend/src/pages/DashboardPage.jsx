@@ -9,6 +9,7 @@ import OnboardingToast from "../components/OnboardingToast";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { ACADEMIC_YEARS, DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
 import { CONTROL_LETTER_STATUS_MAP, CONTROL_LETTER_STATUS_OPTIONS } from "../components/controlLetter/constants";
+import { MEETING_SERVICE_TYPE_BREAKDOWN_COL_ORDER } from "../components/meetings/constants";
 
 // Fallback list so "סוג תקציב" has real options even before check_metrics has any rows
 // for the org (brand-new table, only populated going forward by new checks) — matches
@@ -432,22 +433,53 @@ function GoalConditionRow({ condition, index, label, onChangeMet, onChangeConnec
   );
 }
 
-const MOVABLE_COLUMNS = [
+// Per-service-type "פגישות/שעות שבוצעו" columns — one count + one hours column per bucket
+// (גפן / שוטף / גפן+שוטף / מחוז / ללא סוג). Off by default; values come from
+// school.meetings_stats.by_type[<key>]. Kept adjacent to the two aggregate meetings columns.
+const MEETING_TYPE_BREAKDOWN_COLUMNS = MEETING_SERVICE_TYPE_BREAKDOWN_COL_ORDER.flatMap(t => [
+  { key: `meetings_completed_${t.key}`, label: `סה"כ פגישות ${t.label} שבוצעו`, breakdownType: t.key, breakdownMetric: "completed" },
+  { key: `meetings_hours_${t.key}`,     label: `סה"כ שעות ${t.label} שבוצעו`,   breakdownType: t.key, breakdownMetric: "total_minutes" },
+]);
+const MEETING_TYPE_BREAKDOWN_COL_META = Object.fromEntries(
+  MEETING_TYPE_BREAKDOWN_COLUMNS.map(c => [c.key, c])
+);
+
+// Column-picker groups (see columnCategories below). MOVABLE_COLUMNS stays the flat
+// concatenation of all three so the rest of the file (DEFAULT_COL_ORDER, colVisible init,
+// back-fill) keeps working unchanged.
+const GENERAL_COLUMNS = [
   { key: "symbol",              label: "סמל מוסד" },
   { key: "city",                label: "עיר" },
   { key: "authority",           label: "בעלות" },
   { key: "stage",               label: "שלב מוסד" },
-  { key: "meetings_completed",  label: 'סה"כ פגישות שבוצעו' },
-  { key: "meetings_hours",      label: 'סה"כ שעות שבוצעו' },
-  { key: "meeting_allocation_gefen",    label: "הקצאת פגישות [גפן]" },
-  { key: "meeting_allocation_current",  label: "הקצאת פגישות [שוטף]" },
-  { key: "meeting_allocation_district", label: "הקצאת פגישות [מחוז]" },
-  { key: "meeting_duration_gefen",      label: "זמן לפגישה [גפן]" },
-  { key: "meeting_duration_current",    label: "זמן לפגישה [שוטף]" },
-  { key: "meeting_duration_district",   label: "זמן לפגישה [מחוז]" },
+  { key: "district",            label: "מחוז" },
+  { key: "finance_software",    label: "תוכנת כספים" },
   { key: "advisor_gefen",       label: "יועץ מלווה [גפן]" },
   { key: "advisor_current",     label: "יועץ מלווה [שוטף]" },
   { key: "advisor_district",    label: "יועץ מלווה [מחוז]" },
+];
+const ALLOCATION_COLUMNS = [
+  { key: "meeting_allocation_gefen",    label: "הקצאת פגישות [גפן]" },
+  { key: "meeting_allocation_current",  label: "הקצאת פגישות [שוטף]" },
+  { key: "meeting_allocation_district", label: "הקצאת פגישות [מחוז]" },
+  { key: "meeting_duration_gefen",      label: "הקצאת זמן פגישה [גפן]" },
+  { key: "meeting_duration_current",    label: "הקצאת זמן פגישה [שוטף]" },
+  { key: "meeting_duration_district",   label: "הקצאת זמן פגישה [מחוז]" },
+];
+const MEETINGS_DONE_COLUMNS = [
+  { key: "meetings_completed",  label: 'סה"כ פגישות שבוצעו' },
+  { key: "meetings_hours",      label: 'סה"כ שעות שבוצעו' },
+  ...MEETING_TYPE_BREAKDOWN_COLUMNS.map(c => ({ key: c.key, label: c.label })),
+];
+
+const MOVABLE_COLUMNS = [...GENERAL_COLUMNS, ...ALLOCATION_COLUMNS, ...MEETINGS_DONE_COLUMNS];
+
+// New MOVABLE_COLUMNS keys added after users may already have saved col prefs — must be
+// back-filled into a restored colOrder/colVisible (see effect below), like the other
+// late-added column groups.
+const NEWLY_ADDED_MOVABLE_COLUMNS = [
+  { key: "district",         label: "מחוז" },
+  { key: "finance_software", label: "תוכנת כספים" },
 ];
 
 // Optional columns showing summary data from the last real check run (check_metrics),
@@ -518,15 +550,18 @@ function isKnownColumnKey(k) {
 const FILTER_COLUMN_META = [
   { key: "meetings_completed", label: 'סה"כ פגישות שבוצעו', fmt: "int" },
   { key: "meetings_hours", label: 'סה"כ שעות שבוצעו', fmt: "hours" },
+  ...MEETING_TYPE_BREAKDOWN_COLUMNS.map(c => ({
+    key: c.key, label: c.label, fmt: c.breakdownMetric === "completed" ? "int" : "hours",
+  })),
   ...SUMMARY_COLUMNS,
   { key: "closure_parents_status",   label: "סגירת שנה-הורים", fmt: "closure" },
   { key: "closure_authority_status", label: "סגירת שנה-רשות",  fmt: "closure" },
   { key: "meeting_allocation_gefen",    label: "הקצאת פגישות [גפן]",  fmt: "int" },
   { key: "meeting_allocation_current",  label: "הקצאת פגישות [שוטף]", fmt: "int" },
   { key: "meeting_allocation_district", label: "הקצאת פגישות [מחוז]", fmt: "int" },
-  { key: "meeting_duration_gefen",      label: "זמן לפגישה [גפן]",   fmt: "hours" },
-  { key: "meeting_duration_current",    label: "זמן לפגישה [שוטף]",  fmt: "hours" },
-  { key: "meeting_duration_district",   label: "זמן לפגישה [מחוז]",  fmt: "hours" },
+  { key: "meeting_duration_gefen",      label: "הקצאת זמן פגישה [גפן]",   fmt: "hours" },
+  { key: "meeting_duration_current",    label: "הקצאת זמן פגישה [שוטף]",  fmt: "hours" },
+  { key: "meeting_duration_district",   label: "הקצאת זמן פגישה [מחוז]",  fmt: "hours" },
   { key: "control_letter_received_date",  label: "מכתב בקרה - תאריך קבלה",  fmt: "date" },
   { key: "control_letter_target_date",    label: "מכתב בקרה - תאריך יעד",   fmt: "date" },
   { key: "control_letter_days_to_answer", label: "מכתב בקרה - ימים לתשובה", fmt: "int"  },
@@ -648,6 +683,10 @@ function computeFilterValues(school, combo, meetingsStats, activeSummaryBudget, 
   const stats = meetingsStats[school.id];
   out.meetings_completed = stats ? stats.completed ?? null : null;
   out.meetings_hours = stats ? stats.total_minutes ?? null : null;
+  for (const col of MEETING_TYPE_BREAKDOWN_COLUMNS) {
+    const bucket = stats?.by_type?.[col.breakdownType];
+    out[col.key] = bucket ? bucket[col.breakdownMetric] ?? null : null;
+  }
   const metricsRow = getSummaryMetricsRow(school, combo, activeSummaryBudget);
   for (const col of SUMMARY_COLUMNS) {
     const v = metricsRow ? metricsRow[col.field] : undefined;
@@ -1120,9 +1159,21 @@ function renderClosureStatusBadge(value) {
   return "—";
 }
 
+function meetingBreakdownValue(school, key, meetingsStats, emptyText) {
+  const col = MEETING_TYPE_BREAKDOWN_COL_META[key];
+  if (!col) return undefined;
+  const bucket = meetingsStats[school.id]?.by_type?.[col.breakdownType];
+  if (!bucket) return emptyText;
+  return col.breakdownMetric === "completed"
+    ? String(bucket.completed ?? 0)
+    : formatMeetingHours(bucket.total_minutes ?? 0);
+}
+
 function renderCell(school, key, meetingsStats = {}, combo = null, activeSummaryBudget = "גפן", goalColumnsByKey = {}) {
   const summaryCol = SUMMARY_COLUMNS.find(c => c.key === key);
   if (summaryCol) return renderSummaryValue(school, summaryCol, combo, activeSummaryBudget, "—");
+  const breakdown = meetingBreakdownValue(school, key, meetingsStats, "—");
+  if (breakdown !== undefined) return breakdown;
   if (goalColumnsByKey[key]) {
     const met = getGoalStatus(school, combo, goalColumnsByKey[key], activeSummaryBudget);
     return met === true ? "כן" : met === false ? "לא" : "טרם הוגדר";
@@ -1191,6 +1242,10 @@ function renderCell(school, key, meetingsStats = {}, combo = null, activeSummary
       return school.city || "—";
     case "authority":
       return school.authority || "—";
+    case "district":
+      return school.district || "—";
+    case "finance_software":
+      return FINANCE_SOFTWARE_LABEL[school.finance_software] || school.finance_software || "—";
     case "stage":
       return SCHOOL_STAGE_LABEL[school.stage] || school.stage || "—";
     case "meetings_completed": {
@@ -1209,6 +1264,8 @@ function renderCell(school, key, meetingsStats = {}, combo = null, activeSummary
 function renderCellText(school, key, meetingsStats = {}, combo = null, activeSummaryBudget = "גפן", goalColumnsByKey = {}) {
   const summaryCol = SUMMARY_COLUMNS.find(c => c.key === key);
   if (summaryCol) return renderSummaryValue(school, summaryCol, combo, activeSummaryBudget, "");
+  const breakdown = meetingBreakdownValue(school, key, meetingsStats, "");
+  if (breakdown !== undefined) return breakdown;
   if (goalColumnsByKey[key]) {
     const met = getGoalStatus(school, combo, goalColumnsByKey[key], activeSummaryBudget);
     return met === true ? "כן" : met === false ? "לא" : "טרם הוגדר";
@@ -1262,6 +1319,10 @@ function renderCellText(school, key, meetingsStats = {}, combo = null, activeSum
       return school.city || "";
     case "authority":
       return school.authority || "";
+    case "district":
+      return school.district || "";
+    case "finance_software":
+      return FINANCE_SOFTWARE_LABEL[school.finance_software] || school.finance_software || "";
     case "stage":
       return SCHOOL_STAGE_LABEL[school.stage] || school.stage || "";
     case "meetings_completed": {
@@ -1874,7 +1935,9 @@ export default function DashboardPage() {
   const allFilterColumnMeta = useMemo(() => [...FILTER_COLUMN_META, ...goalColumns], [goalColumns]);
   const allFilterColumnKeys = useMemo(() => new Set(allFilterColumnMeta.map(c => c.key)), [allFilterColumnMeta]);
   const columnCategories = useMemo(() => [
-    { title: "כללי", cols: MOVABLE_COLUMNS },
+    { title: "כללי", cols: GENERAL_COLUMNS },
+    { title: "הקצאות", cols: ALLOCATION_COLUMNS },
+    { title: "פגישות שבוצעו", cols: MEETINGS_DONE_COLUMNS },
     { title: "בדיקות", cols: [...SUMMARY_COLUMNS, ...CLOSURE_COLUMNS] },
     { title: "יעדים", cols: goalColumns },
     { title: "מכתב בקרה", cols: CONTROL_LETTER_COLUMNS },
@@ -1889,7 +1952,7 @@ export default function DashboardPage() {
   // also re-runs once right after restoration overwrites them — the missing-check guard makes
   // this converge after one extra render instead of looping.
   useEffect(() => {
-    const candidates = [...CLOSURE_COLUMNS, ...CONTROL_LETTER_COLUMNS, ...goalColumns];
+    const candidates = [...NEWLY_ADDED_MOVABLE_COLUMNS, ...MEETING_TYPE_BREAKDOWN_COLUMNS, ...CLOSURE_COLUMNS, ...CONTROL_LETTER_COLUMNS, ...goalColumns];
     const missingOrder = candidates.map(c => c.key).filter(k => !colOrder.includes(k));
     const missingVisible = candidates.filter(c => !(c.key in colVisible));
     if (missingOrder.length === 0 && missingVisible.length === 0) return;
@@ -2315,13 +2378,13 @@ export default function DashboardPage() {
                           />
                         </div>
                         <div className="px-2 max-h-[70vh] overflow-y-auto">
-                          {columnCategories.map(cat => {
+                          {columnCategories.map((cat, ci) => {
                             const matches = cat.cols.filter(col =>
                               !colPickerQuery.trim() || col.label.includes(colPickerQuery.trim())
                             );
                             if (matches.length === 0) return null;
                             return (
-                              <div key={cat.title} className="mb-2">
+                              <div key={cat.title} className={ci === 0 ? "mb-2" : "mb-2 mt-5"}>
                                 <p className="text-xs font-semibold text-black px-2 pt-2 pb-1 text-center">{cat.title}</p>
                                 <div className="grid grid-cols-3 gap-x-6 gap-y-0.5">
                                   {matches.map(col => (

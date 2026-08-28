@@ -24,6 +24,7 @@ const CONTACT_ROLES = [
 ];
 const PROBLEM_TITLES = {
   school_not_found: "בית ספר לא נמצא",
+  invalid_date: "לא ניתן לפענח את התאריך",
   academic_year_out_of_range: "תאריך מחוץ לשנות הלימודים המוכרות",
   mode_date_mismatch: "אי-התאמה בין מצב הייבוא לתאריך השורה",
   advisor_unresolved: "לא נמצא יועץ תואם",
@@ -33,6 +34,21 @@ const PROBLEM_TITLES = {
 };
 
 function normStr(s) { return (s || "").trim().toLowerCase(); }
+
+function InvalidDateFix({ rowIndex, onConfirm }) {
+  const [value, setValue] = useState("");
+  return (
+    <div className="flex items-center gap-2">
+      <label htmlFor={`fix-date-${rowIndex}`} className="sr-only">תאריך מתוקן</label>
+      <input id={`fix-date-${rowIndex}`} type="date" value={value} onChange={e => setValue(e.target.value)}
+        className="text-xs border border-amber-300 rounded-lg px-2 py-1.5 bg-white" />
+      <button type="button" disabled={!value} onClick={() => onConfirm(value)}
+        className="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">
+        אישור תאריך
+      </button>
+    </div>
+  );
+}
 
 function QuickAddSchoolForm({ row, orgUsers, academicYear, onCreated, onCancel }) {
   const [draft, setDraft] = useState({
@@ -277,6 +293,7 @@ export default function MeetingImportProblemsModal({ mode, rows, orgUsers, acade
           school_id: res.school_id ?? r.data.resolved_school_id ?? r.data.school_id ?? null,
           resolved_advisor_id: res.resolved_advisor_id ?? r.data.resolved_advisor_id ?? null,
           academic_year_override: res.academic_year_override ?? r.data.academic_year_override ?? null,
+          meeting_date_override: res.meeting_date_override ?? r.data.meeting_date_override ?? null,
           accept_mode_mismatch: res.accept_mode_mismatch ?? r.data.accept_mode_mismatch ?? false,
           accept_conflict: res.accept_conflict ?? r.data.accept_conflict ?? false,
           accept_duplicate: res.accept_duplicate ?? r.data.accept_duplicate ?? false,
@@ -293,16 +310,23 @@ export default function MeetingImportProblemsModal({ mode, rows, orgUsers, acade
   }
 
   if (submitResult) {
+    const hasErrors = submitResult.errors?.length > 0;
+    const noneImported = submitResult.imported === 0;
     return (
       <div className="fixed inset-0 z-[75] flex items-center justify-center bg-black/40 backdrop-blur-sm p-4" dir="rtl">
         <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="import-done-title" onKeyDown={handleKeyDown}
           className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-3">
-          <h2 id="import-done-title" className="font-bold text-slate-800">הייבוא הושלם</h2>
-          <p className="text-sm text-emerald-700 bg-emerald-50 rounded-lg px-3 py-2">
-            יובאו בהצלחה {submitResult.imported} פגישות ({submitResult.past} מהעבר, {submitResult.future} עתידיות)
-          </p>
-          {submitResult.errors?.length > 0 && (
-            <div role="alert" className="text-xs text-red-600 bg-red-50 rounded-lg px-3 py-2 max-h-32 overflow-y-auto">
+          <h2 id="import-done-title" className="font-bold text-slate-800">
+            {noneImported ? "הייבוא נכשל" : hasErrors ? "הייבוא הושלם חלקית" : "הייבוא הושלם"}
+          </h2>
+          {!noneImported && (
+            <p className="text-sm text-emerald-700 bg-emerald-50 rounded-lg px-3 py-2">
+              יובאו בהצלחה {submitResult.imported} פגישות ({submitResult.past} מהעבר, {submitResult.future} עתידיות)
+            </p>
+          )}
+          {hasErrors && (
+            <div role="alert" className="text-xs text-red-600 bg-red-50 rounded-lg px-3 py-2 max-h-32 overflow-y-auto space-y-1">
+              <p className="font-semibold">{submitResult.errors.length} שורות לא יובאו:</p>
               {submitResult.errors.map((e, i) => <p key={i}>{e}</p>)}
             </div>
           )}
@@ -380,6 +404,11 @@ export default function MeetingImportProblemsModal({ mode, rows, orgUsers, acade
                                 הוסף בית ספר חדש
                               </button>
                             )
+                          )}
+
+                          {p.type === "invalid_date" && (
+                            <InvalidDateFix rowIndex={r.row_index}
+                              onConfirm={(iso) => { setRowField(r.row_index, { meeting_date_override: iso }); markResolved("invalid_date", r.row_index); }} />
                           )}
 
                           {p.type === "academic_year_out_of_range" && (
