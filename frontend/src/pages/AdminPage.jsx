@@ -1151,7 +1151,7 @@ function UserPermissionsModal({ user, permDefaults, overrides, loading, saving, 
 const PERM_GROUPS = [
   {
     label: "בתי ספר",
-    perms: ["can_add_school", "can_delete_schools", "can_edit_school_directly", "can_request_school_update", "can_approve_update_requests", "can_delete_own_meetings"],
+    perms: ["can_view_school_card", "can_add_school", "can_delete_schools", "can_edit_school_directly", "can_request_school_update", "can_approve_update_requests", "can_delete_own_meetings"],
     advisorNA: new Set(["can_approve_update_requests"]),
   },
   {

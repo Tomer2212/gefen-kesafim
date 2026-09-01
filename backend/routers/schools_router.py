@@ -3768,6 +3768,11 @@ def get_school(
                 logger.error("get_school failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
+    # School-card visibility permission (default ON for manager+advisor; owner always allowed).
+    # Toggled off per role in "ניהול → הרשאות" blocks that account type from opening the card.
+    if not _check_permission(db, user, "can_view_school_card"):
+        raise HTTPException(status_code=403, detail="אין הרשאה לצפות בכרטיס בית ספר")
+
     # Access check for advisors
     is_advisor = user["role"] not in ("owner", "manager")
     if is_advisor:
@@ -3852,6 +3857,7 @@ def get_me(user: Annotated[dict, Depends(get_current_user)]):
 
     try:
         db = get_admin_client()
+        result["can_view_school_card"] = _check_permission(db, user, "can_view_school_card")
         result["can_delete_schools"] = _check_permission(db, user, "can_delete_schools")
         result["can_edit_school_directly"] = _check_permission(db, user, "can_edit_school_directly")
         result["can_request_school_update"] = _check_permission(db, user, "can_request_school_update")
@@ -3862,6 +3868,7 @@ def get_me(user: Annotated[dict, Depends(get_current_user)]):
         result["can_remove_call_from_school"] = _check_permission(db, user, "can_remove_call_from_school")
     except Exception as exc:
         logger.warning("get_me permission check failed (non-fatal): %s", exc)
+        result["can_view_school_card"] = True  # fail-open: a transient error must not lock users out of the card
         result["can_delete_schools"] = user.get("role") == "owner"
         result["can_edit_school_directly"] = user.get("role") in ("owner", "manager")
         result["can_request_school_update"] = True
@@ -6721,6 +6728,7 @@ def create_mentions(school_id: str, meeting_id: str, body: MentionIn, user: Anno
 
 # All supported permission keys with their role defaults
 PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
+    "can_view_school_card":         {"manager": True,  "advisor": True},
     "can_approve_update_requests":  {"manager": False, "advisor": False},
     "can_invite_users":             {"manager": True,  "advisor": False},
     "can_delete_users":             {"manager": False, "advisor": False},
@@ -6738,6 +6746,7 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
 }
 
 PERMISSION_LABELS: dict[str, str] = {
+    "can_view_school_card":         "צפייה בכרטיס בית ספר",
     "can_approve_update_requests":  "לאשר בקשות עריכת פרטים",
     "can_invite_users":             "להוסיף משתמש חדש",
     "can_delete_users":             "למחוק משתמש קיים",

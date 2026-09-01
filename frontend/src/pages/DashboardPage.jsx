@@ -1712,6 +1712,9 @@ export default function DashboardPage() {
   const [userId, setUserId] = useState(null);
   const [canDelete, setCanDelete] = useState(false);
   const [canEditSchools, setCanEditSchools] = useState(false);
+  // "צפייה בכרטיס בית ספר" permission (default ON). When off for this account type,
+  // clicking a school row must not navigate into the card.
+  const [canOpenSchoolCard, setCanOpenSchoolCard] = useState(true);
   const [showBulkAccessModal, setShowBulkAccessModal] = useState(false);
   const [showTableMenu, setShowTableMenu] = useState(false);
   const tableMenuRef = useRef(null);
@@ -2025,6 +2028,7 @@ export default function DashboardPage() {
         setRole(confirmedRole);
         setCanDelete(!!meRes.data?.can_delete_schools);
         setCanEditSchools(!!meRes.data?.can_edit_school_directly);
+        setCanOpenSchoolCard(meRes.data?.can_view_school_card !== false);
         confirmedIsManager = confirmedRole === "owner" || confirmedRole === "manager";
         if (confirmedRole === "owner" && meRes.data?.org?.subscription_status === "trial") {
           setTrialInfo(meRes.data.org);
@@ -2752,12 +2756,12 @@ export default function DashboardPage() {
                           return (
                             <tr
                               key={rowKey}
-                              className={`group border-b border-slate-100 transition-colors ${isSelected ? "bg-blue-50" : "hover:bg-slate-50"} ${selectMode ? "cursor-default" : "cursor-pointer"}`}
-                              onClick={() => { if (!selectMode) navigate(`/school/${school.id}`, { state: { school } }); }}
-                              role={selectMode ? undefined : "button"}
-                              tabIndex={selectMode ? undefined : 0}
-                              aria-label={selectMode ? undefined : `פתח פרטי בית ספר ${school.name}`}
-                              onKeyDown={e => !selectMode && e.key === "Enter" && navigate(`/school/${school.id}`, { state: { school } })}
+                              className={`group border-b border-slate-100 transition-colors ${isSelected ? "bg-blue-50" : "hover:bg-slate-50"} ${(selectMode || !canOpenSchoolCard) ? "cursor-default" : "cursor-pointer"}`}
+                              onClick={() => { if (!selectMode && canOpenSchoolCard) navigate(`/school/${school.id}`, { state: { school } }); }}
+                              role={(selectMode || !canOpenSchoolCard) ? undefined : "button"}
+                              tabIndex={(selectMode || !canOpenSchoolCard) ? undefined : 0}
+                              aria-label={(selectMode || !canOpenSchoolCard) ? undefined : `פתח פרטי בית ספר ${school.name}`}
+                              onKeyDown={e => !selectMode && canOpenSchoolCard && e.key === "Enter" && navigate(`/school/${school.id}`, { state: { school } })}
                             >
                               {selectMode && (
                                 <td className={`px-3 py-3 border-l border-slate-100 text-center ${isSelected ? "bg-blue-50" : "bg-white group-hover:bg-slate-50"}`}
