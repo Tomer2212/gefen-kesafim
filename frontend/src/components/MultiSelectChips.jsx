@@ -52,9 +52,15 @@ export function MultiSelectChips({ options, selected, onChange, placeholder = "�
   // A fixed-position dropdown doesn't move with its trigger — scrolling the page (or any
   // scrollable ancestor) would otherwise leave it floating over the wrong spot. Closing it
   // matches the convention already used by DatePickerPopover.jsx.
+  // Exception: scrolling *inside* the dropdown's own option list must NOT close it (that
+  // scroll event also reaches this capture-phase listener) — otherwise long option lists
+  // can never be scrolled through.
   useEffect(() => {
     if (!open) return;
-    const handler = () => setOpen(false);
+    const handler = (e) => {
+      if (dropdownRef.current?.contains(e.target)) return;
+      setOpen(false);
+    };
     window.addEventListener("scroll", handler, { capture: true, passive: true });
     return () => window.removeEventListener("scroll", handler, { capture: true });
   }, [open]);

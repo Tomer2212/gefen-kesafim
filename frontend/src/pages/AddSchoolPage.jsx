@@ -74,6 +74,31 @@ const WEEKDAY_OPTIONS = [
   { value: "fri", label: "ו" },
 ];
 
+const STUDY_DAY_OPTIONS = [
+  ...WEEKDAY_OPTIONS,
+  { value: "sat", label: "ש" },
+];
+
+const SECTOR_OPTIONS = [
+  { value: "", label: "בחר" },
+  { value: "יהודי", label: "יהודי" },
+  { value: "ערבי", label: "ערבי" },
+  { value: "צ'רקסי", label: "צ'רקסי" },
+  { value: "בדואי", label: "בדואי" },
+  { value: "דרוזי", label: "דרוזי" },
+];
+
+const SUPERVISION_OPTIONS = [
+  { value: "", label: "בחר" },
+  { value: "ממלכתי", label: "ממלכתי" },
+  { value: "ממלכתי דתי", label: "ממלכתי דתי" },
+  { value: "חרדי", label: "חרדי" },
+];
+
+const GRADE_LEVEL_OPTIONS = ["א", "ב", "ג", "ד", "ה", "ו", "ז", "ח", "ט", "י", "יא", "יב"].map(
+  (label) => ({ value: label, label })
+);
+
 const ROLE_LABELS    = { owner: "בעלים", manager: "מנהל", advisor: "יועץ" };
 const ROLE_SORT_ORDER = { owner: 0, manager: 1, advisor: 2 };
 function sortByRole(arr) { return [...arr].sort((a, b) => (ROLE_SORT_ORDER[a.role] ?? 3) - (ROLE_SORT_ORDER[b.role] ?? 3)); }
@@ -140,6 +165,8 @@ const EMPTY_FORM = {
   meeting_coordinator: null,
   principal_chativa_name: "", principal_chativa_phone: "", principal_chativa_email: "",
   principal_chativa_day_off: [], principal_same_person: true,
+  education_authority: "", sector: "", supervision: "",
+  grade_levels: [], study_days: [], student_count: "",
 };
 
 function validateSymbol(val) {
@@ -425,7 +452,10 @@ export default function AddSchoolPage() {
             principal_chativa_day_off: schoolForm.principal_day_off,
           }
         : {};
-      const res    = await axios.post("/schools/", { ...schoolForm, ...chativaSync, stage: schoolStage });
+      const studentCountValue = schoolForm.student_count === "" || schoolForm.student_count == null
+        ? null
+        : parseInt(schoolForm.student_count, 10);
+      const res    = await axios.post("/schools/", { ...schoolForm, ...chativaSync, stage: schoolStage, student_count: studentCountValue });
       const newId  = res.data.id;
       const option = SCHOOL_STAGE_OPTIONS.find(s => s.value === schoolStage);
 
@@ -577,6 +607,51 @@ export default function AddSchoolPage() {
                 <label htmlFor="school-address" className={TILE_LABEL_CLS}>כתובת</label>
                 <input id="school-address" className="input-field" autoComplete="off" value={schoolForm.address}
                   onChange={e => setSchoolForm(p => ({ ...p, address: e.target.value }))} />
+              </div>
+
+              <div className={TILE_CLS}>
+                <label htmlFor="school-education-authority" className={TILE_LABEL_CLS}>רשות חינוך</label>
+                <input id="school-education-authority" className="input-field" autoComplete="off" value={schoolForm.education_authority}
+                  onChange={e => setSchoolForm(p => ({ ...p, education_authority: e.target.value }))} />
+              </div>
+
+              <div className={TILE_CLS}>
+                <label htmlFor="school-sector" className={TILE_LABEL_CLS}>מגזר</label>
+                <select id="school-sector" className="input-field text-sm"
+                  value={schoolForm.sector}
+                  onChange={e => setSchoolForm(p => ({ ...p, sector: e.target.value }))}>
+                  {SECTOR_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </select>
+              </div>
+
+              <div className={TILE_CLS}>
+                <label htmlFor="school-supervision" className={TILE_LABEL_CLS}>פיקוח</label>
+                <select id="school-supervision" className="input-field text-sm"
+                  value={schoolForm.supervision}
+                  onChange={e => setSchoolForm(p => ({ ...p, supervision: e.target.value }))}>
+                  {SUPERVISION_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </select>
+              </div>
+
+              <div className={TILE_CLS}>
+                <span className={TILE_LABEL_CLS}>שכבות לימוד</span>
+                <MultiSelectChips compact options={GRADE_LEVEL_OPTIONS}
+                  selected={schoolForm.grade_levels || []}
+                  onChange={v => setSchoolForm(p => ({ ...p, grade_levels: v }))} />
+              </div>
+
+              <div className={TILE_CLS}>
+                <span className={TILE_LABEL_CLS}>ימי לימוד</span>
+                <MultiSelectChips compact options={STUDY_DAY_OPTIONS}
+                  selected={schoolForm.study_days || []}
+                  onChange={v => setSchoolForm(p => ({ ...p, study_days: v }))} />
+              </div>
+
+              <div className={TILE_CLS}>
+                <label htmlFor="school-student-count" className={TILE_LABEL_CLS}>מס' תלמידים</label>
+                <input id="school-student-count" className="input-field" autoComplete="off" value={schoolForm.student_count}
+                  onChange={e => setSchoolForm(p => ({ ...p, student_count: e.target.value.replace(/\D/g, "") }))}
+                  inputMode="numeric" />
               </div>
             </div>
 
