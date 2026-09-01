@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import axios from "axios";
 import { fetchRangeBusyByDate } from "../components/meetings/dayScheduleUtils";
 import { computeEndTimeIso } from "../components/calls/CallRow";
@@ -35,6 +35,79 @@ function dateKeyFromIso(iso) {
 }
 
 const TODAY = toISODate(new Date());
+
+// Single-select searchable advisor picker. Replaces a plain <select> so the user can type
+// free text and have every keystroke filter the list. Reports the chosen id via onChange;
+// all downstream data-loading logic keys off that id exactly as before.
+function AdvisorCombobox({ id, advisors, value, onChange, disabled, loadingUsers }) {
+  const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef(null);
+
+  const selected = advisors.find(u => u.id === value) || null;
+  const selectedLabel = selected ? (selected.full_name || selected.email) : "";
+  const filtered = advisors.filter(u =>
+    !query.trim() || (u.full_name || u.email || "").toLowerCase().includes(query.trim().toLowerCase())
+  );
+
+  function pick(u) {
+    onChange(u.id);
+    setQuery("");
+    setOpen(false);
+  }
+
+  return (
+    <div
+      ref={containerRef}
+      className="relative"
+      onBlur={e => {
+        if (!containerRef.current?.contains(e.relatedTarget)) { setOpen(false); setQuery(""); }
+      }}
+    >
+      <input
+        id={id}
+        type="text"
+        role="combobox"
+        aria-expanded={open}
+        aria-controls={`${id}-listbox`}
+        aria-autocomplete="list"
+        autoComplete="off"
+        disabled={disabled}
+        className={INPUT_CLS + " w-44"}
+        placeholder={loadingUsers ? "טוען..." : "בחר יועץ"}
+        value={open ? query : selectedLabel}
+        onFocus={() => { setOpen(true); setQuery(""); }}
+        onClick={() => { setOpen(true); }}
+        onChange={e => { setQuery(e.target.value); setOpen(true); }}
+        onKeyDown={e => {
+          if (e.key === "Escape") { setOpen(false); setQuery(""); e.currentTarget.blur(); }
+          else if (e.key === "Enter" && open && filtered.length > 0) { e.preventDefault(); pick(filtered[0]); }
+        }}
+      />
+      {open && (
+        <ul
+          id={`${id}-listbox`}
+          role="listbox"
+          className="absolute z-50 right-0 left-0 mt-1 max-h-60 overflow-y-auto border border-slate-200 rounded-lg bg-white shadow-xl py-1"
+        >
+          {filtered.length === 0 ? (
+            <li className="px-3 py-2 text-sm text-slate-400">לא נמצאו יועצים</li>
+          ) : filtered.map(u => (
+            <li key={u.id} role="option" aria-selected={u.id === value}>
+              <button
+                type="button"
+                onMouseDown={e => { e.preventDefault(); pick(u); }}
+                className={`w-full text-right px-3 py-2 text-sm hover:bg-blue-50 transition-colors ${u.id === value ? "text-blue-600 font-medium" : "text-slate-700"}`}
+              >
+                {u.full_name || u.email}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 export default function AdminPerformanceTab({ users, loadingUsers, loadUsers }) {
   const advisors = (users || []).filter(u => u.role === "advisor" || u.role === "manager" || u.role === "owner");
@@ -144,14 +217,18 @@ export default function AdminPerformanceTab({ users, loadingUsers, loadUsers }) 
         <h1 className="text-xl font-bold text-slate-900">ביצועים</h1>
       </div>
 
-      <div className="glass-card rounded-xl p-4 mb-4" dir="rtl">
+      <div className="glass-card rounded-xl p-4 mb-4 relative z-40" dir="rtl">
         <div className="flex flex-wrap items-end gap-4">
           <div>
             <label htmlFor="perf-filter-advisor" className="block text-xs font-medium text-slate-500 mb-1">יועץ</label>
-            <select id="perf-filter-advisor" value={advisorId} onChange={e => setAdvisorId(e.target.value)} disabled={loadingUsers} className={INPUT_CLS}>
-              <option value="">{loadingUsers ? "טוען..." : "בחר יועץ"}</option>
-              {advisors.map(u => <option key={u.id} value={u.id}>{u.full_name || u.email}</option>)}
-            </select>
+            <AdvisorCombobox
+              id="perf-filter-advisor"
+              advisors={advisors}
+              value={advisorId}
+              onChange={setAdvisorId}
+              disabled={loadingUsers}
+              loadingUsers={loadingUsers}
+            />
           </div>
           <div>
             <label htmlFor="perf-filter-view" className="block text-xs font-medium text-slate-500 mb-1">תצוגה</label>
@@ -166,9 +243,9 @@ export default function AdminPerformanceTab({ users, loadingUsers, loadUsers }) 
               onChange={e => setAnchorDate(e.target.value)} className={INPUT_CLS} />
           </div>
           <div className="flex items-center gap-1 self-end">
-            <button type="button" onClick={goPrev} aria-label="הקודם" className="btn-ghost text-sm px-3 py-1.5 rounded-lg">◀</button>
+            <button type="button" onClick={goPrev} aria-label="הקודם" className="btn-ghost text-sm px-3 py-1.5 rounded-lg">▶</button>
             <button type="button" onClick={goToday} className="btn-ghost text-sm px-3 py-1.5 rounded-lg">היום</button>
-            <button type="button" onClick={goNext} aria-label="הבא" className="btn-ghost text-sm px-3 py-1.5 rounded-lg">▶</button>
+            <button type="button" onClick={goNext} aria-label="הבא" className="btn-ghost text-sm px-3 py-1.5 rounded-lg">◀</button>
           </div>
           <div className="flex items-center gap-4 self-end mr-auto text-xs text-slate-500">
             <span className="flex items-center gap-1.5"><span aria-hidden="true" className="w-3 h-3 rounded bg-amber-100 border border-amber-300" /> מתוכנן (Outlook)</span>
