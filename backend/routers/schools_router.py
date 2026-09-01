@@ -200,6 +200,12 @@ class SchoolIn(BaseModel):
     principal_chativa_email: str | None = None
     principal_chativa_day_off: list[str] | None = None
     principal_same_person: bool | None = None
+    education_authority: str | None = None
+    sector: str | None = None
+    supervision: str | None = None
+    grade_levels: list[str] | None = None
+    study_days: list[str] | None = None
+    student_count: int | None = None
 
 
 class SchoolYearAdminDataIn(BaseModel):
@@ -1774,6 +1780,15 @@ def assign_advisor(
     except Exception as exc:
         logger.warning("advisor_assigned notification failed (non-fatal): %s", exc)
     return {"ok": True}
+
+
+def _ensure_can_view_school_card(db, user: dict) -> None:
+    """Raise 403 when the 'צפייה בכרטיס בית ספר' permission is off for this account type.
+    Owner always passes (via _check_permission). Central gate for every school-card read
+    path (the card endpoint itself + each tab's GET), so the permission overrides any
+    advisor assignment / access grant."""
+    if not _check_permission(db, user, "can_view_school_card"):
+        raise HTTPException(status_code=403, detail="אין הרשאה לצפות בכרטיס בית ספר")
 
 
 def _advisor_has_access_to_school_row(db, advisor_id: str, school: dict) -> bool:
@@ -3768,10 +3783,9 @@ def get_school(
                 logger.error("get_school failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
-    # School-card visibility permission (default ON for manager+advisor; owner always allowed).
-    # Toggled off per role in "ניהול → הרשאות" blocks that account type from opening the card.
-    if not _check_permission(db, user, "can_view_school_card"):
-        raise HTTPException(status_code=403, detail="אין הרשאה לצפות בכרטיס בית ספר")
+    # School-card visibility permission — central gate (default ON for manager+advisor;
+    # owner always passes). Toggled off per role in "ניהול → הרשאות".
+    _ensure_can_view_school_card(db, user)
 
     # Access check for advisors
     is_advisor = user["role"] not in ("owner", "manager")
@@ -4462,6 +4476,7 @@ def list_logs(
     for attempt in range(2):
         try:
             db = get_admin_client()
+            _ensure_can_view_school_card(db, user)
             q = (
                 db.table("check_logs")
                 .select("*")
@@ -4472,6 +4487,8 @@ def list_logs(
             rows = q.order("run_at", desc=True).execute()
             logs = rows.data or []
             break  # success
+        except HTTPException:
+            raise
         except Exception as exc:
             if attempt == 0:
                 logger.warning("list_logs attempt 1 failed: %s — resetting client and retrying", exc)
@@ -4514,6 +4531,7 @@ def get_log(
     user: Annotated[dict, Depends(get_current_user)],
 ):
     db = get_admin_client()
+    _ensure_can_view_school_card(db, user)
     row = db.table("check_logs").select("*").eq("id", log_id).eq("school_id", school_id).execute()
     if not row.data:
         raise HTTPException(status_code=404, detail="הבדיקה לא נמצאה")
@@ -4820,8 +4838,11 @@ def get_school_notes(
     for attempt in range(2):
         try:
             db = get_admin_client()
+            _ensure_can_view_school_card(db, user)
             rows = db.table("school_notes").select("*").eq("school_id", school_id).order("created_at").execute().data or []
             break
+        except HTTPException:
+            raise
         except Exception as exc:
             if attempt == 0:
                 logger.warning("get_school_notes attempt 1 failed: %s — resetting and retrying", exc)
@@ -5078,6 +5099,7 @@ def get_school_files(
     for attempt in range(2):
         try:
             db = get_admin_client()
+            _ensure_can_view_school_card(db, user)
             rows = (
                 db.table("school_files")
                 .select("*")
@@ -5087,6 +5109,8 @@ def get_school_files(
                 .data or []
             )
             break
+        except HTTPException:
+            raise
         except Exception as exc:
             if attempt == 0:
                 logger.warning("get_school_files attempt 1 failed: %s — resetting and retrying", exc)
@@ -5337,6 +5361,7 @@ def list_school_calls(
 
     if not school_row.data:
         raise HTTPException(status_code=404, detail="בית ספר לא נמצא")
+    _ensure_can_view_school_card(db, user)
     if user["role"] not in ("owner", "manager") and not _advisor_has_access_to_school_row(db, user["id"], school_row.data[0]):
         raise HTTPException(status_code=403, detail="אין הרשאה לצפות בבית ספר זה")
 
