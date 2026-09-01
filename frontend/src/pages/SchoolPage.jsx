@@ -75,6 +75,59 @@ const WEEKDAY_OPTIONS = [
   { value: "fri", label: "ו" },
 ];
 
+const STUDY_DAY_OPTIONS = [
+  ...WEEKDAY_OPTIONS,
+  { value: "sat", label: "ש" },
+];
+
+const SECTOR_OPTIONS = [
+  { value: "", label: "בחר" },
+  { value: "יהודי", label: "יהודי" },
+  { value: "ערבי", label: "ערבי" },
+  { value: "צ'רקסי", label: "צ'רקסי" },
+  { value: "בדואי", label: "בדואי" },
+  { value: "דרוזי", label: "דרוזי" },
+];
+
+const SUPERVISION_OPTIONS = [
+  { value: "", label: "בחר" },
+  { value: "ממלכתי", label: "ממלכתי" },
+  { value: "ממלכתי דתי", label: "ממלכתי דתי" },
+  { value: "חרדי", label: "חרדי" },
+];
+
+const GRADE_LEVEL_OPTIONS = ["א", "ב", "ג", "ד", "ה", "ו", "ז", "ח", "ט", "י", "יא", "יב"].map(
+  (label) => ({ value: label, label })
+);
+
+// Collapse an unordered selection into a compact string, following the option order:
+// a run of 3+ consecutive picks becomes "first-last"; runs of 1-2 and gaps are listed
+// individually, joined by ", ". e.g. [א,ב,ג,ד,ו] → "א-ד, ו" ; [א..ו] → "א-ו".
+function formatOrderedSelection(values, orderedOptions) {
+  const order = orderedOptions.map(o => o.value);
+  const labelOf = v => orderedOptions.find(o => o.value === v)?.label ?? v;
+  const idxs = (values || [])
+    .map(v => order.indexOf(v))
+    .filter(i => i >= 0)
+    .sort((a, b) => a - b);
+  if (idxs.length === 0) return "";
+  const parts = [];
+  const flush = (start, end) => {
+    if (end - start >= 2) parts.push(`${labelOf(order[start])}-${labelOf(order[end])}`);
+    else for (let k = start; k <= end; k++) parts.push(labelOf(order[k]));
+  };
+  let runStart = idxs[0];
+  let prev = idxs[0];
+  for (let k = 1; k < idxs.length; k++) {
+    if (idxs[k] === prev + 1) { prev = idxs[k]; continue; }
+    flush(runStart, prev);
+    runStart = idxs[k];
+    prev = idxs[k];
+  }
+  flush(runStart, prev);
+  return parts.join(", ");
+}
+
 const FINANCE_SOFTWARE_OPTIONS = [
   { value: "", label: "בחר" },
   { value: "kesafim2000", label: "כספים 2000" },
@@ -2425,9 +2478,10 @@ export default function SchoolPage() {
   const [role, setRole] = useState("advisor");
   const [subscriptionStatus, setSubscriptionStatus] = useState(null);
   const [currentUser, setCurrentUser] = useState(null);
-  // "צפייה בכרטיס בית ספר" permission (default ON). When an owner turns it off for this
-  // account type in ניהול → הרשאות, the card is replaced with a no-access screen.
-  const [canViewSchoolCard, setCanViewSchoolCard] = useState(true);
+  // "צפייה בכרטיס בית ספר" permission. null = not resolved yet (show spinner, never the
+  // card — prevents a flash of stale content); false = blocked → no-access screen;
+  // true = allowed. Resolved from /users/me and, authoritatively, from GET /schools/{id}.
+  const [canViewSchoolCard, setCanViewSchoolCard] = useState(null);
   const [notesData, setNotesData] = useState(null); // { general: [...], quarterly: {1:[...],2:[...],3:[...],4:[...]} }
   const [filesData, setFilesData] = useState(null); // flat array of school_files rows
 
@@ -2525,6 +2579,8 @@ export default function SchoolPage() {
     meeting_coordinator: null,
     principal_chativa_name: "", principal_chativa_phone: "", principal_chativa_email: "",
     principal_chativa_day_off: [], principal_same_person: true,
+    education_authority: "", sector: "", supervision: "",
+    grade_levels: [], study_days: [], student_count: "",
   });
   const [saving, setSaving] = useState(false);
   const [triedSave, setTriedSave] = useState(false);
@@ -2589,8 +2645,10 @@ export default function SchoolPage() {
       const userRole = session?.user.user_metadata?.role || "advisor";
       if (session) setRole(userRole);
 
+      let meFetchOk = false;
       try {
         const meRes = await axios.get("/schools/users/me");
+        meFetchOk = true;
         setCurrentUser(meRes.data || null);
         setCanViewSchoolCard(meRes.data?.can_view_school_card !== false);
         if (meRes.data?.org?.subscription_status) {
@@ -2624,8 +2682,18 @@ export default function SchoolPage() {
           current: schoolRes.data?.advisors_current || [],
           district: schoolRes.data?.advisors_district || [],
         });
-      } catch {
-        // non-fatal — page still usable with the initial (possibly stale) snapshot
+        setCanViewSchoolCard(true); // authoritative: the card endpoint let us through
+      } catch (err) {
+        if (err?.response?.status === 403) {
+          // "צפייה בכרטיס בית ספר" permission is off for this account type — hard block,
+          // regardless of any advisor assignment / access grant.
+          setCanViewSchoolCard(false);
+        } else if (!meFetchOk) {
+          // Transient failure and /users/me also failed — don't lock out a legitimate
+          // user over a blip; fall back to allowing the (possibly stale) snapshot.
+          setCanViewSchoolCard(prev => (prev === null ? true : prev));
+        }
+        // else: non-fatal — page still usable with the initial snapshot
       }
 
       const [accountsResult, logsResult] = await Promise.allSettled([
@@ -3005,6 +3073,12 @@ export default function SchoolPage() {
       principal_chativa_email: school.principal_chativa_email || "",
       principal_chativa_day_off: school.principal_chativa_day_off || [],
       principal_same_person: school.principal_same_person !== false,
+      education_authority: school.education_authority || "",
+      sector: school.sector || "",
+      supervision: school.supervision || "",
+      grade_levels: school.grade_levels || [],
+      study_days: school.study_days || [],
+      student_count: school.student_count ?? "",
     };
     setEditForm(formData);
     setOriginalForm(formData);
@@ -3134,7 +3208,10 @@ export default function SchoolPage() {
             principal_chativa_day_off: editForm.principal_day_off,
           }
         : {};
-      await axios.put(`/schools/${schoolId}`, { ...editForm, ...chativaSync });
+      const studentCountValue = editForm.student_count === "" || editForm.student_count == null
+        ? null
+        : parseInt(editForm.student_count, 10);
+      await axios.put(`/schools/${schoolId}`, { ...editForm, ...chativaSync, student_count: studentCountValue });
       let updatedAdvisors = schoolAdvisors;
       if (managingAdvisors) {
         const updatedTyped = {
@@ -3158,6 +3235,7 @@ export default function SchoolPage() {
         ...prev,
         ...editForm,
         ...chativaSync,
+        student_count: studentCountValue,
         advisor_schools: updatedAdvisors.map(adv => ({ advisor_id: adv.id, profiles: adv })),
         // Keep the display-mode "גישה" row in sync — otherwise it keeps showing the
         // pre-save snapshot from the initial GET instead of the just-saved selection.
@@ -3331,7 +3409,9 @@ export default function SchoolPage() {
     return val ? {} : { ...EMPTY_BORDER_STYLE };
   }
 
-  if (loading) {
+  // Spinner while loading OR while the view permission is still unresolved — the card
+  // must never render before we know the user is allowed to see it (no flash).
+  if (loading || canViewSchoolCard === null) {
     return (
       <div dir="rtl" className="bg-scene min-h-screen">
         <Sidebar dark />
@@ -3344,7 +3424,7 @@ export default function SchoolPage() {
     );
   }
 
-  if (!canViewSchoolCard) {
+  if (canViewSchoolCard === false) {
     return (
       <div dir="rtl" className="bg-scene min-h-screen">
         <Sidebar dark />
@@ -3638,7 +3718,8 @@ export default function SchoolPage() {
                     <p role="alert" className="text-sm text-red-600 mb-3 text-right">{saveError}</p>
                   )}
 
-                  {/* Live data tiles — 3×3 grid, one editable stat-tile per field */}
+                  {/* Live data tiles — 3×3 grid, one editable stat-tile per field (scrolls to reveal 2 extra rows) */}
+                  <div className="max-h-[252px] overflow-y-auto pr-1">
                   <div className="grid grid-cols-3 gap-3">
                     <div className={`${tileCls} min-w-0`}>
                       <label htmlFor="edit-name" className={`${tileLabelCls} block`}>שם מוסד</label>
@@ -3713,6 +3794,50 @@ export default function SchoolPage() {
                       <input id="edit-address" className={editFieldCls(false, !editForm.address)} value={editForm.address}
                         onChange={e => setEditForm(p => ({ ...p, address: e.target.value }))} autoComplete="off" />
                     </div>
+
+                    <div className={tileCls}>
+                      <label htmlFor="edit-education-authority" className={`${tileLabelCls} block`}>רשות חינוך</label>
+                      <input id="edit-education-authority" className={editFieldCls(false, !editForm.education_authority)} value={editForm.education_authority}
+                        onChange={e => setEditForm(p => ({ ...p, education_authority: e.target.value }))} autoComplete="off" />
+                    </div>
+
+                    <div className={tileCls}>
+                      <label htmlFor="edit-sector" className={`${tileLabelCls} block`}>מגזר</label>
+                      <select id="edit-sector" className={editFieldCls(false, !editForm.sector)} value={editForm.sector}
+                        onChange={e => setEditForm(p => ({ ...p, sector: e.target.value }))}>
+                        {SECTOR_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                      </select>
+                    </div>
+
+                    <div className={tileCls}>
+                      <label htmlFor="edit-supervision" className={`${tileLabelCls} block`}>פיקוח</label>
+                      <select id="edit-supervision" className={editFieldCls(false, !editForm.supervision)} value={editForm.supervision}
+                        onChange={e => setEditForm(p => ({ ...p, supervision: e.target.value }))}>
+                        {SUPERVISION_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                      </select>
+                    </div>
+
+                    <div className={tileCls}>
+                      <span className={`${tileLabelCls} block`}>שכבות לימוד</span>
+                      <MultiSelectChips compact options={GRADE_LEVEL_OPTIONS}
+                        selected={editForm.grade_levels || []}
+                        onChange={v => setEditForm(p => ({ ...p, grade_levels: v }))} />
+                    </div>
+
+                    <div className={tileCls}>
+                      <span className={`${tileLabelCls} block`}>ימי לימוד</span>
+                      <MultiSelectChips compact options={STUDY_DAY_OPTIONS}
+                        selected={editForm.study_days || []}
+                        onChange={v => setEditForm(p => ({ ...p, study_days: v }))} />
+                    </div>
+
+                    <div className={tileCls}>
+                      <label htmlFor="edit-student-count" className={`${tileLabelCls} block`}>מס' תלמידים</label>
+                      <input id="edit-student-count" className={editFieldCls(false, !editForm.student_count)} value={editForm.student_count}
+                        onChange={e => setEditForm(p => ({ ...p, student_count: e.target.value.replace(/\D/g, "") }))}
+                        inputMode="numeric" autoComplete="off" />
+                    </div>
+                  </div>
                   </div>
                   </div>
                   </div>
@@ -4022,7 +4147,8 @@ export default function SchoolPage() {
                   </div>
                   <div className={sectionBodyCls}>
 
-                  {/* Live data tiles — 3×3 grid, one stat-tile per field */}
+                  {/* Live data tiles — 3×3 grid, one stat-tile per field (scrolls to reveal 2 extra rows) */}
+                  <div className="max-h-[252px] overflow-y-auto pr-1">
                   <div className="grid grid-cols-3 gap-3">
                     <div className={`${tileCls} min-w-0`}>
                       <p className={tileLabelCls}>שם מוסד</p>
@@ -4060,6 +4186,31 @@ export default function SchoolPage() {
                       <p className={tileLabelCls}>כתובת</p>
                       <p className={tileValueCls}>{school?.address || "—"}</p>
                     </div>
+                    <div className={tileCls}>
+                      <p className={tileLabelCls}>רשות חינוך</p>
+                      <p className={tileValueCls}>{school?.education_authority || "—"}</p>
+                    </div>
+                    <div className={tileCls}>
+                      <p className={tileLabelCls}>מגזר</p>
+                      <p className={tileValueCls}>{school?.sector || "—"}</p>
+                    </div>
+                    <div className={tileCls}>
+                      <p className={tileLabelCls}>פיקוח</p>
+                      <p className={tileValueCls}>{school?.supervision || "—"}</p>
+                    </div>
+                    <div className={tileCls}>
+                      <p className={tileLabelCls}>שכבות לימוד</p>
+                      <p className={tileValueCls}>{school?.grade_levels?.length ? formatOrderedSelection(school.grade_levels, GRADE_LEVEL_OPTIONS) : "—"}</p>
+                    </div>
+                    <div className={tileCls}>
+                      <p className={tileLabelCls}>ימי לימוד</p>
+                      <p className={tileValueCls}>{school?.study_days?.length ? formatOrderedSelection(school.study_days, STUDY_DAY_OPTIONS) : "—"}</p>
+                    </div>
+                    <div className={tileCls}>
+                      <p className={tileLabelCls}>מס' תלמידים</p>
+                      <p className={tileValueCls}>{school?.student_count ?? "—"}</p>
+                    </div>
+                  </div>
                   </div>
                   </div>
                   </div>

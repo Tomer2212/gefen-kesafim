@@ -1712,8 +1712,9 @@ export default function DashboardPage() {
   const [userId, setUserId] = useState(null);
   const [canDelete, setCanDelete] = useState(false);
   const [canEditSchools, setCanEditSchools] = useState(false);
-  // "צפייה בכרטיס בית ספר" permission (default ON). When off for this account type,
-  // clicking a school row must not navigate into the card.
+  // "צפייה בכרטיס בית ספר" permission (default ON — optimistic so rows stay clickable
+  // during load). When resolved to false, rows are shown but locked (lock icon, no
+  // navigation); a fast click before it resolves still hits the server 403 + no-access screen.
   const [canOpenSchoolCard, setCanOpenSchoolCard] = useState(true);
   const [showBulkAccessModal, setShowBulkAccessModal] = useState(false);
   const [showTableMenu, setShowTableMenu] = useState(false);
@@ -2778,7 +2779,18 @@ export default function DashboardPage() {
                               )}
                               <td className={`px-5 py-3 border-l border-slate-100 ${isSelected ? "bg-blue-50" : "bg-white group-hover:bg-slate-50"}`}
                                 style={{ position: "sticky", right: selectMode ? "2.5rem" : 0, zIndex: 5 }}>
-                                <span className="font-semibold text-slate-900">{school.name}</span>
+                                <span className="font-semibold text-slate-900 inline-flex items-center gap-1.5">
+                                  {!canOpenSchoolCard && (
+                                    <svg aria-label="אין לך הרשאה לצפות בכרטיס בית ספר" role="img"
+                                      className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" viewBox="0 0 24 24"
+                                      fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                      <title>אין לך הרשאה לצפות בכרטיס בית ספר</title>
+                                      <rect x="3" y="11" width="18" height="11" rx="2" />
+                                      <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                                    </svg>
+                                  )}
+                                  {school.name}
+                                </span>
                               </td>
                               {advancedFilterActive && (
                                 <td className="px-4 py-3 border-l border-slate-100 text-slate-600">

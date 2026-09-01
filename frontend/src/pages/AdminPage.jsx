@@ -570,6 +570,32 @@ const WEEKDAY_OPTIONS = [
   { value: "thu", label: "ה" },
   { value: "fri", label: "ו" },
 ];
+
+const STUDY_DAY_OPTIONS = [
+  ...WEEKDAY_OPTIONS,
+  { value: "sat", label: "ש" },
+];
+
+const SECTOR_OPTIONS = [
+  { value: "", label: "בחר" },
+  { value: "יהודי", label: "יהודי" },
+  { value: "ערבי", label: "ערבי" },
+  { value: "צ'רקסי", label: "צ'רקסי" },
+  { value: "בדואי", label: "בדואי" },
+  { value: "דרוזי", label: "דרוזי" },
+];
+
+const SUPERVISION_OPTIONS = [
+  { value: "", label: "בחר" },
+  { value: "ממלכתי", label: "ממלכתי" },
+  { value: "ממלכתי דתי", label: "ממלכתי דתי" },
+  { value: "חרדי", label: "חרדי" },
+];
+
+const GRADE_LEVEL_OPTIONS = ["א", "ב", "ג", "ד", "ה", "ו", "ז", "ח", "ט", "י", "יא", "יב"].map(
+  (label) => ({ value: label, label })
+);
+
 const ROLE_SORT_ORDER = { owner: 0, manager: 1, advisor: 2 };
 function sortByRole(arr) { return [...arr].sort((a, b) => (ROLE_SORT_ORDER[a.role] ?? 3) - (ROLE_SORT_ORDER[b.role] ?? 3)); }
 
@@ -658,7 +684,7 @@ function validateSymbol(val) {
   return "";
 }
 
-const EMPTY_FORM = { name: "", symbol: "", city: "", authority: "", stage: "", finance_software: "", principal_name: "", principal_phone: "", principal_email: "", secretary_name: "", secretary_phone: "", secretary_email: "", finance_contact_name: "", finance_contact_phone: "", finance_contact_email: "", school_phone: "", address: "", district: "", restrict_access_to: [], extra_contacts: [], principal_day_off: [], secretary_day_off: [], finance_contact_day_off: [], meeting_coordinator: null, principal_chativa_name: "", principal_chativa_phone: "", principal_chativa_email: "", principal_chativa_day_off: [], principal_same_person: true };
+const EMPTY_FORM = { name: "", symbol: "", city: "", authority: "", stage: "", finance_software: "", principal_name: "", principal_phone: "", principal_email: "", secretary_name: "", secretary_phone: "", secretary_email: "", finance_contact_name: "", finance_contact_phone: "", finance_contact_email: "", school_phone: "", address: "", district: "", restrict_access_to: [], extra_contacts: [], principal_day_off: [], secretary_day_off: [], finance_contact_day_off: [], meeting_coordinator: null, principal_chativa_name: "", principal_chativa_phone: "", principal_chativa_email: "", principal_chativa_day_off: [], principal_same_person: true, education_authority: "", sector: "", supervision: "", grade_levels: [], study_days: [], student_count: "" };
 
 const IMPORT_FIELD_CONFIG = [
   { key: "name",                  label: "שם בית ספר",          required: true },
@@ -685,6 +711,12 @@ const IMPORT_FIELD_CONFIG = [
   { key: "advisor_gefen",         label: "יועץ מלווה — גפן",      required: true, hint: "אימייל אחד או כמה, מופרדים בפסיק (ניתן להשאיר תא ריק בשורה שלא נדרש לה)" },
   { key: "advisor_current",       label: "יועץ מלווה — שוטף",     required: true, hint: "אימייל אחד או כמה, מופרדים בפסיק (ניתן להשאיר תא ריק בשורה שלא נדרש לה)" },
   { key: "advisor_district",      label: "יועץ מלווה — מחוז",     required: true, hint: "אימייל אחד או כמה, מופרדים בפסיק (ניתן להשאיר תא ריק בשורה שלא נדרש לה)" },
+  { key: "education_authority",    label: "רשות חינוך",           required: false },
+  { key: "sector",                label: "מגזר",                 required: false, hint: "יהודי / ערבי / צ'רקסי / בדואי / דרוזי" },
+  { key: "supervision",           label: "פיקוח",                required: false, hint: "ממלכתי / ממלכתי דתי / חרדי" },
+  { key: "grade_levels",          label: "שכבות לימוד",          required: false, hint: "רשימה מופרדת בפסיקים מתוך א,ב,ג,ד,ה,ו,ז,ח,ט,י,יא,יב" },
+  { key: "study_days",            label: "ימי לימוד",            required: false, hint: "רשימה מופרדת בפסיקים מתוך א,ב,ג,ד,ה,ו,ש" },
+  { key: "student_count",         label: "מס' תלמידים",          required: false, hint: "מספר בלבד" },
 ];
 
 const USER_IMPORT_FIELD_CONFIG = [
@@ -724,6 +756,26 @@ function normalizeFinanceSoftware(raw) {
   if (l.includes("כספים") || l.includes("kesafim")) return "kesafim2000";
   if (l.includes("פייסקול") || l.includes("payscool")) return "payscool";
   if (l.includes("סקולקאש") || l.includes("schoolcash")) return "schoolcash";
+  return "";
+}
+
+function normalizeSector(raw) {
+  const t = String(raw || "").trim();
+  if (!t) return "";
+  if (t.includes("יהוד")) return "יהודי";
+  if (t.includes("ערבי")) return "ערבי";
+  if (t.includes("צ'רקס") || t.includes("צרקס")) return "צ'רקסי";
+  if (t.includes("בדואי")) return "בדואי";
+  if (t.includes("דרוזי")) return "דרוזי";
+  return "";
+}
+
+function normalizeSupervision(raw) {
+  const t = String(raw || "").trim();
+  if (!t) return "";
+  if (t.includes("ממלכתי דתי")) return "ממלכתי דתי";
+  if (t.includes("ממלכתי")) return "ממלכתי";
+  if (t.includes("חרדי")) return "חרדי";
   return "";
 }
 
@@ -1908,6 +1960,9 @@ export default function AdminPage() {
           principal_chativa_day_off: schoolForm.principal_day_off,
         }
       : {};
+    const studentCountValue = schoolForm.student_count === "" || schoolForm.student_count == null
+      ? null
+      : parseInt(schoolForm.student_count, 10);
     setSavingSchool(true);
     try {
       if (editingSchool) {
@@ -1931,7 +1986,7 @@ export default function AdminPage() {
           window.alert(err.response?.data?.detail || "שגיאה בעדכון היועצים המלווים");
           return false;
         }
-        await axios.put(`/schools/${editingSchool.id}`, { ...schoolForm, ...chativaSync });
+        await axios.put(`/schools/${editingSchool.id}`, { ...schoolForm, ...chativaSync, student_count: studentCountValue });
         await axios.put(`/schools/${editingSchool.id}/year-admin-data`, yearAdminForm, { params: { academic_year: DEFAULT_ACADEMIC_YEAR } });
         try {
           const res = await axios.get(`/schools/${editingSchool.id}/advisors`);
@@ -1941,7 +1996,7 @@ export default function AdminPage() {
         }
         setOriginalTypedAdvisorIds(draftTypedAdvisorIds);
       } else {
-        const res = await axios.post("/schools/", { ...schoolForm, ...chativaSync, stage: schoolStage });
+        const res = await axios.post("/schools/", { ...schoolForm, ...chativaSync, stage: schoolStage, student_count: studentCountValue });
         const newId = res.data.id;
         const stageOption = SCHOOL_STAGE_OPTIONS.find(s => s.value === schoolStage);
         if (stageOption?.divisionType) {
@@ -2017,6 +2072,12 @@ export default function AdminPage() {
       principal_chativa_email: school.principal_chativa_email || "",
       principal_chativa_day_off: school.principal_chativa_day_off || [],
       principal_same_person: school.principal_same_person !== false,
+      education_authority: school.education_authority || "",
+      sector: school.sector || "",
+      supervision: school.supervision || "",
+      grade_levels: school.grade_levels || [],
+      study_days: school.study_days || [],
+      student_count: school.student_count ?? "",
     });
     setTriedSave(false);
     setShowSchoolForm(true);
@@ -2449,6 +2510,21 @@ export default function AdminPage() {
         if (f.key === "stage") school[f.key] = normalizeStage(raw);
         else if (f.key === "finance_software") school[f.key] = normalizeFinanceSoftware(raw);
         else if (f.key === "district") school[f.key] = normalizeDistrict(raw);
+        else if (f.key === "sector") school[f.key] = normalizeSector(raw);
+        else if (f.key === "supervision") school[f.key] = normalizeSupervision(raw);
+        else if (f.key === "grade_levels") {
+          const valid = GRADE_LEVEL_OPTIONS.map(o => o.value);
+          school[f.key] = raw.split(/[,;]/).map(s => s.trim()).filter(s => valid.includes(s));
+        }
+        else if (f.key === "study_days") {
+          school[f.key] = raw.split(/[,;]/).map(s => s.trim())
+            .map(s => STUDY_DAY_OPTIONS.find(o => o.label === s)?.value)
+            .filter(Boolean);
+        }
+        else if (f.key === "student_count") {
+          const n = parseInt(raw.replace(/\D/g, ""), 10);
+          school[f.key] = Number.isFinite(n) ? n : null;
+        }
         else if (f.key === "service_type") yearAdmin.service_type = normalizeServiceType(raw);
         else if (f.key === "client_status") yearAdmin.client_status = normalizeClientStatus(raw);
         else if (f.key === "meeting_coordinator") coordinatorRaw = raw;
@@ -2892,6 +2968,51 @@ export default function AdminPage() {
                       <label htmlFor="school-address" className={TILE_LABEL_CLS}>כתובת</label>
                       <input id="school-address" className="input-field" autoComplete="off" value={schoolForm.address}
                         onChange={e => setSchoolForm(p => ({ ...p, address: e.target.value }))} />
+                    </div>
+
+                    <div className={TILE_CLS}>
+                      <label htmlFor="school-education-authority" className={TILE_LABEL_CLS}>רשות חינוך</label>
+                      <input id="school-education-authority" className="input-field" autoComplete="off" value={schoolForm.education_authority}
+                        onChange={e => setSchoolForm(p => ({ ...p, education_authority: e.target.value }))} />
+                    </div>
+
+                    <div className={TILE_CLS}>
+                      <label htmlFor="school-sector" className={TILE_LABEL_CLS}>מגזר</label>
+                      <select id="school-sector" className="input-field text-sm"
+                        value={schoolForm.sector}
+                        onChange={e => setSchoolForm(p => ({ ...p, sector: e.target.value }))}>
+                        {SECTOR_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                      </select>
+                    </div>
+
+                    <div className={TILE_CLS}>
+                      <label htmlFor="school-supervision" className={TILE_LABEL_CLS}>פיקוח</label>
+                      <select id="school-supervision" className="input-field text-sm"
+                        value={schoolForm.supervision}
+                        onChange={e => setSchoolForm(p => ({ ...p, supervision: e.target.value }))}>
+                        {SUPERVISION_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                      </select>
+                    </div>
+
+                    <div className={TILE_CLS}>
+                      <span className={`${TILE_LABEL_CLS} block`}>שכבות לימוד</span>
+                      <MultiSelectChips compact options={GRADE_LEVEL_OPTIONS}
+                        selected={schoolForm.grade_levels || []}
+                        onChange={v => setSchoolForm(p => ({ ...p, grade_levels: v }))} />
+                    </div>
+
+                    <div className={TILE_CLS}>
+                      <span className={`${TILE_LABEL_CLS} block`}>ימי לימוד</span>
+                      <MultiSelectChips compact options={STUDY_DAY_OPTIONS}
+                        selected={schoolForm.study_days || []}
+                        onChange={v => setSchoolForm(p => ({ ...p, study_days: v }))} />
+                    </div>
+
+                    <div className={TILE_CLS}>
+                      <label htmlFor="school-student-count" className={TILE_LABEL_CLS}>מס' תלמידים</label>
+                      <input id="school-student-count" className="input-field" autoComplete="off" value={schoolForm.student_count}
+                        onChange={e => setSchoolForm(p => ({ ...p, student_count: e.target.value.replace(/\D/g, "") }))}
+                        inputMode="numeric" />
                     </div>
                   </div>
 
