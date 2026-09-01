@@ -2425,6 +2425,9 @@ export default function SchoolPage() {
   const [role, setRole] = useState("advisor");
   const [subscriptionStatus, setSubscriptionStatus] = useState(null);
   const [currentUser, setCurrentUser] = useState(null);
+  // "צפייה בכרטיס בית ספר" permission (default ON). When an owner turns it off for this
+  // account type in ניהול → הרשאות, the card is replaced with a no-access screen.
+  const [canViewSchoolCard, setCanViewSchoolCard] = useState(true);
   const [notesData, setNotesData] = useState(null); // { general: [...], quarterly: {1:[...],2:[...],3:[...],4:[...]} }
   const [filesData, setFilesData] = useState(null); // flat array of school_files rows
 
@@ -2589,6 +2592,7 @@ export default function SchoolPage() {
       try {
         const meRes = await axios.get("/schools/users/me");
         setCurrentUser(meRes.data || null);
+        setCanViewSchoolCard(meRes.data?.can_view_school_card !== false);
         if (meRes.data?.org?.subscription_status) {
           setSubscriptionStatus(meRes.data.org.subscription_status);
         }
@@ -3334,6 +3338,37 @@ export default function SchoolPage() {
         <div style={{ marginRight: "var(--sidebar-w, 240px)", transition: "margin-right 0.25s cubic-bezier(0.4,0,0.2,1)" }} className="flex items-center justify-center min-h-screen">
           <div role="status" aria-label="טוען">
             <div aria-hidden="true" className="spinner w-10 h-10" />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!canViewSchoolCard) {
+    return (
+      <div dir="rtl" className="bg-scene min-h-screen">
+        <Sidebar dark />
+        <div style={{ marginRight: "var(--sidebar-w, 240px)" }} className="flex items-center justify-center min-h-screen p-6">
+          <div className="bg-white rounded-2xl shadow-lg max-w-md w-full p-8 text-center border border-slate-100">
+            <div className="w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-4" style={{ background: "linear-gradient(135deg, #64748b 0%, #475569 100%)" }}>
+              <svg aria-hidden="true" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+              </svg>
+            </div>
+            <h2 className="text-lg font-bold text-slate-800 mb-2">אין לך הרשאה לצפות בכרטיס בית ספר</h2>
+            <p className="text-sm text-slate-500 leading-relaxed mb-6">
+              ההרשאה "צפייה בכרטיס בית ספר" כבויה עבור סוג המשתמש שלך.<br />
+              לפרטים נוספים ניתן לפנות למנהל/ת המערכת בארגון.
+            </p>
+            <div className="flex gap-3 justify-center">
+              <button
+                onClick={() => navigate("/")}
+                className="px-5 py-2.5 rounded-xl text-sm font-semibold text-white"
+                style={{ background: "#0070F3" }}
+              >
+                חזרה לרשימת בתי הספר
+              </button>
+            </div>
           </div>
         </div>
       </div>
