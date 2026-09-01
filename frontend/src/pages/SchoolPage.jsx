@@ -3340,15 +3340,10 @@ export default function SchoolPage() {
     alignItems: "center",
   };
 
-  const editColGridStyle = {
-    display: "grid",
-    gridTemplateColumns: "max-content 1fr",
-    columnGap: 10,
-    alignItems: "start",
-  };
-
   const labelCls = "text-sm font-medium text-slate-500 py-1.5 whitespace-nowrap flex-shrink-0";
-  const editLabelCls = "text-sm font-medium text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]";
+  // Stacked (label above control) variant — used where the column is too narrow for a
+  // side-by-side label+control grid (e.g. the 3-up "יועצים מלווים" editor).
+  const stackedLabelCls = "text-sm font-medium text-slate-500 block mb-1";
 
   // ── Section card styling (visual grouping for פרטי בית הספר tab) ──
   // Each logical section (פרטי מוסד / אנשי קשר / ליווי / ...) renders as its own
@@ -3435,10 +3430,11 @@ export default function SchoolPage() {
                 <rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
               </svg>
             </div>
-            <h2 className="text-lg font-bold text-slate-800 mb-2">אין לך הרשאה לצפות בכרטיס בית ספר</h2>
+            <h2 className="text-lg font-bold text-slate-800 mb-2">אין הרשאות לצפייה בכרטיס בית הספר</h2>
             <p className="text-sm text-slate-500 leading-relaxed mb-6">
-              ההרשאה "צפייה בכרטיס בית ספר" כבויה עבור סוג המשתמש שלך.<br />
-              לפרטים נוספים ניתן לפנות למנהל/ת המערכת בארגון.
+              זו אינה תקלה — ההרשאה "צפייה בכרטיס בית ספר" כבויה עבור סוג המשתמש שלך.<br />
+              אם הגעת לכאן בטעות וצריך גישה, יש לפנות למנהל או לבעלים של הארגון
+              כדי שיפעילו עבורך את ההרשאה (ניהול → הרשאות → "צפייה בכרטיס בית ספר").
             </p>
             <div className="flex gap-3 justify-center">
               <button
@@ -4084,11 +4080,11 @@ export default function SchoolPage() {
                           const isRequired = activeServiceTypes(yearAdminData.service_type).includes(key);
                           const invalid = triedSave && isRequired && draftTypedAdvisorIds[key].length === 0;
                           return (
-                            <div key={key} className="bg-slate-50/70 border border-slate-200/70 rounded-xl p-3">
+                            <div key={key} className="bg-slate-50/70 border border-slate-200/70 rounded-xl p-3 min-w-0">
                               <p className="text-sm font-semibold text-slate-700 text-center mb-3 pb-2 border-b border-black/20">{label}{isRequired && <span className="text-red-500"> *</span>}</p>
-                              <div style={editColGridStyle}>
-                                <span className={editLabelCls}>יועץ מלווה:</span>
-                                <div className="py-0.5">
+                              <div className="space-y-3 min-w-0">
+                                <div className="min-w-0">
+                                  <span className={stackedLabelCls}>יועץ מלווה:</span>
                                   <AdvisorSearch compact schoolId={schoolId} selectedIds={draftTypedAdvisorIds[key]} users={users}
                                     loadingUsers={loadingUsers}
                                     onChange={ids => setDraftTypedAdvisorIds(p => ({ ...p, [key]: ids }))}
@@ -4098,8 +4094,8 @@ export default function SchoolPage() {
                                   )}
                                 </div>
 
-                                <label htmlFor={`meeting-allocation-${key}`} className={editLabelCls}>הקצאת פגישות:</label>
-                                <div className="py-0.5">
+                                <div className="min-w-0">
+                                  <label htmlFor={`meeting-allocation-${key}`} className={stackedLabelCls}>הקצאת פגישות:</label>
                                   <input id={`meeting-allocation-${key}`} type="number" min="0"
                                     className={editFieldCls(false, false)}
                                     defaultValue={yearAdminData[`meeting_allocation_${key}`] ?? ""}
@@ -4109,11 +4105,12 @@ export default function SchoolPage() {
                                     }} />
                                 </div>
 
-                                <span className={editLabelCls}>זמן לפגישה:</span>
-                                <div className="py-0.5">
+                                <div className="min-w-0">
+                                  <span className={stackedLabelCls}>זמן לפגישה:</span>
                                   <HourMinuteInput idPrefix={`meeting-duration-${key}`} label={`זמן לפגישה [${label}]`}
                                     minutes={yearAdminData[`meeting_duration_${key}`] ?? null}
-                                    onChange={v => saveYearAdminField(`meeting_duration_${key}`, v)} />
+                                    onChange={v => saveYearAdminField(`meeting_duration_${key}`, v)}
+                                    inputClassName="w-11 text-sm text-center border rounded-md px-0.5 py-0.5 bg-transparent border-slate-300 focus:outline-none focus:ring-1 focus:border-blue-400 focus:ring-blue-100" />
                                 </div>
                               </div>
                             </div>

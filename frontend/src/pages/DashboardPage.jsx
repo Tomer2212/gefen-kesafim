@@ -784,6 +784,43 @@ function buildRowComparator(sortSpecs) {
   };
 }
 
+// "Banana-yellow" hover tooltip — same visual language as SchoolPage.jsx's CheckLinkTooltip.
+// Used on the lock icon shown next to a school name when the current user lacks the
+// "צפייה בכרטיס בית ספר" permission, so it reads as a permissions matter, not a bug.
+function LockedCardTooltip({ children, text }) {
+  const [pos, setPos] = useState(null); // { top, right } viewport coords, or null when hidden
+  const anchorRef = useRef(null);
+
+  function show() {
+    const rect = anchorRef.current?.getBoundingClientRect();
+    if (rect) setPos({ top: rect.bottom + 6, right: window.innerWidth - rect.right });
+  }
+  function hide() { setPos(null); }
+
+  useEffect(() => {
+    if (!pos) return;
+    function onScroll() { hide(); }
+    document.addEventListener("scroll", onScroll, true);
+    return () => document.removeEventListener("scroll", onScroll, true);
+  }, [pos]);
+
+  return (
+    <span ref={anchorRef} className="inline-flex" onMouseEnter={show} onMouseLeave={hide}>
+      {children}
+      {pos && createPortal(
+        <span
+          role="tooltip"
+          className="fixed text-xs text-slate-800 whitespace-nowrap px-3 py-1.5 rounded-lg shadow-md"
+          style={{ background: "#FEF08A", border: "1px solid #EAB308", top: pos.top, right: pos.right, zIndex: 200 }}
+        >
+          {text}
+        </span>,
+        document.body
+      )}
+    </span>
+  );
+}
+
 // Excel-style header filter/sort icon + dropdown menu for one numeric column. Owns its
 // own transient UI state (search text, custom-filter dialog draft) but reads/writes the
 // shared columnFilters/sortSpecs state passed down from DashboardPage so multiple columns
@@ -2781,13 +2818,15 @@ export default function DashboardPage() {
                                 style={{ position: "sticky", right: selectMode ? "2.5rem" : 0, zIndex: 5 }}>
                                 <span className="font-semibold text-slate-900 inline-flex items-center gap-1.5">
                                   {!canOpenSchoolCard && (
-                                    <svg aria-label="אין לך הרשאה לצפות בכרטיס בית ספר" role="img"
-                                      className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" viewBox="0 0 24 24"
-                                      fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                      <title>אין לך הרשאה לצפות בכרטיס בית ספר</title>
-                                      <rect x="3" y="11" width="18" height="11" rx="2" />
-                                      <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-                                    </svg>
+                                    <LockedCardTooltip text="אין הרשאות לצפייה בכרטיס בית הספר.">
+                                      <svg aria-label="אין הרשאות לצפייה בכרטיס בית הספר" role="img"
+                                        className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" viewBox="0 0 24 24"
+                                        fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                        <title>אין הרשאות לצפייה בכרטיס בית הספר.</title>
+                                        <rect x="3" y="11" width="18" height="11" rx="2" />
+                                        <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                                      </svg>
+                                    </LockedCardTooltip>
                                   )}
                                   {school.name}
                                 </span>
