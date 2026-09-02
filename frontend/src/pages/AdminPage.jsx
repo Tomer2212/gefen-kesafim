@@ -25,6 +25,7 @@ const OUTLINE_BTN_CLS = "border border-slate-300 hover:border-slate-400 text-sla
 import { MultiSelectChips } from "../components/MultiSelectChips";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { ImportMappingModal } from "../components/ImportMappingModal";
+import { SchoolImportProblemsModal } from "../components/SchoolImportProblemsModal";
 import { supabase } from "../lib/supabase";
 import AdminCallsTab from "./AdminCallsTab";
 import AdminCollectionTab from "./AdminCollectionTab";
@@ -705,18 +706,25 @@ const IMPORT_FIELD_CONFIG = [
   { key: "finance_contact_name",  label: "שם אחראי/ת כספים",     required: false },
   { key: "finance_contact_phone", label: "טלפון אחראי/ת כספים",  required: false },
   { key: "finance_contact_email", label: "מייל אחראי/ת כספים",    required: false },
-  { key: "meeting_coordinator",   label: "מתאם פגישות",           required: true, hint: "מנהל/ת / מנהלנ/ית / אחראי/ת כספים" },
+  { key: "meeting_coordinator",   label: "מתאם פגישות",           required: true, ranked: 3, hint: "מנהל/ת / מנהלנ/ית / אחראי/ת כספים — או שם/מייל/טלפון של איש קשר. עד 3 עמודות לפי סדר עדיפות (נופל לעמודה הבאה רק כשהתא ריק / שגיאה / 0)" },
   { key: "service_type",          label: "סוג שירות",             required: true, hint: "גפן / שוטף / גפן+שוטף / מחוז" },
   { key: "client_status",         label: "סטטוס לקוח",            required: true, hint: "פעיל / לא פעיל / בתהליך / לקוח עבר" },
-  { key: "advisor_gefen",         label: "יועץ מלווה — גפן",      required: true, hint: "אימייל אחד או כמה, מופרדים בפסיק (ניתן להשאיר תא ריק בשורה שלא נדרש לה)" },
-  { key: "advisor_current",       label: "יועץ מלווה — שוטף",     required: true, hint: "אימייל אחד או כמה, מופרדים בפסיק (ניתן להשאיר תא ריק בשורה שלא נדרש לה)" },
-  { key: "advisor_district",      label: "יועץ מלווה — מחוז",     required: true, hint: "אימייל אחד או כמה, מופרדים בפסיק (ניתן להשאיר תא ריק בשורה שלא נדרש לה)" },
+  { key: "advisor_gefen",         label: "יועץ מלווה — גפן",      required: true, hint: "שם מלא / אימייל / טלפון — אחד או כמה, מופרדים בפסיק (ניתן להשאיר תא ריק בשורה שלא נדרש לה)" },
+  { key: "advisor_current",       label: "יועץ מלווה — שוטף",     required: true, hint: "שם מלא / אימייל / טלפון — אחד או כמה, מופרדים בפסיק (ניתן להשאיר תא ריק בשורה שלא נדרש לה)" },
+  { key: "advisor_district",      label: "יועץ מלווה — מחוז",     required: true, hint: "שם מלא / אימייל / טלפון — אחד או כמה, מופרדים בפסיק (ניתן להשאיר תא ריק בשורה שלא נדרש לה)" },
   { key: "education_authority",    label: "רשות חינוך",           required: false },
   { key: "sector",                label: "מגזר",                 required: false, hint: "יהודי / ערבי / צ'רקסי / בדואי / דרוזי" },
   { key: "supervision",           label: "פיקוח",                required: false, hint: "ממלכתי / ממלכתי דתי / חרדי" },
   { key: "grade_levels",          label: "שכבות לימוד",          required: false, hint: "רשימה מופרדת בפסיקים מתוך א,ב,ג,ד,ה,ו,ז,ח,ט,י,יא,יב" },
   { key: "study_days",            label: "ימי לימוד",            required: false, hint: "רשימה מופרדת בפסיקים מתוך א,ב,ג,ד,ה,ו,ש" },
   { key: "student_count",         label: "מס' תלמידים",          required: false, hint: "מספר בלבד" },
+  { key: "meeting_allocation_gefen",    label: "הקצאת פגישות [גפן]",    required: false, hint: "מספר" },
+  { key: "meeting_allocation_current",  label: "הקצאת פגישות [שוטף]",   required: false, hint: "מספר" },
+  { key: "meeting_allocation_district", label: "הקצאת פגישות [מחוז]",   required: false, hint: "מספר" },
+  { key: "meeting_duration_gefen",      label: "זמן לפגישה [גפן]",      required: false, hint: 'שעות:דקות ("1:30"), דקות ("90") או "שעה וחצי"' },
+  { key: "meeting_duration_current",    label: "זמן לפגישה [שוטף]",     required: false, hint: 'שעות:דקות ("1:30"), דקות ("90") או "שעה וחצי"' },
+  { key: "meeting_duration_district",   label: "זמן לפגישה [מחוז]",     required: false, hint: 'שעות:דקות ("1:30"), דקות ("90") או "שעה וחצי"' },
+  { key: "general_notes",         label: "הערות כלליות",         required: false, hint: "טקסט חופשי — יתווסף לאזור ההערות בכרטיס בית הספר בשם \"מיובא מאקסל\"" },
 ];
 
 const USER_IMPORT_FIELD_CONFIG = [
@@ -726,85 +734,264 @@ const USER_IMPORT_FIELD_CONFIG = [
   { key: "work_phone",  label: "טלפון עבודה",    required: false, hint: "10 ספרות המתחילות ב-05" },
 ];
 
-function normalizeStage(raw) {
-  const t = String(raw || "").trim();
-  if (!t) return "";
-  const l = t.toLowerCase();
-  if (l.includes("יסוד") || l === "yesodi") return "yesodi";
-  if (l.includes("ביניים") || l === "beinayim") return "beinayim";
-  if (l.includes("תיכון") || l === "tikkon") return "tikkon";
-  if (l.includes("שש") || l === "sheshshnati") return "sheshshnati";
-  return "other";
+// ---------------------------------------------------------------------------
+// Excel-import recognition for closed-vocabulary columns.
+// Every matcher returns { value, status }: "ok" = recognized (or the cell is
+// empty / an error) | "none" = the cell holds something we could not map with
+// confidence — raised in the interactive problems modal. Empty is never a problem.
+// ---------------------------------------------------------------------------
+
+// A cell that carries no real value: blank, an Excel formula error (#N/A, #REF!,
+// #VALUE!, …), the literal words n/a / null / none, or a lone dash. Treated as
+// "not filled in" for EVERY column. (A lone "0" is only treated as empty in the
+// meeting-coordinator ranked fallback — handled there, not here.)
+function isBlankOrError(v) {
+  const t = String(v ?? "").trim();
+  if (!t) return true;
+  if (/^[-–—]+$/.test(t)) return true;
+  if (["n/a", "na", "null", "none", "nan", "#value"].includes(t.toLowerCase())) return true;
+  if (/^#[a-z0-9_/]*[!?]?$/i.test(t)) return true; // #N/A #REF! #NAME? #DIV/0! #GETTING_DATA …
+  return false;
 }
 
-function normalizeDistrict(raw) {
-  const t = String(raw || "").trim();
-  if (!t) return "";
-  if (t.includes("צפון")) return "צפון";
-  if (t.includes("דרום")) return "דרום";
-  if (t.includes("מרכז")) return "מרכז";
-  if (t.includes("ירושלים")) return "ירושלים";
-  if (t.includes("תל") || t.includes("ת\"א") || t.includes("תא")) return "תל-אביב";
-  if (t.includes("חיפה")) return "חיפה";
-  return "";
+// Ordered-rules matcher: first rule whose token list hits the normalized key wins.
+function matchClosed(raw, rules, emptyValue = "") {
+  if (isBlankOrError(raw)) return { value: emptyValue, status: "ok" };
+  const key = normFinanceKey(raw); // lowercase + strip spaces / punctuation / quotes
+  if (!key) return { value: emptyValue, status: "ok" };
+  for (const rule of rules) {
+    if (rule.tokens.some(tok => key.includes(tok))) return { value: rule.value, status: "ok" };
+  }
+  return { value: emptyValue, status: "none" };
 }
 
+const STAGE_RULES = [
+  { value: "tikkon",      tokens: ["עליונה", "חטע", "חטיבהעליונה", "תיכון", "תיכונית", "tichon", "tikon", "highschool"] },
+  { value: "beinayim",    tokens: ["חטיבתביניים", "חטב", "ביניים", "beinayim", "middleschool"] },
+  { value: "yesodi",      tokens: ["יסודי", "יסודית", "יסוד", "yesodi", "elementary", "primary"] },
+  { value: "sheshshnati", tokens: ["שששנתי", "ששסנתי", "6שנתי", "שישנתי", "sheshshnati", "sixyear"] },
+  { value: "other",       tokens: ["אחר", "אחרת", "other", "misc"] },
+];
+const matchStage = (raw) => matchClosed(raw, STAGE_RULES, "");
+
+const DISTRICT_RULES = [
+  { value: "תל-אביב",        tokens: ["תלאביב", "תל", "telaviv"] },
+  { value: "צפון",            tokens: ["צפון", "צפוני", "north"] },
+  { value: "דרום",            tokens: ["דרום", "דרומי", "south"] },
+  { value: "ירושלים",         tokens: ["ירושלים", "ירושלם", "jerusalem"] },
+  { value: "חיפה",            tokens: ["חיפה", "haifa"] },
+  { value: "חינוך התיישבותי", tokens: ["התיישבותי", "חינוךהתיישבותי", "חנה", "התיישבות"] },
+  { value: "חרדי",            tokens: ["חרדי", "חרדית", "מחוזחרדי"] },
+  { value: "מרכז",            tokens: ["מרכז", "מרכזי", "center", "central"] },
+];
+const matchDistrict = (raw) => matchClosed(raw, DISTRICT_RULES, "");
+
+const SECTOR_RULES = [
+  { value: "יהודי",  tokens: ["יהוד", "jewish"] },
+  { value: "ערבי",   tokens: ["ערב", "arab"] },
+  { value: "צ'רקסי", tokens: ["צרקס", "circass"] },
+  { value: "בדואי",  tokens: ["בדוא", "בדוו", "bedou"] },
+  { value: "דרוזי",  tokens: ["דרוז", "druze", "druz"] },
+];
+const matchSector = (raw) => matchClosed(raw, SECTOR_RULES, "");
+
+const SUPERVISION_RULES = [
+  { value: "ממלכתי דתי", tokens: ["דתי", "ממד"] },
+  { value: "ממלכתי",     tokens: ["ממלכתי", "ממלכתית", "state"] },
+  { value: "חרדי",       tokens: ["חרדי", "חרדית", "עצמאי", "מעיין", "ביתיעקב", "חבד"] },
+];
+const matchSupervision = (raw) => matchClosed(raw, SUPERVISION_RULES, "");
+
+// Service type needs a combo case (גפן + שוטף → gefen_current), so it isn't a plain ordered list.
+const SVC_GEFEN = ["גפן", "gefen", "gefn"];
+const SVC_CURRENT = ["שוטף", "שטף", "current", "shotef", "ongoing"];
+const SVC_DISTRICT = ["מחוז", "מחוזי", "district", "machoz"];
+function matchServiceType(raw) {
+  if (isBlankOrError(raw)) return { value: null, status: "ok" };
+  const key = normFinanceKey(raw);
+  if (!key) return { value: null, status: "ok" };
+  const hasG = SVC_GEFEN.some(t => key.includes(t));
+  const hasC = SVC_CURRENT.some(t => key.includes(t));
+  const hasD = SVC_DISTRICT.some(t => key.includes(t));
+  if (hasG && hasC) return { value: "gefen_current", status: "ok" };
+  if (hasG) return { value: "gefen", status: "ok" };
+  if (hasC) return { value: "current", status: "ok" };
+  if (hasD) return { value: "district", status: "ok" };
+  return { value: null, status: "none" };
+}
+
+function matchClientStatus(raw) {
+  if (isBlankOrError(raw)) return { value: null, status: "ok" };
+  const key = normFinanceKey(raw);
+  if (!key) return { value: null, status: "ok" };
+  if ((key.includes("לא") && key.includes("פעיל")) || key.includes("inactive")) return { value: "inactive", status: "ok" };
+  if (key.includes("פעיל") || key.includes("active")) return { value: "active", status: "ok" };
+  if (key.includes("תהליך") || key.includes("הליך") || key.includes("בטיפול") || key.includes("inprogress") || key.includes("process")) return { value: "in_progress", status: "ok" };
+  if (key.includes("עבר") || key.includes("לשעבר") || key.includes("ישן") || key.includes("former") || key.includes("past")) return { value: "former", status: "ok" };
+  return { value: null, status: "none" };
+}
+
+const COORD_RULES = [
+  { value: "secretary",       tokens: ["מנהלנ", "מזכיר", "מזכ", "secretary"] },
+  { value: "finance_contact", tokens: ["כספים", "גזבר", "חשב", "הנהח", "הנהלתחשבונות", "finance", "bookkeep", "treasurer", "accountant"] },
+  { value: "principal",       tokens: ["מנהל", "מנכ", "principal", "director", "headmaster"] },
+];
+// Role-word only. Returns "principal" | "secretary" | "finance_contact" | null.
+const matchCoordinatorWord = (raw) => matchClosed(raw, COORD_RULES, null).value;
+
+// Full coordinator resolution: role word first, then an exact identity match
+// (name / email / phone) against THIS row's own imported contacts.
+// -> { role, via: "word" | "identity" } | null (unresolved → problems modal).
+function resolveCoordinator(raw, school) {
+  if (isBlankOrError(raw)) return null;
+  const t = String(raw).trim();
+  const byWord = matchCoordinatorWord(t);
+  if (byWord) return { role: byWord, via: "word" };
+  const recs = [
+    { role: "principal",       name: school.principal_name,       email: school.principal_email,       phone: school.principal_phone },
+    { role: "secretary",       name: school.secretary_name,       email: school.secretary_email,       phone: school.secretary_phone },
+    { role: "finance_contact", name: school.finance_contact_name, email: school.finance_contact_email, phone: school.finance_contact_phone },
+  ];
+  const hits = new Set();
+  if (t.includes("@")) {
+    const k = normEmailKey(t);
+    for (const r of recs) if (r.email && normEmailKey(r.email) === k) hits.add(r.role);
+  } else {
+    const digits = t.replace(/[\s\-()+.]/g, "");
+    if (digits.length >= 9 && /^\d+$/.test(digits)) {
+      const k = normPhoneKey(t);
+      for (const r of recs) if (r.phone && normPhoneKey(r.phone) === k) hits.add(r.role);
+    } else {
+      const k = normNameKey(t);
+      for (const r of recs) if (r.name && normNameKey(r.name) === k) hits.add(r.role);
+    }
+  }
+  return hits.size === 1 ? { role: [...hits][0], via: "identity" } : null;
+}
+
+// --- list-valued columns: grade levels & study days -------------------------
+const GRADE_ORDER = ["א", "ב", "ג", "ד", "ה", "ו", "ז", "ח", "ט", "י", "יא", "יב"];
+const GRADE_BY_DIGIT = { "1": "א", "2": "ב", "3": "ג", "4": "ד", "5": "ה", "6": "ו", "7": "ז", "8": "ח", "9": "ט", "10": "י", "11": "יא", "12": "יב" };
+function normGradeToken(tok) {
+  const s = String(tok || "").replace(/כית(ות|ה)?/g, "").replace(/["'׳״]/g, "").replace(/\s+/g, "").trim();
+  if (!s) return null;
+  if (/^\d+$/.test(s)) return GRADE_BY_DIGIT[s] || null;
+  return GRADE_ORDER.includes(s) ? s : null;
+}
+const DAY_ORDER = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+const DAY_ALIASES = [
+  { value: "sun", toks: ["א", "ראשון", "1", "sun"] },
+  { value: "mon", toks: ["ב", "שני", "2", "mon"] },
+  { value: "tue", toks: ["ג", "שלישי", "3", "tue"] },
+  { value: "wed", toks: ["ד", "רביעי", "4", "wed"] },
+  { value: "thu", toks: ["ה", "חמישי", "5", "thu"] },
+  { value: "fri", toks: ["ו", "שישי", "6", "fri"] },
+  { value: "sat", toks: ["ש", "שבת", "7", "sat"] },
+];
+function normDayToken(tok) {
+  const s = String(tok || "").replace(/^יום/, "").replace(/["'׳״]/g, "").replace(/\s+/g, "").trim().toLowerCase();
+  if (!s) return null;
+  for (const d of DAY_ALIASES) if (d.toks.includes(s)) return d.value;
+  return null;
+}
+function matchTokenList(raw, order, normTok) {
+  if (isBlankOrError(raw)) return { value: [], status: "ok", unknown: [] };
+  const out = [];
+  const unknown = [];
+  for (const p of String(raw).split(/[,;]/).map(s => s.trim()).filter(Boolean)) {
+    const rm = p.match(/^(.+?)\s*(?:-|–|—|עד)\s*(.+)$/);
+    if (rm) {
+      const a = normTok(rm[1]);
+      const b = normTok(rm[2]);
+      const ia = a ? order.indexOf(a) : -1;
+      const ib = b ? order.indexOf(b) : -1;
+      if (ia !== -1 && ib !== -1) {
+        const [lo, hi] = ia <= ib ? [ia, ib] : [ib, ia];
+        out.push(...order.slice(lo, hi + 1));
+        continue;
+      }
+      unknown.push(p);
+      continue;
+    }
+    const v = normTok(p);
+    if (v) out.push(v); else unknown.push(p);
+  }
+  const value = [...new Set(out)].sort((x, y) => order.indexOf(x) - order.indexOf(y));
+  return { value, status: unknown.length > 0 ? "none" : "ok", unknown };
+}
+const matchGradeLevels = (raw) => matchTokenList(raw, GRADE_ORDER, normGradeToken);
+const matchStudyDays = (raw) => matchTokenList(raw, DAY_ORDER, normDayToken);
+
+// --- numeric columns: meeting allocation (count) & duration (minutes) -------
+function matchMeetingAllocation(raw) {
+  if (isBlankOrError(raw)) return { value: null, status: "ok" };
+  const s = String(raw).replace(/[^\d.,]/g, "").replace(/,/g, ".");
+  const n = parseFloat(s);
+  return Number.isFinite(n) ? { value: n, status: "ok" } : { value: null, status: "none" };
+}
+// Flexible: "90" · "1:30" · "1.5" / "1.5 שעות" · "45 דק'" · "2 שעות" · "שעה וחצי" · "חצי שעה" · "שעתיים"
+function matchMeetingDuration(raw) {
+  if (isBlankOrError(raw)) return { value: null, status: "ok" };
+  const key = String(raw).replace(/\s+/g, "");
+  const ok = (v) => (v > 0 ? { value: Math.round(v), status: "ok" } : { value: null, status: "none" });
+  const hm = key.match(/^(\d{1,2}):(\d{1,2})$/);
+  if (hm) return ok((+hm[1]) * 60 + (+hm[2]));
+  if (key === "שעה") return { value: 60, status: "ok" };
+  if (key === "שעתיים") return { value: 120, status: "ok" };
+  if (key.includes("חצישעה")) return { value: 30, status: "ok" };
+  const frac = key.includes("שלושתרבעי") ? 0.75 : key.includes("וחצי") ? 0.5 : key.includes("ורבע") ? 0.25 : 0;
+  const hasHourWord = /שע(ה|ות|תיים)/.test(key);
+  const hasMinWord = key.includes("דק");
+  if (hasHourWord) {
+    const h = key.match(/(\d+(?:[.,]\d+)?)/);
+    let hours = h ? parseFloat(h[1].replace(",", ".")) : (key.includes("שעתיים") ? 2 : 1);
+    hours += frac;
+    let mins = 0;
+    const mm = key.match(/(\d+)דק/);
+    if (mm) mins = +mm[1];
+    return ok(hours * 60 + mins);
+  }
+  if (hasMinWord) {
+    const mm = key.match(/(\d+)/);
+    if (mm) return ok(+mm[1]);
+  }
+  if (/^\d+[.,]\d+$/.test(key)) return ok(parseFloat(key.replace(",", ".")) * 60);
+  if (/^\d+$/.test(key)) {
+    const n = +key;
+    if (n >= 15 && n <= 600 && n % 5 === 0) return { value: n, status: "ok" };
+    return { value: null, status: "none" }; // bare small integer (e.g. "2") — hours or minutes? ask
+  }
+  return { value: null, status: "none" };
+}
+
+// Finance-software column (Excel import). Strip every space/dash/punctuation, then
+// substring-match against a generous alias list per canonical value. A value that
+// is present but matches 0 aliases — or matches 2+ — is treated as "unrecognized"
+// and raised in the interactive problems modal (an empty cell is fine).
+const FINANCE_SOFTWARE_ALIASES = {
+  kesafim2000: ["כספים2000", "כספים", "כספי2000", "כספיים2000", "כספיםאלפיים", "תוכנתכספים", "kesafim2000", "kesafim", "ksafim2000", "ksafim", "caspim2000", "2000"],
+  payscool: ["פייסקול", "פיסקול", "פייסקל", "פייסכול", "פייסקולתשלומים", "payscool", "payscol", "payschool", "payskool", "payscul", "pyscool", "paycool"],
+  schoolcash: ["סקולקאש", "סקולקש", "סקולכאש", "סקולק", "סקולקאשאונליין", "schoolcash", "scoolcash", "schoolcach", "skoolcash", "schoolkash", "schoolcashonline"],
+};
+
+function normFinanceKey(raw) {
+  return String(raw || "").toLowerCase().replace(/[\s\-_.,'"׳״()/\\]+/g, "");
+}
+
+// -> { value, status }. status: "ok" (matched, or empty) | "none" (present but not confidently recognized).
+function matchFinanceSoftware(raw) {
+  const key = normFinanceKey(raw);
+  if (!key) return { value: "", status: "ok" };
+  const hits = Object.entries(FINANCE_SOFTWARE_ALIASES)
+    .filter(([, aliases]) => aliases.some(a => key.includes(a)))
+    .map(([value]) => value);
+  if (hits.length === 1) return { value: hits[0], status: "ok" };
+  return { value: "", status: "none" };
+}
+
+// Kept for any non-import caller; import uses matchFinanceSoftware.
 function normalizeFinanceSoftware(raw) {
-  const t = String(raw || "").trim();
-  if (!t) return "";
-  const l = t.toLowerCase();
-  if (l.includes("כספים") || l.includes("kesafim")) return "kesafim2000";
-  if (l.includes("פייסקול") || l.includes("payscool")) return "payscool";
-  if (l.includes("סקולקאש") || l.includes("schoolcash")) return "schoolcash";
-  return "";
-}
-
-function normalizeSector(raw) {
-  const t = String(raw || "").trim();
-  if (!t) return "";
-  if (t.includes("יהוד")) return "יהודי";
-  if (t.includes("ערבי")) return "ערבי";
-  if (t.includes("צ'רקס") || t.includes("צרקס")) return "צ'רקסי";
-  if (t.includes("בדואי")) return "בדואי";
-  if (t.includes("דרוזי")) return "דרוזי";
-  return "";
-}
-
-function normalizeSupervision(raw) {
-  const t = String(raw || "").trim();
-  if (!t) return "";
-  if (t.includes("ממלכתי דתי")) return "ממלכתי דתי";
-  if (t.includes("ממלכתי")) return "ממלכתי";
-  if (t.includes("חרדי")) return "חרדי";
-  return "";
-}
-
-function normalizeServiceType(raw) {
-  const t = String(raw || "").trim();
-  if (!t) return null;
-  if (t.includes("גפן") && t.includes("שוטף")) return "gefen_current";
-  if (t.includes("גפן")) return "gefen";
-  if (t.includes("שוטף")) return "current";
-  if (t.includes("מחוז")) return "district";
-  return null;
-}
-
-function normalizeMeetingCoordinator(raw) {
-  const t = String(raw || "").trim();
-  if (!t) return null;
-  if (t.includes("מנהלנ")) return "secretary";
-  if (t.includes("כספים")) return "finance_contact";
-  if (t.includes("מנהל")) return "principal";
-  return null;
-}
-
-function normalizeClientStatus(raw) {
-  const t = String(raw || "").trim();
-  if (t === "פעיל") return "active";
-  if (t === "לא פעיל") return "inactive";
-  if (t.includes("בתהליך")) return "in_progress";
-  if (t.includes("לקוח עבר")) return "former";
-  return null;
+  return matchFinanceSoftware(raw).value;
 }
 
 function normalizeRole(raw) {
@@ -814,45 +1001,107 @@ function normalizeRole(raw) {
   return "advisor";
 }
 
-function ImportProblemsModal({ problems, onClose }) {
-  const { ref, handleKeyDown } = useFocusTrap(onClose);
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4" dir="rtl">
-      <div
-        ref={ref}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="import-problems-title"
-        onKeyDown={handleKeyDown}
-        className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col"
-      >
-        <div className="px-6 py-4 border-b border-slate-100 flex-shrink-0">
-          <h2 id="import-problems-title" className="font-bold text-slate-900 text-lg">בעיות בייבוא</h2>
-          <p className="text-sm text-slate-600 mt-1">
-            בתי הספר הבאים יובאו בהצלחה, אך נותרו בהם פרטים חסרים שכדאי להשלים ידנית — <b className="text-slate-800">{problems.length}</b> בתי ספר.
-          </p>
-        </div>
-        <div className="flex-1 overflow-y-auto px-6 py-4 flex flex-col gap-3">
-          {problems.map((p, i) => (
-            <div key={i} className="border border-amber-200 bg-amber-50/50 rounded-xl p-3 space-y-1.5">
-              <div className="text-sm">
-                <b className="text-slate-800">{p.name}</b>{" "}
-                {p.symbol && <bdi className="text-slate-400 text-xs">({p.symbol})</bdi>}
-              </div>
-              <ul className="list-disc pr-5 space-y-0.5">
-                {p.issues.map((issue, j) => (
-                  <li key={j} className="text-xs text-slate-700">{issue}</li>
-                ))}
-              </ul>
-            </div>
-          ))}
-        </div>
-        <div className="px-6 py-4 border-t border-slate-100 flex justify-end flex-shrink-0">
-          <button type="button" onClick={onClose} className="btn-blue text-sm px-5 py-2">הבנתי</button>
-        </div>
-      </div>
-    </div>
-  );
+// ---------------------------------------------------------------------------
+// Advisor-cell matching for the school Excel import.
+// A "יועץ מלווה [גפן/שוטף/מחוז]" cell may contain one or more system users,
+// identified by an EXACT match on full name, email, or phone — separated by
+// a comma/semicolon, or (best effort) glued together with no separator.
+// ---------------------------------------------------------------------------
+const normNameKey = (s) => String(s || "").replace(/ /g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+const normEmailKey = (s) => String(s || "").replace(/\s+/g, "").trim().toLowerCase();
+function normPhoneKey(s) {
+  let d = String(s || "").replace(/\D/g, "");
+  if (/^972\d{9}$/.test(d)) d = "0" + d.slice(3);
+  return d;
+}
+const EMAIL_RE = /[^\s,;]+@[^\s,;]+\.[^\s,;]+/g;
+const PHONE_RE = /(?:\+?972[-\s]?|0)\d(?:[-\s]?\d){7,9}/g;
+
+// Build lookup maps { key -> [userId, ...] } so name/email/phone collisions surface as "ambiguous".
+function buildUserMatchIndex(users) {
+  const byName = new Map();
+  const byEmail = new Map();
+  const byPhone = new Map();
+  let maxNameWords = 1;
+  const push = (map, key, id) => {
+    if (!key) return;
+    const arr = map.get(key);
+    if (arr) { if (!arr.includes(id)) arr.push(id); } else map.set(key, [id]);
+  };
+  for (const u of users || []) {
+    const nk = normNameKey(u.full_name);
+    if (nk) { push(byName, nk, u.id); maxNameWords = Math.max(maxNameWords, nk.split(" ").length); }
+    push(byEmail, normEmailKey(u.email), u.id);
+    const pk = normPhoneKey(u.work_phone);
+    if (pk.length >= 9) push(byPhone, pk, u.id);
+  }
+  return { byName, byEmail, byPhone, maxNameWords: Math.min(maxNameWords, 6) };
+}
+
+// Classify + look up a single already-isolated token. Returns { status, ids }.
+function matchAdvisorToken(token, idx) {
+  const t = String(token || "").trim();
+  if (!t) return { status: "none", ids: [] };
+  let hit;
+  if (t.includes("@")) hit = idx.byEmail.get(normEmailKey(t));
+  else {
+    const digits = t.replace(/[\s\-()+.]/g, "");
+    if (digits.length >= 9 && /^\d+$/.test(digits)) hit = idx.byPhone.get(normPhoneKey(t));
+    else hit = idx.byName.get(normNameKey(t));
+  }
+  if (!hit || hit.length === 0) return { status: "none", ids: [] };
+  if (hit.length === 1) return { status: "ok", ids: [hit[0]] };
+  return { status: "ambiguous", ids: hit.slice() };
+}
+
+// Best-effort split of a separator-less part that did not match as a whole:
+// peel emails/phones, then greedily partition the remaining words against known
+// full names (longest match first). Only succeeds if the ENTIRE part is consumed.
+function smartSplitPart(part, idx) {
+  let rest = ` ${part} `;
+  const ids = [];
+  const problems = [];
+  for (const re of [EMAIL_RE, PHONE_RE]) {
+    const found = rest.match(re) || [];
+    for (const frag of found) {
+      const m = matchAdvisorToken(frag, idx);
+      if (m.status === "ok") { ids.push(m.ids[0]); rest = rest.replace(frag, " "); }
+      else if (m.status === "ambiguous") { problems.push({ kind: "advisor_ambiguous", token: frag.trim(), candidateIds: m.ids }); rest = rest.replace(frag, " "); }
+    }
+  }
+  const words = rest.replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
+  let i = 0;
+  let ok = true;
+  while (i < words.length) {
+    let matched = false;
+    for (let take = Math.min(idx.maxNameWords, words.length - i); take >= 1; take--) {
+      const cand = words.slice(i, i + take).join(" ");
+      const hit = idx.byName.get(normNameKey(cand));
+      if (hit && hit.length === 1) { ids.push(hit[0]); i += take; matched = true; break; }
+      if (hit && hit.length > 1) { problems.push({ kind: "advisor_ambiguous", token: cand, candidateIds: hit.slice() }); i += take; matched = true; break; }
+    }
+    if (!matched) { ok = false; break; }
+  }
+  if (ok && ids.length + problems.length >= 1) return { ids, problems };
+  return { ids: [], problems: [{ kind: "advisor_unresolved", token: String(part).trim() }] };
+}
+
+// Resolve a whole advisor cell -> { ids: [unique userId...], problems: [...] }.
+function resolveAdvisorCell(rawCell, idx) {
+  const raw = String(rawCell || "").replace(/ /g, " ").trim();
+  if (!raw) return { ids: [], problems: [] };
+  const parts = raw.split(/[,;\n]+/).map((s) => s.trim()).filter(Boolean);
+  const ids = [];
+  const problems = [];
+  for (const part of parts) {
+    const m = matchAdvisorToken(part, idx);
+    if (m.status === "ok") { ids.push(m.ids[0]); continue; }
+    if (m.status === "ambiguous") { problems.push({ kind: "advisor_ambiguous", token: part, candidateIds: m.ids }); continue; }
+    const s = smartSplitPart(part, idx);
+    ids.push(...s.ids);
+    problems.push(...s.problems);
+  }
+  return { ids: [...new Set(ids)], problems };
 }
 
 function RecycleBinInfoModal({ schoolName, onClose }) {
@@ -1340,7 +1589,10 @@ export default function AdminPage() {
   const [importing, setImporting] = useState(false);
   const [importMappingData, setImportMappingData] = useState(null);
   const [importProgressMsg, setImportProgressMsg] = useState("");
-  const [importProblems, setImportProblems] = useState(null);
+  // Pending interactive-resolution state for the school import: { rows: [planRow, ...] }.
+  // When set, <SchoolImportProblemsModal> is shown and blocks the commit until every
+  // row is either fully resolved or excluded.
+  const [importPlan, setImportPlan] = useState(null);
 
   // Admin schools table state (ניהול → בתי ספר: מחירים/חוזים/תשלומים, per school year)
   const [adminAcademicYear, setAdminAcademicYear] = useState(DEFAULT_ACADEMIC_YEAR);
@@ -2486,123 +2738,210 @@ export default function AdminPage() {
   const IMPORT_YEAR_ADMIN_KEYS = ["service_type", "client_status"];
   const IMPORT_ADVISOR_KEYS = { advisor_gefen: "gefen", advisor_current: "current", advisor_district: "district" };
 
-  async function confirmImport(mapping) {
+  const COORDINATOR_NAME_FIELD = { principal: "principal_name", secretary: "secretary_name", finance_contact: "finance_contact_name" };
+
+  // Closed-vocabulary columns and how to recognize / resolve them in the modal.
+  const CLOSED_FIELD_SPECS = {
+    stage:           { label: "שלב מוסד",  target: "school",    match: matchStage,       kind: "select", allowEmpty: true,  options: () => SCHOOL_STAGE_OPTIONS.filter(o => o.value) },
+    district:        { label: "מחוז",      target: "school",    match: matchDistrict,    kind: "select", allowEmpty: true,  options: () => DISTRICT_OPTIONS.map(d => ({ value: d, label: d })) },
+    sector:          { label: "מגזר",      target: "school",    match: matchSector,      kind: "select", allowEmpty: true,  options: () => SECTOR_OPTIONS.filter(o => o.value) },
+    supervision:     { label: "פיקוח",     target: "school",    match: matchSupervision, kind: "select", allowEmpty: true,  options: () => SUPERVISION_OPTIONS.filter(o => o.value) },
+    service_type:    { label: "סוג שירות", target: "yearAdmin", match: matchServiceType, kind: "select", allowEmpty: false, options: () => SERVICE_TYPE_OPTIONS },
+    client_status:   { label: "סטטוס לקוח", target: "yearAdmin", match: matchClientStatus, kind: "select", allowEmpty: false, options: () => CLIENT_STATUS_OPTIONS },
+    grade_levels:    { label: "שכבות לימוד", target: "school",  match: matchGradeLevels, kind: "chips",  options: () => GRADE_LEVEL_OPTIONS },
+    study_days:      { label: "ימי לימוד", target: "school",    match: matchStudyDays,   kind: "chips",  options: () => STUDY_DAY_OPTIONS },
+    meeting_allocation_gefen:    { label: "הקצאת פגישות [גפן]",  target: "yearAdmin", match: matchMeetingAllocation, kind: "number" },
+    meeting_allocation_current:  { label: "הקצאת פגישות [שוטף]", target: "yearAdmin", match: matchMeetingAllocation, kind: "number" },
+    meeting_allocation_district: { label: "הקצאת פגישות [מחוז]", target: "yearAdmin", match: matchMeetingAllocation, kind: "number" },
+    meeting_duration_gefen:      { label: "זמן לפגישה [גפן]",   target: "yearAdmin", match: matchMeetingDuration,  kind: "duration" },
+    meeting_duration_current:    { label: "זמן לפגישה [שוטף]",  target: "yearAdmin", match: matchMeetingDuration,  kind: "duration" },
+    meeting_duration_district:   { label: "זמן לפגישה [מחוז]",  target: "yearAdmin", match: matchMeetingDuration,  kind: "duration" },
+  };
+
+  // Parse one mapped Excel row into a structured plan row (no network calls, no writes).
+  function parseImportRow(row, i, mapping, idx) {
+    const school = {};
+    const yearAdmin = {};
+    const advisorRaw = { gefen: "", current: "", district: "" };
+    const rawByKey = {};
+    let coordinatorRaw = "";
+    let generalNotes = "";
+    let financeSoftwareRaw = "";
+    IMPORT_FIELD_CONFIG.forEach(f => {
+      // meeting_coordinator: up to 3 ranked columns — take the first that is not
+      // blank / an Excel error / a lone 0 (a broken lookup result).
+      if (f.key === "meeting_coordinator") {
+        const cols = Array.isArray(mapping[f.key]) ? mapping[f.key] : [mapping[f.key]];
+        for (const c of cols) {
+          if (c === null || c === undefined) continue;
+          const v = String(row[c] ?? "").trim();
+          if (isBlankOrError(v) || /^0+(\.0+)?$/.test(v)) continue;
+          coordinatorRaw = v;
+          break;
+        }
+        return;
+      }
+      if (mapping[f.key] === null || mapping[f.key] === undefined) return;
+      let raw = String(row[mapping[f.key]] ?? "").trim();
+      if (isBlankOrError(raw)) raw = "";
+      if (f.key === "finance_software") { financeSoftwareRaw = raw; return; }
+      if (f.key === "general_notes") { generalNotes = raw; return; }
+      if (IMPORT_ADVISOR_KEYS[f.key]) { advisorRaw[IMPORT_ADVISOR_KEYS[f.key]] = raw; return; }
+      if (CLOSED_FIELD_SPECS[f.key]) { rawByKey[f.key] = raw; return; }
+      if (f.key === "student_count") {
+        const n = parseInt(raw.replace(/\D/g, ""), 10);
+        school[f.key] = Number.isFinite(n) ? n : null;
+        if (raw && !Number.isFinite(n)) rawByKey[f.key] = raw; // has text but no digits → resolve in modal
+        return;
+      }
+      if (f.key.includes("phone")) { school[f.key] = raw.replace(/\D/g, ""); return; }
+      school[f.key] = raw;
+    });
+
+    // Resolve every closed-vocabulary field; collect the ones we could not map.
+    const fieldIssues = [];
+    for (const [key, spec] of Object.entries(CLOSED_FIELD_SPECS)) {
+      if (!(key in rawByKey)) continue;
+      const res = spec.match(rawByKey[key]);
+      const bucket = spec.target === "yearAdmin" ? yearAdmin : school;
+      bucket[key] = res.value;
+      if (res.status === "none") {
+        fieldIssues.push({
+          field: key, label: spec.label, target: spec.target, kind: spec.kind,
+          allowEmpty: !!spec.allowEmpty, raw: rawByKey[key],
+          options: spec.options ? spec.options() : undefined,
+          recognized: res.value, unknown: res.unknown || [],
+        });
+      }
+    }
+    if ("student_count" in rawByKey) {
+      fieldIssues.push({ field: "student_count", label: "מס' תלמידים", target: "school", kind: "number", raw: rawByKey.student_count });
+    }
+
+    const coordRes = resolveCoordinator(coordinatorRaw, school);
+    const coordinator = coordRes?.role || null;
+    const coordinatorName = coordinator ? (school[COORDINATOR_NAME_FIELD[coordinator]] || "") : "";
+
+    const advisorBase = {};
+    const advisorProblems = {};
+    for (const t of ["gefen", "current", "district"]) {
+      const r = resolveAdvisorCell(advisorRaw[t], idx);
+      advisorBase[t] = r.ids;
+      advisorProblems[t] = r.problems.map(p => ({ ...p, type: t, typeLabel: SERVICE_TYPE_TABS.find(s => s.key === t)?.label || t }));
+    }
+    const requiredTypes = yearAdmin.client_status === "active" ? activeServiceTypes(yearAdmin.service_type) : [];
+
+    const financeSoftware = matchFinanceSoftware(financeSoftwareRaw);
+    school.finance_software = financeSoftware.value;
+
+    const problems = [];
+    if (!school.name || !school.symbol) problems.push({ kind: "missing_identity" });
+    if (!coordinator || !coordinatorName) {
+      problems.push({ kind: "coordinator_issue", suggestedRole: coordinator || "", suggestedName: coordinatorName, raw: coordinatorRaw });
+    }
+    if (financeSoftware.status === "none") problems.push({ kind: "finance_software_issue", raw: financeSoftwareRaw });
+    for (const fi of fieldIssues) problems.push({ kind: "field_issue", field: fi.field });
+    for (const t of ["gefen", "current", "district"]) problems.push(...advisorProblems[t]);
+    for (const t of requiredTypes) {
+      if (advisorBase[t].length === 0 && advisorProblems[t].length === 0) {
+        problems.push({ kind: "advisor_missing_required", type: t, typeLabel: SERVICE_TYPE_TABS.find(s => s.key === t)?.label || t });
+      }
+    }
+
+    return {
+      rowIndex: i, excelRow: i + 2,
+      school, yearAdmin, coordinatorRaw, coordinator, coordinatorName, coordinatorVia: coordRes?.via || null, generalNotes,
+      financeSoftwareRaw, financeSoftwareIssue: financeSoftware.status === "none",
+      fieldIssues, advisorRaw, advisorBase, advisorProblems, requiredTypes, problems,
+      name: school.name || "", symbol: school.symbol || "",
+    };
+  }
+
+  // Build final straight from the parsed row (fast path — no problems to resolve).
+  function baseFinal(planRow) {
+    return {
+      school: { ...planRow.school, meeting_coordinator: planRow.coordinator },
+      yearAdmin: { ...planRow.yearAdmin },
+      advisorIdsByType: {
+        gefen: [...planRow.advisorBase.gefen],
+        current: [...planRow.advisorBase.current],
+        district: [...planRow.advisorBase.district],
+      },
+    };
+  }
+
+  function confirmImport(mapping) {
     if (!importMappingData) return;
+    const { dataRows } = importMappingData;
     setImportMappingData(null);
+    setImportResult(null);
+    const idx = buildUserMatchIndex(users);
+    const rows = dataRows.map((row, i) => parseImportRow(row, i, mapping, idx));
+    if (rows.some(r => r.problems.length > 0)) {
+      setImportPlan({ rows });
+      return;
+    }
+    commitSchoolImport(rows.map(r => ({ ...r, final: baseFinal(r) })));
+  }
+
+  // Write phase — shared by the fast path and the modal's "onCommit". Each row must
+  // already carry `final` = { school, coordinator?, advisorIdsByType }.
+  async function commitSchoolImport(resolvedRows) {
+    setImportPlan(null);
     setImporting(true);
     setImportResult(null);
-    setImportProblems(null);
-    const { dataRows } = importMappingData;
     let imported = 0;
     const errors = [];
-    const problems = [];
-
-    for (let i = 0; i < dataRows.length; i++) {
-      const row = dataRows[i];
-      setImportProgressMsg(`מייבא... ${i + 1} / ${dataRows.length}`);
-      const school = {};
-      const yearAdmin = {};
-      const advisorEmailsByType = { gefen: [], current: [], district: [] };
-      let coordinatorRaw = null;
-      IMPORT_FIELD_CONFIG.forEach(f => {
-        if (mapping[f.key] === null) return;
-        const raw = String(row[mapping[f.key]] ?? "").trim();
-        if (f.key === "stage") school[f.key] = normalizeStage(raw);
-        else if (f.key === "finance_software") school[f.key] = normalizeFinanceSoftware(raw);
-        else if (f.key === "district") school[f.key] = normalizeDistrict(raw);
-        else if (f.key === "sector") school[f.key] = normalizeSector(raw);
-        else if (f.key === "supervision") school[f.key] = normalizeSupervision(raw);
-        else if (f.key === "grade_levels") {
-          const valid = GRADE_LEVEL_OPTIONS.map(o => o.value);
-          school[f.key] = raw.split(/[,;]/).map(s => s.trim()).filter(s => valid.includes(s));
-        }
-        else if (f.key === "study_days") {
-          school[f.key] = raw.split(/[,;]/).map(s => s.trim())
-            .map(s => STUDY_DAY_OPTIONS.find(o => o.label === s)?.value)
-            .filter(Boolean);
-        }
-        else if (f.key === "student_count") {
-          const n = parseInt(raw.replace(/\D/g, ""), 10);
-          school[f.key] = Number.isFinite(n) ? n : null;
-        }
-        else if (f.key === "service_type") yearAdmin.service_type = normalizeServiceType(raw);
-        else if (f.key === "client_status") yearAdmin.client_status = normalizeClientStatus(raw);
-        else if (f.key === "meeting_coordinator") coordinatorRaw = raw;
-        else if (IMPORT_ADVISOR_KEYS[f.key]) {
-          advisorEmailsByType[IMPORT_ADVISOR_KEYS[f.key]] = raw.split(/[,;]/).map(s => s.trim()).filter(Boolean);
-        }
-        else if (f.key.includes("phone")) school[f.key] = raw.replace(/\D/g, "");
-        else school[f.key] = raw;
-      });
-      if (!school.name || !school.symbol) {
-        errors.push(`שורה ${i + 2}: חסר שם בית ספר או סמל מוסד`);
+    for (let n = 0; n < resolvedRows.length; n++) {
+      const r = resolvedRows[n];
+      setImportProgressMsg(`מייבא... ${n + 1} / ${resolvedRows.length}`);
+      const school = { ...r.final.school };
+      if (r.final.coordinator) {
+        school.meeting_coordinator = r.final.coordinator.role;
+        school[COORDINATOR_NAME_FIELD[r.final.coordinator.role]] = r.final.coordinator.name;
+      }
+      if (!school.name || !school.symbol || !school.meeting_coordinator || !school[COORDINATOR_NAME_FIELD[school.meeting_coordinator]]) {
+        errors.push(`שורה ${r.excelRow}: חסרים פרטי חובה (שם / סמל / מתאם פגישות) — לא יובאה`);
         continue;
       }
-      const coordinator = normalizeMeetingCoordinator(coordinatorRaw);
-      const coordinatorNameField = { principal: "principal_name", secretary: "secretary_name", finance_contact: "finance_contact_name" }[coordinator];
-      if (!coordinator) {
-        errors.push(`שורה ${i + 2}: ערך לא תקין בעמודת "מתאם פגישות" — יש לציין מנהל/ת, מנהלנ/ית או אחראי/ת כספים`);
-        continue;
-      }
-      if (!school[coordinatorNameField]) {
-        errors.push(`שורה ${i + 2}: נבחר/ה "${coordinatorRaw}" כמתאם/ת פגישות אך חסר שם עבור תפקיד זה`);
-        continue;
-      }
-      school.meeting_coordinator = coordinator;
       try {
         const res = await axios.post("/schools/", school);
         const newId = res.data.id;
         imported++;
-
-        const rowProblems = [];
-
-        if (yearAdmin.service_type || yearAdmin.client_status) {
+        const yearAdmin = r.final.yearAdmin || r.yearAdmin || {};
+        if (Object.values(yearAdmin).some(v => v !== null && v !== undefined && v !== "")) {
           try {
             await axios.put(`/schools/${newId}/year-admin-data`, yearAdmin, { params: { academic_year: DEFAULT_ACADEMIC_YEAR } });
           } catch {
-            rowProblems.push("שמירת סוג השירות/סטטוס הלקוח נכשלה");
+            errors.push(`שורה ${r.excelRow} (${school.name}): שמירת נתוני השנה (סוג שירות / סטטוס / הקצאות) נכשלה`);
           }
         }
-
-        const matchedTypes = { gefen: [], current: [], district: [] };
         for (const t of ["gefen", "current", "district"]) {
-          for (const email of advisorEmailsByType[t]) {
-            const match = users.find(u => (u.email || "").toLowerCase() === email.toLowerCase());
-            if (!match) {
-              rowProblems.push(`האימייל '${email}' בעמודת יועץ ${SERVICE_TYPE_TABS.find(s => s.key === t)?.label || t} לא נמצא במערכת`);
-              continue;
-            }
+          for (const advisorId of (r.final.advisorIdsByType[t] || [])) {
             try {
-              await axios.post(`/schools/${newId}/advisors/${t}`, { advisor_id: match.id });
-              matchedTypes[t].push(match.id);
+              await axios.post(`/schools/${newId}/advisors/${t}`, { advisor_id: advisorId });
             } catch {
-              rowProblems.push(`שיוך היועץ '${email}' (${SERVICE_TYPE_TABS.find(s => s.key === t)?.label || t}) נכשל`);
+              const label = SERVICE_TYPE_TABS.find(s => s.key === t)?.label || t;
+              errors.push(`שורה ${r.excelRow} (${school.name}): שיוך יועץ ${label} נכשל`);
             }
           }
         }
-
-        if (yearAdmin.client_status === "active") {
-          const required = activeServiceTypes(yearAdmin.service_type);
-          for (const t of required) {
-            if (matchedTypes[t].length === 0) {
-              rowProblems.push(`לא נמצא יועץ מלווה מסוג ${SERVICE_TYPE_TABS.find(s => s.key === t)?.label || t} כנדרש לפי סוג השירות שנבחר`);
-            }
+        const notes = String(r.generalNotes || "").trim();
+        if (notes) {
+          try {
+            await axios.post(`/schools/${newId}/notes`, { note_type: "general", content: notes, imported_from_excel: true });
+          } catch {
+            errors.push(`שורה ${r.excelRow} (${school.name}): שמירת ההערה הכללית נכשלה`);
           }
-        }
-
-        if (rowProblems.length > 0) {
-          problems.push({ name: school.name, symbol: school.symbol, issues: rowProblems });
         }
       } catch (err) {
         const detail = err.response?.data?.detail || "שגיאה לא ידועה";
-        errors.push(`שורה ${i + 2} (${school.name}): ${detail}`);
+        errors.push(`שורה ${r.excelRow} (${school.name}): ${detail}`);
       }
     }
-
     setImportProgressMsg("");
     setImporting(false);
     setImportResult({ imported, errors });
-    if (problems.length > 0) setImportProblems(problems);
     if (imported > 0) await loadSchools();
   }
 
@@ -4297,8 +4636,14 @@ export default function AdminPage() {
           onCancel={() => setImportMappingData(null)}
         />
       )}
-      {importProblems && (
-        <ImportProblemsModal problems={importProblems} onClose={() => setImportProblems(null)} />
+      {importPlan && (
+        <SchoolImportProblemsModal
+          rows={importPlan.rows}
+          users={users}
+          requiredTypesFor={(svc, status) => (status === "active" ? activeServiceTypes(svc) : [])}
+          onCommit={commitSchoolImport}
+          onClose={() => setImportPlan(null)}
+        />
       )}
       {userImportMappingData && (
         <ImportMappingModal
