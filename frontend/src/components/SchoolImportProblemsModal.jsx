@@ -85,9 +85,14 @@ export function SchoolImportProblemsModal({ rows, users, requiredTypesFor, onCom
   const okCount = rows.length - problemRows.length;
 
   function defaultRes(row) {
+    // If the coordinator cell held a plain name (not an email / phone) that we could
+    // not match to a contact role, prefill it as the name so the user only picks a role.
+    const rawCoord = String(row.coordinatorRaw || "").trim();
+    const coordNamePrefill = row.coordinatorName
+      || (rawCoord && !rawCoord.includes("@") && !/^[\d\s\-()+.]+$/.test(rawCoord) ? rawCoord : "");
     return {
       name: row.name || "", symbol: row.symbol || "",
-      coordRole: row.coordinator || "", coordName: row.coordinatorName || "",
+      coordRole: row.coordinator || "", coordName: coordNamePrefill,
       financeSoftware: undefined, // undefined = not chosen; "" = leave empty; canonical = chosen
       fields: {},  // field key -> resolved value (select string / number|null / minutes|null / array)
       drafts: {},  // field key -> working value before "אישור"

@@ -2870,12 +2870,26 @@ export default function AdminPage() {
     };
   }
 
-  function confirmImport(mapping) {
+  async function confirmImport(mapping) {
     if (!importMappingData) return;
     const { dataRows } = importMappingData;
     setImportMappingData(null);
     setImportResult(null);
-    const idx = buildUserMatchIndex(users);
+    // The org users list is loaded lazily (only on the משתמשים/billing tabs). The import
+    // needs it to match advisor cells by name/email/phone — fetch it now if it's empty.
+    let userList = users;
+    if (!userList || userList.length === 0) {
+      setImportProgressMsg("טוען משתמשים...");
+      try {
+        const res = await axios.get("/schools/users/all");
+        userList = Array.isArray(res.data) ? res.data : [];
+        setUsers(userList);
+      } catch {
+        userList = [];
+      }
+      setImportProgressMsg("");
+    }
+    const idx = buildUserMatchIndex(userList);
     const rows = dataRows.map((row, i) => parseImportRow(row, i, mapping, idx));
     if (rows.some(r => r.problems.length > 0)) {
       setImportPlan({ rows });
