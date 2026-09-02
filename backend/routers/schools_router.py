@@ -4814,7 +4814,7 @@ def _group_school_note_rows(rows: list[dict], profiles_map: dict) -> list[dict]:
         segment = {
             "id": r["id"],
             "author_id": r["author_id"],
-            "author_name": author_profile.get("full_name"),
+            "author_name": "מיובא מאקסל" if r.get("imported_from_excel") else author_profile.get("full_name"),
             "author_role": author_profile.get("role"),
             "content": r["content"],
             "created_at": r["created_at"],
@@ -4878,6 +4878,9 @@ class SchoolNoteCreateIn(BaseModel):
     note_type: str
     quarter: int | None = None
     content: str
+    # Set only by the schools Excel import — the note is shown as authored by
+    # "מיובא מאקסל" instead of the uploading user's name.
+    imported_from_excel: bool = False
 
 
 @router.post("/{school_id}/notes")
@@ -4901,6 +4904,7 @@ def create_school_note(
     content = body.content.strip()
     if not content:
         raise HTTPException(status_code=400, detail="לא ניתן לשמור הערה ריקה")
+    imported_from_excel = bool(body.imported_from_excel) and body.note_type == "general"
     db = get_admin_client()
     row = db.table("school_notes").insert({
         "school_id": school_id,
@@ -4909,6 +4913,7 @@ def create_school_note(
         "group_id": str(uuid.uuid4()),
         "author_id": user["id"],
         "content": content,
+        "imported_from_excel": imported_from_excel,
     }).execute()
     return row.data[0]
 

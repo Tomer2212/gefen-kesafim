@@ -5,7 +5,27 @@ import { useFocusTrap } from "../hooks/useFocusTrap";
 // the schools-import and users-import flows). Generic {key, label, required, hint}-driven
 // column mapper with a live preview of the file's first data row — used by any bulk-import
 // flow in the app that needs to map arbitrary Excel columns onto known field keys.
-function FieldMappingRow({ label, hint, required, headers, previewRow, value, error, onChange }) {
+function ColumnSelect({ headers, previewRow, value, required, error, placeholder, onChange }) {
+  return (
+    <select
+      className={`input-field text-sm ${error ? "border-red-400" : ""}`}
+      value={value === null || value === undefined ? "" : String(value)}
+      onChange={e => onChange(e.target.value === "" ? null : Number(e.target.value))}
+    >
+      <option value="">{placeholder ?? (required ? "— בחר עמודה —" : "— לא ממפה —")}</option>
+      {headers.map((h, i) => {
+        const preview = previewRow[i] ? String(previewRow[i]).slice(0, 35) : "";
+        return (
+          <option key={i} value={String(i)}>
+            {h || `עמודה ${i + 1}`}{preview ? `  (${preview})` : ""}
+          </option>
+        );
+      })}
+    </select>
+  );
+}
+
+function FieldMappingRow({ label, hint, required, ranked, headers, previewRow, value, error, onChange }) {
   return (
     <div className="flex items-start gap-3">
       <div className="w-44 flex-shrink-0 text-right pt-2">
@@ -14,21 +34,30 @@ function FieldMappingRow({ label, hint, required, headers, previewRow, value, er
         {hint && <p className="text-[10px] text-slate-400 mt-0.5 leading-tight">{hint}</p>}
       </div>
       <div className="flex-1">
-        <select
-          className={`input-field text-sm ${error ? "border-red-400" : ""}`}
-          value={value === null ? "" : String(value)}
-          onChange={e => onChange(e.target.value === "" ? null : Number(e.target.value))}
-        >
-          <option value="">{required ? "— בחר עמודה —" : "— לא ממפה —"}</option>
-          {headers.map((h, i) => {
-            const preview = previewRow[i] ? String(previewRow[i]).slice(0, 35) : "";
-            return (
-              <option key={i} value={String(i)}>
-                {h || `עמודה ${i + 1}`}{preview ? `  (${preview})` : ""}
-              </option>
-            );
-          })}
-        </select>
+        {ranked ? (
+          <div className="flex flex-col gap-1.5">
+            {Array.from({ length: ranked }).map((_, r) => (
+              <div key={r} className="flex items-center gap-2">
+                <span className="text-[10px] text-slate-400 w-14 flex-shrink-0">עדיפות {r + 1}</span>
+                <div className="flex-1">
+                  <ColumnSelect
+                    headers={headers} previewRow={previewRow}
+                    value={Array.isArray(value) ? value[r] : null}
+                    required={required && r === 0}
+                    error={error && r === 0}
+                    placeholder={r === 0 ? "— בחר עמודה —" : "— ללא —"}
+                    onChange={v => onChange(r, v)}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <ColumnSelect
+            headers={headers} previewRow={previewRow} value={value} required={required} error={error}
+            onChange={v => onChange(v)}
+          />
+        )}
         {error && <span className="text-xs text-red-500 block mt-0.5" role="alert">נדרש מיפוי</span>}
       </div>
     </div>
@@ -37,12 +66,24 @@ function FieldMappingRow({ label, hint, required, headers, previewRow, value, er
 
 export function ImportMappingModal({ headers, previewRow, totalRows, fieldConfig, confirmLabel, onConfirm, onCancel }) {
   const { ref, handleKeyDown } = useFocusTrap(onCancel);
-  const [mapping, setMapping] = useState(() => Object.fromEntries(fieldConfig.map(f => [f.key, null])));
+  const [mapping, setMapping] = useState(() =>
+    Object.fromEntries(fieldConfig.map(f => [f.key, f.ranked ? Array(f.ranked).fill(null) : null]))
+  );
   const [tried, setTried] = useState(false);
+
+  const isUnmapped = (f) => (f.ranked ? (mapping[f.key]?.[0] ?? null) === null : mapping[f.key] === null);
+
+  function setRanked(key, rankIdx, colIdx) {
+    setMapping(p => {
+      const arr = Array.isArray(p[key]) ? [...p[key]] : [];
+      arr[rankIdx] = colIdx;
+      return { ...p, [key]: arr };
+    });
+  }
 
   function handleConfirm() {
     setTried(true);
-    if (fieldConfig.some(f => f.required && mapping[f.key] === null)) return;
+    if (fieldConfig.some(f => f.required && isUnmapped(f))) return;
     onConfirm(mapping);
   }
 
@@ -78,11 +119,14 @@ export function ImportMappingModal({ headers, previewRow, totalRows, fieldConfig
                 label={f.label}
                 hint={f.hint}
                 required
+                ranked={f.ranked}
                 headers={headers}
                 previewRow={previewRow}
                 value={mapping[f.key]}
-                error={tried && mapping[f.key] === null}
-                onChange={v => setMapping(p => ({ ...p, [f.key]: v }))}
+                error={tried && isUnmapped(f)}
+                onChange={f.ranked
+                  ? (rankIdx, v) => setRanked(f.key, rankIdx, v)
+                  : v => setMapping(p => ({ ...p, [f.key]: v }))}
               />
             ))}
           </div>
@@ -94,10 +138,13 @@ export function ImportMappingModal({ headers, previewRow, totalRows, fieldConfig
                 key={f.key}
                 label={f.label}
                 hint={f.hint}
+                ranked={f.ranked}
                 headers={headers}
                 previewRow={previewRow}
                 value={mapping[f.key]}
-                onChange={v => setMapping(p => ({ ...p, [f.key]: v }))}
+                onChange={f.ranked
+                  ? (rankIdx, v) => setRanked(f.key, rankIdx, v)
+                  : v => setMapping(p => ({ ...p, [f.key]: v }))}
               />
             ))}
           </div>
