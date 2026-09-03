@@ -29,7 +29,15 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 import graph_client
-from academic_years import ACADEMIC_YEARS, DEFAULT_ACADEMIC_YEAR, get_academic_year_for_date
+from academic_years import (
+    ACADEMIC_YEARS,
+    DEFAULT_ACADEMIC_YEAR,
+    GOAL_TEMPLATE_BASE_YEAR,
+    INHERITED_YEAR_ADMIN_FIELDS,
+    get_academic_year_for_date,
+    merge_inherited_year_admin,
+    resolve_inherited_year_admin,
+)
 from auth import get_current_user, invalidate_profile_cache
 from email_resend import send_resend_email
 from meeting_upload_logic import build_upload_checklist, get_or_create_upload_token
@@ -151,14 +159,14 @@ GOAL_DEFINITIONS = [
 
 
 def _shift_goal_date(goal_def: dict, academic_year: str) -> str:
-    """target_date/label above are written for DEFAULT_ACADEMIC_YEAR — shift the year forward
+    """target_date/label above are written for GOAL_TEMPLATE_BASE_YEAR — shift the year forward
     (day/month unchanged) by however many academic years ahead `academic_year` is, unless an
     explicit one-off override exists for that academic year in `date_overrides`."""
     override = goal_def.get("date_overrides", {}).get(academic_year)
     if override:
         return override
     iso_date = goal_def["target_date"]
-    offset = ACADEMIC_YEARS.index(academic_year) - ACADEMIC_YEARS.index(DEFAULT_ACADEMIC_YEAR)
+    offset = ACADEMIC_YEARS.index(academic_year) - ACADEMIC_YEARS.index(GOAL_TEMPLATE_BASE_YEAR)
     if offset == 0:
         return iso_date
     y, m, d = iso_date.split("-")
@@ -1029,7 +1037,27 @@ def list_year_admin_data(
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
     _attach_updater_names(db, data)
-    return {r["school_id"]: r for r in data}
+    result = {r["school_id"]: r for r in data}
+
+    # Carry-forward: client_status / service_type inherit from the most recent earlier year
+    # for any school without an explicit value in `academic_year`. Non-fatal.
+    try:
+        earlier = (
+            db.table("school_year_admin_data")
+            .select("school_id")
+            .in_("academic_year", ACADEMIC_YEARS[: ACADEMIC_YEARS.index(academic_year)] or [])
+            .execute()
+            .data
+        ) if academic_year in ACADEMIC_YEARS else []
+        inherit_ids = {r["school_id"] for r in (earlier or [])} | set(result.keys())
+        if inherit_ids:
+            merge_inherited_year_admin(
+                result, resolve_inherited_year_admin(db, inherit_ids, academic_year), academic_year
+            )
+    except Exception as exc:
+        logger.warning("list_year_admin_data inheritance merge failed (non-fatal): %s", exc)
+
+    return result
 
 
 @router.get("/{school_id}/year-admin-data")
@@ -1052,6 +1080,17 @@ def get_year_admin_data(
     data = row.data[0] if row.data else {}
     if data:
         _attach_updater_names(db, [data])
+
+    # Carry-forward: fill client_status / service_type from the most recent earlier year
+    # when this year's row is missing them (or missing entirely). Non-fatal.
+    try:
+        resolved = resolve_inherited_year_admin(db, [school_id], academic_year).get(school_id, {})
+        for f in INHERITED_YEAR_ADMIN_FIELDS:
+            if data.get(f) in (None, "") and resolved.get(f) not in (None, ""):
+                data[f] = resolved[f]
+    except Exception as exc:
+        logger.warning("get_year_admin_data inheritance fill failed (non-fatal): %s", exc)
+
     return data
 
 
@@ -1658,7 +1697,7 @@ def list_goals(
             ]
             important_dates = [
                 {
-                    "label": d["label"].replace(DEFAULT_ACADEMIC_YEAR, academic_year),
+                    "label": d["label"].replace(GOAL_TEMPLATE_BASE_YEAR, academic_year),
                     "target_date": _shift_goal_date(d, academic_year),
                 }
                 for d in date_defs
@@ -3345,11 +3384,10 @@ def send_due_reminders(request: Request):
     try:
         db = get_admin_client()
         opted_out_emails = task_logic.fetch_opted_out_emails(db, all_participant_emails)
-        year_rows = (
-            db.table("school_year_admin_data").select("school_id, client_status")
-            .eq("academic_year", DEFAULT_ACADEMIC_YEAR).in_("school_id", school_ids).execute().data or []
-        )
-        client_status_map = {r["school_id"]: r.get("client_status") for r in year_rows}
+        client_status_map = {
+            sid: fields.get("client_status")
+            for sid, fields in resolve_inherited_year_admin(db, school_ids, DEFAULT_ACADEMIC_YEAR).items()
+        }
     except Exception as exc:
         logger.warning("send_due_reminders: opt-out lookup failed (non-fatal, treated as none opted out): %s", exc)
 
@@ -3556,11 +3594,9 @@ def process_booking_email_queue(request: Request):
                 }).eq("id", row["id"]).execute()
                 continue
 
-            year_rows = (
-                db.table("school_year_admin_data").select("client_status")
-                .eq("academic_year", DEFAULT_ACADEMIC_YEAR).eq("school_id", row["school_id"]).execute().data or []
-            )
-            client_status = year_rows[0].get("client_status") if year_rows else None
+            client_status = resolve_inherited_year_admin(
+                db, [row["school_id"]], DEFAULT_ACADEMIC_YEAR
+            ).get(row["school_id"], {}).get("client_status")
             opt_out_link = None
             if client_status != "active":
                 email_lower = to_email.strip().lower()
@@ -6502,11 +6538,9 @@ def send_direct_coordination_request(
     booking_url = f"{os.getenv('APP_URL', '')}/book/{token_row['token']}"
     opt_out_link = None
     if coordinator.get("email"):
-        year_rows = (
-            db.table("school_year_admin_data").select("client_status")
-            .eq("academic_year", DEFAULT_ACADEMIC_YEAR).eq("school_id", school_id).execute().data or []
-        )
-        client_status = year_rows[0].get("client_status") if year_rows else None
+        client_status = resolve_inherited_year_admin(
+            db, [school_id], DEFAULT_ACADEMIC_YEAR
+        ).get(school_id, {}).get("client_status")
         if client_status != "active":
             email_lower = coordinator["email"].strip().lower()
             opt_out_link = f"{os.getenv('APP_URL', '')}/tasks/opt-out?email={email_lower}&token={task_logic.make_optout_token(email_lower)}"

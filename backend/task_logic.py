@@ -40,7 +40,11 @@ import logging
 import os
 import time
 
-from academic_years import DEFAULT_ACADEMIC_YEAR
+from academic_years import (
+    DEFAULT_ACADEMIC_YEAR,
+    merge_inherited_year_admin,
+    resolve_inherited_year_admin,
+)
 from routers.schools_router import GOAL_DEFINITIONS, DIVISION_LABELS
 from supabase_client import get_admin_client, reset_admin_client
 
@@ -165,11 +169,10 @@ def opted_out_recipients(
     opted_out_emails = fetch_opted_out_emails(db, emails)
     if not opted_out_emails:
         return {}
-    year_rows = (
-        db.table("school_year_admin_data").select("school_id, client_status")
-        .eq("academic_year", academic_year).in_("school_id", school_ids).execute().data or []
-    )
-    client_status_map = {r["school_id"]: r.get("client_status") for r in year_rows}
+    client_status_map = {
+        sid: fields.get("client_status")
+        for sid, fields in resolve_inherited_year_admin(db, school_ids, academic_year).items()
+    }
     return {
         sid: email.strip().lower()
         for sid, email in resolved_emails_by_school_id.items()
@@ -349,6 +352,11 @@ def _fetch_schools_and_meetings(
                 .data or []
             )
             year_map = {r["school_id"]: r for r in year_rows}
+            # client_status / service_type carry forward from earlier years for schools
+            # without an explicit value this year (audience criteria evaluate against these).
+            merge_inherited_year_admin(
+                year_map, resolve_inherited_year_admin(db, school_ids, academic_year), academic_year
+            )
 
             meetings = (
                 db.table("meetings")
