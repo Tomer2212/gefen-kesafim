@@ -24,7 +24,7 @@ import graph_client
 import task_logic
 import whatsapp_twilio
 from routers import schools_router as _schools_router
-from academic_years import DEFAULT_ACADEMIC_YEAR
+from academic_years import DEFAULT_ACADEMIC_YEAR, resolve_inherited_year_admin
 from auth import get_current_user
 from booking_logic import get_org_mailbox_capability, format_ranges_html, format_ranges_text
 from email_resend import send_resend_email
@@ -1750,7 +1750,10 @@ def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[st
         .select("school_id, client_status, meeting_duration_gefen, meeting_duration_current, meeting_duration_district")
         .eq("academic_year", academic_year).in_("school_id", school_ids).execute().data or []
     )
-    client_status_map = {r["school_id"]: r.get("client_status") for r in year_rows}
+    client_status_map = {
+        sid: fields.get("client_status")
+        for sid, fields in resolve_inherited_year_admin(db, school_ids, academic_year).items()
+    }
     duration_map = {r["school_id"]: r for r in year_rows}
 
     # Only fetched when actually needed — a structured meeting-scheduling task's booking link

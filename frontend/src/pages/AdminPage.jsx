@@ -547,6 +547,22 @@ function validateSchoolPhone(phone) {
   return "";
 }
 
+// Normalize a digits-only phone value coming from the schools Excel import so it always
+// carries a leading Israeli 0. Excel files often store the number without the leading 0
+// (e.g. "544201796", "25334461") or with an international country code (e.g. "+972-54-...",
+// "00972...", "972..."). Applied ONLY on the import path — manual entry has its own validation.
+//   00972XXXXXXXXX / 972XXXXXXXXX  -> 0XXXXXXXXX   (country code -> leading 0)
+//   5XXXXXXXX / 2XXXXXXX ...       -> 05XXXXXXXX / 02XXXXXXX  (missing leading 0 -> add it)
+//   0XXXXXXXXX                     -> unchanged (already valid)
+function normalizeImportedPhone(digits) {
+  let s = String(digits || "").replace(/\D/g, "");
+  if (!s) return "";
+  if (s.startsWith("00972")) return "0" + s.slice(5);
+  if (s.startsWith("972")) return "0" + s.slice(3);
+  if (!s.startsWith("0")) return "0" + s;
+  return s;
+}
+
 const FINANCE_SOFTWARE_OPTIONS = [
   { value: "", label: "בחר" },
   { value: "kesafim2000", label: "כספים 2000" },
@@ -2794,7 +2810,7 @@ export default function AdminPage() {
         if (raw && !Number.isFinite(n)) rawByKey[f.key] = raw; // has text but no digits → resolve in modal
         return;
       }
-      if (f.key.includes("phone")) { school[f.key] = raw.replace(/\D/g, ""); return; }
+      if (f.key.includes("phone")) { school[f.key] = normalizeImportedPhone(raw); return; }
       school[f.key] = raw;
     });
 
@@ -2914,6 +2930,14 @@ export default function AdminPage() {
         school.meeting_coordinator = r.final.coordinator.role;
         school[COORDINATOR_NAME_FIELD[r.final.coordinator.role]] = r.final.coordinator.name;
       }
+      // Access default for imported schools: restricted to the assigned מלווים (owners/managers
+      // always see everything regardless). Never leave it null — that means "open to all advisors".
+      // An empty array is still "restricted" (advisor_schools rows grant the actual access).
+      school.restrict_access_to = [...new Set([
+        ...(r.final.advisorIdsByType?.gefen || []),
+        ...(r.final.advisorIdsByType?.current || []),
+        ...(r.final.advisorIdsByType?.district || []),
+      ])];
       if (!school.name || !school.symbol || !school.meeting_coordinator || !school[COORDINATOR_NAME_FIELD[school.meeting_coordinator]]) {
         errors.push(`שורה ${r.excelRow}: חסרים פרטי חובה (שם / סמל / מתאם פגישות) — לא יובאה`);
         continue;

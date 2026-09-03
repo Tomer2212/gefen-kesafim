@@ -27,7 +27,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 import task_logic
-from academic_years import DEFAULT_ACADEMIC_YEAR
+from academic_years import DEFAULT_ACADEMIC_YEAR, resolve_inherited_year_admin
 from auth import get_current_user
 from routers import schools_router as _schools_router
 from supabase_client import get_admin_client, reset_admin_client
@@ -119,11 +119,10 @@ def _resolve_school_advisor_candidates(db, org_id: str, criteria: dict, academic
     schools_rows = db.table("schools").select("id, name, symbol, authority, stage").in_("id", matched_school_ids).execute().data or []
     schools_map = {s["id"]: s for s in schools_rows}
 
-    year_rows = (
-        db.table("school_year_admin_data").select("school_id, service_type")
-        .eq("academic_year", academic_year).in_("school_id", matched_school_ids).execute().data or []
-    )
-    service_type_map = {r["school_id"]: r.get("service_type") for r in year_rows}
+    service_type_map = {
+        sid: fields.get("service_type")
+        for sid, fields in resolve_inherited_year_admin(db, matched_school_ids, academic_year).items()
+    }
 
     candidates_by_division: dict[str, dict[str, list[str]]] = {}
     for division, table in _schools_router._TYPED_ADVISOR_TABLES.items():
@@ -802,7 +801,13 @@ def get_person_task(task_id: str, user: Annotated[dict, Depends(get_current_user
                 db.table("school_year_admin_data").select("school_id, client_status, service_type")
                 .eq("academic_year", ay).in_("school_id", school_ids).execute().data or []
             )
-            ya_map = {r["school_id"]: r for r in ya_rows}
+            ya_map = {r["school_id"]: dict(r) for r in ya_rows}
+            # client_status / service_type carry forward from earlier years when unset this year.
+            for sid, fields in resolve_inherited_year_admin(db, school_ids, ay).items():
+                entry = ya_map.setdefault(sid, {"school_id": sid})
+                for f in ("client_status", "service_type"):
+                    if entry.get(f) in (None, "") and fields.get(f) not in (None, ""):
+                        entry[f] = fields[f]
 
         for t in targets:
             t["assignee_names"] = [names_map.get(aid, aid) for aid in (t.get("assignee_ids") or [])]
