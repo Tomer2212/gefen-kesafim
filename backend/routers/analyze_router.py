@@ -24,7 +24,7 @@ from logic.file_identifier import identify_file
 from plan_roster import extract_plan_roster
 from logic.gefen_processor import load_gefen, normalize_amount
 from logic.kesafim_processor import load_kesafim
-from logic.payscool_processor import load_payscool
+from logic.payscool_processor import canonical_payscool_invoice, load_payscool
 from logic.schoolcash_processor import load_schoolcash
 from logic.reconciler import BEINAYIM_ONLY, TIKKON_ONLY, reconcile
 from logic.tikhnun_processor import load_tikhnun, cross_reference_doch, build_tikhnun_result
@@ -1307,7 +1307,7 @@ def _build_finance_ichud_budget_map(
                             continue
                         report_code = m.group(1)
                         supplier    = str(row[hp_col]).strip()  if row[hp_col]  is not None else ""
-                        invoice     = str(row[inv_col]).strip() if row[inv_col] is not None else ""
+                        invoice     = canonical_payscool_invoice(row[inv_col])
                         amount      = _norm_key_amount(row[amt_col])
                         if supplier and invoice and report_code and amount:
                             key = f"{supplier}-{invoice}-{report_code}-{amount}"
@@ -1730,7 +1730,7 @@ def _load_payscool_sheet_df(fpath, sheet_name: str):
             return None
         df["ichud"] = (
             df["ח.פ"].apply(_na) + "-"
-            + df["מספר חשבונית"].apply(_na) + "-"
+            + df["מספר חשבונית"].apply(canonical_payscool_invoice).apply(_na) + "-"
             + df["report_code"].astype(str) + "-"
             + df[amt_col].apply(_na)
         )
@@ -3073,7 +3073,17 @@ def _load_finance_raw(paths: list[Path], ftype: str) -> tuple[pd.DataFrame, str,
         stats = {"filename": filename, "software": "סקולקאש", "cancelled_rows": None}
         return df, "סקולקאש", stats
     df, cancelled = load_payscool(str(paths[0]))
-    stats = {"filename": paths[0].name, "software": "פייסקול", "cancelled_rows": cancelled}
+    paren_normalized = 0
+    if "מספר חשבונית" in df.columns:
+        paren_normalized = int(df["מספר חשבונית"].apply(
+            lambda v: canonical_payscool_invoice(v) != ("" if v is None else str(v).strip())
+        ).sum())
+    stats = {
+        "filename": paths[0].name,
+        "software": "פייסקול",
+        "cancelled_rows": cancelled,
+        "paren_invoice_normalized": paren_normalized,
+    }
     return df, "פייסקול", stats
 
 
