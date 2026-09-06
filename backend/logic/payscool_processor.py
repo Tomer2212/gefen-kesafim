@@ -1,8 +1,27 @@
+import logging
 import re
 
 import pandas as pd
 
 from logic.gefen_processor import normalize_amount
+
+logger = logging.getLogger(__name__)
+
+# PaySchool keeps a superseded "חשבונית עסקה" number in parentheses next to the
+# new tax-invoice number, e.g. "27203 (3646)". The Gefen "דיווח ביצוע" report still
+# carries the original (parenthesised) number, so reconciliation must key on that.
+# Strict: something before, then "(<digits>)" at the very end of the string.
+_PAYSCOOL_PAREN_INVOICE_RE = re.compile(r"^(.+?)\s*\((\d+)\)\s*$")
+
+
+def canonical_payscool_invoice(value) -> str:
+    """Return the parenthesised original invoice number when the PaySchool
+    "<new> (<original>)" pattern is present; otherwise the value unchanged."""
+    if value is None:
+        return ""
+    s = str(value).strip()
+    m = _PAYSCOOL_PAREN_INVOICE_RE.match(s)
+    return m.group(2) if m else s
 
 
 def load_payscool(filepath: str) -> tuple[pd.DataFrame, int]:
@@ -27,10 +46,19 @@ def load_payscool(filepath: str) -> tuple[pd.DataFrame, int]:
     df = df[df["סטטוס חשבונית"] != "מבוטלת"].copy()
 
     df["amount"] = df['סה"כ לסעיף'].apply(normalize_amount)
+    canon_invoice = df["מספר חשבונית"].apply(canonical_payscool_invoice)
+    paren_count = int((canon_invoice != df["מספר חשבונית"].apply(
+        lambda v: "" if v is None else str(v).strip()
+    )).sum())
+    if paren_count:
+        logger.info(
+            "payscool: normalized %d invoice(s) of the 'NEW (ORIG)' form for reconciliation",
+            paren_count,
+        )
     df["ichud"] = (
         df["ח.פ"].apply(normalize_amount)
         + "-"
-        + df["מספר חשבונית"].apply(normalize_amount)
+        + canon_invoice.apply(normalize_amount)
         + "-"
         + df["report_code"].astype(str)
         + "-"
