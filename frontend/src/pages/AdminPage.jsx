@@ -2608,6 +2608,7 @@ export default function AdminPage() {
   async function saveUserBirthDate(u, value) {
     setBirthEditingIds(prev => { const n = new Set(prev); n.delete(u.id); return n; });
     if (value === (u.birth_date || "")) return;
+    if (value && (value < "1900-01-01" || value > new Date().toISOString().slice(0, 10))) return;
     setUsers(prev => prev.map(x => x.id === u.id ? { ...x, birth_date: value || null } : x));
     try {
       await axios.patch(`/schools/users/${u.id}`, { birth_date: value || null });
@@ -4525,6 +4526,7 @@ export default function AdminPage() {
                               <input id={`birth-${u.id}`} autoFocus type="date" dir="ltr"
                                 className="input-field text-sm w-40"
                                 defaultValue={u.birth_date || ""}
+                                min="1900-01-01"
                                 max={new Date().toISOString().slice(0, 10)}
                                 onBlur={e => saveUserBirthDate(u, e.target.value)}
                                 onKeyDown={e => {
