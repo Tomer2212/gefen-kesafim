@@ -68,6 +68,30 @@ const FINANCE_SOFTWARE_LABEL = {
   schoolcash:  "סקולקאש",
 };
 
+// "סוג שירות" — year-scoped (school_year_admin_data.service_type), shown read-only on the
+// dashboard. Codes/labels mirror SERVICE_TYPE_OPTIONS in SchoolPage.jsx.
+const SERVICE_TYPE_LABEL = {
+  gefen:         "גפן",
+  current:       "שוטף",
+  gefen_current: "גפן+שוטף",
+  district:      "מחוז",
+};
+
+// "סטטוס לקוח" / "אמצעי הזמנה" — year-scoped (school_year_admin_data), shown read-only on
+// the dashboard. Codes/labels mirror CLIENT_STATUS_OPTIONS / FUNDING_METHOD_OPTIONS in
+// SchoolPage.jsx.
+const CLIENT_STATUS_LABEL = {
+  active:      "פעיל",
+  inactive:    "לא פעיל",
+  in_progress: "בתהליך",
+  former:      "לקוח עבר",
+};
+const ORDER_METHOD_LABEL = {
+  private:   "פרטי",
+  authority: "רשות",
+  district:  "מחוז",
+};
+
 const EMPTY_FILTERS = {
   names: [], symbols: [], stages: [], divisions: [],
   cities: [], authorities: [], financeSoftwares: [], addresses: [],
@@ -453,7 +477,13 @@ const GENERAL_COLUMNS = [
   { key: "authority",           label: "בעלות" },
   { key: "stage",               label: "שלב מוסד" },
   { key: "district",            label: "מחוז" },
+  { key: "education_authority", label: "רשות חינוך" },
+  { key: "sector",              label: "מגזר" },
+  { key: "client_status",       label: "סטטוס לקוח" },
+  { key: "service_type",        label: "סוג שירות" },
   { key: "finance_software",    label: "תוכנת כספים" },
+  { key: "order_method",        label: "אמצעי הזמנה" },
+  { key: "order_amount_gefen",  label: 'מחיר כולל מע"מ' },
   { key: "advisor_gefen",       label: "יועץ מלווה [גפן]" },
   { key: "advisor_current",     label: "יועץ מלווה [שוטף]" },
   { key: "advisor_district",    label: "יועץ מלווה [מחוז]" },
@@ -478,8 +508,14 @@ const MOVABLE_COLUMNS = [...GENERAL_COLUMNS, ...ALLOCATION_COLUMNS, ...MEETINGS_
 // back-filled into a restored colOrder/colVisible (see effect below), like the other
 // late-added column groups.
 const NEWLY_ADDED_MOVABLE_COLUMNS = [
-  { key: "district",         label: "מחוז" },
-  { key: "finance_software", label: "תוכנת כספים" },
+  { key: "district",            label: "מחוז" },
+  { key: "finance_software",    label: "תוכנת כספים" },
+  { key: "service_type",        label: "סוג שירות" },
+  { key: "education_authority", label: "רשות חינוך" },
+  { key: "sector",              label: "מגזר" },
+  { key: "client_status",       label: "סטטוס לקוח" },
+  { key: "order_method",        label: "אמצעי הזמנה" },
+  { key: "order_amount_gefen",  label: 'מחיר כולל מע"מ' },
 ];
 
 // Optional columns showing summary data from the last real check run (check_metrics),
@@ -566,8 +602,28 @@ const FILTER_COLUMN_META = [
   { key: "control_letter_target_date",    label: "מכתב בקרה - תאריך יעד",   fmt: "date" },
   { key: "control_letter_days_to_answer", label: "מכתב בקרה - ימים לתשובה", fmt: "int"  },
   { key: "control_letter_status",         label: "מכתב בקרה - סטטוס",       fmt: "controlLetterStatus" },
+  // "כללי" group — text/enum single-value columns (raw value = the displayed Hebrew label).
+  { key: "symbol",              label: "סמל מוסד",      fmt: "text" },
+  { key: "city",                label: "עיר",           fmt: "text" },
+  { key: "authority",           label: "בעלות",         fmt: "text" },
+  { key: "stage",               label: "שלב מוסד",      fmt: "text" },
+  { key: "district",            label: "מחוז",          fmt: "text" },
+  { key: "finance_software",    label: "תוכנת כספים",   fmt: "text" },
+  { key: "education_authority", label: "רשות חינוך",    fmt: "text" },
+  { key: "sector",              label: "מגזר",          fmt: "text" },
+  { key: "client_status",       label: "סטטוס לקוח",    fmt: "text" },
+  { key: "service_type",        label: "סוג שירות",     fmt: "text" },
+  { key: "order_amount_gefen",  label: 'מחיר כולל מע"מ', fmt: "money" },
+  // Multi-value columns — raw value is an array of displayed strings; the value list breaks
+  // them into individual entries and a row matches if it contains any selected entry.
+  { key: "order_method",    label: "אמצעי הזמנה",       fmt: "textMulti" },
+  { key: "advisor_gefen",   label: "יועץ מלווה [גפן]",  fmt: "textMulti" },
+  { key: "advisor_current", label: "יועץ מלווה [שוטף]", fmt: "textMulti" },
+  { key: "advisor_district",label: "יועץ מלווה [מחוז]", fmt: "textMulti" },
 ];
 const FILTER_COLUMN_KEYS = new Set(FILTER_COLUMN_META.map(c => c.key));
+
+const TEXT_FMTS = new Set(["text", "textMulti"]);
 
 // Non-empty status values in a fixed order, used to ordinally encode control_letter_status
 // for sort/filter (like closure/goal columns' true/false/null → 2/1/0 encoding) — the empty
@@ -594,6 +650,17 @@ const NUMBER_FILTER_OPERATORS = [
   { op: "lte", label: "קטן או שווה ל..." },
 ];
 const OPERATOR_LABEL = Object.fromEntries(NUMBER_FILTER_OPERATORS.map(o => [o.op, o.label]));
+
+// Text-column header filter operators (fmt "text" / "textMulti"). Mirrors the numeric
+// submenu but with string predicates — see evalTextCond / passesOneColumnFilter.
+const TEXT_FILTER_OPERATORS = [
+  { op: "contains",    label: "מכיל..." },
+  { op: "notContains", label: "לא מכיל..." },
+  { op: "eq",          label: "שווה ל..." },
+  { op: "ne",          label: "לא שווה ל..." },
+  { op: "startsWith",  label: "מתחיל ב..." },
+  { op: "endsWith",    label: "מסתיים ב..." },
+];
 
 function fmtMoney(v) {
   if (v === null || v === undefined) return "—";
@@ -640,6 +707,7 @@ function formatMeetingHours(totalMinutes) {
 }
 
 function formatFilterValueLabel(raw, fmt) {
+  if (fmt === "text" || fmt === "textMulti") return raw === null || raw === undefined ? "" : String(raw);
   if (fmt === "goal") return raw === 2 ? "כן" : raw === 1 ? "לא" : "טרם הוגדר";
   if (fmt === "closure") return raw === 2 ? "סגור" : raw === 1 ? "לא סגור" : "טרם סומן";
   if (fmt === "controlLetterStatus") {
@@ -708,6 +776,25 @@ function computeFilterValues(school, combo, meetingsStats, activeSummaryBudget, 
   out.control_letter_days_to_answer = controlLetterFieldValue(school, "days_to_answer");
   const clStatus = controlLetterFieldValue(school, "status");
   out.control_letter_status = clStatus ? CONTROL_LETTER_STATUS_FILTER_ORDER.indexOf(clStatus) + 1 : null;
+
+  // "כללי" group — single-value text/enum columns. Raw value is the displayed Hebrew label
+  // (or null when empty) so header sort/filter and the on-screen cell agree.
+  out.symbol = school.symbol || null;
+  out.city = school.city || null;
+  out.authority = school.authority || null;
+  out.stage = SCHOOL_STAGE_LABEL[school.stage] || school.stage || null;
+  out.district = school.district || null;
+  out.finance_software = FINANCE_SOFTWARE_LABEL[school.finance_software] || school.finance_software || null;
+  out.education_authority = school.education_authority || null;
+  out.sector = school.sector || null;
+  out.client_status = CLIENT_STATUS_LABEL[school.client_status] || school.client_status || null;
+  out.service_type = SERVICE_TYPE_LABEL[school.service_type] || school.service_type || null;
+  out.order_amount_gefen = school.order_amount_gefen ?? null;
+  // Multi-value columns — array of displayed strings (empty array = blank).
+  out.order_method = (school.order_method || []).map(v => ORDER_METHOD_LABEL[v] || v);
+  out.advisor_gefen = (school.advisors_gefen || []).map(p => p.full_name || p.email);
+  out.advisor_current = (school.advisors_current || []).map(p => p.full_name || p.email);
+  out.advisor_district = (school.advisors_district || []).map(p => p.full_name || p.email);
   return out;
 }
 
@@ -740,15 +827,56 @@ function evalCond(numericValue, cond, fmt) {
   }
 }
 
+// String predicate for a "text"/"textMulti" custom condition. Empty value = no-op (true),
+// matching evalCond's behavior for numeric columns.
+function evalTextCond(strValue, cond) {
+  if (!cond || !cond.op) return true;
+  const target = String(cond.value ?? "").trim().toLowerCase();
+  if (target === "") return true;
+  const v = String(strValue ?? "").toLowerCase();
+  switch (cond.op) {
+    case "eq": return v === target;
+    case "ne": return v !== target;
+    case "contains": return v.includes(target);
+    case "notContains": return !v.includes(target);
+    case "startsWith": return v.startsWith(target);
+    case "endsWith": return v.endsWith(target);
+    default: return true;
+  }
+}
+
 function passesOneColumnFilter(rawValue, spec, fmt) {
   if (!spec) return true;
-  const isBlank = rawValue === null || rawValue === undefined;
+
+  if (fmt === "textMulti") {
+    const arr = Array.isArray(rawValue)
+      ? rawValue.filter(x => x !== null && x !== undefined && x !== "")
+      : [];
+    if (spec.mode === "values") {
+      if (arr.length === 0) return spec.selected.includes("__BLANK__");
+      return arr.some(x => spec.selected.includes(String(x)));
+    }
+    if (arr.length === 0) return false;
+    return arr.some(x => {
+      const r1 = evalTextCond(x, spec.cond1);
+      const r2 = evalTextCond(x, spec.cond2);
+      return spec.joiner === "OR" ? (r1 || r2) : (r1 && r2);
+    });
+  }
+
+  const isText = fmt === "text";
+  const isBlank = rawValue === null || rawValue === undefined || (isText && rawValue === "");
   if (spec.mode === "values") {
     if (isBlank) return spec.selected.includes("__BLANK__");
     return spec.selected.includes(String(rawValue));
   }
-  // mode === "custom" — blanks never satisfy a numeric operator
+  // mode === "custom" — blanks never satisfy an operator
   if (isBlank) return false;
+  if (isText) {
+    const r1 = evalTextCond(rawValue, spec.cond1);
+    const r2 = evalTextCond(rawValue, spec.cond2);
+    return spec.joiner === "OR" ? (r1 || r2) : (r1 && r2);
+  }
   const r1 = evalCond(rawValue, spec.cond1, fmt);
   const r2 = evalCond(rawValue, spec.cond2, fmt);
   return spec.joiner === "OR" ? (r1 || r2) : (r1 && r2);
@@ -766,18 +894,24 @@ function passesAllColumnFilters(row, columnFilters, metaList, excludeKey = null)
 // Stacked multi-column sort: sortSpecs[0] is the most-recently-clicked (primary) column,
 // later entries are older clicks kept on as tie-breakers. Blank values always sort last,
 // regardless of direction, matching Excel.
-function buildRowComparator(sortSpecs) {
+function buildRowComparator(sortSpecs, metaList = []) {
+  const fmtOf = k => metaList.find(c => c.key === k)?.fmt;
   return (a, b) => {
     for (const { key, dir } of sortSpecs) {
-      const va = a.filterValues[key];
-      const vb = b.filterValues[key];
-      const aBlank = va === null || va === undefined;
-      const bBlank = vb === null || vb === undefined;
+      const fmt = fmtOf(key);
+      let va = a.filterValues[key];
+      let vb = b.filterValues[key];
+      if (Array.isArray(va)) va = va.join(", ");
+      if (Array.isArray(vb)) vb = vb.join(", ");
+      const aBlank = va === null || va === undefined || va === "";
+      const bBlank = vb === null || vb === undefined || vb === "";
       if (aBlank && bBlank) continue;
       if (aBlank) return 1;
       if (bBlank) return -1;
       if (va === vb) continue;
-      const cmp = va < vb ? -1 : 1;
+      const cmp = TEXT_FMTS.has(fmt)
+        ? String(va).localeCompare(String(vb), "he", { numeric: true })
+        : (va < vb ? -1 : 1);
       return dir === "asc" ? cmp : -cmp;
     }
     return 0;
@@ -866,11 +1000,18 @@ function ColumnHeaderFilter({ colDef, columnFilters, setColumnFilters, sortSpecs
     return () => document.removeEventListener("mousedown", handleOutside);
   }, [isOpen, setOpenKey]);
 
-  // A stale menu detached from its anchor is worse than a closed one — dismiss on any scroll
-  // (page or the table's own horizontal/vertical scroll container).
+  // A stale menu detached from its anchor is worse than a closed one — dismiss on page/table
+  // scroll (the portaled menu is fixed-positioned and would drift away from its header).
+  // But NOT when the scroll happens inside the menu itself (its value list / custom panel
+  // scroll) — that's a capture-phase scroll event on a descendant, and closing on it makes
+  // the value list impossible to scroll.
   useEffect(() => {
     if (!isOpen) return;
-    function handleScroll() { setOpenKey(null); }
+    function handleScroll(e) {
+      const t = e.target;
+      if (t instanceof Node && menuRef.current?.contains(t)) return;
+      setOpenKey(null);
+    }
     document.addEventListener("scroll", handleScroll, true);
     return () => document.removeEventListener("scroll", handleScroll, true);
   }, [isOpen, setOpenKey]);
@@ -898,13 +1039,22 @@ function ColumnHeaderFilter({ colDef, columnFilters, setColumnFilters, sortSpecs
     const rowsPassingOthers = baseDisplayRows.filter(row => passesAllColumnFilters(row, columnFilters, allFilterMeta, key));
     const seen = new Map();
     let hasBlank = false;
+    const isTextLike = fmt === "text" || fmt === "textMulti";
     for (const row of rowsPassingOthers) {
       const raw = row.filterValues[key];
-      if (raw === null || raw === undefined) { hasBlank = true; continue; }
-      const k = String(raw);
-      if (!seen.has(k)) seen.set(k, { value: k, raw, label: formatFilterValueLabel(raw, fmt) });
+      const items = Array.isArray(raw) ? raw : [raw];
+      if (items.length === 0) { hasBlank = true; continue; }
+      for (const item of items) {
+        if (item === null || item === undefined || item === "") { hasBlank = true; continue; }
+        const k = String(item);
+        if (!seen.has(k)) seen.set(k, { value: k, raw: item, label: formatFilterValueLabel(item, fmt) });
+      }
     }
-    const list = [...seen.values()].sort((a, b) => a.raw - b.raw);
+    const list = [...seen.values()].sort((a, b) =>
+      isTextLike
+        ? String(a.label).localeCompare(String(b.label), "he", { numeric: true })
+        : a.raw - b.raw
+    );
     if (hasBlank) list.push({ value: "__BLANK__", raw: null, label: "(ריקים)" });
     return list;
   }, [isOpen, baseDisplayRows, columnFilters, allFilterMeta, key, fmt]);
@@ -915,6 +1065,25 @@ function ColumnHeaderFilter({ colDef, columnFilters, setColumnFilters, sortSpecs
     else setDraftSelected(distinctValues.map(v => v.value));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, distinctValues]);
+
+  // Excel-style search behavior: the moment the user starts typing in the value search, the
+  // selection snaps to "all currently-matching values" (so pressing אישור/Enter filters to
+  // the matches, and unchecking then narrows further). Clearing the search restores the
+  // previous full selection. Without this, the hidden non-matching values stay selected and
+  // אישור ends up applying "≈everything" = no filter.
+  const prevQueryEmptyRef = useRef(true);
+  useEffect(() => {
+    if (!isOpen) { prevQueryEmptyRef.current = true; return; }
+    const q = searchQuery.trim();
+    const wasEmpty = prevQueryEmptyRef.current;
+    prevQueryEmptyRef.current = q === "";
+    if (q && wasEmpty) {
+      setDraftSelected(distinctValues.filter(v => v.label.includes(q)).map(v => v.value));
+    } else if (!q && !wasEmpty) {
+      setDraftSelected(spec?.mode === "values" ? spec.selected : distinctValues.map(v => v.value));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, searchQuery, distinctValues]);
 
   function applySort(dir) {
     setSortSpecs(prev => [{ key, dir }, ...prev.filter(s => s.key !== key)]);
@@ -932,6 +1101,7 @@ function ColumnHeaderFilter({ colDef, columnFilters, setColumnFilters, sortSpecs
       return next;
     });
     // Reset the menu's own drafts too, in case the user keeps the menu open afterward.
+    setSearchQuery("");
     setDraftSelected(distinctValues.map(v => v.value));
     setCustomCond1({ op: "eq", value: "" });
     setCustomJoiner("AND");
@@ -942,9 +1112,13 @@ function ColumnHeaderFilter({ colDef, columnFilters, setColumnFilters, sortSpecs
     setDraftSelected(prev => (prev.includes(v) ? prev.filter(x => x !== v) : [...prev, v]));
   }
 
-  const filteredDistinctValues = distinctValues.filter(v =>
-    v.value === "__BLANK__" || !searchQuery.trim() || v.label.includes(searchQuery.trim())
-  );
+  // While a search query is active only matching values are shown — and, Excel-style, only
+  // those matching values participate in the selection. "(ריקים)" is shown unfiltered only
+  // when there is no query.
+  const trimmedQuery = searchQuery.trim();
+  const filteredDistinctValues = trimmedQuery
+    ? distinctValues.filter(v => v.label.includes(trimmedQuery))
+    : distinctValues;
 
   function toggleSelectAll() {
     setDraftSelected(prev =>
@@ -957,11 +1131,19 @@ function ColumnHeaderFilter({ colDef, columnFilters, setColumnFilters, sortSpecs
   function confirmValues() {
     setColumnFilters(prev => {
       const next = { ...prev };
-      if (draftSelected.length === distinctValues.length) delete next[key];
-      else next[key] = { mode: "values", selected: draftSelected };
+      const allValues = distinctValues.map(v => v.value);
+      // With a search query: the selection is exactly the checked values among the matches
+      // (hidden, non-matching values are ignored). Without a query: the checked values.
+      const selected = trimmedQuery
+        ? filteredDistinctValues.filter(v => draftSelected.includes(v.value)).map(v => v.value)
+        : draftSelected.filter(v => allValues.includes(v));
+      const isAll = allValues.length > 0 && allValues.every(v => selected.includes(v));
+      if (selected.length === 0 || isAll) delete next[key];
+      else next[key] = { mode: "values", selected };
       return next;
     });
     setOpenKey(null);
+    setSearchQuery("");
   }
 
   function openCustomDialog(presetOp) {
@@ -986,7 +1168,9 @@ function ColumnHeaderFilter({ colDef, columnFilters, setColumnFilters, sortSpecs
     setOpenKey(null);
   }
 
-  const valuePlaceholder = fmt === "pct" ? "%" : fmt === "hours" ? "שעות" : "ערך";
+  const isTextLike = fmt === "text" || fmt === "textMulti";
+  const customOperators = isTextLike ? TEXT_FILTER_OPERATORS : NUMBER_FILTER_OPERATORS;
+  const valuePlaceholder = fmt === "pct" ? "%" : fmt === "hours" ? "שעות" : isTextLike ? "טקסט" : "ערך";
 
   return (
     <div ref={containerRef} className="relative inline-flex">
@@ -1025,11 +1209,11 @@ function ColumnHeaderFilter({ colDef, columnFilters, setColumnFilters, sortSpecs
               <div className="py-1 border-b border-slate-100">
                 <button type="button" onClick={() => applySort("asc")} className="w-full flex items-center gap-2 text-right px-3 py-1.5 text-sm text-slate-700 hover:bg-blue-50">
                   <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-                  מיין מהקטן לגדול
+                  {isTextLike ? 'מיין מא׳ עד ת׳' : 'מיין מהקטן לגדול'}
                 </button>
                 <button type="button" onClick={() => applySort("desc")} className="w-full flex items-center gap-2 text-right px-3 py-1.5 text-sm text-slate-700 hover:bg-blue-50">
                   <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="18 15 12 9 6 15"/></svg>
-                  מיין מהגדול לקטן
+                  {isTextLike ? 'מיין מת׳ עד א׳' : 'מיין מהגדול לקטן'}
                 </button>
                 {isSorted && (
                   <button type="button" onClick={removeSort} className="w-full text-right px-3 py-1.5 text-xs text-slate-400 hover:text-red-500 hover:bg-slate-50">
@@ -1051,7 +1235,7 @@ function ColumnHeaderFilter({ colDef, columnFilters, setColumnFilters, sortSpecs
                     aria-expanded={numberFiltersOpen}
                     className="w-full flex items-center justify-between px-3 py-1.5 text-sm text-slate-700 hover:bg-blue-50"
                   >
-                    {fmt === "date" ? "מסנני תאריכים" : "מסנני מספרים"}
+                    {isTextLike ? "מסנני טקסט" : fmt === "date" ? "מסנני תאריכים" : "מסנני מספרים"}
                     <svg aria-hidden="true" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"
                       style={{ transform: numberFiltersOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s" }}>
                       <polyline points="9 18 15 12 9 6" />
@@ -1059,14 +1243,16 @@ function ColumnHeaderFilter({ colDef, columnFilters, setColumnFilters, sortSpecs
                   </button>
                   {numberFiltersOpen && (
                     <div className="pb-1">
-                      {NUMBER_FILTER_OPERATORS.map(o => (
+                      {customOperators.map(o => (
                         <button key={o.op} type="button" onClick={() => openCustomDialog(o.op)} className="w-full text-right px-5 py-1.5 text-sm text-slate-600 hover:bg-blue-50">
                           {o.label}
                         </button>
                       ))}
-                      <button type="button" onClick={() => openCustomDialog("between")} className="w-full text-right px-5 py-1.5 text-sm text-slate-600 hover:bg-blue-50">
-                        בין...
-                      </button>
+                      {!isTextLike && (
+                        <button type="button" onClick={() => openCustomDialog("between")} className="w-full text-right px-5 py-1.5 text-sm text-slate-600 hover:bg-blue-50">
+                          בין...
+                        </button>
+                      )}
                       <button type="button" onClick={() => openCustomDialog(null)} className="w-full text-right px-5 py-1.5 text-sm text-slate-600 hover:bg-blue-50">
                         מסנן מותאם אישית...
                       </button>
@@ -1080,6 +1266,7 @@ function ColumnHeaderFilter({ colDef, columnFilters, setColumnFilters, sortSpecs
                   type="text"
                   value={searchQuery}
                   onChange={e => setSearchQuery(e.target.value)}
+                  onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); confirmValues(); } }}
                   placeholder="חיפוש..."
                   className="w-full text-sm border border-slate-200 rounded-lg px-3 py-1.5 outline-none focus:border-blue-400 bg-white"
                   aria-label={`חיפוש ערכים בעמודה ${label}`}
@@ -1120,7 +1307,7 @@ function ColumnHeaderFilter({ colDef, columnFilters, setColumnFilters, sortSpecs
             <div className="p-3 flex flex-col gap-2">
               <div className="flex items-center gap-1.5">
                 <select value={customCond1.op} onChange={e => setCustomCond1(c => ({ ...c, op: e.target.value }))} className="input-field text-xs flex-shrink-0" style={{ width: 120 }} aria-label="אופרטור תנאי 1">
-                  {NUMBER_FILTER_OPERATORS.map(o => <option key={o.op} value={o.op}>{o.label}</option>)}
+                  {customOperators.map(o => <option key={o.op} value={o.op}>{o.label}</option>)}
                 </select>
                 <input type={fmt === "date" ? "date" : "text"} value={customCond1.value} onChange={e => setCustomCond1(c => ({ ...c, value: e.target.value }))} className="input-field text-xs flex-1" placeholder={valuePlaceholder} aria-label="ערך תנאי 1" />
               </div>
@@ -1130,7 +1317,7 @@ function ColumnHeaderFilter({ colDef, columnFilters, setColumnFilters, sortSpecs
               </div>
               <div className="flex items-center gap-1.5">
                 <select value={customCond2.op} onChange={e => setCustomCond2(c => ({ ...c, op: e.target.value }))} className="input-field text-xs flex-shrink-0" style={{ width: 120 }} aria-label="אופרטור תנאי 2">
-                  {NUMBER_FILTER_OPERATORS.map(o => <option key={o.op} value={o.op}>{o.label}</option>)}
+                  {customOperators.map(o => <option key={o.op} value={o.op}>{o.label}</option>)}
                 </select>
                 <input type={fmt === "date" ? "date" : "text"} value={customCond2.value} onChange={e => setCustomCond2(c => ({ ...c, value: e.target.value }))} className="input-field text-xs flex-1" placeholder={valuePlaceholder} aria-label="ערך תנאי 2" />
               </div>
@@ -1283,6 +1470,18 @@ function renderCell(school, key, meetingsStats = {}, combo = null, activeSummary
       return school.district || "—";
     case "finance_software":
       return FINANCE_SOFTWARE_LABEL[school.finance_software] || school.finance_software || "—";
+    case "service_type":
+      return SERVICE_TYPE_LABEL[school.service_type] || school.service_type || "—";
+    case "education_authority":
+      return school.education_authority || "—";
+    case "sector":
+      return school.sector || "—";
+    case "client_status":
+      return CLIENT_STATUS_LABEL[school.client_status] || school.client_status || "—";
+    case "order_method":
+      return (school.order_method || []).map(v => ORDER_METHOD_LABEL[v] || v).join(", ") || "—";
+    case "order_amount_gefen":
+      return school.order_amount_gefen == null ? "—" : fmtMoney(school.order_amount_gefen);
     case "stage":
       return SCHOOL_STAGE_LABEL[school.stage] || school.stage || "—";
     case "meetings_completed": {
@@ -1360,6 +1559,18 @@ function renderCellText(school, key, meetingsStats = {}, combo = null, activeSum
       return school.district || "";
     case "finance_software":
       return FINANCE_SOFTWARE_LABEL[school.finance_software] || school.finance_software || "";
+    case "service_type":
+      return SERVICE_TYPE_LABEL[school.service_type] || school.service_type || "";
+    case "education_authority":
+      return school.education_authority || "";
+    case "sector":
+      return school.sector || "";
+    case "client_status":
+      return CLIENT_STATUS_LABEL[school.client_status] || school.client_status || "";
+    case "order_method":
+      return (school.order_method || []).map(v => ORDER_METHOD_LABEL[v] || v).join(", ");
+    case "order_amount_gefen":
+      return school.order_amount_gefen == null ? "" : fmtMoney(school.order_amount_gefen);
     case "stage":
       return SCHOOL_STAGE_LABEL[school.stage] || school.stage || "";
     case "meetings_completed": {
@@ -1872,7 +2083,10 @@ export default function DashboardPage() {
   }
 
   async function handleBulkDeleteConfirmed() {
-    const ids = Object.entries(selectedIds).filter(([, v]) => v).map(([id]) => id);
+    // Only act on schools that are both selected AND currently shown (a header filter may
+    // have hidden some selected rows since they were checked).
+    const shownIds = new Set(displayedSchools.map(s => s.id));
+    const ids = Object.entries(selectedIds).filter(([id, v]) => v && shownIds.has(id)).map(([id]) => id);
     setBulkDeleting(true);
     // Sent sequentially, not via Promise.all — the backend shares a single Supabase httpx
     // client singleton per process, and firing many deletes at once made them all fail
@@ -2202,13 +2416,24 @@ export default function DashboardPage() {
   const finalDisplayRows = useMemo(() => {
     const filtered = baseDisplayRows.filter(row => passesAllColumnFilters(row, columnFilters, allFilterColumnMeta));
     if (sortSpecs.length === 0) return filtered;
-    return [...filtered].sort(buildRowComparator(sortSpecs));
+    return [...filtered].sort(buildRowComparator(sortSpecs, allFilterColumnMeta));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [baseDisplayRows, columnFilters, sortSpecs, allFilterColumnMeta]);
 
   const visibleSchoolIds = useMemo(
     () => [...new Set(finalDisplayRows.map(r => r.school.id))],
     [finalDisplayRows]
+  );
+  // Distinct schools actually shown in the table — after ALL filters, including the
+  // per-column header filters (which live in finalDisplayRows, NOT in filteredSchools).
+  // Counts, exports and bulk actions use these so they never disagree with the table.
+  const displayedSchools = useMemo(
+    () => [...new Map(finalDisplayRows.map(r => [r.school.id, r.school])).values()],
+    [finalDisplayRows]
+  );
+  const selectedSchools = useMemo(
+    () => displayedSchools.filter(s => selectedIds[s.id]),
+    [displayedSchools, selectedIds]
   );
   const allVisibleSelected = visibleSchoolIds.length > 0 && visibleSchoolIds.every(id => selectedIds[id]);
   const someVisibleSelected = visibleSchoolIds.some(id => selectedIds[id]);
@@ -2248,7 +2473,7 @@ export default function DashboardPage() {
   }
 
   function exportSelectedToExcel() {
-    const selected = filteredSchools.filter(s => selectedIds[s.id]);
+    const selected = selectedSchools;
     const colLabels = [
       "שם מוסד",
       ...visibleColOrder.map(key => dynamicAllColumns.find(c => c.key === key)?.label || key),
@@ -2268,7 +2493,7 @@ export default function DashboardPage() {
   }
 
   async function exportSelectedToPdf() {
-    const selected = filteredSchools.filter(s => selectedIds[s.id]);
+    const selected = selectedSchools;
     const headers = [
       "שם מוסד",
       ...visibleColOrder.map(key => dynamicAllColumns.find(c => c.key === key)?.label || key),
@@ -2299,7 +2524,7 @@ export default function DashboardPage() {
       "שם מוסד",
       ...visibleColOrder.map(key => dynamicAllColumns.find(c => c.key === key)?.label || key),
     ];
-    const rows = filteredSchools.map(school => [
+    const rows = displayedSchools.map(school => [
       school.name || "",
       ...visibleColOrder.map(key => renderCellText(school, key, meetingsStats, null, activeSummaryBudget, goalColumnsByKey)),
     ]);
@@ -2695,10 +2920,13 @@ export default function DashboardPage() {
           {!loading && !error && schools.length > 0 && (
             <>
               <p className="text-sm text-slate-500 mb-2">
+                {/* Count must reflect the per-column header filters too — those are applied in
+                    finalDisplayRows, NOT in filteredSchools (which is only the search bar +
+                    "סינון מתקדם" panel). visibleSchoolIds = distinct schools actually shown. */}
                 {advancedFilterActive
-                  ? `סה"כ ${finalDisplayRows.length} שורות (${filteredSchools.length} בתי ספר) מתוך ${schools.length}`
+                  ? `סה"כ ${finalDisplayRows.length} שורות (${visibleSchoolIds.length} בתי ספר) מתוך ${schools.length}`
                   : hasAnyFilter
-                  ? `סה"כ ${filteredSchools.length} בתי ספר מתוך ${schools.length}`
+                  ? `סה"כ ${visibleSchoolIds.length} בתי ספר מתוך ${schools.length}`
                   : `סה"כ ${schools.length} בתי ספר`}
               </p>
               <div className="glass-card rounded-2xl overflow-hidden relative">
@@ -2895,7 +3123,7 @@ export default function DashboardPage() {
       {showBulkDeleteConfirm && (
         <DeleteConfirmModal
           title="מחיקת בתי ספר"
-          subtitle={`${Object.values(selectedIds).filter(Boolean).length} בתי ספר מסומנים`}
+          subtitle={`${selectedSchools.length} בתי ספר מסומנים`}
           message="מחיקת בתי הספר תגרום למחיקת כלל הנתונים עליהם לצמיתות."
           onConfirm={handleBulkDeleteConfirmed}
           onCancel={() => setShowBulkDeleteConfirm(false)}
@@ -2912,7 +3140,7 @@ export default function DashboardPage() {
 
       {showBulkAccessModal && (
         <BulkAccessModal
-          schools={filteredSchools.filter(s => selectedIds[s.id])}
+          schools={selectedSchools}
           users={allOrgUsers}
           loadingUsers={false}
           onClose={() => setShowBulkAccessModal(false)}
