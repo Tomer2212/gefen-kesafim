@@ -649,7 +649,8 @@ def list_schools(
                 .select("school_id, closure_parents_status, closure_parents_notes, "
                         "closure_authority_status, closure_authority_notes, "
                         "meeting_allocation_gefen, meeting_allocation_current, meeting_allocation_district, "
-                        "meeting_duration_gefen, meeting_duration_current, meeting_duration_district")
+                        "meeting_duration_gefen, meeting_duration_current, meeting_duration_district, "
+                        "order_method, order_amount_gefen")
                 .eq("academic_year", academic_year)
                 .in_("school_id", school_ids)
                 .execute()
@@ -657,6 +658,28 @@ def list_schools(
             closure_by_school = {r["school_id"]: r for r in (closure_rows.data or [])}
         except Exception as exc:
             logger.warning("year_closure enrichment failed (non-fatal): %s", exc)
+
+    # Enrich Q7c (year-scoped "פרטי ליווי" fields shown read-only on the dashboard). Both
+    # "סוג שירות" and "סטטוס לקוח" carry forward from the most recent earlier year like on
+    # the school card; "אמצעי הזמנה" / "מחיר כולל מע"מ" are per-year (no inheritance).
+    # Non-fatal.
+    service_type_by_school: dict = {}
+    client_status_by_school: dict = {}
+    if school_ids:
+        try:
+            resolved = resolve_inherited_year_admin(db, school_ids, academic_year)
+            service_type_by_school = {
+                sid: fields["service_type"]
+                for sid, fields in resolved.items()
+                if fields.get("service_type") not in (None, "")
+            }
+            client_status_by_school = {
+                sid: fields["client_status"]
+                for sid, fields in resolved.items()
+                if fields.get("client_status") not in (None, "")
+            }
+        except Exception as exc:
+            logger.warning("year-admin ליווי enrichment failed (non-fatal): %s", exc)
 
     # Enrich Q7b ("מכתב בקרה" — control letters, one fixed row per division_type) for the
     # dashboard and admin schools tables.
@@ -711,6 +734,11 @@ def list_schools(
         school["check_metrics"] = metrics_by_school.get(school["id"], [])
         school["goal_statuses"] = goals_by_school.get(school["id"], [])
         school["year_closure"] = closure_by_school.get(school["id"]) or {}
+        school["service_type"] = service_type_by_school.get(school["id"])
+        school["client_status"] = client_status_by_school.get(school["id"])
+        _year_row = closure_by_school.get(school["id"]) or {}
+        school["order_method"] = _year_row.get("order_method")
+        school["order_amount_gefen"] = _year_row.get("order_amount_gefen")
         school["control_letters"] = control_letters_by_school.get(school["id"], [])
         school["meeting_coordinator_contact"] = _resolve_meeting_coordinator(school)
         for service_type in ("gefen", "current", "district"):
