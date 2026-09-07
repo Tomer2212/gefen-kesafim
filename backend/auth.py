@@ -75,7 +75,7 @@ def _get_profile(user_id: str) -> dict:
             db = get_admin_client()
             profile = (
                 db.table("profiles")
-                .select("role, full_name, gender, avatar_storage_key, org_id, status, is_superadmin, onboarding_dismissed, notification_preferences")
+                .select("role, full_name, gender, birth_date, avatar_storage_key, org_id, status, is_superadmin, onboarding_dismissed, notification_preferences")
                 .eq("id", user_id)
                 .single()
                 .execute()
@@ -85,6 +85,7 @@ def _get_profile(user_id: str) -> dict:
                 "role": d.get("role", "advisor"),
                 "full_name": d.get("full_name", ""),
                 "gender": d.get("gender"),
+                "birth_date": d.get("birth_date"),
                 "avatar_storage_key": d.get("avatar_storage_key"),
                 "org_id": d.get("org_id"),
                 "status": d.get("status", "active"),
@@ -108,7 +109,7 @@ def _get_profile(user_id: str) -> dict:
                 fresh = _profile_cache.get(user_id)
                 if fresh:
                     return fresh
-                return {"role": "advisor", "full_name": "", "gender": None, "avatar_storage_key": None, "org_id": None, "is_superadmin": False, "onboarding_dismissed": {}, "notification_preferences": {"meeting_reminder": True, "meeting_reminder_minutes": 10}, "_cached_at": time.monotonic()}
+                return {"role": "advisor", "full_name": "", "gender": None, "birth_date": None, "avatar_storage_key": None, "org_id": None, "is_superadmin": False, "onboarding_dismissed": {}, "notification_preferences": {"meeting_reminder": True, "meeting_reminder_minutes": 10}, "_cached_at": time.monotonic()}
 
 
 def invalidate_profile_cache(user_id: str) -> None:
@@ -156,6 +157,7 @@ def get_current_user(
         "role": profile["role"],
         "full_name": profile["full_name"],
         "gender": profile.get("gender"),
+        "birth_date": profile.get("birth_date"),
         "avatar_storage_key": profile.get("avatar_storage_key"),
         "org_id": profile["org_id"],
         "status": profile["status"],
