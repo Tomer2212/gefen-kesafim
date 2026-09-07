@@ -64,6 +64,12 @@ export default function ProfilePage() {
   const [genderSaved, setGenderSaved] = useState(false);
   const [genderError, setGenderError] = useState("");
 
+  // תאריך לידה — עריכה ישירה ללא הרשאה, כל אחד רושם לעצמו.
+  const [birthDate, setBirthDate] = useState("");
+  const [birthDateSaving, setBirthDateSaving] = useState(false);
+  const [birthDateSaved, setBirthDateSaved] = useState(false);
+  const [birthDateError, setBirthDateError] = useState("");
+
   const [resetView, setResetView] = useState("idle"); // "idle" | "loading" | "sent" | "error"
   const [resetError, setResetError] = useState("");
 
@@ -126,6 +132,7 @@ export default function ProfilePage() {
         setUserId(res.data.id);
         setUserRole(res.data.role);
         setGender(res.data.gender || "");
+        setBirthDate(res.data.birth_date || "");
         setWorkPhone(res.data.work_phone || "");
         setControlDomains(res.data.control_domains || []);
         setCanEditPhone(res.data.can_edit_own_work_phone !== false);
@@ -235,6 +242,25 @@ export default function ProfilePage() {
       setDomainsMsg("");
     } finally {
       setDomainsSaving(false);
+    }
+  }
+
+  async function handleBirthDateChange(e) {
+    const value = e.target.value; // "" | "YYYY-MM-DD"
+    const prev = birthDate;
+    setBirthDate(value);
+    setBirthDateSaving(true);
+    setBirthDateError("");
+    setBirthDateSaved(false);
+    try {
+      await axios.patch("/schools/users/me/profile", { birth_date: value || null });
+      setBirthDateSaved(true);
+      setTimeout(() => setBirthDateSaved(false), 2500);
+    } catch (err) {
+      setBirthDate(prev);
+      setBirthDateError(err?.response?.data?.detail || "שגיאה בשמירה. נסה שנית.");
+    } finally {
+      setBirthDateSaving(false);
     }
   }
 
@@ -647,6 +673,42 @@ export default function ProfilePage() {
                         <p className="text-xs text-slate-400">JPG, PNG או WebP · עד 5MB</p>
                         {avatarError && <p role="alert" className="text-xs text-red-600">{avatarError}</p>}
                       </div>
+
+                      {/* Birth date — centered between the row's midpoint and its left edge
+                          (same field as "ניהול > משתמשים") */}
+                      <div className="mx-auto flex flex-col gap-1.5">
+                        <label htmlFor="profile-birth-date" className="text-xs font-semibold text-slate-500 flex items-center gap-2">
+                          <svg aria-hidden="true" width="30" height="30" viewBox="0 0 48 48">
+                            <ellipse cx="14" cy="7" rx="2.3" ry="3.4" fill="#fbbf24" />
+                            <ellipse cx="24" cy="5" rx="2.3" ry="3.4" fill="#fb923c" />
+                            <ellipse cx="34" cy="7" rx="2.3" ry="3.4" fill="#fbbf24" />
+                            <rect x="12.4" y="10" width="3.2" height="10" rx="1.4" fill="#60a5fa" />
+                            <rect x="22.4" y="8" width="3.2" height="12" rx="1.4" fill="#f472b6" />
+                            <rect x="32.4" y="10" width="3.2" height="10" rx="1.4" fill="#34d399" />
+                            <path d="M5 27c3-4.5 6.5-4.5 9.5 0s6.5 4.5 9.5 0 6.5-4.5 9.5 0 6.5 4.5 9.5 0v5H5z" fill="#f9a8d4" />
+                            <path d="M5 31h38v10a3 3 0 0 1-3 3H8a3 3 0 0 1-3-3z" fill="#c084fc" />
+                            <circle cx="15" cy="37" r="1.6" fill="#fde68a" />
+                            <circle cx="24" cy="39" r="1.6" fill="#fde68a" />
+                            <circle cx="33" cy="37" r="1.6" fill="#fde68a" />
+                            <rect x="2.5" y="43.5" width="43" height="3.2" rx="1.6" fill="#94a3b8" />
+                          </svg>
+                          תאריך לידה
+                        </label>
+                        <div className="flex items-center gap-2">
+                          <input
+                            id="profile-birth-date"
+                            type="date"
+                            value={birthDate}
+                            max={new Date().toISOString().slice(0, 10)}
+                            onChange={handleBirthDateChange}
+                            disabled={birthDateSaving}
+                            className="border border-slate-200 rounded-xl px-3 py-2 text-sm text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-blue-200 disabled:opacity-60"
+                          />
+                          {birthDateSaved && <span className="text-xs text-green-600 font-medium whitespace-nowrap">נשמר ✓</span>}
+                        </div>
+                        {birthDateError && <p role="alert" className="text-xs text-red-600">{birthDateError}</p>}
+                      </div>
+
                       <label htmlFor="profile-avatar-input" className="sr-only">בחירת תמונת פרופיל</label>
                       <input
                         id="profile-avatar-input"

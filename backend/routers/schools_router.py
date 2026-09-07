@@ -4018,6 +4018,7 @@ def dismiss_onboarding(
 class MyProfileIn(BaseModel):
     full_name: str | None = None
     gender: str | None = None  # 'male' | 'female' | None (no selection)
+    birth_date: str | None = None  # 'YYYY-MM-DD' or None (cleared)
     work_phone: str | None = None
     control_domains: list[str] | None = None
 
@@ -4029,6 +4030,22 @@ _SELF_EDIT_PERMISSION = {
 }
 _VALID_CONTROL_DOMAINS = {"gefen", "kesafim2000", "payscool", "schoolcash"}
 _PROFILE_FIELD_LABELS = {"work_phone": "טלפון עבודה", "control_domains": "תחומי ידע"}
+
+
+def _validate_birth_date(value: str | None) -> str | None:
+    """Accept 'YYYY-MM-DD' (not in the future) or empty/None → None."""
+    if value is None or str(value).strip() == "":
+        return None
+    s = str(value).strip()
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+        raise HTTPException(status_code=400, detail="תאריך לידה לא חוקי")
+    try:
+        d = date.fromisoformat(s)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="תאריך לידה לא חוקי")
+    if d > date.today():
+        raise HTTPException(status_code=400, detail="תאריך לידה לא יכול להיות בעתיד")
+    return s
 
 
 def _validate_control_domains(domains: list[str] | None) -> list[str]:
@@ -4065,6 +4082,10 @@ def update_my_profile(
         if body.gender not in (None, "male", "female"):
             raise HTTPException(status_code=400, detail="מגדר לא חוקי")
         updates["gender"] = body.gender
+
+    if "birth_date" in sent:
+        # Self-service, no permission gate — everyone records their own birth date.
+        updates["birth_date"] = _validate_birth_date(body.birth_date)
 
     # Self-service gated fields: work_phone + control_domains.
     gated_values = {}
@@ -4633,6 +4654,7 @@ class UserProfileUpdateIn(BaseModel):
     full_name: str | None = None
     control_domains: list[str] | None = None
     work_phone: str | None = None
+    birth_date: str | None = None  # 'YYYY-MM-DD' or None (cleared)
 
 
 @router.patch("/users/{user_id}")
@@ -4645,7 +4667,13 @@ def update_user_profile(
     provided = body.model_dump(exclude_unset=True)
     if "work_phone" in provided:
         provided["work_phone"] = _validate_work_phone(provided["work_phone"])
+    # birth_date is nullable-clearable: keep it even when None, and validate the format.
+    birth_date_cleared = "birth_date" in provided and provided.get("birth_date") in (None, "")
+    if "birth_date" in provided:
+        provided["birth_date"] = _validate_birth_date(provided["birth_date"])
     data = {k: v for k, v in provided.items() if v is not None}
+    if birth_date_cleared:
+        data["birth_date"] = None
     if not data:
         return {"ok": True}
     for attempt in range(2):

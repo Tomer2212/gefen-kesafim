@@ -1,4 +1,4 @@
-﻿import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
+﻿import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useBlocker, useLocation, useNavigate } from "react-router-dom";
 import axios from "axios";
@@ -41,6 +41,9 @@ import MeetingNavigationGuardModal from "../components/meetings/MeetingNavigatio
 import { AcademicYearSelector } from "../components/AcademicYearSelector";
 import { DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
 import { DOMAIN_OPTIONS } from "../constants/domains";
+import ColumnPickerButton, { loadColVisible } from "../components/tasks/ColumnPickerButton";
+import ColumnFilterButton from "../components/tasks/ColumnFilterButton";
+import { buildUserColumns, matchesUserColumnFilter, USERS_COL_LS_KEY, ALWAYS_VISIBLE_KEYS } from "../components/users/userColumns";
 import { CONTROL_LETTER_STATUS_MAP } from "../components/controlLetter/constants";
 import { MEETING_SERVICE_TYPE_BREAKDOWN_COL_ORDER } from "../components/meetings/constants";
 import { AdvisorSearch } from "../components/AdvisorSearch";
@@ -1697,6 +1700,13 @@ export default function AdminPage() {
   const [phoneDrafts, setPhoneDrafts] = useState({});
   const [phoneErrors, setPhoneErrors] = useState({});
   const [phoneEditingIds, setPhoneEditingIds] = useState(() => new Set());
+  const [birthEditingIds, setBirthEditingIds] = useState(() => new Set());
+  // Users table: per-column sort + type-aware filter + "עמודות להצגה" (localStorage only).
+  const [userColFilters, setUserColFilters] = useState({}); // { [colKey]: FilterSpec }
+  const [userSortSpec, setUserSortSpec] = useState(null);   // null | { key, dir }
+  const [userColVisible, setUserColVisible] = useState(
+    () => loadColVisible(buildUserColumns(), USERS_COL_LS_KEY),
+  );
   const WORK_PHONE_REGEX = /^05\d{8}$/;
   function formatWorkPhone(phone) {
     if (!phone) return "";
@@ -2582,6 +2592,86 @@ export default function AdminPage() {
     } catch {
       loadUsers();
     }
+  }
+
+  function formatBirthDate(d) {
+    if (!d) return "";
+    const [y, m, day] = d.split("-");
+    return `${day}/${m}/${y}`;
+  }
+  function startEditBirthDate(u) {
+    setBirthEditingIds(prev => new Set(prev).add(u.id));
+  }
+  function cancelEditBirthDate(u) {
+    setBirthEditingIds(prev => { const n = new Set(prev); n.delete(u.id); return n; });
+  }
+  async function saveUserBirthDate(u, value) {
+    setBirthEditingIds(prev => { const n = new Set(prev); n.delete(u.id); return n; });
+    if (value === (u.birth_date || "")) return;
+    setUsers(prev => prev.map(x => x.id === u.id ? { ...x, birth_date: value || null } : x));
+    try {
+      await axios.patch(`/schools/users/${u.id}`, { birth_date: value || null });
+    } catch {
+      loadUsers();
+    }
+  }
+
+  const userColumnDefs = useMemo(
+    () => buildUserColumns({ overrideCounts, voicenterMappings }),
+    [overrideCounts, voicenterMappings],
+  );
+  // Columns offered in the "עמודות להצגה" picker (drop always-visible + VOICENTER when off).
+  const userPickerColumns = useMemo(
+    () => userColumnDefs.filter(c =>
+      !ALWAYS_VISIBLE_KEYS.has(c.key) && (c.key !== "voicenter" || voicenterEnabled)),
+    [userColumnDefs, voicenterEnabled],
+  );
+  const isUserColVisible = (key) => ALWAYS_VISIBLE_KEYS.has(key) || userColVisible[key] !== false;
+
+  const displayUsers = useMemo(() => {
+    const filtered = users.filter(u =>
+      userColumnDefs.every(c => matchesUserColumnFilter(u, c, userColFilters[c.key])));
+    if (!userSortSpec) return sortByRole(filtered);
+    const col = userColumnDefs.find(c => c.key === userSortSpec.key);
+    if (!col) return sortByRole(filtered);
+    const sorted = [...filtered].sort((a, b) => {
+      const av = col.getValue(a), bv = col.getValue(b);
+      const as = Array.isArray(av) ? av.join(",") : (av ?? "");
+      const bs = Array.isArray(bv) ? bv.join(",") : (bv ?? "");
+      return String(as).localeCompare(String(bs), "he", { numeric: true });
+    });
+    return userSortSpec.dir === "asc" ? sorted : sorted.reverse();
+  }, [users, userColumnDefs, userColFilters, userSortSpec]);
+
+  function setUserColFilter(key, value) {
+    setUserColFilters(prev => {
+      const next = { ...prev };
+      if (value === null) delete next[key]; else next[key] = value;
+      return next;
+    });
+  }
+  function setUserColSort(key, dir) {
+    setUserSortSpec(dir ? { key, dir } : null);
+  }
+  function userTh(key, { center = false } = {}) {
+    if (!isUserColVisible(key)) return null;
+    const col = userColumnDefs.find(c => c.key === key);
+    if (!col) return null;
+    return (
+      <th key={key} scope="col"
+        className={`${center ? "text-center" : "text-right"} px-5 py-3 text-slate-500 font-medium whitespace-nowrap`}>
+        <div className={`flex items-center gap-1.5 ${center ? "justify-center" : ""}`}>
+          <span>{col.label}</span>
+          <ColumnFilterButton
+            col={col}
+            filter={userColFilters[key]}
+            onFilterChange={v => setUserColFilter(key, v)}
+            sortDir={userSortSpec?.key === key ? userSortSpec.dir : null}
+            onSort={dir => setUserColSort(key, dir)}
+          />
+        </div>
+      </th>
+    );
   }
 
   async function handleDeleteButtonClick(u) {
@@ -4275,13 +4365,19 @@ export default function AdminPage() {
           {/* Users Tab */}
           {activeTab === "users" && (
             <div>
-              {(myRole === "owner" || canInviteUsers) && (
-                <div className="flex justify-end mb-4">
+              <div className="flex items-center justify-between gap-3 mb-4">
+                <ColumnPickerButton
+                  columns={userPickerColumns}
+                  storageKey={USERS_COL_LS_KEY}
+                  colVisible={userColVisible}
+                  setColVisible={setUserColVisible}
+                />
+                {(myRole === "owner" || canInviteUsers) && (
                   <button onClick={() => setShowAddUserModal(true)} className="btn-blue text-sm px-4 py-2">
                     הוסף משתמש
                   </button>
-                </div>
-              )}
+                )}
+              </div>
 
               {showAddUserModal && (myRole === "owner" || canInviteUsers) && (
                 <AddUserModal
@@ -4317,21 +4413,21 @@ export default function AdminPage() {
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-slate-100">
-                      <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium whitespace-nowrap">תפקיד</th>
-                      <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium whitespace-nowrap">שם</th>
-                      <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium whitespace-nowrap">אימייל</th>
-                      <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium whitespace-nowrap">טלפון עבודה</th>
-                      <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium whitespace-nowrap">תחומי ידע</th>
-                      <th scope="col" className="px-5 py-3 text-center text-slate-500 font-medium whitespace-nowrap">הרשאות בהתאמה אישית</th>
-                      {voicenterEnabled && (
-                        <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium whitespace-nowrap">שיוך VOICENTER</th>
-                      )}
-                      <th scope="col" className="text-right px-5 py-3 text-slate-500 font-medium whitespace-nowrap">סטטוס</th>
+                      {userTh("role")}
+                      {userTh("full_name")}
+                      {userTh("email")}
+                      {userTh("work_phone")}
+                      {userTh("control_domains")}
+                      {userTh("birth_date")}
+                      {userTh("overrides", { center: true })}
+                      {voicenterEnabled && userTh("voicenter")}
+                      {userTh("status")}
                     </tr>
                   </thead>
                   <tbody>
-                    {sortByRole(users).map(u => (
+                    {displayUsers.map(u => (
                       <tr key={u.id} className="border-b border-slate-50 hover:bg-slate-50 transition-colors">
+                        {isUserColVisible("role") && (
                         <td className="px-5 py-3 whitespace-nowrap">
                           <RoleSelect
                             value={u.role}
@@ -4351,6 +4447,8 @@ export default function AdminPage() {
                             ]}
                           />
                         </td>
+                        )}
+                        {isUserColVisible("full_name") && (
                         <td className="px-5 py-3 whitespace-nowrap">
                           {editingUser?.id === u.id ? (
                             <div className="flex items-center gap-2">
@@ -4369,7 +4467,11 @@ export default function AdminPage() {
                             <span className="text-slate-900">{u.full_name || "—"}</span>
                           )}
                         </td>
+                        )}
+                        {isUserColVisible("email") && (
                         <td className="px-5 py-3 text-slate-600 whitespace-nowrap" dir="ltr">{u.email}</td>
+                        )}
+                        {isUserColVisible("work_phone") && (
                         <td className="px-5 py-3 whitespace-nowrap" dir="ltr">
                           {phoneEditingIds.has(u.id) ? (
                             <>
@@ -4404,6 +4506,8 @@ export default function AdminPage() {
                             </div>
                           )}
                         </td>
+                        )}
+                        {isUserColVisible("control_domains") && (
                         <td className="px-5 py-3">
                           <MultiSelectChips compact options={DOMAIN_OPTIONS}
                             className={(u.control_domains || []).length === 0 ? "flex justify-center" : ""}
@@ -4412,6 +4516,43 @@ export default function AdminPage() {
                             placeholder="בחר תחומים"
                             emptyIcon />
                         </td>
+                        )}
+                        {isUserColVisible("birth_date") && (
+                        <td className="px-5 py-3 whitespace-nowrap" dir="ltr">
+                          {birthEditingIds.has(u.id) ? (
+                            <>
+                              <label htmlFor={`birth-${u.id}`} className="sr-only">תאריך לידה {u.full_name || u.email}</label>
+                              <input id={`birth-${u.id}`} autoFocus type="date" dir="ltr"
+                                className="input-field text-sm w-40"
+                                defaultValue={u.birth_date || ""}
+                                max={new Date().toISOString().slice(0, 10)}
+                                onBlur={e => saveUserBirthDate(u, e.target.value)}
+                                onKeyDown={e => {
+                                  if (e.key === "Enter") e.target.blur();
+                                  if (e.key === "Escape") cancelEditBirthDate(u);
+                                }}
+                              />
+                            </>
+                          ) : u.birth_date ? (
+                            <button type="button" onClick={() => startEditBirthDate(u)}
+                              className="text-slate-900 bg-transparent border-0 p-0 m-0 cursor-pointer hover:text-blue-600">
+                              {formatBirthDate(u.birth_date)}
+                            </button>
+                          ) : (
+                            <div className="flex justify-center">
+                              <button
+                                type="button"
+                                onClick={() => startEditBirthDate(u)}
+                                aria-label={`הוסף תאריך לידה: ${u.full_name || u.email}`}
+                                className="w-7 h-7 flex items-center justify-center rounded-lg border border-dashed border-slate-300 text-slate-400 hover:text-blue-600 hover:border-blue-400 hover:bg-blue-50 transition-colors"
+                              >
+                                <span aria-hidden="true" className="text-base leading-none">+</span>
+                              </button>
+                            </div>
+                          )}
+                        </td>
+                        )}
+                        {isUserColVisible("overrides") && (
                         <td className="px-5 py-3 whitespace-nowrap">
                           <div className="flex items-center justify-center">
                             {u.role !== "owner" && (
@@ -4428,7 +4569,8 @@ export default function AdminPage() {
                             )}
                           </div>
                         </td>
-                        {voicenterEnabled && (
+                        )}
+                        {voicenterEnabled && isUserColVisible("voicenter") && (
                           <td className="px-5 py-3">
                             <MultiSelectChips compact
                               options={voicenterKnownReps.map(r => ({ value: r.representative_code, label: r.representative_name || r.representative_code }))}
@@ -4439,6 +4581,7 @@ export default function AdminPage() {
                               emptyIcon />
                           </td>
                         )}
+                        {isUserColVisible("status") && (
                         <td className={`px-5 py-3 whitespace-nowrap relative ${(myRole === "owner" || canDeleteUsers) ? "pl-9" : ""}`}>
                           <span className="text-slate-600">
                             {u.status === "pending" ? "ממתין לאישור" : "פעיל"}
@@ -4459,8 +4602,16 @@ export default function AdminPage() {
                             </div>
                           )}
                         </td>
+                        )}
                       </tr>
                     ))}
+                    {displayUsers.length === 0 && !loadingUsers && (
+                      <tr>
+                        <td colSpan={9} className="text-sm text-slate-400 p-8 text-center">
+                          אין משתמשים תואמים לסינון הנוכחי
+                        </td>
+                      </tr>
+                    )}
                   </tbody>
                 </table>
               </div>
