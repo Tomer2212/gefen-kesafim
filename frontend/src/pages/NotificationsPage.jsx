@@ -23,6 +23,7 @@ function timeAgo(iso) {
 
 const TYPE_ICON = {
   update_request_submitted: "✏️",
+  profile_update_request_submitted: "✏️",
   update_request_approved:  "✅",
   update_request_rejected:  "❌",
   update_request_result:    "📋",
@@ -51,6 +52,8 @@ const FIELD_LABEL = {
   principal_name: "שם מנהל/ת", principal_phone: "טלפון מנהל/ת", principal_email: "מייל מנהל/ת",
   secretary_name: "שם מזכיר/ה", secretary_phone: "טלפון מזכיר/ה", secretary_email: "מייל מזכיר/ה",
   finance_contact_name: "איש קשר כספים", finance_contact_phone: "טלפון כספים", finance_contact_email: "מייל כספים",
+  // profile self-service fields
+  work_phone: "טלפון עבודה", control_domains: "תחומי ידע",
 };
 
 const VALUE_LABEL = {
@@ -59,9 +62,14 @@ const VALUE_LABEL = {
   sheshshnati: "שש-שנתי", other: "אחר",
   // finance_software
   kesafim2000: "כספים 2000", payscool: "פייסקול", schoolcash: "סקולקאש",
+  // knowledge areas (control_domains)
+  gefen: "גפן",
 };
 
 function formatValue(val) {
+  if (Array.isArray(val)) {
+    return val.length ? val.map(v => VALUE_LABEL[v] ?? String(v)).join(", ") : "—";
+  }
   if (val === null || val === undefined || val === "") return "—";
   return VALUE_LABEL[val] ?? String(val);
 }
@@ -515,7 +523,8 @@ function NotificationRow({ notif, isExpanded, onToggle, onRead, onReload, onDele
   const icon      = TYPE_ICON[notif.type] || "🔔";
   const title     = notif.data?.title || "התראה";
   const data      = notif.data || {};
-  const isActionable = notif.type === "update_request_submitted";
+  const isProfileRequest = notif.type === "profile_update_request_submitted";
+  const isActionable = notif.type === "update_request_submitted" || isProfileRequest;
   const isResultExpandable = (
     notif.type === "update_request_approved" ||
     notif.type === "update_request_rejected" ||
@@ -591,7 +600,10 @@ function NotificationRow({ notif, isExpanded, onToggle, onRead, onReload, onDele
     try {
       const body = { status, reviewer_note: reviewNote || null };
       if (approvedFields !== null) body.approved_fields = approvedFields;
-      await axios.patch(`/schools/update-requests/${notif.ref_id}`, body);
+      const endpoint = isProfileRequest
+        ? `/schools/profile-update-requests/${notif.ref_id}`
+        : `/schools/update-requests/${notif.ref_id}`;
+      await axios.patch(endpoint, body);
       setReviewed(status);
       setReviewedByViewer(true);
       onRead(notif.id);

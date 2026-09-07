@@ -2606,6 +2606,19 @@ def get_notifications(user: Annotated[dict, Depends(get_current_user)]):
                         if n.get("type") == "update_request_submitted" and n.get("ref_id"):
                             n["data"] = {**(n.get("data") or {}),
                                          "request_status": status_map.get(n["ref_id"])}
+                # Same enrichment for the parallel profile-update-request flow
+                p_action_ids = [n["ref_id"] for n in items
+                                if n.get("type") == "profile_update_request_submitted" and n.get("ref_id")]
+                if p_action_ids:
+                    p_rows = (db.table("profile_update_requests")
+                              .select("id, status")
+                              .in_("id", p_action_ids)
+                              .execute())
+                    p_status_map = {r["id"]: r["status"] for r in (p_rows.data or [])}
+                    for n in items:
+                        if n.get("type") == "profile_update_request_submitted" and n.get("ref_id"):
+                            n["data"] = {**(n.get("data") or {}),
+                                         "request_status": p_status_map.get(n["ref_id"])}
             except Exception as enrich_exc:
                 logger.warning("request status enrichment failed (non-fatal): %s", enrich_exc)
             count = sum(1 for r in items if not r.get("read_at"))
@@ -3906,9 +3919,24 @@ def get_school(
 # Users (owner/manager only)
 # ---------------------------------------------------------------------------
 
+AVATAR_BUCKET = "avatars"
+
+
+def _public_avatar_url(key: str | None) -> str | None:
+    """Public URL for an object in the (public) avatars bucket. `key` is the object
+    name *within* the bucket (no bucket prefix). None when no avatar.
+    Tolerates a legacy `avatars/` prefix from an earlier build of this feature."""
+    if not key:
+        return None
+    obj = key[len("avatars/"):] if key.startswith("avatars/") else key
+    base = os.getenv("SUPABASE_URL", "").rstrip("/")
+    return f"{base}/storage/v1/object/public/{AVATAR_BUCKET}/{obj}"
+
+
 @router.get("/users/me")
 def get_me(user: Annotated[dict, Depends(get_current_user)]):
     result = dict(user)
+    result["avatar_url"] = _public_avatar_url(user.get("avatar_storage_key"))
 
     # org subscription info
     if user.get("org_id"):
@@ -3944,6 +3972,13 @@ def get_me(user: Annotated[dict, Depends(get_current_user)]):
         result["can_delete_users"] = _check_permission(db, user, "can_delete_users")
         result["can_manage_user_permissions"] = _check_permission(db, user, "can_manage_user_permissions")
         result["can_remove_call_from_school"] = _check_permission(db, user, "can_remove_call_from_school")
+        # Advisors only: manager/owner always edit their own profile directly.
+        result["can_edit_own_work_phone"] = (
+            user.get("role") != "advisor" or _check_permission(db, user, "can_edit_own_work_phone")
+        )
+        result["can_edit_own_knowledge_areas"] = (
+            user.get("role") != "advisor" or _check_permission(db, user, "can_edit_own_knowledge_areas")
+        )
     except Exception as exc:
         logger.warning("get_me permission check failed (non-fatal): %s", exc)
         result["can_view_school_card"] = True  # fail-open: a transient error must not lock users out of the card
@@ -3955,6 +3990,8 @@ def get_me(user: Annotated[dict, Depends(get_current_user)]):
         result["can_delete_users"] = user.get("role") == "owner"
         result["can_manage_user_permissions"] = user.get("role") == "owner"
         result["can_remove_call_from_school"] = user.get("role") in ("owner", "manager")
+        result["can_edit_own_work_phone"] = user.get("role") != "advisor"
+        result["can_edit_own_knowledge_areas"] = user.get("role") != "advisor"
 
     return result
 
@@ -3979,7 +4016,33 @@ def dismiss_onboarding(
 
 
 class MyProfileIn(BaseModel):
-    full_name: str
+    full_name: str | None = None
+    gender: str | None = None  # 'male' | 'female' | None (no selection)
+    work_phone: str | None = None
+    control_domains: list[str] | None = None
+
+
+# Which self-service profile field is gated by which permission key.
+_SELF_EDIT_PERMISSION = {
+    "work_phone": "can_edit_own_work_phone",
+    "control_domains": "can_edit_own_knowledge_areas",
+}
+_VALID_CONTROL_DOMAINS = {"gefen", "kesafim2000", "payscool", "schoolcash"}
+_PROFILE_FIELD_LABELS = {"work_phone": "טלפון עבודה", "control_domains": "תחומי ידע"}
+
+
+def _validate_control_domains(domains: list[str] | None) -> list[str]:
+    domains = domains or []
+    bad = [d for d in domains if d not in _VALID_CONTROL_DOMAINS]
+    if bad:
+        raise HTTPException(status_code=400, detail="תחום ידע לא חוקי")
+    # dedupe, preserve order
+    seen, out = set(), []
+    for d in domains:
+        if d not in seen:
+            seen.add(d)
+            out.append(d)
+    return out
 
 
 @router.patch("/users/me/profile")
@@ -3987,11 +4050,306 @@ def update_my_profile(
     body: MyProfileIn,
     user: Annotated[dict, Depends(get_current_user)],
 ):
-    name = body.full_name.strip()
-    if not name:
-        raise HTTPException(status_code=400, detail="שם לא יכול להיות ריק")
+    # Only touch fields the client actually sent, so saving one field never wipes another.
+    sent = body.model_fields_set
+    updates: dict = {}          # applied directly to profiles
+    pending: dict = {}          # routed through the approval flow (advisor + permission off)
+
+    if "full_name" in sent:
+        name = (body.full_name or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="שם לא יכול להיות ריק")
+        updates["full_name"] = name
+
+    if "gender" in sent:
+        if body.gender not in (None, "male", "female"):
+            raise HTTPException(status_code=400, detail="מגדר לא חוקי")
+        updates["gender"] = body.gender
+
+    # Self-service gated fields: work_phone + control_domains.
+    gated_values = {}
+    if "work_phone" in sent:
+        gated_values["work_phone"] = _validate_work_phone(body.work_phone)
+    if "control_domains" in sent:
+        gated_values["control_domains"] = _validate_control_domains(body.control_domains)
+
+    if gated_values:
+        db = get_admin_client()
+        is_advisor = user.get("role") == "advisor"
+        for field, value in gated_values.items():
+            allowed_direct = (not is_advisor) or _check_permission(db, user, _SELF_EDIT_PERMISSION[field])
+            if allowed_direct:
+                updates[field] = value
+            else:
+                pending[field] = value
+
+    if not updates and not pending:
+        return {"ok": True}
+
     db = get_admin_client()
-    db.table("profiles").update({"full_name": name}).eq("id", user["id"]).execute()
+
+    if updates:
+        db.table("profiles").update(updates).eq("id", user["id"]).execute()
+        invalidate_profile_cache(user["id"])
+
+    pending_fields: list[str] = []
+    if pending:
+        pending_fields = list(pending.keys())
+        # Snapshot current values so approvers see from→to, mirroring the school-card flow.
+        try:
+            cur_row = db.table("profiles").select("work_phone, control_domains").eq("id", user["id"]).execute()
+            cur = cur_row.data[0] if cur_row.data else {}
+        except Exception:
+            cur = {}
+        current_values = {k: cur.get(k) for k in pending}
+
+        req_row = db.table("profile_update_requests").insert({
+            "user_id": user["id"],
+            "requester_id": user["id"],
+            "org_id": user.get("org_id"),
+            "proposed_changes": pending,
+            "status": "pending",
+        }).execute()
+        req_id = req_row.data[0]["id"]
+
+        try:
+            approver_ids = _get_approver_ids(db, user["org_id"])
+            changed_labels = "، ".join(_PROFILE_FIELD_LABELS.get(k, k) for k in pending)
+            notif_title = f'{user.get("full_name", "יועץ")} ביקש לעדכן את הפרטים האישיים ({changed_labels})'
+            notif_rows = [{
+                "recipient_id": aid,
+                "type": "profile_update_request_submitted",
+                "ref_id": req_id,
+                "school_id": None,
+                "data": {
+                    "title": notif_title,
+                    "sender_name": user.get("full_name", ""),
+                    "proposed_changes": pending,
+                    "current_values": current_values,
+                    "deeplink": "/notifications",
+                },
+            } for aid in approver_ids if aid != user["id"]]
+            _create_notifications(db, notif_rows, pref_key="notify_update_request_submitted")
+        except Exception as exc:
+            logger.warning("profile_update_request_submitted notification failed (non-fatal): %s", exc)
+
+    return {"ok": True, "pending_fields": pending_fields}
+
+
+@router.get("/profile-update-requests")
+def list_profile_update_requests(user: Annotated[dict, Depends(get_current_user)]):
+    """The current user's own profile-update requests (for the 'pending approval' indicator)."""
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            rows = (
+                db.table("profile_update_requests")
+                .select("*")
+                .eq("requester_id", user["id"])
+                .order("created_at", desc=True)
+                .limit(50)
+                .execute()
+            )
+            return rows.data or []
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("list_profile_update_requests attempt 1 failed: %s — resetting", exc)
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.warning("list_profile_update_requests failed after 2 attempts: %s", exc)
+                return []
+
+
+@router.patch("/profile-update-requests/{req_id}")
+def review_profile_update_request(
+    req_id: str,
+    body: ReviewRequestIn,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    _require_manager(user)
+    if body.status not in ("approved", "rejected"):
+        raise HTTPException(status_code=400, detail="סטטוס לא חוקי")
+
+    # Phase 1: read + validate
+    req = None
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            if not _check_permission(db, user, "can_approve_update_requests"):
+                raise HTTPException(status_code=403, detail="אין הרשאה לאשר בקשות עדכון")
+            req_row = db.table("profile_update_requests").select("*").eq("id", req_id).execute()
+            if not req_row.data:
+                raise HTTPException(status_code=404, detail="הבקשה לא נמצאה")
+            req = req_row.data[0]
+            if req.get("org_id") and req["org_id"] != user.get("org_id"):
+                raise HTTPException(status_code=404, detail="הבקשה לא נמצאה")
+            if req["status"] != "pending":
+                raise HTTPException(status_code=400, detail="הבקשה כבר טופלה")
+            break
+        except HTTPException:
+            raise
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("review_profile_update_request attempt 1 failed: %s — resetting", exc)
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.error("review_profile_update_request failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    target_user_id = req["user_id"]
+    all_field_keys = list((req.get("proposed_changes") or {}).keys())
+
+    # Phase 2: apply on approval (respecting approved_fields subset)
+    if body.status == "approved" and req.get("proposed_changes"):
+        changes = dict(req["proposed_changes"])
+        if body.approved_fields is not None:
+            changes = {k: v for k, v in changes.items() if k in body.approved_fields}
+        if "work_phone" in changes:
+            changes["work_phone"] = _validate_work_phone(changes["work_phone"])
+        if "control_domains" in changes:
+            changes["control_domains"] = _validate_control_domains(changes["control_domains"])
+        if changes:
+            db = get_admin_client()
+            db.table("profiles").update(changes).eq("id", target_user_id).execute()
+            invalidate_profile_cache(target_user_id)
+
+    # Phase 3: update request status
+    from datetime import datetime, timezone
+    for status_attempt in range(2):
+        try:
+            db = get_admin_client()
+            db.table("profile_update_requests").update({
+                "status": body.status,
+                "reviewer_id": user["id"],
+                "reviewer_note": body.reviewer_note,
+                "resolved_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("id", req_id).execute()
+            break
+        except Exception as exc:
+            if status_attempt == 0:
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.warning("profile request status update failed after 2 attempts (non-fatal): %s", exc)
+
+    # Phase 4: notify the requester
+    approved_fields_list = body.approved_fields
+    is_partial = (
+        approved_fields_list is not None
+        and body.status == "approved"
+        and len(approved_fields_list) < len(all_field_keys)
+    )
+    if is_partial:
+        req_title = "בקשתך לעדכון הפרטים האישיים אושרה באופן חלקי"
+    elif body.status == "approved":
+        req_title = "בקשתך לעדכון הפרטים האישיים אושרה"
+    else:
+        req_title = "בקשתך לעדכון הפרטים האישיים נדחתה"
+    try:
+        db = get_admin_client()
+        _create_notifications(db, [{
+            "recipient_id": req["requester_id"],
+            "type": f"update_request_{body.status}",
+            "ref_id": req_id,
+            "school_id": None,
+            "data": {
+                "title": req_title,
+                "sender_name": user.get("full_name", ""),
+                "reviewer_note": body.reviewer_note,
+                "deeplink": "/profile?tab=personal",
+                "proposed_changes": req.get("proposed_changes"),
+                "approved_fields": approved_fields_list,
+                "is_partial": is_partial,
+            },
+        }], pref_key="notify_update_request_reviewed")
+    except Exception as exc:
+        logger.warning("profile review requester notification failed (non-fatal): %s", exc)
+
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Profile picture (avatar)
+# ---------------------------------------------------------------------------
+
+# Magic-byte signatures → (mime, extension). Client always downscales to ~512px
+# before upload, so the real payload is tiny; this cap is only an abuse ceiling.
+_AVATAR_MAX_BYTES = 2_000_000
+
+
+def _sniff_image(data: bytes) -> tuple[str, str] | None:
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg", ".jpg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png", ".png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp", ".webp"
+    return None
+
+
+@router.post("/users/me/avatar")
+async def upload_my_avatar(
+    user: Annotated[dict, Depends(get_current_user)],
+    file: UploadFile = File(...),
+):
+    import shutil
+    import tempfile
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="קובץ ריק")
+    if len(data) > _AVATAR_MAX_BYTES:
+        raise HTTPException(status_code=400, detail="הקובץ גדול מדי")
+    sniff = _sniff_image(data)
+    if not sniff:
+        raise HTTPException(status_code=400, detail="קובץ חייב להיות תמונה (JPG/PNG/WebP)")
+    mime, ext = sniff
+
+    # Object name *within* the "avatars" bucket — no bucket prefix.
+    new_key = f"{user['id']}/{secrets.token_hex(8)}{ext}"
+    db = get_admin_client()
+
+    run_dir = Path(tempfile.mkdtemp(prefix=f"avatar_{user['id']}_"))
+    try:
+        dest = run_dir / f"avatar{ext}"
+        dest.write_bytes(data)
+        db.storage.from_(AVATAR_BUCKET).upload(
+            new_key, dest.read_bytes(), {"content-type": mime, "upsert": "false"}
+        )
+    finally:
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+    old_key = user.get("avatar_storage_key")
+    if old_key and old_key != new_key:
+        try:
+            db.storage.from_(AVATAR_BUCKET).remove([old_key])
+        except Exception as exc:
+            logger.warning("old avatar cleanup failed (non-fatal): %s", exc)
+
+    db.table("profiles").update({
+        "avatar_storage_key": new_key,
+        "avatar_updated_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", user["id"]).execute()
+    invalidate_profile_cache(user["id"])
+
+    return {"avatar_url": _public_avatar_url(new_key)}
+
+
+@router.delete("/users/me/avatar")
+def delete_my_avatar(user: Annotated[dict, Depends(get_current_user)]):
+    db = get_admin_client()
+    old_key = user.get("avatar_storage_key")
+    if old_key:
+        try:
+            db.storage.from_(AVATAR_BUCKET).remove([old_key])
+        except Exception as exc:
+            logger.warning("avatar delete from storage failed (non-fatal): %s", exc)
+    db.table("profiles").update({
+        "avatar_storage_key": None,
+        "avatar_updated_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", user["id"]).execute()
     invalidate_profile_cache(user["id"])
     return {"ok": True}
 
@@ -6835,7 +7193,16 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
     "can_manage_billing":           {"manager": False, "advisor": False},
     "can_edit_meeting_automations": {"manager": True,  "advisor": False},
     "can_remove_call_from_school":  {"manager": True,  "advisor": False},
+    # Self-service edit of one's own profile fields. Relevant to advisors only
+    # (manager/owner always edit their own profile directly). Default ON = direct edit;
+    # OFF routes the change through the approval flow (profile_update_requests).
+    "can_edit_own_work_phone":       {"manager": True,  "advisor": True},
+    "can_edit_own_knowledge_areas":  {"manager": True,  "advisor": True},
 }
+
+# Permission keys that are not applicable to managers (manager/owner always edit their
+# own profile directly, so these gates only ever apply to advisors).
+MANAGER_NA_PERMISSIONS = {"can_edit_own_work_phone", "can_edit_own_knowledge_areas"}
 
 PERMISSION_LABELS: dict[str, str] = {
     "can_view_school_card":         "צפייה בכרטיס בית ספר",
@@ -6853,6 +7220,8 @@ PERMISSION_LABELS: dict[str, str] = {
     "can_manage_billing":           "לנהל את אזור 'חיובים' (לרבות אמצעי תשלום)",
     "can_edit_meeting_automations": "לערוך אוטומציות של פגישות",
     "can_remove_call_from_school":  "להסיר שיחה מטאב 'שיחות' בכרטיס בית ספר",
+    "can_edit_own_work_phone":      "לערוך ישירות מספר טלפון עבודה",
+    "can_edit_own_knowledge_areas": "לערוך ישירות תחומי ידע",
 }
 
 

@@ -6,8 +6,20 @@ import { useFocusTrap } from "../hooks/useFocusTrap";
 import sidebarLogoImg from "../assets/logo-sidebar.png";
 import NotificationToastContainer from "./NotificationToast";
 import { useMeetingReminders } from "../context/MeetingRemindersContext";
+import Avatar from "./Avatar";
+
+function readCachedAvatar() {
+  try { return localStorage.getItem("avatar_url") || ""; } catch { return ""; }
+}
 
 const ROLE_LABEL = { owner: "בעלים", manager: "מנהל", advisor: "יועץ" };
+// Symbolic gender → feminine role label for advisor/manager only. Any other case
+// (no gender / male / owner) keeps the default ROLE_LABEL.
+const ROLE_LABEL_FEMININE = { manager: "מנהלת", advisor: "יועצת" };
+function roleLabel(role, gender) {
+  if (gender === "female" && ROLE_LABEL_FEMININE[role]) return ROLE_LABEL_FEMININE[role];
+  return ROLE_LABEL[role] || role;
+}
 
 // When the "auto-complete meeting status from activity" org automation is ON, defer the
 // end-of-meeting status popup by 1h (window 1h–3h after end) so the automation has time to
@@ -285,7 +297,9 @@ export default function Sidebar({ dark = false }) {
   const [userName, setUserName] = useState("");
   const [userEmail, setUserEmail] = useState("");
   const [role, setRole] = useState(null);
+  const [gender, setGender] = useState("");
   const [orgName, setOrgName] = useState("");
+  const [avatarUrl, setAvatarUrl] = useState(readCachedAvatar);
   const [isSuperAdmin, setIsSuperAdmin] = useState(false);
   const [notifCount, setNotifCount] = useState(0);
   const [toasts, setToasts] = useState([]);
@@ -309,6 +323,14 @@ export default function Sidebar({ dark = false }) {
     document.documentElement.style.setProperty("--sidebar-w", collapsed ? "64px" : "240px");
   }, [collapsed]);
 
+  // The profile page dispatches this after upload/remove so the already-mounted
+  // sidebar reflects the new picture without a navigation.
+  useEffect(() => {
+    const onAvatarUpdated = () => setAvatarUrl(readCachedAvatar());
+    window.addEventListener("avatar-updated", onAvatarUpdated);
+    return () => window.removeEventListener("avatar-updated", onAvatarUpdated);
+  }, []);
+
   useEffect(() => {
     async function load() {
       const { data: { session } } = await supabase.auth.getSession();
@@ -322,8 +344,14 @@ export default function Sidebar({ dark = false }) {
         setUserName(name);
         setCtxUserName(name);
         setRole(res.data.role || metaRole);
+        setGender(res.data.gender || "");
         setOrgName(res.data.org?.name || "");
         setIsSuperAdmin(!!res.data.is_superadmin);
+        setAvatarUrl(res.data.avatar_url || "");
+        try {
+          if (res.data.avatar_url) localStorage.setItem("avatar_url", res.data.avatar_url);
+          else localStorage.removeItem("avatar_url");
+        } catch { /* ignore */ }
         if (res.data.notification_preferences) {
           notifPrefsRef.current = res.data.notification_preferences;
         }
@@ -517,6 +545,7 @@ export default function Sidebar({ dark = false }) {
   }, []);
 
   async function handleLogout() {
+    try { localStorage.removeItem("avatar_url"); } catch { /* ignore */ }
     await supabase.auth.signOut();
     window.location.replace("/login");
   }
@@ -555,17 +584,24 @@ export default function Sidebar({ dark = false }) {
         </button>
 
         {/* User info */}
-        {!collapsed && (
+        {collapsed ? (
+          <div className="mb-2 flex justify-center">
+            <Avatar url={avatarUrl} name={userName} size={32} />
+          </div>
+        ) : (
           <div
-            className="mx-3 mb-3 px-3 py-2.5 rounded-xl"
+            className="mx-3 mb-3 px-3 py-2.5 rounded-xl flex items-center gap-2.5"
             style={dark
               ? { background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.1)" }
               : { background: "#f8fafc", border: "1px solid #f1f5f9" }}
           >
-            <p className={`text-sm font-semibold truncate ${dark ? "text-white" : "text-slate-800"}`}>{userName || "..."}</p>
-            <p className={`text-xs mt-0.5 ${dark ? "text-white/40" : "text-slate-400"}`}>
-              {ROLE_LABEL[role] || role}{orgName ? `, ${orgName}` : ""}
-            </p>
+            <div className="min-w-0 flex-1">
+              <p className={`text-sm font-semibold truncate ${dark ? "text-white" : "text-slate-800"}`}>{userName || "..."}</p>
+              <p className={`text-xs mt-0.5 ${dark ? "text-white/40" : "text-slate-400"}`}>
+                {roleLabel(role, gender)}{orgName ? `, ${orgName}` : ""}
+              </p>
+            </div>
+            <Avatar url={avatarUrl} name={userName} size={36} />
           </div>
         )}
 

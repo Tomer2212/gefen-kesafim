@@ -1400,6 +1400,7 @@ function UserPermissionsModal({ user, permDefaults, overrides, loading, saving, 
               <div className="divide-y divide-slate-100">
                 {Object.entries(permDefaults)
                   .filter(([perm]) => !(user.role === "advisor" && ADVISOR_NA_PERMS.has(perm)))
+                  .filter(([perm]) => !(user.role === "manager" && MANAGER_NA_PERMS.has(perm)))
                   .map(([perm, data]) => {
                     const currentOverride = localOverrides[perm]; // true | false | undefined
                     const isCustom = currentOverride !== undefined;
@@ -1492,8 +1493,16 @@ const PERM_GROUPS = [
     perms: ["can_remove_call_from_school"],
     advisorNA: new Set(),
   },
+  {
+    label: "פרטים אישיים",
+    perms: ["can_edit_own_work_phone", "can_edit_own_knowledge_areas"],
+    advisorNA: new Set(),
+    // Managers/owners always edit their own profile directly — these gates apply to advisors only.
+    managerNA: new Set(["can_edit_own_work_phone", "can_edit_own_knowledge_areas"]),
+  },
 ];
 const ADVISOR_NA_PERMS = new Set(PERM_GROUPS.flatMap(g => [...(g.advisorNA || [])]));
+const MANAGER_NA_PERMS = new Set(PERM_GROUPS.flatMap(g => [...(g.managerNA || [])]));
 
 const ADMIN_NUMBER_FILTER_OPS = [
   { value: "eq", label: "שווה ל" },
@@ -4639,7 +4648,10 @@ export default function AdminPage() {
                                   <td className="px-5 py-3 text-slate-700">{data.label}</td>
                                   {myRole === "owner" && (
                                     <td className="px-5 py-3 text-center">
-                                      <PermToggle role="manager" perm={perm} data={data} />
+                                      {group.managerNA?.has(perm)
+                                        ? <span className="text-xs text-slate-400 italic">לא רלוונטי</span>
+                                        : <PermToggle role="manager" perm={perm} data={data} />
+                                      }
                                     </td>
                                   )}
                                   <td className="px-5 py-3 text-center">
