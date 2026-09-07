@@ -245,12 +245,20 @@ export default function ProfilePage() {
     }
   }
 
-  async function handleBirthDateChange(e) {
+  // Save only when the field loses focus (or Enter) — NOT on every keystroke, so a
+  // native <input type="date"> isn't locked to a half-typed year like "0019".
+  async function handleBirthDateBlur(e) {
     const value = e.target.value; // "" | "YYYY-MM-DD"
+    setBirthDateError("");
+    if (value === (birthDate || "")) return;
+    if (value && (value < "1900-01-01" || value > new Date().toISOString().slice(0, 10))) {
+      setBirthDateError("תאריך לידה לא חוקי");
+      e.target.value = birthDate || "";
+      return;
+    }
     const prev = birthDate;
     setBirthDate(value);
     setBirthDateSaving(true);
-    setBirthDateError("");
     setBirthDateSaved(false);
     try {
       await axios.patch("/schools/users/me/profile", { birth_date: value || null });
@@ -696,11 +704,14 @@ export default function ProfilePage() {
                         </label>
                         <div className="flex items-center gap-2">
                           <input
+                            key={birthDate}
                             id="profile-birth-date"
                             type="date"
-                            value={birthDate}
+                            defaultValue={birthDate}
+                            min="1900-01-01"
                             max={new Date().toISOString().slice(0, 10)}
-                            onChange={handleBirthDateChange}
+                            onBlur={handleBirthDateBlur}
+                            onKeyDown={e => { if (e.key === "Enter") e.currentTarget.blur(); }}
                             disabled={birthDateSaving}
                             className="border border-slate-200 rounded-xl px-3 py-2 text-sm text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-blue-200 disabled:opacity-60"
                           />

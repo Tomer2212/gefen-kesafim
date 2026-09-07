@@ -4045,6 +4045,8 @@ def _validate_birth_date(value: str | None) -> str | None:
         raise HTTPException(status_code=400, detail="תאריך לידה לא חוקי")
     if d > date.today():
         raise HTTPException(status_code=400, detail="תאריך לידה לא יכול להיות בעתיד")
+    if d.year < 1900:
+        raise HTTPException(status_code=400, detail="תאריך לידה לא חוקי")
     return s
 
 
