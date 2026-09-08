@@ -486,11 +486,17 @@ def list_schools(
     user: Annotated[dict, Depends(get_current_user)],
     include_deleted: bool = False,
     academic_year: str = DEFAULT_ACADEMIC_YEAR,
+    lite: bool = False,
 ):
+    # `lite=True`: return only id/name/symbol/city/status with the same role-based row
+    # filtering, and skip every enrichment query (profiles, meetings stats, check_metrics,
+    # goals, control letters, typed advisors, ...). Used by screens that only need a school
+    # picker list (e.g. the "גבייה" admin tab), so they don't pay for the full payload.
     is_advisor = user["role"] not in ("owner", "manager")
     if include_deleted and is_advisor:
         include_deleted = False
     schools = []
+    sel = "id, name, symbol, city, status" if lite else "*, gefen_accounts(*), advisor_schools(advisor_id)"
 
     for attempt in range(2):
         try:
@@ -510,7 +516,7 @@ def list_schools(
                     open_filters.append(f"id.in.({','.join(assigned_ids)})")
                 q1_builder = (
                     db.table("schools")
-                    .select("*, gefen_accounts(*), advisor_schools(advisor_id)")
+                    .select(sel)
                     .eq("org_id", user["org_id"])
                     .or_(",".join(open_filters))
                     .order("name")
@@ -523,7 +529,7 @@ def list_schools(
                 # Uses direct .filter() (not inside or_()) so PostgREST parses the JSON value correctly.
                 q2_builder = (
                     db.table("schools")
-                    .select("*, gefen_accounts(*), advisor_schools(advisor_id)")
+                    .select(sel)
                     .eq("org_id", user["org_id"])
                     .filter("restrict_access_to", "cs", json.dumps([user["id"]]))
                 )
@@ -539,7 +545,7 @@ def list_schools(
                 # Q1 (manager/owner): fetch all schools within their org
                 all_builder = (
                     db.table("schools")
-                    .select("*, gefen_accounts(*), advisor_schools(advisor_id)")
+                    .select(sel)
                     .eq("org_id", user["org_id"])
                     .order("name")
                 )
@@ -557,6 +563,9 @@ def list_schools(
             else:
                 logger.error("list_schools failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    if lite:
+        return schools
 
     # Enrich Q3 (profiles) and Q4 (meetings stats) sequentially — safer with 3s timeout
     # db is the singleton already acquired inside the retry loop above — still valid.
