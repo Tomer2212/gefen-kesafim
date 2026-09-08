@@ -126,9 +126,20 @@ async def global_exception_handler(request: Request, exc: Exception):
         request.method, request.url.path, exc,
         exc_info=True,
     )
+    # This handler runs in Starlette's ServerErrorMiddleware, which sits OUTSIDE
+    # CORSMiddleware — so its response would otherwise carry no CORS headers and
+    # the browser would surface it as a network error ("failed to fetch") rather
+    # than a readable 503. Re-add the CORS headers here for allowed origins.
+    origin = request.headers.get("origin")
+    headers = {}
+    if origin and origin in _origins:
+        headers["Access-Control-Allow-Origin"] = origin
+        headers["Access-Control-Allow-Credentials"] = "true"
+        headers["Vary"] = "Origin"
     return JSONResponse(
         status_code=503,
         content={"detail": "שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות"},
+        headers=headers,
     )
 
 

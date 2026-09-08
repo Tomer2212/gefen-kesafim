@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import axios from "axios";
+import GoalAutomationsModal from "./GoalAutomationsModal";
 
 function formatGoalDate(iso) {
   if (!iso) return "";
@@ -12,7 +13,7 @@ function fmtPct(v, decimals = 2) {
   return (Number(v) * 100).toFixed(decimals) + "%";
 }
 
-export function GoalsTab({ accounts, schoolId, schoolStage, activeSubTab, academicYear, logs }) {
+export function GoalsTab({ accounts, schoolId, schoolStage, activeSubTab, academicYear, logs, canEditAutomations = false }) {
   const isSheshsSnati = schoolStage === "sheshshnati";
   const division = isSheshsSnati ? activeSubTab : schoolStage;
 
@@ -61,6 +62,7 @@ export function GoalsTab({ accounts, schoolId, schoolStage, activeSubTab, academ
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [savingKey, setSavingKey] = useState(null);
+  const [automationsOpen, setAutomationsOpen] = useState(false);
 
   // filteredLogs is ordered newest-first (same assumption ChecksTab/CompareChecksModal rely on) —
   // find the latest log that has tikhnun data for the currently selected budget.
@@ -81,11 +83,11 @@ export function GoalsTab({ accounts, schoolId, schoolStage, activeSubTab, academ
     }
   }, [budgets, selectedBudget]);
 
-  useEffect(() => {
-    if (!division || !academicYear) { setGoals([]); setImportantDates([]); return; }
-    setLoading(true);
+  const loadGoals = useCallback(({ withSpinner = true } = {}) => {
+    if (!division || !academicYear) { setGoals([]); setImportantDates([]); return Promise.resolve(); }
+    if (withSpinner) setLoading(true);
     setError("");
-    axios.get(`/schools/${schoolId}/goals`, {
+    return axios.get(`/schools/${schoolId}/goals`, {
       params: { division_type: division, budget_name: selectedBudget, academic_year: academicYear },
     })
       .then(r => {
@@ -93,8 +95,10 @@ export function GoalsTab({ accounts, schoolId, schoolStage, activeSubTab, academ
         setImportantDates(r.data?.important_dates || []);
       })
       .catch(() => setError("שגיאה בטעינת היעדים"))
-      .finally(() => setLoading(false));
+      .finally(() => { if (withSpinner) setLoading(false); });
   }, [schoolId, division, academicYear, selectedBudget]);
+
+  useEffect(() => { loadGoals(); }, [loadGoals]);
 
   async function toggleMet(goal, met) {
     if (!division) return;
@@ -109,6 +113,8 @@ export function GoalsTab({ accounts, schoolId, schoolStage, activeSubTab, academ
         academic_year: academicYear,
         met: nextMet,
       });
+      // Refetch to pick up the server-written "הערות" audit line.
+      await loadGoals({ withSpinner: false });
     } catch {
       setGoals(prev => prev.map(g => g.key === goal.key ? { ...g, met: goal.met } : g));
       setError("שגיאה בשמירת הסטטוס");
@@ -119,7 +125,20 @@ export function GoalsTab({ accounts, schoolId, schoolStage, activeSubTab, academ
 
   return (
     <div dir="rtl" className="flex flex-col">
-      <h2 className="text-lg font-bold text-slate-900 mb-4">יעדים</h2>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-lg font-bold text-slate-900">יעדים</h2>
+        {canEditAutomations && (
+          <button
+            type="button"
+            onClick={() => setAutomationsOpen(true)}
+            className="btn-ghost flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-xl font-medium"
+          >
+            <span aria-hidden="true">⚙️</span> אוטומציות
+          </button>
+        )}
+      </div>
+
+      {automationsOpen && <GoalAutomationsModal onClose={() => setAutomationsOpen(false)} />}
 
       {budgets.length > 1 && (
         <div className="flex items-end border-b border-slate-200 mb-4 gap-1 flex-shrink-0">
@@ -157,12 +176,13 @@ export function GoalsTab({ accounts, schoolId, schoolStage, activeSubTab, academ
                     <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">יעד</th>
                     <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">מצב נוכחי</th>
                     <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">עמידה ביעד</th>
+                    <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">הערות</th>
                   </tr>
                 </thead>
                 <tbody>
                   {goals.length === 0 ? (
                     <tr>
-                      <td colSpan={5} className="py-12 text-center text-sm text-slate-400">
+                      <td colSpan={6} className="py-12 text-center text-sm text-slate-400">
                         אין יעדים להצגה עבור חטיבה זו
                       </td>
                     </tr>
@@ -172,6 +192,9 @@ export function GoalsTab({ accounts, schoolId, schoolStage, activeSubTab, academ
                     const currentStatus = goal.goal_type === "planning"
                       ? fmtPct(latestBudgetOverview?.pct_plan)
                       : fmtPct(latestBudgetOverview?.pct_tanuz);
+                    const notes = Array.isArray(goal.notes) ? goal.notes : [];
+                    const lastNote = notes[notes.length - 1];
+                    const locked = goal.automation_active === false && lastNote?.source === "auto";
                     return (
                       <tr key={goal.key} className="border-b border-slate-100 hover:bg-slate-50/50 transition-colors">
                         <td className="py-2.5 px-2 pr-3 text-sm text-slate-700 tabular-nums whitespace-nowrap">{formatGoalDate(goal.target_date)}</td>
@@ -198,6 +221,22 @@ export function GoalsTab({ accounts, schoolId, schoolStage, activeSubTab, academ
                               className={`px-3 py-1.5 border-r border-slate-200 transition-colors focus:outline-none ${yesClass}`}
                             >כן</button>
                           </div>
+                        </td>
+                        <td className="py-2.5 px-2 text-xs text-slate-500 min-w-[220px] max-w-[340px]">
+                          {notes.length === 0 ? (
+                            <span className="text-slate-300">—</span>
+                          ) : (
+                            <div className="flex flex-col gap-1">
+                              {locked && (
+                                <span className="text-slate-400 inline-flex items-center gap-1" title="עבר תאריך היעד — עדכון ידני בלבד">
+                                  <span aria-hidden="true">🔒</span>
+                                </span>
+                              )}
+                              {notes.map((n, i) => (
+                                <span key={i} className="leading-snug">{n.text}</span>
+                              ))}
+                            </div>
+                          )}
                         </td>
                       </tr>
                     );
