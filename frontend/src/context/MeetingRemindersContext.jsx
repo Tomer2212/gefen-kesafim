@@ -58,6 +58,18 @@ export function MeetingRemindersProvider({ children }) {
     setActiveKey(prev => prev ?? key);
   }, []);
 
+  // "X יעדים עודכנו אוטומטית לפי בדיקה" — an ephemeral popup (no bell entry) fired by
+  // Sidebar polling when the goals automation changed something after a check. Keyed by the
+  // backing notification id so each check's summary stacks as its own toast.
+  const addGoalUpdateReminder = useCallback((m) => {
+    const key = `goal-update-${m.id}`;
+    setReminders(prev => {
+      if (prev.some(r => r._key === key)) return prev;
+      return [...prev, { ...m, _type: "goal-update", _key: key }];
+    });
+    setActiveKey(prev => prev ?? key);
+  }, []);
+
   const dismiss = useCallback((key) => {
     setReminders(prev => prev.filter(r => r._key !== key));
   }, []);
@@ -65,7 +77,7 @@ export function MeetingRemindersProvider({ children }) {
   return (
     <MeetingRemindersCtx.Provider value={{
       reminders, activeKey, setActiveKey,
-      addMeetingReminder, addStatusReminder, addTaskReminder, addCallAttribReminder, dismiss,
+      addMeetingReminder, addStatusReminder, addTaskReminder, addCallAttribReminder, addGoalUpdateReminder, dismiss,
       userName, setUserName,
     }}>
       {children}

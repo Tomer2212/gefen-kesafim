@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { supabase } from "../lib/supabase";
+import { describeConnectionError } from "../lib/connectionError";
 import logoImg from "../assets/logo.png";
 
 const LogoMark = () => (
@@ -32,8 +33,8 @@ export default function LoginPage() {
         return;
       }
       window.location.replace("/");
-    } catch {
-      setError("לא ניתן להתחבר לשרת. אנא נסה שוב בעוד כמה שניות.");
+    } catch (err) {
+      setError(describeConnectionError(err).message);
     } finally {
       setLoading(false);
     }

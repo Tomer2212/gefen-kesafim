@@ -1704,25 +1704,46 @@ def list_goals(
 
             statuses = (
                 db.table("school_goals")
-                .select("goal_key, met")
+                .select("goal_key, met, notes")
                 .eq("school_id", school_id)
                 .eq("division_type", division_type)
                 .eq("budget_name", budget_name)
                 .eq("academic_year", academic_year)
                 .execute()
             )
-            status_map = {r["goal_key"]: r["met"] for r in (statuses.data or [])}
-            goals = [
-                {
+            status_map = {r["goal_key"]: r for r in (statuses.data or [])}
+
+            # Org-level automation flag (non-fatal — default ON if unavailable)
+            goal_automation_enabled = True
+            try:
+                if user.get("org_id"):
+                    org = (db.table("organizations").select("goal_auto_update_enabled")
+                           .eq("id", user["org_id"]).single().execute().data) or {}
+                    goal_automation_enabled = org.get("goal_auto_update_enabled", True)
+            except Exception as exc:
+                logger.warning("list_goals org flag lookup failed (non-fatal): %s", exc)
+
+            from goals_logic import il_now
+            today_il = il_now().date()
+
+            goals = []
+            for d in tracked_defs:
+                tgt = _shift_goal_date(d, academic_year)
+                try:
+                    date_passed = today_il > date.fromisoformat(tgt)
+                except (ValueError, TypeError):
+                    date_passed = False
+                sg = status_map.get(d["key"]) or {}
+                goals.append({
                     "key": d["key"],
                     "goal_type": d["kind"],
                     "goal_number": d["goal_number"],
-                    "target_date": _shift_goal_date(d, academic_year),
+                    "target_date": tgt,
                     "current_status": None,
-                    "met": status_map.get(d["key"]),
-                }
-                for d in tracked_defs
-            ]
+                    "met": sg.get("met"),
+                    "notes": sg.get("notes") or [],
+                    "automation_active": goal_automation_enabled and not date_passed,
+                })
             important_dates = [
                 {
                     "label": d["label"].replace(GOAL_TEMPLATE_BASE_YEAR, academic_year),
@@ -1730,7 +1751,11 @@ def list_goals(
                 }
                 for d in date_defs
             ]
-            return {"goals": goals, "important_dates": important_dates}
+            return {
+                "goals": goals,
+                "important_dates": important_dates,
+                "goal_automation_enabled": goal_automation_enabled,
+            }
         except Exception as exc:
             if attempt == 0:
                 logger.warning("list_goals attempt 1 failed: %s — resetting client and retrying", exc)
@@ -1759,6 +1784,28 @@ def set_goal_status(
     # goal. Same access rule already enforced by upsert_control_letter/get_year_admin_data.
     if user["role"] not in ("owner", "manager") and not _advisor_has_school_access(db, user, school_id):
         raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
+
+    # Append a "הערות" audit line for every manual toggle (kept append-only alongside the
+    # automation's own lines — see goals_logic). Manual edits are always allowed, regardless
+    # of the org automation flag or whether the goal's target date has passed.
+    from goals_logic import build_manual_note_entry
+    try:
+        prev = (
+            db.table("school_goals")
+            .select("notes")
+            .eq("school_id", school_id)
+            .eq("division_type", body.division_type)
+            .eq("budget_name", body.budget_name)
+            .eq("goal_key", body.goal_key)
+            .eq("academic_year", body.academic_year)
+            .execute()
+            .data
+        )
+        notes = list((prev[0].get("notes") if prev else None) or [])
+    except Exception:
+        notes = []
+    notes.append(build_manual_note_entry(user.get("full_name"), body.met))
+
     row = (
         db.table("school_goals")
         .upsert(
@@ -1771,6 +1818,7 @@ def set_goal_status(
                 "goal_number": goal_def["goal_number"],
                 "academic_year": body.academic_year,
                 "met": body.met,
+                "notes": notes,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             },
             on_conflict="school_id,division_type,budget_name,goal_key,academic_year",
@@ -2621,8 +2669,13 @@ def get_notifications(user: Annotated[dict, Depends(get_current_user)]):
                                          "request_status": p_status_map.get(n["ref_id"])}
             except Exception as enrich_exc:
                 logger.warning("request status enrichment failed (non-fatal): %s", enrich_exc)
+            # goal_auto_updated is delivered ONLY as an ephemeral bottom-left popup
+            # (GoalUpdatePopup) — it must not appear in the bell list or count. Split it off
+            # into its own key; the frontend fires the popup and acks via mark-read.
+            goal_updates = [n for n in items if n.get("type") == "goal_auto_updated" and not n.get("read_at")]
+            items = [n for n in items if n.get("type") != "goal_auto_updated"]
             count = sum(1 for r in items if not r.get("read_at"))
-            return {"count": count, "items": items}
+            return {"count": count, "items": items, "goal_auto_updates": goal_updates}
         except Exception as exc:
             if attempt == 0:
                 logger.warning("get_notifications attempt 1 failed: %s — resetting and retrying", exc)
@@ -2630,7 +2683,7 @@ def get_notifications(user: Annotated[dict, Depends(get_current_user)]):
                 time.sleep(0.3)
             else:
                 logger.warning("get_notifications failed after 2 attempts: %s", exc)
-                return {"count": 0, "items": []}  # silent fallback — not critical
+                return {"count": 0, "items": [], "goal_auto_updates": []}  # silent fallback — not critical
 
 
 @router.patch("/notifications/read-all")
@@ -4994,6 +5047,83 @@ def _can_delete_check_log(user: dict, db) -> bool:
     return _check_permission(db, user, "can_delete_own_meetings")
 
 
+def _pseudo_run_from_summary(summary: dict | None) -> dict:
+    """Rebuild the minimal run-shaped dict that _compute_check_metrics_rows needs, from a
+    stored check_logs.summary JSON."""
+    s = summary or {}
+    return {
+        "tikhnun": s.get("tikhnun_result"),
+        "tikhnun_tikkon": s.get("tikhnun_tikkon_result"),
+        "tikhnun_beinayim": s.get("tikhnun_beinayim_result"),
+        "per_combo_results": s.get("per_combo_results"),
+        "division_type": None,
+        "summary": {"division": s.get("division")},
+    }
+
+
+def _recompute_goals_after_log_delete(db, school_id: str, deleted_row: dict) -> None:
+    """After a check is deleted, re-point every (division, budget) it touched at the latest
+    remaining check for that combo — or reset the automation-set goals if none remains.
+    Gated by organizations.goal_auto_update_enabled. Non-fatal."""
+    try:
+        from routers.analyze_router import _compute_check_metrics_rows
+        from goals_logic import apply_goal_automation, reset_auto_goals_for_combo, normalize_metric_rows
+
+        ay = deleted_row.get("academic_year") or DEFAULT_ACADEMIC_YEAR
+
+        org_flag_on = True
+        try:
+            sch = db.table("schools").select("org_id").eq("id", school_id).single().execute().data or {}
+            if sch.get("org_id"):
+                org = db.table("organizations").select("goal_auto_update_enabled").eq("id", sch["org_id"]).single().execute().data or {}
+                org_flag_on = org.get("goal_auto_update_enabled", True)
+        except Exception:
+            pass
+        if not org_flag_on:
+            return
+
+        deleted_rows = normalize_metric_rows(_compute_check_metrics_rows(
+            school_id, deleted_row.get("gefen_account_id"), ay, _pseudo_run_from_summary(deleted_row.get("summary")), db=db
+        ))
+        affected = sorted({(r["division_type"], r["budget_name"]) for r in deleted_rows})
+        if not affected:
+            return
+
+        remaining = (
+            db.table("check_logs")
+            .select("run_at, gefen_account_id, summary")
+            .eq("school_id", school_id)
+            .eq("academic_year", ay)
+            .order("run_at", desc=True)
+            .execute()
+            .data
+        ) or []
+        computed_cache: dict[int, list] = {}
+
+        for division_type, budget_name in affected:
+            matched = None
+            for idx, log in enumerate(remaining):
+                rows = computed_cache.get(idx)
+                if rows is None:
+                    rows = normalize_metric_rows(_compute_check_metrics_rows(
+                        school_id, log.get("gefen_account_id"), ay, _pseudo_run_from_summary(log.get("summary")), db=db
+                    ))
+                    computed_cache[idx] = rows
+                hit = next((r for r in rows if r["division_type"] == division_type and r["budget_name"] == budget_name), None)
+                if hit is not None:
+                    matched = (log.get("run_at"), hit)
+                    break
+            if matched is not None:
+                apply_goal_automation(
+                    db, school_id=school_id, metric_rows=[matched[1]], check_run_at=matched[0],
+                    academic_year=ay, org_flag_on=True,
+                )
+            else:
+                reset_auto_goals_for_combo(db, school_id, division_type, budget_name, ay)
+    except Exception as exc:
+        logger.warning("_recompute_goals_after_log_delete failed (non-fatal) for school %s: %s", school_id, exc)
+
+
 @router.delete("/{school_id}/logs/{log_id}")
 def delete_log(
     school_id: str,
@@ -5004,9 +5134,10 @@ def delete_log(
     if not _can_delete_check_log(user, db):
         raise HTTPException(status_code=403, detail="אין הרשאה למחיקת בדיקות")
     # Delete stored files from Supabase Storage before removing the DB record
-    log_row = db.table("check_logs").select("summary").eq("id", log_id).eq("school_id", school_id).execute()
-    if log_row.data:
-        stored_paths = (log_row.data[0].get("summary") or {}).get("stored_file_paths") or []
+    log_row = db.table("check_logs").select("summary, gefen_account_id, academic_year").eq("id", log_id).eq("school_id", school_id).execute()
+    deleted_row = log_row.data[0] if log_row.data else None
+    if deleted_row:
+        stored_paths = (deleted_row.get("summary") or {}).get("stored_file_paths") or []
         if stored_paths:
             try:
                 keys = [sp["path"] if isinstance(sp, dict) else sp for sp in stored_paths]
@@ -5014,6 +5145,8 @@ def delete_log(
             except Exception as exc:
                 logger.warning("Storage cleanup failed for log %s: %s", log_id, exc)
     db.table("check_logs").delete().eq("id", log_id).eq("school_id", school_id).execute()
+    if deleted_row:
+        _recompute_goals_after_log_delete(db, school_id, deleted_row)
     return {"ok": True}
 
 
@@ -7222,6 +7355,7 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
     "can_view_billing":             {"manager": False, "advisor": False},
     "can_manage_billing":           {"manager": False, "advisor": False},
     "can_edit_meeting_automations": {"manager": True,  "advisor": False},
+    "can_edit_goal_automations":    {"manager": True,  "advisor": False},
     "can_remove_call_from_school":  {"manager": True,  "advisor": False},
     # Self-service edit of one's own profile fields. Relevant to advisors only
     # (manager/owner always edit their own profile directly). Default ON = direct edit;
@@ -7249,6 +7383,7 @@ PERMISSION_LABELS: dict[str, str] = {
     "can_view_billing":             "לצפות באזור 'חיובים' של הארגון",
     "can_manage_billing":           "לנהל את אזור 'חיובים' (לרבות אמצעי תשלום)",
     "can_edit_meeting_automations": "לערוך אוטומציות של פגישות",
+    "can_edit_goal_automations":    "לערוך אוטומציות של יעדים",
     "can_remove_call_from_school":  "להסיר שיחה מטאב 'שיחות' בכרטיס בית ספר",
     "can_edit_own_work_phone":      "לערוך ישירות מספר טלפון עבודה",
     "can_edit_own_knowledge_areas": "לערוך ישירות תחומי ידע",
@@ -7415,6 +7550,37 @@ class MeetingAutomationsIn(BaseModel):
 def set_meeting_automations(body: MeetingAutomationsIn, user: Annotated[dict, Depends(get_current_user)]):
     db = get_admin_client()
     _require_can_edit_automations(db, user)
+    patch = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not patch:
+        return {"ok": True}
+    db.table("organizations").update(patch).eq("id", user["org_id"]).execute()
+    return {"ok": True}
+
+
+def _require_can_edit_goal_automations(db, user: dict) -> None:
+    if user["role"] == "owner":
+        return
+    if user["role"] == "manager" and _check_permission(db, user, "can_edit_goal_automations"):
+        return
+    raise HTTPException(status_code=403, detail="אין הרשאה לעריכת אוטומציות")
+
+
+class GoalAutomationsIn(BaseModel):
+    goal_auto_update_enabled: bool | None = None
+
+
+@router.get("/goals/automations")
+def get_goal_automations(user: Annotated[dict, Depends(get_current_user)]):
+    db = get_admin_client()
+    _require_can_edit_goal_automations(db, user)
+    org = db.table("organizations").select("goal_auto_update_enabled").eq("id", user["org_id"]).single().execute().data or {}
+    return {"goal_auto_update_enabled": org.get("goal_auto_update_enabled", True)}
+
+
+@router.put("/goals/automations")
+def set_goal_automations(body: GoalAutomationsIn, user: Annotated[dict, Depends(get_current_user)]):
+    db = get_admin_client()
+    _require_can_edit_goal_automations(db, user)
     patch = {k: v for k, v in body.model_dump().items() if v is not None}
     if not patch:
         return {"ok": True}

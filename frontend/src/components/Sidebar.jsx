@@ -303,7 +303,7 @@ export default function Sidebar({ dark = false }) {
   const [isSuperAdmin, setIsSuperAdmin] = useState(false);
   const [notifCount, setNotifCount] = useState(0);
   const [toasts, setToasts] = useState([]);
-  const { addMeetingReminder, addStatusReminder, addTaskReminder, addCallAttribReminder, setUserName: setCtxUserName } = useMeetingReminders();
+  const { addMeetingReminder, addStatusReminder, addTaskReminder, addCallAttribReminder, addGoalUpdateReminder, setUserName: setCtxUserName } = useMeetingReminders();
   const prevCountRef = useRef(0);
   const lastPollTimeRef = useRef(Date.now());
   const notifPrefsRef = useRef({ meeting_reminder: true, meeting_reminder_minutes: 10 });
@@ -374,6 +374,13 @@ export default function Sidebar({ dark = false }) {
         const res = await axios.get("/schools/notifications");
         const newCount = res.data.count || 0;
         const items = res.data.items || [];
+
+        // Goals-automation summaries: ephemeral bottom-left popup only (never a bell entry).
+        // Fire regardless of first-load gating — the context de-dupes by id and "אישור"
+        // marks it read so it won't come back.
+        for (const g of (res.data.goal_auto_updates || [])) {
+          addGoalUpdateReminder({ id: g.id, school_id: g.school_id, ...(g.data || {}) });
+        }
 
         // Show toasts for new unread notifications (not on first load)
         if (newCount > prevCountRef.current && prevCountRef.current > 0) {

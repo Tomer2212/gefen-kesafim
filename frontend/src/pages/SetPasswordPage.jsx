@@ -60,11 +60,19 @@ export default function SetPasswordPage() {
         handled = true;
         setEmail(session.user.email || "");
         setIsRecovery(true);
-        // Check if still pending (resent invite) vs active (forgot password)
-        try {
-          const res = await axios.get("/schools/users/me");
-          if (res.data.status === "pending") setIsPending(true);
-        } catch { /* non-fatal — treat as forgot-password */ }
+        // Check if still pending (resent invite) vs active (forgot password).
+        // Retry briefly — a transient failure here must not silently downgrade a
+        // resent-invite into the forgot-password path (which skips setup-complete).
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const res = await axios.get("/schools/users/me");
+            if (res.data.status === "pending") setIsPending(true);
+            break;
+          } catch {
+            if (attempt === 0) await new Promise(r => setTimeout(r, 600));
+            /* else: non-fatal — handleSubmit still calls setup-complete anyway */
+          }
+        }
         setChecking(false);
       } else if (event === "SIGNED_IN" || (event === "INITIAL_SESSION" && session)) {
         handleSession(session);
@@ -107,12 +115,20 @@ export default function SetPasswordPage() {
         setError("שגיאה בהגדרת הסיסמה. נסה שנית.");
         return;
       }
+      // Always mark setup complete — idempotent (a no-op for an already-active
+      // user). This guarantees the pending→active flip even if the isPending
+      // pre-check above misfired on a transient error.
+      try {
+        await axios.post("/schools/users/me/setup-complete");
+      } catch {
+        // Retry once — this is the call that flips pending→active.
+        try { await axios.post("/schools/users/me/setup-complete"); } catch { /* give up quietly */ }
+      }
       if (isRecovery && !isPending) {
         // Forgot-password flow — user is already registered, go to dashboard
         window.location.replace("/");
       } else {
-        // Invite flow (original or resent) — mark active, sign out, show welcome
-        await axios.post("/schools/users/me/setup-complete");
+        // Invite flow (original or resent) — sign out, show welcome
         await supabase.auth.signOut();
         setSucceeded(true);
       }

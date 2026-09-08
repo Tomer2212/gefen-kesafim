@@ -4662,6 +4662,7 @@ export default function SchoolPage() {
               activeSubTab={activeSubTab}
               academicYear={academicYear}
               logs={logs}
+              canEditAutomations={role === "owner" || role === "manager"}
             />
           )}
 

@@ -10,6 +10,7 @@ import { useFocusTrap } from "../hooks/useFocusTrap";
 import { ACADEMIC_YEARS, DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
 import { CONTROL_LETTER_STATUS_MAP, CONTROL_LETTER_STATUS_OPTIONS } from "../components/controlLetter/constants";
 import { MEETING_SERVICE_TYPE_BREAKDOWN_COL_ORDER } from "../components/meetings/constants";
+import { diagnoseConnectionError } from "../lib/connectionError";
 
 // Fallback list so "סוג תקציב" has real options even before check_metrics has any rows
 // for the org (brand-new table, only populated going forward by new checks) — matches
@@ -2152,13 +2153,9 @@ export default function DashboardPage() {
           continue;
         }
         clearTimeout(slowTimer);
-        if (!err.response) {
-          setError("לא ניתן להתחבר לשרת — ודא שהשרת פועל ולחץ על רענן");
-        } else if (is5xx) {
-          setError(`שגיאה בשרת (${err.response.status}) — נסה לרענן את הדף`);
-        } else {
-          setError(`שגיאה בטעינת בתי הספר (${err.response.status})`);
-        }
+        // One more attempt for a bare network error before we diagnose it.
+        if (!err.response && attempt === 0) continue;
+        setError((await diagnoseConnectionError(err)).message);
       }
     }
     setSlowLoading(false);

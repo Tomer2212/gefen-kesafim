@@ -981,6 +981,12 @@ def _save_check_log(run_id: str, user_id: str, school_id: str, gefen_account_id:
                 except Exception as merge_exc:
                     logger.warning("Could not merge original finance data for %s: %s", update_log_id, merge_exc)
             db.table("check_logs").update(log_fields).eq("id", update_log_id).execute()
+            saved_run_at = None
+            try:
+                r = db.table("check_logs").select("run_at").eq("id", update_log_id).single().execute()
+                saved_run_at = (r.data or {}).get("run_at")
+            except Exception:
+                pass
         else:
             result = db.table("check_logs").insert({
                 "school_id": school_id,
@@ -989,11 +995,15 @@ def _save_check_log(run_id: str, user_id: str, school_id: str, gefen_account_id:
                 "academic_year": academic_year or DEFAULT_ACADEMIC_YEAR,
                 **log_fields,
             }).execute()
+            saved_run_at = None
             if result.data:
                 run["saved_log_id"] = result.data[0]["id"]
+                saved_run_at = result.data[0].get("run_at")
                 _update_run(run_id, run)
 
-        _save_check_metrics(db, school_id, gefen_account_id, academic_year or DEFAULT_ACADEMIC_YEAR, run)
+        year_final = academic_year or DEFAULT_ACADEMIC_YEAR
+        _save_check_metrics(db, school_id, gefen_account_id, year_final, run)
+        _maybe_auto_update_goals(db, school_id, gefen_account_id, year_final, run, user_id, saved_run_at)
     except Exception as exc:
         logger.error("Failed to save check_log for run %s: %s", run_id, exc)
 
@@ -1179,6 +1189,69 @@ def _save_check_metrics(db, school_id: str, gefen_account_id: str | None, academ
             ).execute()
     except Exception as exc:
         logger.warning("check_metrics enrichment failed (non-fatal) for school %s: %s", school_id, exc)
+
+
+def _maybe_auto_update_goals(db, school_id: str, gefen_account_id: str | None, academic_year: str,
+                             run: dict, user_id: str | None, check_run_at: str | None) -> None:
+    """After a check is saved, auto-update the school_goals 'עמידה ביעד' toggles from its
+    findings — gated by organizations.goal_auto_update_enabled. Fires one summary popup
+    (bottom-left, ephemeral — see GoalUpdatePopup / get_notifications) to the user who ran
+    the check when at least one goal meaningfully changed. Non-fatal."""
+    try:
+        from goals_logic import apply_goal_automation, fmt_check_dt, normalize_metric_rows
+
+        org_id = None
+        school_name = ""
+        try:
+            sch = db.table("schools").select("org_id, name").eq("id", school_id).single().execute()
+            org_id = (sch.data or {}).get("org_id")
+            school_name = (sch.data or {}).get("name") or ""
+        except Exception:
+            pass
+        org_flag_on = True
+        if org_id:
+            try:
+                org = db.table("organizations").select("goal_auto_update_enabled").eq("id", org_id).single().execute()
+                org_flag_on = (org.data or {}).get("goal_auto_update_enabled", True)
+            except Exception:
+                org_flag_on = True
+        if not org_flag_on:
+            return
+
+        metric_rows = normalize_metric_rows(_compute_check_metrics_rows(school_id, gefen_account_id, academic_year, run, db=db))
+        changes = apply_goal_automation(
+            db, school_id=school_id, metric_rows=metric_rows, check_run_at=check_run_at,
+            academic_year=academic_year, org_flag_on=org_flag_on,
+        )
+        if changes and user_id:
+            n = len(changes)
+            head = "יעד אחד עודכן" if n == 1 else f"{n} יעדים עודכנו"
+            try:
+                db.table("notifications").insert({
+                    "recipient_id": user_id,
+                    "type": "goal_auto_updated",
+                    "school_id": school_id,
+                    "data": {
+                        "title": f"{head} אוטומטית לפי הבדיקה מיום {fmt_check_dt(check_run_at)}",
+                        "deeplink": f"/school/{school_id}?tab=goals&year={academic_year}",
+                        "count": n,
+                        "school_name": school_name,
+                        "check_dt": fmt_check_dt(check_run_at),
+                        "goals": [
+                            {
+                                "label": c["label"],
+                                "division_type": c["division_type"],
+                                "budget_name": c["budget_name"],
+                                "met": c["met"],
+                            }
+                            for c in changes
+                        ],
+                    },
+                }).execute()
+            except Exception as exc:
+                logger.warning("goal_auto_updated notification failed (non-fatal): %s", exc)
+    except Exception as exc:
+        logger.warning("auto goal update failed (non-fatal) for school %s: %s", school_id, exc)
 
 
 def _any_tikhnun_pending(run_dict: dict) -> bool:

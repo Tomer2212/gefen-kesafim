@@ -109,7 +109,7 @@ def _get_profile(user_id: str) -> dict:
                 fresh = _profile_cache.get(user_id)
                 if fresh:
                     return fresh
-                return {"role": "advisor", "full_name": "", "gender": None, "birth_date": None, "avatar_storage_key": None, "org_id": None, "is_superadmin": False, "onboarding_dismissed": {}, "notification_preferences": {"meeting_reminder": True, "meeting_reminder_minutes": 10}, "_cached_at": time.monotonic()}
+                return {"role": "advisor", "full_name": "", "gender": None, "birth_date": None, "avatar_storage_key": None, "org_id": None, "status": "active", "is_superadmin": False, "onboarding_dismissed": {}, "notification_preferences": {"meeting_reminder": True, "meeting_reminder_minutes": 10}, "_cached_at": time.monotonic()}
 
 
 def invalidate_profile_cache(user_id: str) -> None:
@@ -160,7 +160,7 @@ def get_current_user(
         "birth_date": profile.get("birth_date"),
         "avatar_storage_key": profile.get("avatar_storage_key"),
         "org_id": profile["org_id"],
-        "status": profile["status"],
+        "status": profile.get("status", "active"),
         "is_superadmin": profile["is_superadmin"],
         "onboarding_dismissed": profile["onboarding_dismissed"],
         "notification_preferences": profile["notification_preferences"],
