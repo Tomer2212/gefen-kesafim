@@ -1,10 +1,12 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import axios from "axios";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { AcademicYearSelector } from "../components/AcademicYearSelector";
 import { DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
 import FileUpload from "../components/FileUpload";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { useDebouncedValue, useDebouncedCallback } from "../hooks/useDebouncedValue";
 import { useGefenOrganizedResults } from "../context/GefenOrganizedResultsContext";
 
 const COLLECTION_COLUMNS = [
@@ -170,8 +172,31 @@ function isCollectionFilterActive(spec) {
 }
 
 function CollectionColumnFilterPopover({ colKey, colLabel, filterType, spec, options, onChange, onClear, onClose }) {
+  // Local draft for the free-text / number value inputs, debounced before it reaches the
+  // parent so typing doesn't recompute the full filter/sort pipeline on every keystroke.
+  const [draftValue, setDraftValue] = useState(spec?.value ?? "");
+  const debouncedDraft = useDebouncedValue(draftValue, 250);
+  const draftOpRef = useRef(spec?.op);
+  const lastSpecValueRef = useRef(spec?.value ?? "");
+
+  useEffect(() => {
+    const ext = spec?.value ?? "";
+    if (ext !== lastSpecValueRef.current) {
+      lastSpecValueRef.current = ext;
+      setDraftValue(ext);
+    }
+  }, [spec?.value]);
+
+  useEffect(() => {
+    if (filterType !== "text" && filterType !== "number") return;
+    if (debouncedDraft === (spec?.value ?? "")) return;
+    lastSpecValueRef.current = debouncedDraft;
+    if (filterType === "text") onChange({ op: "contains", value: debouncedDraft });
+    else onChange({ op: draftOpRef.current || spec?.op || "eq", value: debouncedDraft });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedDraft]);
+
   if (filterType === "text") {
-    const value = spec?.value || "";
     return (
       <div className="flex flex-col gap-2">
         <label htmlFor={`collection-filter-${colKey}`} className="text-xs text-slate-500">סינון: {colLabel}</label>
@@ -181,8 +206,8 @@ function CollectionColumnFilterPopover({ colKey, colLabel, filterType, spec, opt
           autoComplete="off"
           className="input-field text-sm"
           placeholder="לדוגמה: 12345"
-          value={value}
-          onChange={e => onChange({ op: "contains", value: e.target.value })}
+          value={draftValue}
+          onChange={e => setDraftValue(e.target.value)}
         />
         <div className="flex justify-between gap-2">
           <button type="button" onClick={() => { onClear(); onClose(); }} className="text-xs text-slate-400 hover:text-slate-600">נקה</button>
@@ -193,7 +218,6 @@ function CollectionColumnFilterPopover({ colKey, colLabel, filterType, spec, opt
   }
   if (filterType === "number") {
     const op = spec?.op || "eq";
-    const value = spec?.value ?? "";
     return (
       <div className="flex flex-col gap-2">
         <label htmlFor={`collection-filter-op-${colKey}`} className="text-xs text-slate-500">סינון: {colLabel}</label>
@@ -201,7 +225,7 @@ function CollectionColumnFilterPopover({ colKey, colLabel, filterType, spec, opt
           id={`collection-filter-op-${colKey}`}
           className="input-field text-sm"
           value={op}
-          onChange={e => onChange({ op: e.target.value, value })}
+          onChange={e => { draftOpRef.current = e.target.value; onChange({ op: e.target.value, value: spec?.value ?? draftValue }); }}
         >
           {NUMBER_FILTER_OPS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
@@ -210,8 +234,8 @@ function CollectionColumnFilterPopover({ colKey, colLabel, filterType, spec, opt
           id={`collection-filter-val-${colKey}`}
           type="number"
           className="input-field text-sm"
-          value={value}
-          onChange={e => onChange({ op, value: e.target.value })}
+          value={draftValue}
+          onChange={e => setDraftValue(e.target.value)}
         />
         <div className="flex justify-between gap-2">
           <button type="button" onClick={() => { onClear(); onClose(); }} className="text-xs text-slate-400 hover:text-slate-600">נקה</button>
@@ -389,6 +413,16 @@ function GefenOrganizedCell({ yad }) {
 
 function InvoiceNumbersCell({ savedValues, onSave }) {
   const [values, setValues] = useState(savedValues);
+  const valuesRef = useRef(savedValues);
+  valuesRef.current = values;
+  const dirtyRef = useRef(false);
+  const onSaveRef = useRef(onSave);
+  onSaveRef.current = onSave;
+
+  // Commit a still-dirty edit if the row unmounts (virtualization recycle) before blur.
+  useEffect(() => () => {
+    if (dirtyRef.current) onSaveRef.current(valuesRef.current.filter(v => v !== ""));
+  }, []);
 
   function addField() {
     setValues(prev => [...prev, ""]);
@@ -397,15 +431,18 @@ function InvoiceNumbersCell({ savedValues, onSave }) {
   function removeField(i) {
     const next = values.filter((_, idx) => idx !== i);
     setValues(next);
+    dirtyRef.current = false;
     onSave(next.filter(v => v !== ""));
   }
 
   function changeField(i, raw) {
     const digitsOnly = raw.replace(/\D/g, "");
+    dirtyRef.current = true;
     setValues(prev => prev.map((v, idx) => (idx === i ? digitsOnly : v)));
   }
 
   function blurField() {
+    dirtyRef.current = false;
     onSave(values.filter(v => v !== ""));
   }
 
@@ -464,6 +501,18 @@ function normalizeYear(iso) {
 function DepositDatesCell({ savedValues, onSave }) {
   const [values, setValues] = useState(savedValues);
   const [editingIndex, setEditingIndex] = useState(null);
+  const valuesRef = useRef(savedValues);
+  valuesRef.current = values;
+  const dirtyRef = useRef(false);
+  const onSaveRef = useRef(onSave);
+  onSaveRef.current = onSave;
+
+  // Commit a still-dirty edit if the row unmounts (virtualization recycle) before blur.
+  useEffect(() => () => {
+    if (dirtyRef.current) {
+      onSaveRef.current(valuesRef.current.map(normalizeYear).filter(v => v !== ""));
+    }
+  }, []);
 
   function addField() {
     const newIndex = values.length;
@@ -475,6 +524,7 @@ function DepositDatesCell({ savedValues, onSave }) {
     const next = values.filter((_, idx) => idx !== i);
     setValues(next);
     setEditingIndex(null);
+    dirtyRef.current = false;
     onSave(next.filter(v => v !== ""));
   }
 
@@ -484,11 +534,13 @@ function DepositDatesCell({ savedValues, onSave }) {
   // so committing on every change would lock in that intermediate value before the user
   // finishes typing. Committing happens only on blur, once the user is done.
   function changeField(i, raw) {
+    dirtyRef.current = true;
     setValues(prev => prev.map((v, idx) => (idx === i ? raw : v)));
   }
 
   function blurField(i) {
     setEditingIndex(null);
+    dirtyRef.current = false;
     if (values[i] === "") {
       setValues(prev => prev.filter((_, idx) => idx !== i));
       return;
@@ -766,6 +818,154 @@ function GefenOrganizedUploadModal({ academicYear, onClose, onUploaded }) {
   );
 }
 
+// Controlled, debounced-save amount cell. Replaces the uncontrolled defaultValue/onBlur input
+// so a row unmounting (virtualization recycle / tab switch) before blur doesn't drop an edit.
+const CollectionAmountInput = memo(function CollectionAmountInput({ value, onCommit, className }) {
+  const [draft, setDraft] = useState(() => formatAmount(value));
+  const focusedRef = useRef(false);
+  const dirtyRef = useRef(false);
+  const baselineRef = useRef(value ?? null);
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+
+  useEffect(() => {
+    if (focusedRef.current || dirtyRef.current) return;
+    if ((value ?? null) !== baselineRef.current) {
+      baselineRef.current = value ?? null;
+      setDraft(formatAmount(value));
+    }
+  }, [value]);
+
+  const commit = useCallback((raw) => {
+    const parsed = parseAmount(raw);
+    if (parsed === baselineRef.current) return;
+    baselineRef.current = parsed;
+    onCommit(parsed);
+  }, [onCommit]);
+  const commitRef = useRef(commit);
+  commitRef.current = commit;
+  const debouncedCommit = useDebouncedCallback(commit, 600);
+
+  useEffect(() => () => { if (dirtyRef.current) commitRef.current(draftRef.current); }, []);
+
+  return (
+    <input
+      type="text"
+      inputMode="numeric"
+      value={draft}
+      className={className}
+      aria-label="סכום ששולם"
+      onFocus={() => { focusedRef.current = true; }}
+      onChange={(e) => { dirtyRef.current = true; setDraft(e.target.value); debouncedCommit(e.target.value); }}
+      onBlur={(e) => {
+        focusedRef.current = false;
+        debouncedCommit.cancel();
+        commit(e.target.value);
+        dirtyRef.current = false;
+        setDraft(formatAmount(parseAmount(e.target.value)));
+      }}
+    />
+  );
+});
+
+// One row of the collection table. Memoized: with virtualization only ~40 are mounted, and
+// this stops them re-rendering when unrelated parent state changes.
+const CollectionRow = memo(function CollectionRow({ school, yad, academicYear, visibleColumns, onSaveField }) {
+  return (
+    <tr className="group border-b border-slate-100 hover:bg-slate-50 transition-colors">
+      <td
+        className="px-5 py-3 border-l border-slate-100 bg-white group-hover:bg-slate-50 whitespace-nowrap"
+        style={{ position: "sticky", right: 0, zIndex: 5, minWidth: "14rem" }}
+      >
+        <span className="font-semibold text-slate-900">{school.name}</span>
+      </td>
+      {visibleColumns.map((col, i) => {
+        const isLast = i === visibleColumns.length - 1;
+        const tdClass = `px-4 py-2 text-slate-600 ${isLast ? "" : "border-l border-slate-100"}`;
+        if (col.key === "gefen_organized") {
+          return <td key={col.key} className={tdClass}><GefenOrganizedCell yad={yad} /></td>;
+        }
+        if (col.key === "order_amount_gefen") {
+          return <td key={col.key} className={tdClass}>{formatAmount(yad.order_amount_gefen) || "—"}</td>;
+        }
+        if (col.key === "amount_paid") {
+          return (
+            <td key={col.key} className={tdClass}>
+              <CollectionAmountInput
+                key={`${school.id}-${academicYear}`}
+                value={yad.amount_paid ?? null}
+                onCommit={v => onSaveField(school.id, "amount_paid", v)}
+                className={`${ADMIN_FIELD_CLS} w-24`}
+              />
+            </td>
+          );
+        }
+        if (col.key === "remaining_to_pay") {
+          const remaining = yad.order_amount_gefen == null ? null : (yad.order_amount_gefen ?? 0) - (yad.amount_paid ?? 0);
+          return <td key={col.key} className={tdClass}>{remaining === null ? "—" : formatAmount(remaining)}</td>;
+        }
+        if (col.key === "payment_method") {
+          return (
+            <td key={col.key} className={tdClass}>
+              <label htmlFor={`payment-method-${school.id}`} className="sr-only">דרך תשלום</label>
+              <select
+                id={`payment-method-${school.id}`}
+                className={`${ADMIN_FIELD_CLS} w-32`}
+                value={yad.payment_method || ""}
+                onChange={e => onSaveField(school.id, "payment_method", e.target.value || null)}
+              >
+                <option value="">בחר</option>
+                {PAYMENT_METHOD_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            </td>
+          );
+        }
+        if (col.key === "invoice_number") {
+          return (
+            <td key={col.key} className={tdClass}>
+              <InvoiceNumbersCell
+                key={`${school.id}-${academicYear}`}
+                savedValues={yad.invoice_numbers || []}
+                onSave={values => onSaveField(school.id, "invoice_numbers", values.length ? values : null)}
+              />
+            </td>
+          );
+        }
+        if (col.key === "deposit_date") {
+          return (
+            <td key={col.key} className={tdClass}>
+              <DepositDatesCell
+                key={`${school.id}-${academicYear}`}
+                savedValues={yad.deposit_dates || []}
+                onSave={values => onSaveField(school.id, "deposit_dates", values.length ? values : null)}
+              />
+            </td>
+          );
+        }
+        if (col.key === "invoice_transaction_status") {
+          return (
+            <td key={col.key} className={tdClass}>
+              <label htmlFor={`invoice-status-${school.id}`} className="sr-only">חשבונית עסקה</label>
+              <select
+                id={`invoice-status-${school.id}`}
+                className={`${ADMIN_FIELD_CLS} w-36`}
+                value={yad.invoice_transaction_status || ""}
+                onChange={e => onSaveField(school.id, "invoice_transaction_status", e.target.value || null)}
+              >
+                <option value="">בחר</option>
+                {INVOICE_TRANSACTION_STATUS_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            </td>
+          );
+        }
+        return <td key={col.key} className={tdClass}>—</td>;
+      })}
+    </tr>
+  );
+});
+
+const COLLECTION_EMPTY_OBJ = {};
+
 export default function AdminCollectionTab() {
   const [schools, setSchools] = useState([]);
   const [yearAdminData, setYearAdminData] = useState({});
@@ -797,7 +997,7 @@ export default function AdminCollectionTab() {
       setLoading(true);
       try {
         const [schoolsRes, yearDataRes] = await Promise.all([
-          axios.get("/schools/"),
+          axios.get("/schools/", { params: { lite: true } }),
           axios.get("/schools/year-admin-data", { params: { academic_year: academicYear } }),
         ]);
         if (cancelled) return;
@@ -853,38 +1053,60 @@ export default function AdminCollectionTab() {
     });
   }
 
-  const visibleColumns = COLLECTION_COLUMNS.filter(c => colVisible[c.key]);
+  const visibleColumns = useMemo(
+    () => COLLECTION_COLUMNS.filter(c => colVisible[c.key]),
+    [colVisible],
+  );
 
-  let filteredSchools = statusFilter.length === 0
-    ? schools
-    : schools.filter(s => {
-        const status = yearAdminData[s.id]?.client_status;
-        return statusFilter.some(f => f.value === status);
+  // Whole filter+sort pipeline memoized — at 550+ rows it used to recompute (including the
+  // sort value-getter twice per comparison) on every render / keystroke / field edit.
+  const filteredSchools = useMemo(() => {
+    let rows = statusFilter.length === 0
+      ? schools
+      : schools.filter(s => {
+          const status = yearAdminData[s.id]?.client_status;
+          return statusFilter.some(f => f.value === status);
+        });
+
+    if (Object.keys(columnFilters).length > 0) {
+      rows = rows.filter(s => passesCollectionColumnFilters(yearAdminData[s.id] || {}, columnFilters));
+    }
+
+    if (sortKey) {
+      // decorate-sort: compute each row's sort value once, not twice per comparison.
+      const sv = new Map(rows.map(s => [s.id, getCollectionSortValue(yearAdminData[s.id] || {}, sortKey)]));
+      rows = [...rows].sort((a, b) => {
+        const va = sv.get(a.id);
+        const vb = sv.get(b.id);
+        if (va == null && vb == null) return 0;
+        if (va == null) return 1;
+        if (vb == null) return -1;
+        const cmp = typeof va === "number" && typeof vb === "number" ? va - vb : String(va).localeCompare(String(vb), "he");
+        return sortDir === "asc" ? cmp : -cmp;
       });
-
-  if (Object.keys(columnFilters).length > 0) {
-    filteredSchools = filteredSchools.filter(s => passesCollectionColumnFilters(yearAdminData[s.id] || {}, columnFilters));
-  }
-
-  if (sortKey) {
-    filteredSchools = [...filteredSchools].sort((a, b) => {
-      const va = getCollectionSortValue(yearAdminData[a.id] || {}, sortKey);
-      const vb = getCollectionSortValue(yearAdminData[b.id] || {}, sortKey);
-      if (va == null && vb == null) return 0;
-      if (va == null) return 1;
-      if (vb == null) return -1;
-      const cmp = typeof va === "number" && typeof vb === "number" ? va - vb : String(va).localeCompare(String(vb), "he");
-      return sortDir === "asc" ? cmp : -cmp;
-    });
-  } else if (sortMismatchFirst) {
-    filteredSchools = [...filteredSchools].sort((a, b) => {
-      const ra = GEFEN_ORGANIZED_SORT_RANK[getGefenOrganizedStatus(yearAdminData[a.id] || {})];
-      const rb = GEFEN_ORGANIZED_SORT_RANK[getGefenOrganizedStatus(yearAdminData[b.id] || {})];
-      return ra - rb;
-    });
-  }
+    } else if (sortMismatchFirst) {
+      const rank = new Map(rows.map(s => [s.id, GEFEN_ORGANIZED_SORT_RANK[getGefenOrganizedStatus(yearAdminData[s.id] || {})]]));
+      rows = [...rows].sort((a, b) => rank.get(a.id) - rank.get(b.id));
+    }
+    return rows;
+  }, [schools, yearAdminData, statusFilter, columnFilters, sortKey, sortDir, sortMismatchFirst]);
 
   const hasResults = Object.values(yearAdminData).some(yad => yad.gefen_organized_checked_at);
+
+  // Stable per-row save handler for <CollectionRow> (always the latest closure via ref).
+  const saveFieldRef = useRef(saveYearAdminField);
+  saveFieldRef.current = saveYearAdminField;
+  const onSaveField = useCallback((...a) => saveFieldRef.current(...a), []);
+
+  // Row virtualization — keeps only ~40 <tr>s in the DOM regardless of school count.
+  const collectionScrollRef = useRef(null);
+  const collectionRowVirtualizer = useVirtualizer({
+    count: filteredSchools.length,
+    getScrollElement: () => collectionScrollRef.current,
+    estimateSize: () => 45,
+    overscan: 12,
+    getItemKey: useCallback(i => filteredSchools[i]?.id ?? i, [filteredSchools]),
+  });
 
   function showLastResults() {
     const mismatched = schools.filter(s => getGefenOrganizedStatus(yearAdminData[s.id] || {}) === "mismatch");
@@ -927,7 +1149,7 @@ export default function AdminCollectionTab() {
             <div aria-hidden="true" className="spinner w-8 h-8" />
           </div>
         ) : (
-          <div className="flex-1 overflow-auto dash-scroll-x">
+          <div ref={collectionScrollRef} className="flex-1 overflow-auto dash-scroll-x">
             <table className="w-full text-sm border-collapse">
               <thead>
                 <tr
@@ -989,137 +1211,47 @@ export default function AdminCollectionTab() {
                   })}
                 </tr>
               </thead>
-              <tbody>
-                {filteredSchools.length === 0 && (
-                  <tr>
-                    <td colSpan={visibleColumns.length + 1} className="p-8 text-center text-slate-500">
-                      לא נמצאו בתי ספר
-                    </td>
-                  </tr>
-                )}
-                {filteredSchools.map(school => {
-                  const yad = yearAdminData[school.id] || {};
+              {(() => {
+                const vItems = collectionRowVirtualizer.getVirtualItems();
+                const totalH = collectionRowVirtualizer.getTotalSize();
+                const padTop = vItems.length ? vItems[0].start : 0;
+                const padBottom = vItems.length ? totalH - vItems[vItems.length - 1].end : 0;
+                const vColSpan = visibleColumns.length + 1;
+                if (filteredSchools.length === 0) {
                   return (
-                    <tr key={school.id} className="group border-b border-slate-100 hover:bg-slate-50 transition-colors">
-                      <td
-                        className="px-5 py-3 border-l border-slate-100 bg-white group-hover:bg-slate-50 whitespace-nowrap"
-                        style={{ position: "sticky", right: 0, zIndex: 5, minWidth: "14rem" }}
-                      >
-                        <span className="font-semibold text-slate-900">{school.name}</span>
-                      </td>
-                      {visibleColumns.map((col, i) => {
-                        const isLast = i === visibleColumns.length - 1;
-                        const tdClass = `px-4 py-2 text-slate-600 ${isLast ? "" : "border-l border-slate-100"}`;
-                        if (col.key === "gefen_organized") {
-                          return (
-                            <td key={col.key} className={tdClass}>
-                              <GefenOrganizedCell yad={yad} />
-                            </td>
-                          );
-                        }
-                        if (col.key === "order_amount_gefen") {
-                          return (
-                            <td key={col.key} className={tdClass}>
-                              {formatAmount(yad.order_amount_gefen) || "—"}
-                            </td>
-                          );
-                        }
-                        if (col.key === "amount_paid") {
-                          return (
-                            <td key={col.key} className={tdClass}>
-                              <label htmlFor={`amount-paid-${school.id}`} className="sr-only">סכום ששולם</label>
-                              <input
-                                id={`amount-paid-${school.id}`}
-                                key={`${school.id}-${academicYear}`}
-                                type="text"
-                                inputMode="numeric"
-                                defaultValue={formatAmount(yad.amount_paid)}
-                                onBlur={e => {
-                                  const v = parseAmount(e.target.value);
-                                  e.target.value = formatAmount(v);
-                                  if (v !== (yad.amount_paid ?? null)) saveYearAdminField(school.id, "amount_paid", v);
-                                }}
-                                className={`${ADMIN_FIELD_CLS} w-24`}
-                              />
-                            </td>
-                          );
-                        }
-                        if (col.key === "remaining_to_pay") {
-                          const remaining = yad.order_amount_gefen == null ? null : (yad.order_amount_gefen ?? 0) - (yad.amount_paid ?? 0);
-                          return (
-                            <td key={col.key} className={tdClass}>
-                              {remaining === null ? "—" : formatAmount(remaining)}
-                            </td>
-                          );
-                        }
-                        if (col.key === "payment_method") {
-                          return (
-                            <td key={col.key} className={tdClass}>
-                              <label htmlFor={`payment-method-${school.id}`} className="sr-only">דרך תשלום</label>
-                              <select
-                                id={`payment-method-${school.id}`}
-                                className={`${ADMIN_FIELD_CLS} w-32`}
-                                value={yad.payment_method || ""}
-                                onChange={e => saveYearAdminField(school.id, "payment_method", e.target.value || null)}
-                              >
-                                <option value="">בחר</option>
-                                {PAYMENT_METHOD_OPTIONS.map(o => (
-                                  <option key={o.value} value={o.value}>{o.label}</option>
-                                ))}
-                              </select>
-                            </td>
-                          );
-                        }
-                        if (col.key === "invoice_number") {
-                          return (
-                            <td key={col.key} className={tdClass}>
-                              <InvoiceNumbersCell
-                                key={`${school.id}-${academicYear}`}
-                                savedValues={yad.invoice_numbers || []}
-                                onSave={values => saveYearAdminField(school.id, "invoice_numbers", values.length ? values : null)}
-                              />
-                            </td>
-                          );
-                        }
-                        if (col.key === "deposit_date") {
-                          return (
-                            <td key={col.key} className={tdClass}>
-                              <DepositDatesCell
-                                key={`${school.id}-${academicYear}`}
-                                savedValues={yad.deposit_dates || []}
-                                onSave={values => saveYearAdminField(school.id, "deposit_dates", values.length ? values : null)}
-                              />
-                            </td>
-                          );
-                        }
-                        if (col.key === "invoice_transaction_status") {
-                          return (
-                            <td key={col.key} className={tdClass}>
-                              <label htmlFor={`invoice-status-${school.id}`} className="sr-only">חשבונית עסקה</label>
-                              <select
-                                id={`invoice-status-${school.id}`}
-                                className={`${ADMIN_FIELD_CLS} w-36`}
-                                value={yad.invoice_transaction_status || ""}
-                                onChange={e => saveYearAdminField(school.id, "invoice_transaction_status", e.target.value || null)}
-                              >
-                                <option value="">בחר</option>
-                                {INVOICE_TRANSACTION_STATUS_OPTIONS.map(o => (
-                                  <option key={o.value} value={o.value}>{o.label}</option>
-                                ))}
-                              </select>
-                            </td>
-                          );
-                        }
-                        return (
-                          <td key={col.key} className={tdClass}>
-                            —
-                          </td>
-                        );
-                      })}
-                    </tr>
+                    <tbody>
+                      <tr>
+                        <td colSpan={vColSpan} className="p-8 text-center text-slate-500">לא נמצאו בתי ספר</td>
+                      </tr>
+                    </tbody>
                   );
-                })}
-              </tbody>
+                }
+                return (
+                  <>
+                    {padTop > 0 && (
+                      <tbody aria-hidden="true"><tr style={{ height: `${padTop}px` }}><td colSpan={vColSpan} style={{ padding: 0, border: 0 }} /></tr></tbody>
+                    )}
+                    {vItems.map(vi => {
+                      const school = filteredSchools[vi.index];
+                      if (!school) return null;
+                      return (
+                        <tbody key={school.id} data-index={vi.index} ref={collectionRowVirtualizer.measureElement}>
+                          <CollectionRow
+                            school={school}
+                            yad={yearAdminData[school.id] || COLLECTION_EMPTY_OBJ}
+                            academicYear={academicYear}
+                            visibleColumns={visibleColumns}
+                            onSaveField={onSaveField}
+                          />
+                        </tbody>
+                      );
+                    })}
+                    {padBottom > 0 && (
+                      <tbody aria-hidden="true"><tr style={{ height: `${padBottom}px` }}><td colSpan={vColSpan} style={{ padding: 0, border: 0 }} /></tr></tbody>
+                    )}
+                  </>
+                );
+              })()}
             </table>
           </div>
         )}
