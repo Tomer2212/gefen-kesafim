@@ -1,4 +1,4 @@
-﻿import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+﻿import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useBlocker, useLocation, useNavigate } from "react-router-dom";
 import axios from "axios";
@@ -24,6 +24,8 @@ const TILE_LABEL_CLS = "text-[13px] font-medium text-gray-500 mb-1 block";
 const OUTLINE_BTN_CLS = "border border-slate-300 hover:border-slate-400 text-slate-700 bg-white text-xs font-semibold px-3.5 py-2 rounded-lg transition-all";
 import { MultiSelectChips } from "../components/MultiSelectChips";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { useDebouncedValue, useDebouncedCallback } from "../hooks/useDebouncedValue";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { ImportMappingModal } from "../components/ImportMappingModal";
 import { SchoolImportProblemsModal } from "../components/SchoolImportProblemsModal";
 import { supabase } from "../lib/supabase";
@@ -392,6 +394,13 @@ const ADMIN_ALL_COLUMNS = [
   ...ADMIN_IDENTITY_COLUMNS, ...ADMIN_ALLOCATION_COLUMNS, ...ADMIN_MEETINGS_DONE_COLUMNS,
   ...ADMIN_DATA_COLUMNS, ...ADMIN_CONTROL_LETTER_COLUMNS,
 ];
+// Stable empty-object reference for schools with no year-admin row yet — keeps `SchoolRow`
+// props referentially stable so React.memo can skip re-renders.
+const EMPTY_OBJ = {};
+// Hoisted sticky-cell styles (identical every row) so no fresh object is allocated per render.
+const STICKY_HEADER_ROW_STYLE = { position: "sticky", top: 0, background: "rgba(241,245,249,0.97)", zIndex: 10, backdropFilter: "blur(8px)" };
+const STICKY_HEADER_FIRST_CELL_STYLE = { position: "sticky", right: 0, zIndex: 11, background: "rgba(241,245,249,0.97)", minWidth: "14rem" };
+const STICKY_ROW_FIRST_CELL_STYLE = { position: "sticky", right: 0, zIndex: 5, minWidth: "14rem" };
 const ADMIN_DEFAULT_COL_ORDER = ADMIN_ALL_COLUMNS.map(c => c.key);
 const ADMIN_DEFAULT_COL_VISIBLE = {
   ...Object.fromEntries(ADMIN_ALL_COLUMNS.map(c => [c.key, true])),
@@ -1517,14 +1526,39 @@ const ADMIN_NUMBER_FILTER_OPS = [
 ];
 
 function AdminColumnFilterPopover({ colKey, colLabel, filterType, spec, onChange, onClear, onClose, options: optionsProp }) {
+  // Local draft for the free-text / number value inputs, debounced before it reaches the
+  // parent — so typing here doesn't recompute the full filter/sort pipeline on every key.
+  const [draftValue, setDraftValue] = useState(spec?.value ?? "");
+  const debouncedDraft = useDebouncedValue(draftValue, 250);
+  const draftOpRef = useRef(spec?.op);
+  const lastSpecValueRef = useRef(spec?.value ?? "");
+
+  // Pull external changes (clear, restored-from-storage) into the draft.
+  useEffect(() => {
+    const ext = spec?.value ?? "";
+    if (ext !== lastSpecValueRef.current) {
+      lastSpecValueRef.current = ext;
+      setDraftValue(ext);
+    }
+  }, [spec?.value]);
+
+  // Push the debounced draft up.
+  useEffect(() => {
+    if (filterType !== "text" && filterType !== "number") return;
+    if (debouncedDraft === (spec?.value ?? "")) return;
+    lastSpecValueRef.current = debouncedDraft;
+    if (filterType === "text") onChange({ op: "contains", value: debouncedDraft });
+    else onChange({ op: draftOpRef.current || spec?.op || "eq", value: debouncedDraft });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedDraft]);
+
   if (filterType === "text") {
-    const value = spec?.value || "";
     return (
       <div className="flex flex-col gap-2">
         <label htmlFor={`admin-filter-${colKey}`} className="text-xs text-slate-500">סינון: {colLabel}</label>
         <input id={`admin-filter-${colKey}`} type="text" autoComplete="off" className="input-field text-sm"
-          value={value}
-          onChange={e => onChange({ op: "contains", value: e.target.value })} />
+          value={draftValue}
+          onChange={e => setDraftValue(e.target.value)} />
         <div className="flex justify-between gap-2">
           <button type="button" onClick={() => { onClear(); onClose(); }} className="text-xs text-slate-400 hover:text-slate-600">נקה</button>
           <button type="button" onClick={onClose} className="btn-blue text-xs px-3 py-1">סגור</button>
@@ -1534,19 +1568,18 @@ function AdminColumnFilterPopover({ colKey, colLabel, filterType, spec, onChange
   }
   if (filterType === "number") {
     const op = spec?.op || "eq";
-    const value = spec?.value ?? "";
     return (
       <div className="flex flex-col gap-2">
         <label htmlFor={`admin-filter-op-${colKey}`} className="text-xs text-slate-500">סינון: {colLabel}</label>
         <select id={`admin-filter-op-${colKey}`} className="input-field text-sm"
           value={op}
-          onChange={e => onChange({ op: e.target.value, value })}>
+          onChange={e => { draftOpRef.current = e.target.value; onChange({ op: e.target.value, value: spec?.value ?? draftValue }); }}>
           {ADMIN_NUMBER_FILTER_OPS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
         <label htmlFor={`admin-filter-val-${colKey}`} className="sr-only">ערך</label>
         <input id={`admin-filter-val-${colKey}`} type="number" className="input-field text-sm"
-          value={value}
-          onChange={e => onChange({ op, value: e.target.value })} />
+          value={draftValue}
+          onChange={e => setDraftValue(e.target.value)} />
         <div className="flex justify-between gap-2">
           <button type="button" onClick={() => { onClear(); onClose(); }} className="text-xs text-slate-400 hover:text-slate-600">נקה</button>
           <button type="button" onClick={onClose} className="btn-blue text-xs px-3 py-1">סגור</button>
@@ -1583,6 +1616,387 @@ function AdminColumnFilterPopover({ colKey, colLabel, filterType, spec, onChange
   }
   return null;
 }
+
+// Controlled, debounced-save numeric/amount cell for the admin schools table. Replaces the
+// old uncontrolled `defaultValue`/`onBlur` <input>: with row virtualization a row can unmount
+// (scroll out of the window) before blur fires, which would silently drop an in-progress edit.
+// Saves ~600ms after typing stops, and flushes immediately on blur and on unmount.
+const AdminAutosaveInput = memo(function AdminAutosaveInput({
+  value, onCommit, parse, format, className, ariaLabel, title, type = "text", inputMode,
+}) {
+  const toDisplay = format || ((v) => (v ?? ""));
+  const [draft, setDraft] = useState(() => toDisplay(value));
+  const focusedRef = useRef(false);
+  const dirtyRef = useRef(false);
+  const baselineRef = useRef(value ?? null);
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+
+  // Pull external changes (server reformat, reload) into the field when the user isn't typing.
+  useEffect(() => {
+    if (focusedRef.current || dirtyRef.current) return;
+    if ((value ?? null) !== baselineRef.current) {
+      baselineRef.current = value ?? null;
+      setDraft(toDisplay(value));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value]);
+
+  const commit = useCallback((raw) => {
+    const parsed = parse ? parse(raw) : (raw === "" ? null : raw);
+    if (parsed === baselineRef.current) return;
+    baselineRef.current = parsed;
+    onCommit(parsed);
+  }, [parse, onCommit]);
+  const commitRef = useRef(commit);
+  commitRef.current = commit;
+  const debouncedCommit = useDebouncedCallback(commit, 600);
+
+  // Flush an in-progress edit if the row unmounts (virtualization recycle / tab switch)
+  // before blur — but only if the user actually changed something.
+  useEffect(() => () => { if (dirtyRef.current) commitRef.current(draftRef.current); }, []);
+
+  return (
+    <input
+      type={type}
+      inputMode={inputMode}
+      value={draft}
+      className={className}
+      aria-label={ariaLabel}
+      title={title}
+      onFocus={() => { focusedRef.current = true; }}
+      onChange={(e) => { dirtyRef.current = true; setDraft(e.target.value); debouncedCommit(e.target.value); }}
+      onBlur={(e) => {
+        focusedRef.current = false;
+        debouncedCommit.cancel();
+        commit(e.target.value);
+        dirtyRef.current = false;
+        if (format && parse) setDraft(format(parse(e.target.value)));
+      }}
+    />
+  );
+});
+
+// Controlled edit-in-place notes textarea for the admin schools table. Commits on blur and,
+// as a virtualization safety net, also on unmount if the text changed and blur never fired.
+const AdminNotesTextarea = memo(function AdminNotesTextarea({ initialValue, onCommit, className, ariaLabel }) {
+  const [draft, setDraft] = useState(initialValue || "");
+  const draftRef = useRef(initialValue || "");
+  const initialRef = useRef(initialValue || "");
+  const doneRef = useRef(false);
+  const onCommitRef = useRef(onCommit);
+  onCommitRef.current = onCommit;
+
+  const finish = useCallback(() => {
+    if (doneRef.current) return;
+    doneRef.current = true;
+    onCommitRef.current(draftRef.current);
+  }, []);
+
+  useEffect(() => () => {
+    if (!doneRef.current && draftRef.current !== initialRef.current) finish();
+  }, [finish]);
+
+  return (
+    <label>
+      <span className="sr-only">{ariaLabel}</span>
+      <textarea
+        autoFocus
+        rows={2}
+        className={className}
+        value={draft}
+        onChange={(e) => { setDraft(e.target.value); draftRef.current = e.target.value; }}
+        onBlur={finish}
+      />
+    </label>
+  );
+});
+
+const NUMERIC_ADMIN_FIELDS = new Set([
+  "requested_price", "hours_ordered", "rate", "payment_received", "payment_requests_sent", "receipts_sent",
+  "meeting_allocation_gefen", "meeting_allocation_current", "meeting_allocation_district",
+]);
+
+// One row of the admin schools table. Memoized: with virtualization only ~40 of these are
+// mounted, and this keeps them from re-rendering when unrelated parent state changes.
+const SchoolRow = memo(function SchoolRow({
+  school, yad, academicYear, visibleAdminColOrder, expanded,
+  editingNotesKey, setEditingNotesKey, quarterlyForSchool, handlers,
+}) {
+  const rowKey = `${school.id}-${academicYear}`;
+  return (
+    <tr className="group border-b border-slate-100 hover:bg-slate-50 transition-colors">
+      <td className="px-5 py-3 border-l border-slate-100 bg-white group-hover:bg-slate-50 whitespace-nowrap"
+        style={STICKY_ROW_FIRST_CELL_STYLE}>
+        <span className="font-semibold text-slate-900">{school.name}</span>
+      </td>
+      {visibleAdminColOrder.map((key, i) => {
+        const isLast = i === visibleAdminColOrder.length - 1;
+        const tdClass = `px-4 py-2 text-slate-600 ${isLast ? "" : "border-l border-slate-100"}`;
+        if (key === "symbol") return <td key={key} className={tdClass}><span className="font-mono">{school.symbol || "—"}</span></td>;
+        if (key === "city") return <td key={key} className={tdClass}>{school.city || "—"}</td>;
+        if (key === "authority") return <td key={key} className={tdClass}>{school.authority || "—"}</td>;
+        if (key === "district") return <td key={key} className={tdClass}>{school.district || "—"}</td>;
+        if (key === "finance_software") return <td key={key} className={tdClass}>{FINANCE_SOFTWARE_OPTIONS.find(o => o.value === school.finance_software)?.label || school.finance_software || "—"}</td>;
+        if (key === "stage") return <td key={key} className={tdClass}>{ADMIN_SCHOOL_STAGE_LABEL[school.stage] || school.stage || "—"}</td>;
+        if (key === "meetings_completed") return <td key={key} className={tdClass}>{school.meetings_stats ? String(school.meetings_stats.completed) : "—"}</td>;
+        if (key === "meetings_hours") return <td key={key} className={tdClass}>{school.meetings_stats ? formatAdminMeetingHours(school.meetings_stats.total_minutes) : "—"}</td>;
+        if (MEETING_TYPE_BREAKDOWN_COL_META[key]) {
+          const bc = MEETING_TYPE_BREAKDOWN_COL_META[key];
+          const bucket = school.meetings_stats?.by_type?.[bc.breakdownType];
+          return <td key={key} className={tdClass}>{
+            !bucket ? "—"
+              : bc.breakdownMetric === "completed" ? String(bucket.completed ?? 0)
+              : formatAdminMeetingHours(bucket.total_minutes ?? 0)
+          }</td>;
+        }
+        if (key === "service_type") return (
+          <td key={key} className={tdClass}>
+            <label htmlFor={`svc-${rowKey}`} className="sr-only">סוג שירות</label>
+            <select id={`svc-${rowKey}`} className={`${ADMIN_FIELD_CLS} w-28`}
+              value={yad.service_type || ""}
+              onChange={e => handlers.onSaveField(school.id, "service_type", e.target.value || null)}>
+              <option value="">בחר</option>
+              {SERVICE_TYPE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </td>
+        );
+        if (key === "order_method") return (
+          <td key={key} className={tdClass}>
+            <MultiSelectChips key={rowKey} compact className="w-36" options={FUNDING_METHOD_OPTIONS}
+              selected={yad.order_method || []}
+              onChange={v => handlers.onSaveField(school.id, "order_method", v.length ? v : null)} />
+          </td>
+        );
+        if (key === "order_amount_gefen") return (
+          <td key={key} className={tdClass}>
+            <AdminAutosaveInput
+              key={rowKey}
+              type="text"
+              inputMode="numeric"
+              value={yad.order_amount_gefen ?? null}
+              format={formatAmount}
+              parse={parseAmount}
+              onCommit={v => handlers.onSaveField(school.id, "order_amount_gefen", v)}
+              title={yad.order_amount_gefen_updated_by_name ? `${yad.order_amount_gefen_updated_by_name} - ${formatUpdatedAt(yad.order_amount_gefen_updated_at)}` : ""}
+              ariaLabel='מחיר כולל מע"מ'
+              className={`${ADMIN_FIELD_CLS} w-24`}
+            />
+          </td>
+        );
+        if (NUMERIC_ADMIN_FIELDS.has(key)) return (
+          <td key={key} className={tdClass}>
+            <AdminAutosaveInput
+              key={rowKey}
+              type="number"
+              value={yad[key] ?? null}
+              parse={raw => (raw === "" ? null : Number(raw))}
+              onCommit={v => handlers.onSaveField(school.id, key, v)}
+              ariaLabel={ADMIN_DATA_COLUMNS.find(c => c.key === key)?.label}
+              className={`${ADMIN_FIELD_CLS} no-spinner w-24`}
+            />
+          </td>
+        );
+        if (key === "meeting_duration_gefen" || key === "meeting_duration_current" || key === "meeting_duration_district") return (
+          <td key={key} className={tdClass}>
+            <HourMinuteInput idPrefix={`${key}-${rowKey}`} label={ADMIN_DATA_COLUMNS.find(c => c.key === key)?.label}
+              minutes={yad[key] ?? null}
+              onChange={v => handlers.onSaveField(school.id, key, v)} />
+          </td>
+        );
+        if (key === "advisor_gefen" || key === "advisor_current" || key === "advisor_district") {
+          const list = school[key === "advisor_gefen" ? "advisors_gefen" : key === "advisor_current" ? "advisors_current" : "advisors_district"] || [];
+          return (
+            <td key={key} className={tdClass}>
+              {list.length === 0 ? "—" : (
+                <div className="flex flex-wrap gap-1">
+                  {list.map(a => (
+                    <span key={a.id} className="inline-flex items-center text-xs font-medium px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 border border-slate-200">
+                      {a.full_name || a.email}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </td>
+          );
+        }
+        if (key === "contract_sent" || key === "contract_received") return (
+          <td key={key} className={tdClass}>
+            <label htmlFor={`${key}-${rowKey}`} className="sr-only">{ADMIN_DATA_COLUMNS.find(c => c.key === key)?.label}</label>
+            <select id={`${key}-${rowKey}`} className={`${ADMIN_FIELD_CLS} w-20`}
+              value={yad[key] === true ? "yes" : yad[key] === false ? "no" : ""}
+              onChange={e => handlers.onSaveField(school.id, key, e.target.value === "yes" ? true : e.target.value === "no" ? false : null)}>
+              <option value="">—</option>
+              <option value="yes">כן</option>
+              <option value="no">לא</option>
+            </select>
+          </td>
+        );
+        if (key === "contract_file") return (
+          <td key={key} className={tdClass}>
+            {yad.contract_file_name ? (
+              <div className="flex items-center gap-2">
+                <button type="button" onClick={() => handlers.onDownloadContractFile(school.id)} className="text-xs text-blue-600 hover:underline truncate max-w-[100px]">
+                  {yad.contract_file_name}
+                </button>
+                <button type="button" onClick={() => handlers.onOpenContractUpload(school.id)} className="text-xs text-slate-400 hover:text-slate-600">החלף</button>
+              </div>
+            ) : (
+              <button type="button" onClick={() => handlers.onOpenContractUpload(school.id)} className="btn-ghost text-xs px-2 py-1">העלה קובץ</button>
+            )}
+          </td>
+        );
+        if (key === "closure_parents_status" || key === "closure_authority_status") {
+          const val = yad[key];
+          const colorCls = val === true ? "text-green-600" : val === false ? "text-red-600" : "text-slate-400";
+          return (
+            <td key={key} className={tdClass}>
+              <label htmlFor={`${key}-${rowKey}`} className="sr-only">{ADMIN_DATA_COLUMNS.find(c => c.key === key)?.label}</label>
+              <select id={`${key}-${rowKey}`} className={`${ADMIN_FIELD_CLS} w-24 font-semibold ${colorCls}`}
+                value={val === true ? "yes" : val === false ? "no" : ""}
+                onChange={e => handlers.onSaveField(school.id, key, e.target.value === "yes" ? true : e.target.value === "no" ? false : null)}>
+                <option value="">—</option>
+                <option value="yes">סגור</option>
+                <option value="no">לא סגור</option>
+              </select>
+            </td>
+          );
+        }
+        if (key === "closure_parents_notes" || key === "closure_authority_notes") {
+          const notesKey = `${school.id}:${key}`;
+          const isEditing = editingNotesKey === notesKey;
+          const text = yad[key] || "";
+          return (
+            <td key={key} className={tdClass}>
+              {isEditing ? (
+                <AdminNotesTextarea
+                  initialValue={text}
+                  ariaLabel={ADMIN_DATA_COLUMNS.find(c => c.key === key)?.label}
+                  className={`${ADMIN_FIELD_CLS} w-48 resize-y`}
+                  onCommit={(raw) => {
+                    const v = raw.trim() || null;
+                    setEditingNotesKey(null);
+                    if (v !== (text || null)) handlers.onSaveField(school.id, key, v);
+                  }}
+                />
+              ) : (
+                <button type="button" onClick={() => setEditingNotesKey(notesKey)}
+                  className="text-right text-slate-600 hover:text-blue-600 truncate max-w-[160px] block">
+                  {text ? (text.length > 30 ? `${text.slice(0, 30)}…` : text) : "—"}
+                </button>
+              )}
+            </td>
+          );
+        }
+        if (key === "quarterly_notes_1" || key === "quarterly_notes_2" || key === "quarterly_notes_3" || key === "quarterly_notes_4") {
+          const q = key.slice(-1);
+          const summary = quarterlyForSchool?.[q] || { count: 0, latest_segment: null };
+          const notesKey = `${school.id}:${key}`;
+          const isEditing = editingNotesKey === notesKey;
+
+          if (summary.count >= 2) {
+            return (
+              <td key={key} className={tdClass}>
+                <button type="button"
+                  onClick={() => handlers.onOpenNotesModal({ schoolId: school.id, quarter: Number(q) })}
+                  className="text-slate-400 hover:text-blue-600 transition-colors text-base leading-none" aria-label="פתח הערות">
+                  📝
+                </button>
+              </td>
+            );
+          }
+
+          const text = summary.latest_segment?.content || "";
+          return (
+            <td key={key} className={tdClass}>
+              {isEditing ? (
+                <AdminNotesTextarea
+                  initialValue={text}
+                  ariaLabel={ADMIN_DATA_COLUMNS.find(c => c.key === key)?.label}
+                  className={`${ADMIN_FIELD_CLS} w-48 resize-y`}
+                  onCommit={(raw) => {
+                    const v = raw.trim();
+                    setEditingNotesKey(null);
+                    if (v === text) return;
+                    if (summary.count === 1) {
+                      if (v) handlers.onSaveQuarterlyNoteEdit(school.id, summary.latest_segment.id, q, v);
+                    } else if (v) {
+                      handlers.onCreateQuarterlyNote(school.id, q, v);
+                    }
+                  }}
+                />
+              ) : (
+                <button type="button" onClick={() => setEditingNotesKey(notesKey)}
+                  className="text-right text-slate-600 hover:text-blue-600 truncate max-w-[160px] block">
+                  {text ? (text.length > 30 ? `${text.slice(0, 30)}…` : text) : "—"}
+                </button>
+              )}
+            </td>
+          );
+        }
+        if (key === "control_letter_received_date" || key === "control_letter_target_date") {
+          const iso = controlLetterFieldValue(school, key === "control_letter_target_date" ? "target_date" : "received_date");
+          return <td key={key} className={tdClass}>{iso ? formatDDMMYY(iso) : "—"}</td>;
+        }
+        if (key === "control_letter_days_to_answer") {
+          const v = controlLetterFieldValue(school, "days_to_answer");
+          return <td key={key} className={tdClass}>{v ?? "—"}</td>;
+        }
+        if (key === "control_letter_status") {
+          const v = controlLetterFieldValue(school, "status");
+          const s = CONTROL_LETTER_STATUS_MAP[v || ""] || CONTROL_LETTER_STATUS_MAP[""];
+          return (
+            <td key={key} className={tdClass}>
+              {v ? (
+                <span className="inline-flex items-center gap-1.5 text-xs font-semibold px-2 py-0.5 rounded-full" style={{ background: s.bg, color: s.color }}>
+                  <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: s.dot }} aria-hidden="true" />
+                  {s.label}
+                </span>
+              ) : "—"}
+            </td>
+          );
+        }
+        if (key === "control_letter_notes") {
+          const text = controlLetterFieldValue(school, "notes") || "";
+          return (
+            <td key={key} className={tdClass}>
+              <span title={text} className="truncate max-w-[160px] block">
+                {text ? (text.length > 30 ? `${text.slice(0, 30)}…` : text) : "—"}
+              </span>
+            </td>
+          );
+        }
+        if (key === "control_letter_original_file" || key === "control_letter_response_file") {
+          const kind = key === "control_letter_original_file" ? "original" : "response";
+          const fileName = controlLetterFieldValue(school, `${kind}_letter_file_name`);
+          const primary = pickPrimaryControlLetter(school.control_letters);
+          return (
+            <td key={key} className={tdClass}>
+              {fileName && primary ? (
+                <button
+                  type="button"
+                  onClick={() => handlers.onDownloadControlLetterFile(school.id, primary.division_type, kind, fileName)}
+                  className="text-xs text-blue-600 hover:underline truncate max-w-[100px]"
+                >
+                  {fileName}
+                </button>
+              ) : "—"}
+            </td>
+          );
+        }
+        return <td key={key} className={tdClass}>—</td>;
+      })}
+      <td className="px-4 py-2">
+        <div className="flex gap-2">
+          <button onClick={() => handlers.onToggleExpand(school)} className="btn-ghost text-xs px-3 py-1.5">
+            {expanded ? "סגור" : "חטיבות"}
+          </button>
+          <button onClick={() => handlers.onStartEdit(school)} className="btn-ghost text-xs px-3 py-1.5">✏️ ערוך</button>
+        </div>
+      </td>
+    </tr>
+  );
+});
 
 export default function AdminPage() {
   const location = useLocation();
@@ -1634,6 +2048,9 @@ export default function AdminPage() {
   const [adminSearchQuery, setAdminSearchQuery] = useState("");
   const [adminColumnFilters, setAdminColumnFilters] = useState({}); // {[colKey]: FilterSpec}
   const [openAdminFilterKey, setOpenAdminFilterKey] = useState(null); // only one column's filter popover open at a time
+  // Debounced copy of the search box — the filter/sort pipeline over the full schools list
+  // recomputes off this, not off every keystroke.
+  const debouncedAdminSearch = useDebouncedValue(adminSearchQuery, 250);
   const [uploadingContractFor, setUploadingContractFor] = useState(null);
   const [editingAdminNotesKey, setEditingAdminNotesKey] = useState(null); // `${schoolId}:${field}` of the notes cell currently in edit mode
   const [quarterlyNotesSummary, setQuarterlyNotesSummary] = useState({}); // school_id -> {"1":{count,latest_segment}, "2":..., "3":..., "4":...}
@@ -3136,14 +3553,21 @@ export default function AdminPage() {
 
   // Derived rows for the new admin schools table (active schools only — "סל מחזור" below it
   // is unaffected and keeps reading straight from `schools`).
-  const activeAdminSchools = schools.filter(s => s.status === "active" || !s.status);
-  const filteredAdminSchools = adminSearchQuery.trim()
-    ? activeAdminSchools.filter(s => {
-        const q = adminSearchQuery.trim();
-        return (s.name || "").includes(q) || (s.symbol || "").includes(q) || (s.city || "").includes(q);
-      })
-    : activeAdminSchools;
-  function getAdminSortValue(school, key) {
+  // The whole pipeline below is memoized: at 550+ schools it used to recompute (including
+  // getAdminSortValue's array .find / Date parsing / control-letter reduce for every row)
+  // on every render — every keystroke, autosave, or popover toggle — which froze the tab.
+  const activeAdminSchools = useMemo(
+    () => schools.filter(s => s.status === "active" || !s.status),
+    [schools],
+  );
+  const filteredAdminSchools = useMemo(() => {
+    const q = debouncedAdminSearch.trim();
+    if (!q) return activeAdminSchools;
+    return activeAdminSchools.filter(s =>
+      (s.name || "").includes(q) || (s.symbol || "").includes(q) || (s.city || "").includes(q),
+    );
+  }, [activeAdminSchools, debouncedAdminSearch]);
+  const getAdminSortValue = useCallback((school, key) => {
     const yad = yearAdminData[school.id] || {};
     const breakdownCol = MEETING_TYPE_BREAKDOWN_COL_META[key];
     if (breakdownCol) {
@@ -3196,40 +3620,90 @@ export default function AdminPage() {
         return v === undefined || v === null ? "" : v;
       }
     }
-  }
-  const columnFilteredAdminSchools = Object.keys(adminColumnFilters).length === 0
-    ? filteredAdminSchools
-    : filteredAdminSchools.filter(s => passesAdminColumnFilters(s, yearAdminData[s.id] || {}, adminColumnFilters, getAdminSortValue));
-  const adminColumnFilterActiveKeys = Object.entries(adminColumnFilters)
-    .filter(([, spec]) => spec && (spec.value || (spec.values && spec.values.length > 0)))
-    .map(([key]) => key);
-  const sortedAdminSchools = adminSortKey
-    ? [...columnFilteredAdminSchools].sort((a, b) => {
-        const va = getAdminSortValue(a, adminSortKey);
-        const vb = getAdminSortValue(b, adminSortKey);
-        let cmp;
-        if (typeof va === "number" && typeof vb === "number") cmp = va - vb;
-        else cmp = String(va).localeCompare(String(vb), "he");
-        return adminSortDir === "asc" ? cmp : -cmp;
-      })
-    : columnFilteredAdminSchools;
+  }, [yearAdminData, quarterlyNotesSummary]);
+  const columnFilteredAdminSchools = useMemo(() => {
+    if (Object.keys(adminColumnFilters).length === 0) return filteredAdminSchools;
+    return filteredAdminSchools.filter(s =>
+      passesAdminColumnFilters(s, yearAdminData[s.id] || {}, adminColumnFilters, getAdminSortValue),
+    );
+  }, [filteredAdminSchools, adminColumnFilters, yearAdminData, getAdminSortValue]);
+  const adminColumnFilterActiveKeys = useMemo(
+    () => Object.entries(adminColumnFilters)
+      .filter(([, spec]) => spec && (spec.value || (spec.values && spec.values.length > 0)))
+      .map(([key]) => key),
+    [adminColumnFilters],
+  );
+  // decorate-sort-undecorate: compute each school's sort value exactly once (not twice per
+  // comparison inside .sort() as before).
+  const sortValueBySchoolId = useMemo(() => {
+    if (!adminSortKey) return null;
+    const m = new Map();
+    for (const s of columnFilteredAdminSchools) m.set(s.id, getAdminSortValue(s, adminSortKey));
+    return m;
+  }, [columnFilteredAdminSchools, adminSortKey, getAdminSortValue]);
+  const sortedAdminSchools = useMemo(() => {
+    if (!adminSortKey || !sortValueBySchoolId) return columnFilteredAdminSchools;
+    return [...columnFilteredAdminSchools].sort((a, b) => {
+      const va = sortValueBySchoolId.get(a.id);
+      const vb = sortValueBySchoolId.get(b.id);
+      let cmp;
+      if (typeof va === "number" && typeof vb === "number") cmp = va - vb;
+      else cmp = String(va).localeCompare(String(vb), "he");
+      return adminSortDir === "asc" ? cmp : -cmp;
+    });
+  }, [columnFilteredAdminSchools, sortValueBySchoolId, adminSortKey, adminSortDir]);
   // Dynamic filter options for the 3 advisor-name columns — deduplicated {id, name} pairs
   // collected from every school's already-loaded advisors_gefen/current/district list.
-  function adminAdvisorFilterOptions(key) {
+  // Stays lazy: only invoked from the header JSX while a filter popover is open.
+  const adminAdvisorFilterOptions = useCallback((key) => {
     const field = key === "advisor_gefen" ? "advisors_gefen" : key === "advisor_current" ? "advisors_current" : "advisors_district";
     const map = new Map();
     for (const s of schools) {
       for (const a of (s[field] || [])) map.set(a.id, a.full_name || a.email);
     }
     return [...map.entries()].map(([value, label]) => ({ value, label })).sort((a, b) => a.label.localeCompare(b.label, "he"));
-  }
-  const visibleAdminColOrder = adminColOrder.filter(k => adminColVisible[k] && ADMIN_ALL_COLUMNS.some(c => c.key === k));
-  const adminColumnCategories = [
+  }, [schools]);
+  const visibleAdminColOrder = useMemo(
+    () => adminColOrder.filter(k => adminColVisible[k] && ADMIN_ALL_COLUMNS.some(c => c.key === k)),
+    [adminColOrder, adminColVisible],
+  );
+  const adminColumnCategories = useMemo(() => [
     { title: "כללי", cols: ADMIN_IDENTITY_COLUMNS },
     { title: "הקצאות", cols: ADMIN_ALLOCATION_COLUMNS },
     { title: "פגישות שבוצעו", cols: ADMIN_MEETINGS_DONE_COLUMNS },
     { title: "ניהולי", cols: ADMIN_DATA_COLUMNS },
-  ];
+  ], []);
+
+  // Stable handler bag for <SchoolRow> — always calls the latest closures (via ref) so the
+  // object identity never changes and React.memo on the row stays effective.
+  const rowFnRef = useRef({});
+  rowFnRef.current = {
+    saveYearAdminField, toggleExpand, startEdit, downloadContractFile, openContractUpload,
+    downloadControlLetterFile, createQuarterlyNote, saveQuarterlyNoteEdit, setShowSchoolNotesModalFor,
+  };
+  const rowHandlers = useMemo(() => ({
+    onSaveField: (...a) => rowFnRef.current.saveYearAdminField(...a),
+    onToggleExpand: (...a) => rowFnRef.current.toggleExpand(...a),
+    onStartEdit: (...a) => rowFnRef.current.startEdit(...a),
+    onDownloadContractFile: (...a) => rowFnRef.current.downloadContractFile(...a),
+    onOpenContractUpload: (...a) => rowFnRef.current.openContractUpload(...a),
+    onDownloadControlLetterFile: (...a) => rowFnRef.current.downloadControlLetterFile(...a),
+    onCreateQuarterlyNote: (...a) => rowFnRef.current.createQuarterlyNote(...a),
+    onSaveQuarterlyNoteEdit: (...a) => rowFnRef.current.saveQuarterlyNoteEdit(...a),
+    onOpenNotesModal: (...a) => rowFnRef.current.setShowSchoolNotesModalFor(...a),
+  }), []);
+
+  // Row virtualization for the admin schools table — only ~40 <SchoolRow>s are mounted at a
+  // time regardless of how many schools the org has, so the tab opens instantly and scrolls
+  // smoothly at any scale.
+  const adminTableScrollRef = useRef(null);
+  const adminRowVirtualizer = useVirtualizer({
+    count: sortedAdminSchools.length,
+    getScrollElement: () => adminTableScrollRef.current,
+    estimateSize: () => 49,
+    overscan: 12,
+    getItemKey: useCallback(i => sortedAdminSchools[i]?.id ?? i, [sortedAdminSchools]),
+  });
 
   const tabs = [
     { id: "schools", label: "בתי ספר" },
@@ -3883,15 +4357,15 @@ export default function AdminPage() {
                     <p className="text-slate-500">לא נמצאו בתי ספר</p>
                   </div>
                 ) : (
-                  <div className="overflow-auto dash-scroll-x max-h-[70vh]">
+                  <div ref={adminTableScrollRef} className="overflow-auto dash-scroll-x max-h-[70vh]">
                     <table className="w-full text-sm border-collapse">
                       <thead>
                         <tr
                           className="border-b border-slate-200"
-                          style={{ position: "sticky", top: 0, background: "rgba(241,245,249,0.97)", zIndex: 10, backdropFilter: "blur(8px)" }}
+                          style={STICKY_HEADER_ROW_STYLE}
                         >
                           <th scope="col" className="text-right px-5 py-3 text-slate-900 font-semibold border-l border-slate-200 whitespace-nowrap"
-                            style={{ position: "sticky", right: 0, zIndex: 11, background: "rgba(241,245,249,0.97)", minWidth: "14rem" }}>שם מוסד</th>
+                            style={STICKY_HEADER_FIRST_CELL_STYLE}>שם מוסד</th>
                           {visibleAdminColOrder.map((key, i) => {
                             const col = ADMIN_ALL_COLUMNS.find(c => c.key === key);
                             const isLast = i === visibleAdminColOrder.length - 1;
@@ -3948,298 +4422,35 @@ export default function AdminPage() {
                           <th scope="col" className="text-right px-4 py-3 text-slate-900 font-semibold whitespace-nowrap">פעולות</th>
                         </tr>
                       </thead>
-                      <tbody>
-                        {sortedAdminSchools.map(school => {
-                          const yad = yearAdminData[school.id] || {};
-                          const rowKey = `${school.id}-${adminAcademicYear}`;
-                          return (
-                            <Fragment key={school.id}>
-                              <tr className="group border-b border-slate-100 hover:bg-slate-50 transition-colors">
-                                <td className="px-5 py-3 border-l border-slate-100 bg-white group-hover:bg-slate-50 whitespace-nowrap"
-                                  style={{ position: "sticky", right: 0, zIndex: 5, minWidth: "14rem" }}>
-                                  <span className="font-semibold text-slate-900">{school.name}</span>
-                                </td>
-                                {visibleAdminColOrder.map((key, i) => {
-                                  const isLast = i === visibleAdminColOrder.length - 1;
-                                  const tdClass = `px-4 py-2 text-slate-600 ${isLast ? "" : "border-l border-slate-100"}`;
-                                  if (key === "symbol") return <td key={key} className={tdClass}><span className="font-mono">{school.symbol || "—"}</span></td>;
-                                  if (key === "city") return <td key={key} className={tdClass}>{school.city || "—"}</td>;
-                                  if (key === "authority") return <td key={key} className={tdClass}>{school.authority || "—"}</td>;
-                                  if (key === "district") return <td key={key} className={tdClass}>{school.district || "—"}</td>;
-                                  if (key === "finance_software") return <td key={key} className={tdClass}>{FINANCE_SOFTWARE_OPTIONS.find(o => o.value === school.finance_software)?.label || school.finance_software || "—"}</td>;
-                                  if (key === "stage") return <td key={key} className={tdClass}>{ADMIN_SCHOOL_STAGE_LABEL[school.stage] || school.stage || "—"}</td>;
-                                  if (key === "meetings_completed") return <td key={key} className={tdClass}>{school.meetings_stats ? String(school.meetings_stats.completed) : "—"}</td>;
-                                  if (key === "meetings_hours") return <td key={key} className={tdClass}>{school.meetings_stats ? formatAdminMeetingHours(school.meetings_stats.total_minutes) : "—"}</td>;
-                                  if (MEETING_TYPE_BREAKDOWN_COL_META[key]) {
-                                    const bc = MEETING_TYPE_BREAKDOWN_COL_META[key];
-                                    const bucket = school.meetings_stats?.by_type?.[bc.breakdownType];
-                                    return <td key={key} className={tdClass}>{
-                                      !bucket ? "—"
-                                        : bc.breakdownMetric === "completed" ? String(bucket.completed ?? 0)
-                                        : formatAdminMeetingHours(bucket.total_minutes ?? 0)
-                                    }</td>;
-                                  }
-                                  if (key === "service_type") return (
-                                    <td key={key} className={tdClass}>
-                                      <label htmlFor={`svc-${rowKey}`} className="sr-only">סוג שירות</label>
-                                      <select id={`svc-${rowKey}`} className={`${ADMIN_FIELD_CLS} w-28`}
-                                        value={yad.service_type || ""}
-                                        onChange={e => saveYearAdminField(school.id, "service_type", e.target.value || null)}>
-                                        <option value="">בחר</option>
-                                        {SERVICE_TYPE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                                      </select>
-                                    </td>
-                                  );
-                                  if (key === "order_method") return (
-                                    <td key={key} className={tdClass}>
-                                      <MultiSelectChips key={rowKey} compact className="w-36" options={FUNDING_METHOD_OPTIONS}
-                                        selected={yad.order_method || []}
-                                        onChange={v => saveYearAdminField(school.id, "order_method", v.length ? v : null)} />
-                                    </td>
-                                  );
-                                  if (key === "order_amount_gefen") return (
-                                    <td key={key} className={tdClass}>
-                                      <input
-                                        key={rowKey}
-                                        type="text"
-                                        inputMode="numeric"
-                                        defaultValue={formatAmount(yad.order_amount_gefen)}
-                                        onBlur={e => {
-                                          const v = parseAmount(e.target.value);
-                                          e.target.value = formatAmount(v);
-                                          if (v !== (yad.order_amount_gefen ?? null)) saveYearAdminField(school.id, "order_amount_gefen", v);
-                                        }}
-                                        title={yad.order_amount_gefen_updated_by_name ? `${yad.order_amount_gefen_updated_by_name} - ${formatUpdatedAt(yad.order_amount_gefen_updated_at)}` : ""}
-                                        aria-label='מחיר כולל מע"מ'
-                                        className={`${ADMIN_FIELD_CLS} w-24`}
-                                      />
-                                    </td>
-                                  );
-                                  if ([
-                                    "requested_price", "hours_ordered", "rate", "payment_received", "payment_requests_sent", "receipts_sent",
-                                    "meeting_allocation_gefen", "meeting_allocation_current", "meeting_allocation_district",
-                                  ].includes(key)) return (
-                                    <td key={key} className={tdClass}>
-                                      <input
-                                        key={rowKey}
-                                        type="number"
-                                        defaultValue={yad[key] ?? ""}
-                                        onBlur={e => {
-                                          const v = e.target.value === "" ? null : Number(e.target.value);
-                                          if (v !== (yad[key] ?? null)) saveYearAdminField(school.id, key, v);
-                                        }}
-                                        aria-label={ADMIN_DATA_COLUMNS.find(c => c.key === key)?.label}
-                                        className={`${ADMIN_FIELD_CLS} no-spinner w-24`}
-                                      />
-                                    </td>
-                                  );
-                                  if (key === "meeting_duration_gefen" || key === "meeting_duration_current" || key === "meeting_duration_district") return (
-                                    <td key={key} className={tdClass}>
-                                      <HourMinuteInput idPrefix={`${key}-${rowKey}`} label={ADMIN_DATA_COLUMNS.find(c => c.key === key)?.label}
-                                        minutes={yad[key] ?? null}
-                                        onChange={v => saveYearAdminField(school.id, key, v)} />
-                                    </td>
-                                  );
-                                  if (key === "advisor_gefen" || key === "advisor_current" || key === "advisor_district") {
-                                    const list = school[key === "advisor_gefen" ? "advisors_gefen" : key === "advisor_current" ? "advisors_current" : "advisors_district"] || [];
-                                    return (
-                                      <td key={key} className={tdClass}>
-                                        {list.length === 0 ? "—" : (
-                                          <div className="flex flex-wrap gap-1">
-                                            {list.map(a => (
-                                              <span key={a.id} className="inline-flex items-center text-xs font-medium px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 border border-slate-200">
-                                                {a.full_name || a.email}
-                                              </span>
-                                            ))}
-                                          </div>
-                                        )}
-                                      </td>
-                                    );
-                                  }
-                                  if (key === "contract_sent" || key === "contract_received") return (
-                                    <td key={key} className={tdClass}>
-                                      <label htmlFor={`${key}-${rowKey}`} className="sr-only">{ADMIN_DATA_COLUMNS.find(c => c.key === key)?.label}</label>
-                                      <select id={`${key}-${rowKey}`} className={`${ADMIN_FIELD_CLS} w-20`}
-                                        value={yad[key] === true ? "yes" : yad[key] === false ? "no" : ""}
-                                        onChange={e => saveYearAdminField(school.id, key, e.target.value === "yes" ? true : e.target.value === "no" ? false : null)}>
-                                        <option value="">—</option>
-                                        <option value="yes">כן</option>
-                                        <option value="no">לא</option>
-                                      </select>
-                                    </td>
-                                  );
-                                  if (key === "contract_file") return (
-                                    <td key={key} className={tdClass}>
-                                      {yad.contract_file_name ? (
-                                        <div className="flex items-center gap-2">
-                                          <button type="button" onClick={() => downloadContractFile(school.id)} className="text-xs text-blue-600 hover:underline truncate max-w-[100px]">
-                                            {yad.contract_file_name}
-                                          </button>
-                                          <button type="button" onClick={() => openContractUpload(school.id)} className="text-xs text-slate-400 hover:text-slate-600">החלף</button>
-                                        </div>
-                                      ) : (
-                                        <button type="button" onClick={() => openContractUpload(school.id)} className="btn-ghost text-xs px-2 py-1">העלה קובץ</button>
-                                      )}
-                                    </td>
-                                  );
-                                  if (key === "closure_parents_status" || key === "closure_authority_status") {
-                                    const val = yad[key];
-                                    const colorCls = val === true ? "text-green-600" : val === false ? "text-red-600" : "text-slate-400";
-                                    return (
-                                      <td key={key} className={tdClass}>
-                                        <label htmlFor={`${key}-${rowKey}`} className="sr-only">{ADMIN_DATA_COLUMNS.find(c => c.key === key)?.label}</label>
-                                        <select id={`${key}-${rowKey}`} className={`${ADMIN_FIELD_CLS} w-24 font-semibold ${colorCls}`}
-                                          value={val === true ? "yes" : val === false ? "no" : ""}
-                                          onChange={e => saveYearAdminField(school.id, key, e.target.value === "yes" ? true : e.target.value === "no" ? false : null)}>
-                                          <option value="">—</option>
-                                          <option value="yes">סגור</option>
-                                          <option value="no">לא סגור</option>
-                                        </select>
-                                      </td>
-                                    );
-                                  }
-                                  if (key === "closure_parents_notes" || key === "closure_authority_notes") {
-                                    const notesKey = `${school.id}:${key}`;
-                                    const isEditing = editingAdminNotesKey === notesKey;
-                                    const text = yad[key] || "";
-                                    return (
-                                      <td key={key} className={tdClass}>
-                                        {isEditing ? (
-                                          <label>
-                                            <span className="sr-only">{ADMIN_DATA_COLUMNS.find(c => c.key === key)?.label}</span>
-                                            <textarea
-                                              autoFocus
-                                              rows={2}
-                                              className={`${ADMIN_FIELD_CLS} w-48 resize-y`}
-                                              defaultValue={text}
-                                              onBlur={e => {
-                                                const v = e.target.value.trim() || null;
-                                                setEditingAdminNotesKey(null);
-                                                if (v !== (text || null)) saveYearAdminField(school.id, key, v);
-                                              }}
-                                            />
-                                          </label>
-                                        ) : (
-                                          <button type="button" onClick={() => setEditingAdminNotesKey(notesKey)}
-                                            className="text-right text-slate-600 hover:text-blue-600 truncate max-w-[160px] block">
-                                            {text ? (text.length > 30 ? `${text.slice(0, 30)}…` : text) : "—"}
-                                          </button>
-                                        )}
-                                      </td>
-                                    );
-                                  }
-                                  if (key === "quarterly_notes_1" || key === "quarterly_notes_2" || key === "quarterly_notes_3" || key === "quarterly_notes_4") {
-                                    const q = key.slice(-1);
-                                    const summary = quarterlyNotesSummary[school.id]?.[q] || { count: 0, latest_segment: null };
-                                    const notesKey = `${school.id}:${key}`;
-                                    const isEditing = editingAdminNotesKey === notesKey;
-
-                                    if (summary.count >= 2) {
-                                      return (
-                                        <td key={key} className={tdClass}>
-                                          <button type="button"
-                                            onClick={() => setShowSchoolNotesModalFor({ schoolId: school.id, quarter: Number(q) })}
-                                            className="text-slate-400 hover:text-blue-600 transition-colors text-base leading-none" aria-label="פתח הערות">
-                                            📝
-                                          </button>
-                                        </td>
-                                      );
-                                    }
-
-                                    const text = summary.latest_segment?.content || "";
-                                    return (
-                                      <td key={key} className={tdClass}>
-                                        {isEditing ? (
-                                          <label>
-                                            <span className="sr-only">{ADMIN_DATA_COLUMNS.find(c => c.key === key)?.label}</span>
-                                            <textarea
-                                              autoFocus
-                                              rows={2}
-                                              className={`${ADMIN_FIELD_CLS} w-48 resize-y`}
-                                              defaultValue={text}
-                                              onBlur={e => {
-                                                const v = e.target.value.trim();
-                                                setEditingAdminNotesKey(null);
-                                                if (v === text) return;
-                                                if (summary.count === 1) {
-                                                  if (v) saveQuarterlyNoteEdit(school.id, summary.latest_segment.id, q, v);
-                                                } else if (v) {
-                                                  createQuarterlyNote(school.id, q, v);
-                                                }
-                                              }}
-                                            />
-                                          </label>
-                                        ) : (
-                                          <button type="button" onClick={() => setEditingAdminNotesKey(notesKey)}
-                                            className="text-right text-slate-600 hover:text-blue-600 truncate max-w-[160px] block">
-                                            {text ? (text.length > 30 ? `${text.slice(0, 30)}…` : text) : "—"}
-                                          </button>
-                                        )}
-                                      </td>
-                                    );
-                                  }
-                                  if (key === "control_letter_received_date" || key === "control_letter_target_date") {
-                                    const iso = controlLetterFieldValue(school, key === "control_letter_target_date" ? "target_date" : "received_date");
-                                    return <td key={key} className={tdClass}>{iso ? formatDDMMYY(iso) : "—"}</td>;
-                                  }
-                                  if (key === "control_letter_days_to_answer") {
-                                    const v = controlLetterFieldValue(school, "days_to_answer");
-                                    return <td key={key} className={tdClass}>{v ?? "—"}</td>;
-                                  }
-                                  if (key === "control_letter_status") {
-                                    const v = controlLetterFieldValue(school, "status");
-                                    const s = CONTROL_LETTER_STATUS_MAP[v || ""] || CONTROL_LETTER_STATUS_MAP[""];
-                                    return (
-                                      <td key={key} className={tdClass}>
-                                        {v ? (
-                                          <span className="inline-flex items-center gap-1.5 text-xs font-semibold px-2 py-0.5 rounded-full" style={{ background: s.bg, color: s.color }}>
-                                            <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: s.dot }} aria-hidden="true" />
-                                            {s.label}
-                                          </span>
-                                        ) : "—"}
-                                      </td>
-                                    );
-                                  }
-                                  if (key === "control_letter_notes") {
-                                    const text = controlLetterFieldValue(school, "notes") || "";
-                                    return (
-                                      <td key={key} className={tdClass}>
-                                        <span title={text} className="truncate max-w-[160px] block">
-                                          {text ? (text.length > 30 ? `${text.slice(0, 30)}…` : text) : "—"}
-                                        </span>
-                                      </td>
-                                    );
-                                  }
-                                  if (key === "control_letter_original_file" || key === "control_letter_response_file") {
-                                    const kind = key === "control_letter_original_file" ? "original" : "response";
-                                    const fileName = controlLetterFieldValue(school, `${kind}_letter_file_name`);
-                                    const primary = pickPrimaryControlLetter(school.control_letters);
-                                    return (
-                                      <td key={key} className={tdClass}>
-                                        {fileName && primary ? (
-                                          <button
-                                            type="button"
-                                            onClick={() => downloadControlLetterFile(school.id, primary.division_type, kind, fileName)}
-                                            className="text-xs text-blue-600 hover:underline truncate max-w-[100px]"
-                                          >
-                                            {fileName}
-                                          </button>
-                                        ) : "—"}
-                                      </td>
-                                    );
-                                  }
-                                  return <td key={key} className={tdClass}>—</td>;
-                                })}
-                                <td className="px-4 py-2">
-                                  <div className="flex gap-2">
-                                    <button onClick={() => toggleExpand(school)} className="btn-ghost text-xs px-3 py-1.5">
-                                      {expandedSchool === school.id ? "סגור" : "חטיבות"}
-                                    </button>
-                                    <button onClick={() => startEdit(school)} className="btn-ghost text-xs px-3 py-1.5">✏️ ערוך</button>
-                                  </div>
-                                </td>
-                              </tr>
-                              {expandedSchool === school.id && (
+                      {(() => {
+                        const virtualItems = adminRowVirtualizer.getVirtualItems();
+                        const totalSize = adminRowVirtualizer.getTotalSize();
+                        const padTop = virtualItems.length ? virtualItems[0].start : 0;
+                        const padBottom = virtualItems.length ? totalSize - virtualItems[virtualItems.length - 1].end : 0;
+                        const vColSpan = visibleAdminColOrder.length + 2;
+                        return (
+                          <>
+                            {padTop > 0 && (
+                              <tbody aria-hidden="true"><tr style={{ height: `${padTop}px` }}><td colSpan={vColSpan} style={{ padding: 0, border: 0 }} /></tr></tbody>
+                            )}
+                            {virtualItems.map(vi => {
+                              const school = sortedAdminSchools[vi.index];
+                              if (!school) return null;
+                              const isExpanded = expandedSchool === school.id;
+                              return (
+                                <tbody key={school.id} data-index={vi.index} ref={adminRowVirtualizer.measureElement}>
+                                  <SchoolRow
+                                    school={school}
+                                    yad={yearAdminData[school.id] || EMPTY_OBJ}
+                                    academicYear={adminAcademicYear}
+                                    visibleAdminColOrder={visibleAdminColOrder}
+                                    expanded={isExpanded}
+                                    editingNotesKey={editingAdminNotesKey}
+                                    setEditingNotesKey={setEditingAdminNotesKey}
+                                    quarterlyForSchool={quarterlyNotesSummary[school.id]}
+                                    handlers={rowHandlers}
+                                  />
+                                  {isExpanded && (
                                 <tr className="border-b border-slate-100 bg-slate-50/70">
                                   <td colSpan={visibleAdminColOrder.length + 2} className="px-6 py-4">
                                     <p className="text-xs text-slate-800 mb-3 font-medium">חטיבות / חשבונות גפן</p>
@@ -4312,11 +4523,16 @@ export default function AdminPage() {
                                     </div>
                                   </td>
                                 </tr>
-                              )}
-                            </Fragment>
-                          );
-                        })}
-                      </tbody>
+                                  )}
+                                </tbody>
+                              );
+                            })}
+                            {padBottom > 0 && (
+                              <tbody aria-hidden="true"><tr style={{ height: `${padBottom}px` }}><td colSpan={vColSpan} style={{ padding: 0, border: 0 }} /></tr></tbody>
+                            )}
+                          </>
+                        );
+                      })()}
                     </table>
                   </div>
                 )}

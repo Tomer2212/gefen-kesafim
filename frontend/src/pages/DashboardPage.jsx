@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
 import axios from "axios";
@@ -1917,6 +1918,70 @@ function BulkAccessModal({ schools, users, loadingUsers, onClose, onSaved }) {
   );
 }
 
+// One row of the schools table. Memoized so that, with virtualization, the ~40 mounted rows
+// don't re-render on unrelated parent state changes (e.g. a filter popover opening).
+const DashboardSchoolRow = memo(function DashboardSchoolRow({
+  school, combo, isSelected, selectMode, canOpenSchoolCard, advancedFilterActive,
+  visibleColOrder, meetingsStats, activeSummaryBudget, goalColumnsByKey, onOpen, onToggleSelect,
+}) {
+  return (
+    <tr
+      className={`group border-b border-slate-100 transition-colors ${isSelected ? "bg-blue-50" : "hover:bg-slate-50"} ${(selectMode || !canOpenSchoolCard) ? "cursor-default" : "cursor-pointer"}`}
+      onClick={() => { if (!selectMode && canOpenSchoolCard) onOpen(school); }}
+      role={(selectMode || !canOpenSchoolCard) ? undefined : "button"}
+      tabIndex={(selectMode || !canOpenSchoolCard) ? undefined : 0}
+      aria-label={(selectMode || !canOpenSchoolCard) ? undefined : `פתח פרטי בית ספר ${school.name}`}
+      onKeyDown={e => !selectMode && canOpenSchoolCard && e.key === "Enter" && onOpen(school)}
+    >
+      {selectMode && (
+        <td className={`px-3 py-3 border-l border-slate-100 text-center ${isSelected ? "bg-blue-50" : "bg-white group-hover:bg-slate-50"}`}
+          style={{ position: "sticky", right: 0, zIndex: 5 }}>
+          <input
+            type="checkbox"
+            checked={isSelected}
+            onChange={() => onToggleSelect(school.id)}
+            onClick={e => e.stopPropagation()}
+            className="w-4 h-4 rounded accent-blue-600"
+            aria-label={`בחר ${school.name}`}
+          />
+        </td>
+      )}
+      <td className={`px-5 py-3 border-l border-slate-100 ${isSelected ? "bg-blue-50" : "bg-white group-hover:bg-slate-50"}`}
+        style={{ position: "sticky", right: selectMode ? "2.5rem" : 0, zIndex: 5 }}>
+        <span className="font-semibold text-slate-900 inline-flex items-center gap-1.5">
+          {!canOpenSchoolCard && (
+            <LockedCardTooltip text="אין הרשאות לצפייה בכרטיס בית הספר.">
+              <svg aria-label="אין הרשאות לצפייה בכרטיס בית הספר" role="img"
+                className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" viewBox="0 0 24 24"
+                fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <title>אין הרשאות לצפייה בכרטיס בית הספר.</title>
+                <rect x="3" y="11" width="18" height="11" rx="2" />
+                <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+              </svg>
+            </LockedCardTooltip>
+          )}
+          {school.name}
+        </span>
+      </td>
+      {advancedFilterActive && (
+        <td className="px-4 py-3 border-l border-slate-100 text-slate-600">
+          <div className="flex flex-col gap-0.5 text-xs">
+            <span className="font-medium text-slate-700">
+              {combo.budget_name} · {DIVISION_LABEL[combo.division_type] || combo.division_type}
+            </span>
+          </div>
+        </td>
+      )}
+      {visibleColOrder.map((key, i) => (
+        <td key={key}
+          className={`px-5 py-3 text-slate-600${(i < visibleColOrder.length - 1 || selectMode) ? " border-l border-slate-100" : ""}`}>
+          {renderCell(school, key, meetingsStats, combo, activeSummaryBudget, goalColumnsByKey)}
+        </td>
+      ))}
+    </tr>
+  );
+});
+
 export default function DashboardPage() {
   const navigate = useNavigate();
   const [schools, setSchools] = useState([]);
@@ -2359,7 +2424,7 @@ export default function DashboardPage() {
   const activeFilterCount = activeChipCount + activeQueryCount + advancedActiveCount + columnFilterActiveCount;
   const hasAnyFilter = !!searchQuery.trim() || activeFilterCount > 0;
 
-  const filteredSchools = schools.filter(school => {
+  const filteredSchools = useMemo(() => schools.filter(school => {
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
       const matchName = school.name?.toLowerCase().includes(q);
@@ -2370,7 +2435,7 @@ export default function DashboardPage() {
       if (!matchName && !matchSymbol && !matchAdvisor) return false;
     }
     return applyFilters(school, filters, queries);
-  });
+  }), [schools, searchQuery, filters, queries]);
 
   // When a checks/goals filter (or a visible summary column) is active, split each school
   // into one row per division+budget combination that matches — otherwise keep one row per
@@ -2378,7 +2443,7 @@ export default function DashboardPage() {
   // narrow combos down to the active summary budget so turning on a column alone doesn't
   // explode a school into one row per unrelated budget — only per division (e.g. six-year
   // schools running "גפן" separately for each division).
-  const baseDisplayRows = !advancedFilterActive
+  const baseDisplayRows = useMemo(() => (!advancedFilterActive
     ? filteredSchools.map(school => ({
         school, combo: null, rowKey: school.id,
         filterValues: computeFilterValues(school, null, meetingsStats, activeSummaryBudget, goalColumns),
@@ -2405,7 +2470,9 @@ export default function DashboardPage() {
           rowKey: `${school.id}:${combo.division_type}:${combo.budget_name}`,
           filterValues: computeFilterValues(school, combo, meetingsStats, activeSummaryBudget, goalColumns),
         }));
-      });
+      })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  ), [filteredSchools, advancedFilterActive, meetingsStats, activeSummaryBudget, goalColumns, hasVisibleSummaryCol, budgetTypes, goalConditions]);
 
   // Excel-style per-column header filters/sort, layered on top of baseDisplayRows — all
   // active column filters combine with AND (order-independent), then the stacked
@@ -2421,6 +2488,23 @@ export default function DashboardPage() {
     () => [...new Set(finalDisplayRows.map(r => r.school.id))],
     [finalDisplayRows]
   );
+
+  // Row virtualization for the schools table — keeps only ~40 <tr>s in the DOM regardless of
+  // how many rows the filters produce (a six-year school can split into several combo rows),
+  // so the table renders and scrolls smoothly at any org size.
+  const dashRowVirtualizer = useVirtualizer({
+    count: finalDisplayRows.length,
+    getScrollElement: () => tableScrollRef.current,
+    estimateSize: () => 53,
+    overscan: 12,
+    getItemKey: useCallback(i => finalDisplayRows[i]?.rowKey ?? i, [finalDisplayRows]),
+  });
+  const openSchoolCard = useCallback((school) => {
+    navigate(`/school/${school.id}`, { state: { school } });
+  }, [navigate]);
+  const toggleSelectOne = useCallback((id) => {
+    setSelectedIds(prev => ({ ...prev, [id]: !prev[id] }));
+  }, []);
   // Distinct schools actually shown in the table — after ALL filters, including the
   // per-column header filters (which live in finalDisplayRows, NOT in filteredSchools).
   // Counts, exports and bulk actions use these so they never disagree with the table.
@@ -3013,68 +3097,45 @@ export default function DashboardPage() {
                           })}
                         </tr>
                       </thead>
-                      <tbody>
-                        {finalDisplayRows.map(({ school, combo, rowKey }) => {
-                          const isSelected = !!selectedIds[school.id];
-                          return (
-                            <tr
-                              key={rowKey}
-                              className={`group border-b border-slate-100 transition-colors ${isSelected ? "bg-blue-50" : "hover:bg-slate-50"} ${(selectMode || !canOpenSchoolCard) ? "cursor-default" : "cursor-pointer"}`}
-                              onClick={() => { if (!selectMode && canOpenSchoolCard) navigate(`/school/${school.id}`, { state: { school } }); }}
-                              role={(selectMode || !canOpenSchoolCard) ? undefined : "button"}
-                              tabIndex={(selectMode || !canOpenSchoolCard) ? undefined : 0}
-                              aria-label={(selectMode || !canOpenSchoolCard) ? undefined : `פתח פרטי בית ספר ${school.name}`}
-                              onKeyDown={e => !selectMode && canOpenSchoolCard && e.key === "Enter" && navigate(`/school/${school.id}`, { state: { school } })}
-                            >
-                              {selectMode && (
-                                <td className={`px-3 py-3 border-l border-slate-100 text-center ${isSelected ? "bg-blue-50" : "bg-white group-hover:bg-slate-50"}`}
-                                  style={{ position: "sticky", right: 0, zIndex: 5 }}>
-                                  <input
-                                    type="checkbox"
-                                    checked={isSelected}
-                                    onChange={() => setSelectedIds(prev => ({ ...prev, [school.id]: !prev[school.id] }))}
-                                    onClick={e => e.stopPropagation()}
-                                    className="w-4 h-4 rounded accent-blue-600"
-                                    aria-label={`בחר ${school.name}`}
+                      {(() => {
+                        const vItems = dashRowVirtualizer.getVirtualItems();
+                        const totalH = dashRowVirtualizer.getTotalSize();
+                        const padTop = vItems.length ? vItems[0].start : 0;
+                        const padBottom = vItems.length ? totalH - vItems[vItems.length - 1].end : 0;
+                        const vColSpan = visibleColOrder.length + (advancedFilterActive ? 1 : 0) + (selectMode ? 1 : 0) + 1;
+                        return (
+                          <>
+                            {padTop > 0 && (
+                              <tbody aria-hidden="true"><tr style={{ height: `${padTop}px` }}><td colSpan={vColSpan} style={{ padding: 0, border: 0 }} /></tr></tbody>
+                            )}
+                            {vItems.map(vi => {
+                              const row = finalDisplayRows[vi.index];
+                              if (!row) return null;
+                              return (
+                                <tbody key={row.rowKey} data-index={vi.index} ref={dashRowVirtualizer.measureElement}>
+                                  <DashboardSchoolRow
+                                    school={row.school}
+                                    combo={row.combo}
+                                    isSelected={!!selectedIds[row.school.id]}
+                                    selectMode={selectMode}
+                                    canOpenSchoolCard={canOpenSchoolCard}
+                                    advancedFilterActive={advancedFilterActive}
+                                    visibleColOrder={visibleColOrder}
+                                    meetingsStats={meetingsStats}
+                                    activeSummaryBudget={activeSummaryBudget}
+                                    goalColumnsByKey={goalColumnsByKey}
+                                    onOpen={openSchoolCard}
+                                    onToggleSelect={toggleSelectOne}
                                   />
-                                </td>
-                              )}
-                              <td className={`px-5 py-3 border-l border-slate-100 ${isSelected ? "bg-blue-50" : "bg-white group-hover:bg-slate-50"}`}
-                                style={{ position: "sticky", right: selectMode ? "2.5rem" : 0, zIndex: 5 }}>
-                                <span className="font-semibold text-slate-900 inline-flex items-center gap-1.5">
-                                  {!canOpenSchoolCard && (
-                                    <LockedCardTooltip text="אין הרשאות לצפייה בכרטיס בית הספר.">
-                                      <svg aria-label="אין הרשאות לצפייה בכרטיס בית הספר" role="img"
-                                        className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" viewBox="0 0 24 24"
-                                        fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                        <title>אין הרשאות לצפייה בכרטיס בית הספר.</title>
-                                        <rect x="3" y="11" width="18" height="11" rx="2" />
-                                        <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-                                      </svg>
-                                    </LockedCardTooltip>
-                                  )}
-                                  {school.name}
-                                </span>
-                              </td>
-                              {advancedFilterActive && (
-                                <td className="px-4 py-3 border-l border-slate-100 text-slate-600">
-                                  <div className="flex flex-col gap-0.5 text-xs">
-                                    <span className="font-medium text-slate-700">
-                                      {combo.budget_name} · {DIVISION_LABEL[combo.division_type] || combo.division_type}
-                                    </span>
-                                  </div>
-                                </td>
-                              )}
-                              {visibleColOrder.map((key, i) => (
-                                <td key={key}
-                                  className={`px-5 py-3 text-slate-600${(i < visibleColOrder.length - 1 || selectMode) ? " border-l border-slate-100" : ""}`}>
-                                  {renderCell(school, key, meetingsStats, combo, activeSummaryBudget, goalColumnsByKey)}
-                                </td>
-                              ))}
-                            </tr>
-                          );
-                        })}
-                      </tbody>
+                                </tbody>
+                              );
+                            })}
+                            {padBottom > 0 && (
+                              <tbody aria-hidden="true"><tr style={{ height: `${padBottom}px` }}><td colSpan={vColSpan} style={{ padding: 0, border: 0 }} /></tr></tbody>
+                            )}
+                          </>
+                        );
+                      })()}
                     </table>
                   </div>
                 )}
