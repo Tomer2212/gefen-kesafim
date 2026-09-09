@@ -41,10 +41,17 @@ function SpreadsheetIcon() {
   );
 }
 
-function fieldConfigForMode(mode) {
+function fieldConfigForMode(mode, endTimeMethod) {
   return MEETING_IMPORT_FIELD_CONFIG.filter(f => {
     if (mode === "past" && f.key === "advisor_name_or_email") return false;
     if (mode === "future" && f.key === "advisor_name_text") return false;
+    // "שעת סיום" and the duration-based fields are mutually exclusive input methods for the
+    // same underlying value — only the fields matching the chosen method are ever shown.
+    if (f.key === "end_time" && endTimeMethod === "duration") return false;
+    if (f.key === "planned_duration_hours" && endTimeMethod !== "duration") return false;
+    // "זמן פגישה בפועל" only makes sense for past documentation — a future meeting hasn't
+    // happened yet, so it has no "actual" duration.
+    if (f.key === "actual_duration_hours" && (endTimeMethod !== "duration" || mode !== "past")) return false;
     return true;
   });
 }
@@ -98,6 +105,12 @@ function buildRowsFromSheet(mode, headers, dataRows, mapping) {
     if (typeof raw === "number") return excelSerialToTimeHHMM(raw);
     return cellDisplayValue(raw);
   }
+  // Descriptive fields (status / meeting_service_type / meeting_type) are only worth forcing
+  // onto this system's closed option lists for future meetings, which drive real automations
+  // (Outlook sync, advisor auto-reassignment by service type). Past documentation gets copied
+  // verbatim — the org's own historical wording is kept as-is rather than silently discarded
+  // when it doesn't match a recognized label.
+  const isPast = mode === "past";
   return dataRows.map((row, i) => ({
     row_index: i,
     meeting_date: normalizeImportDate(dateCell(row, "meeting_date")) || null,
@@ -105,28 +118,32 @@ function buildRowsFromSheet(mode, headers, dataRows, mapping) {
     school_symbol: cell(row, "school_symbol") || null,
     start_time: timeCell(row, "start_time") || null,
     end_time: timeCell(row, "end_time") || null,
+    planned_duration_hours: cell(row, "planned_duration_hours") || null,
+    actual_duration_hours: cell(row, "actual_duration_hours") || null,
     stage_scope: normalizeImportStageScope(cell(row, "stage_scope")),
     advisor_name_or_email: mode === "future" ? (cell(row, "advisor_name_or_email") || null) : null,
     advisor_name_text: mode === "past" ? (cell(row, "advisor_name_text") || null) : null,
-    meeting_type: normalizeImportMeetingType(cell(row, "meeting_type")),
-    meeting_service_type: normalizeImportServiceType(cell(row, "meeting_service_type")),
+    meeting_type: isPast ? (cell(row, "meeting_type") || null) : normalizeImportMeetingType(cell(row, "meeting_type")),
+    meeting_service_type: isPast ? (cell(row, "meeting_service_type") || null) : normalizeImportServiceType(cell(row, "meeting_service_type")),
     participant_name: cell(row, "participant_name") || null,
     participant_phone: cell(row, "participant_phone") || null,
     participant_email: cell(row, "participant_email") || null,
     notes: cell(row, "notes") || null,
-    status: normalizeImportStatus(cell(row, "status")),
+    status: isPast ? (cell(row, "status") || null) : normalizeImportStatus(cell(row, "status")),
   }));
 }
 
 export default function ImportMeetingsModal({ orgUsers, academicYear, onClose, onImported }) {
   const { ref, handleKeyDown } = useFocusTrap(onClose);
-  const [step, setStep] = useState("mode"); // mode | upload | mapping | validating | problems
+  const [step, setStep] = useState("mode"); // mode | upload | end_method | mapping | validating | problems
   const [mode, setMode] = useState(null);
   const [sheetData, setSheetData] = useState(null); // { headers, previewRow, dataRows }
   const [validateRows, setValidateRows] = useState(null);
   const [error, setError] = useState(null);
   const [selectedFile, setSelectedFile] = useState(null);
   const [dragOver, setDragOver] = useState(false);
+  const [endTimeMethod, setEndTimeMethod] = useState(null); // "direct" | "duration"
+  const [durationPriority, setDurationPriority] = useState("planned_first"); // "planned_first" | "actual_first"
   const inputRef = useRef();
 
   function readFile(file) {
@@ -182,12 +199,22 @@ export default function ImportMeetingsModal({ orgUsers, academicYear, onClose, o
     setError(null);
   }
 
+  const showActualDuration = endTimeMethod === "duration" && mode === "past";
+  const durationPriorityForRequest = endTimeMethod === "duration" && mode === "past" ? durationPriority : null;
+
   async function handleMappingConfirm(mapping) {
+    // ImportMappingModal's generic required/optional model can't express "at least one of
+    // these two" — enforced here instead: when the duration method is chosen and both
+    // planned/actual columns are available (past mode), at least one must be mapped.
+    if (showActualDuration && mapping.planned_duration_hours === null && mapping.actual_duration_hours === null) {
+      setError("יש למפות לפחות אחת מהעמודות: 'זמן פגישה מתוכנן' או 'זמן פגישה בפועל'");
+      return;
+    }
     const rows = buildRowsFromSheet(mode, sheetData.headers, sheetData.dataRows, mapping);
     setStep("validating");
     setError(null);
     try {
-      const res = await axios.post("/schools/meetings/import/validate", { mode, rows });
+      const res = await axios.post("/schools/meetings/import/validate", { mode, duration_priority: durationPriorityForRequest, rows });
       setValidateRows(res.data.rows);
       setStep("problems");
     } catch (e) {
@@ -200,6 +227,7 @@ export default function ImportMeetingsModal({ orgUsers, academicYear, onClose, o
     return (
       <MeetingImportProblemsModal
         mode={mode}
+        durationPriority={durationPriorityForRequest}
         rows={validateRows}
         orgUsers={orgUsers}
         academicYear={academicYear}
@@ -218,10 +246,11 @@ export default function ImportMeetingsModal({ orgUsers, academicYear, onClose, o
         headers={sheetData.headers}
         previewRow={sheetData.previewRow}
         totalRows={sheetData.dataRows.length}
-        fieldConfig={fieldConfigForMode(mode)}
+        fieldConfig={fieldConfigForMode(mode, endTimeMethod)}
         confirmLabel={`בדוק ${sheetData.dataRows.length} שורות`}
         onConfirm={handleMappingConfirm}
         onCancel={onClose}
+        error={error}
       />
     );
   }
@@ -232,8 +261,8 @@ export default function ImportMeetingsModal({ orgUsers, academicYear, onClose, o
         className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl mx-4">
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
           <div className="flex items-center gap-2">
-            {step === "upload" && (
-              <button type="button" onClick={() => setStep("mode")} aria-label="חזרה" className="text-slate-400 hover:text-slate-600">
+            {(step === "upload" || step === "end_method") && (
+              <button type="button" onClick={() => setStep(step === "upload" ? "mode" : "upload")} aria-label="חזרה" className="text-slate-400 hover:text-slate-600">
                 <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M9 6l6 6-6 6" />
                 </svg>
@@ -317,7 +346,54 @@ export default function ImportMeetingsModal({ orgUsers, academicYear, onClose, o
 
             <div className="flex items-center justify-between">
               <button type="button" onClick={onClose} className="text-sm px-4 py-2 rounded-xl font-medium text-slate-500 hover:bg-slate-50">ביטול</button>
-              <button type="button" disabled={!sheetData} onClick={() => setStep("mapping")}
+              <button type="button" disabled={!sheetData} onClick={() => setStep("end_method")}
+                className="text-sm px-5 py-2.5 rounded-xl font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+                המשך
+              </button>
+            </div>
+          </div>
+        )}
+
+        {step === "end_method" && (
+          <div className="p-6 space-y-4">
+            <p className="text-sm text-slate-600">כיצד לקבוע את שעת הסיום של כל פגישה?</p>
+            <div className="grid grid-cols-2 gap-3" role="group" aria-label="שיטת קביעת שעת סיום">
+              <button type="button" onClick={() => setEndTimeMethod("direct")}
+                className={`text-right border rounded-xl p-4 transition-colors ${endTimeMethod === "direct" ? "border-blue-400 bg-blue-50/50" : "border-slate-200 hover:border-blue-300"}`}>
+                <div className="font-semibold text-slate-800 mb-1">עמודת "שעת סיום"</div>
+                <div className="text-sm text-slate-500">ממפים עמודה בקובץ שמכילה ישירות את שעת הסיום של כל פגישה.</div>
+              </button>
+              <button type="button" onClick={() => setEndTimeMethod("duration")}
+                className={`text-right border rounded-xl p-4 transition-colors ${endTimeMethod === "duration" ? "border-blue-400 bg-blue-50/50" : "border-slate-200 hover:border-blue-300"}`}>
+                <div className="font-semibold text-slate-800 mb-1">חישוב ממשך הפגישה</div>
+                <div className="text-sm text-slate-500">ממפים עמודה עם מספר שעות (למשל 0.25 לרבע שעה) — שעת הסיום תחושב אוטומטית משעת ההתחלה.</div>
+              </button>
+            </div>
+
+            {endTimeMethod === "duration" && mode === "past" && (
+              <div className="border border-slate-200 rounded-xl p-3.5 space-y-2 bg-slate-50/50">
+                <p className="text-sm text-slate-600">
+                  במצב "תיעוד פגישות עבר" ניתן למפות גם "זמן פגישה מתוכנן" וגם "זמן פגישה בפועל" (אותו עיקרון חישוב). כשלשורה יש ערך בשתיהן, איזו מהן קובעת?
+                </p>
+                <div className="flex gap-2" role="radiogroup" aria-label="עדיפות בין זמן מתוכנן לזמן בפועל">
+                  {[
+                    { value: "planned_first", label: "קודם: זמן פגישה מתוכנן" },
+                    { value: "actual_first", label: "קודם: זמן פגישה בפועל" },
+                  ].map(o => (
+                    <button key={o.value} type="button" role="radio" aria-checked={durationPriority === o.value}
+                      onClick={() => setDurationPriority(o.value)}
+                      className={`text-sm px-3 py-1.5 rounded-lg border font-medium transition-colors ${durationPriority === o.value ? "border-blue-400 bg-blue-50 text-blue-700" : "border-slate-200 text-slate-600 hover:border-slate-300"}`}>
+                      {o.label}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-slate-400">כשהעדיפות הראשונה ריקה בשורה מסוימת, המערכת תשתמש בשנייה במקומה.</p>
+              </div>
+            )}
+
+            <div className="flex items-center justify-between">
+              <button type="button" onClick={onClose} className="text-sm px-4 py-2 rounded-xl font-medium text-slate-500 hover:bg-slate-50">ביטול</button>
+              <button type="button" disabled={!endTimeMethod} onClick={() => setStep("mapping")}
                 className="text-sm px-5 py-2.5 rounded-xl font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
                 המשך למיפוי עמודות
               </button>

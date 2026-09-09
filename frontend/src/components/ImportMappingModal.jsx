@@ -64,7 +64,7 @@ function FieldMappingRow({ label, hint, required, ranked, headers, previewRow, v
   );
 }
 
-export function ImportMappingModal({ headers, previewRow, totalRows, fieldConfig, confirmLabel, onConfirm, onCancel }) {
+export function ImportMappingModal({ headers, previewRow, totalRows, fieldConfig, confirmLabel, onConfirm, onCancel, error }) {
   const { ref, handleKeyDown } = useFocusTrap(onCancel);
   const [mapping, setMapping] = useState(() =>
     Object.fromEntries(fieldConfig.map(f => [f.key, f.ranked ? Array(f.ranked).fill(null) : null]))
@@ -150,11 +150,14 @@ export function ImportMappingModal({ headers, previewRow, totalRows, fieldConfig
           </div>
         </div>
 
-        <div className="px-6 py-4 border-t border-slate-100 flex items-center gap-3 flex-shrink-0">
-          <button onClick={handleConfirm} className="btn-blue text-sm px-5 py-2">
-            {confirmLabel}
-          </button>
-          <button onClick={onCancel} className="btn-ghost text-sm px-5 py-2">ביטול</button>
+        <div className="px-6 py-4 border-t border-slate-100 flex-shrink-0">
+          {error && <p role="alert" className="text-sm text-red-600 mb-2">{error}</p>}
+          <div className="flex items-center gap-3">
+            <button onClick={handleConfirm} className="btn-blue text-sm px-5 py-2">
+              {confirmLabel}
+            </button>
+            <button onClick={onCancel} className="btn-ghost text-sm px-5 py-2">ביטול</button>
+          </div>
         </div>
       </div>
     </div>
