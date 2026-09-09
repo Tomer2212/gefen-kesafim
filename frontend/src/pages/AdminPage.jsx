@@ -2027,6 +2027,7 @@ export default function AdminPage() {
   const [showSchoolForm, setShowSchoolForm] = useState(false);
   const [savingSchool, setSavingSchool] = useState(false);
   const [triedSave, setTriedSave] = useState(false);
+  const [schoolConflict, setSchoolConflict] = useState(null); // {existing_school_id, existing_school_name, existing_school_status} from a 409
   const [importResult, setImportResult] = useState(null);
   const [importing, setImporting] = useState(false);
   const [importMappingData, setImportMappingData] = useState(null);
@@ -2641,6 +2642,7 @@ export default function AdminPage() {
 
   async function saveSchool() {
     setTriedSave(true);
+    setSchoolConflict(null);
     if (!schoolForm.name || validateSymbol(schoolForm.symbol)) return;
     if (!editingSchool && schools.some(s => s.symbol === schoolForm.symbol)) return;
     if (!editingSchool && !schoolStage) return;
@@ -2700,7 +2702,17 @@ export default function AdminPage() {
         }
         setOriginalTypedAdvisorIds(draftTypedAdvisorIds);
       } else {
-        const res = await axios.post("/schools/", { ...schoolForm, ...chativaSync, stage: schoolStage, student_count: studentCountValue });
+        let res;
+        try {
+          res = await axios.post("/schools/", { ...schoolForm, ...chativaSync, stage: schoolStage, student_count: studentCountValue });
+        } catch (err) {
+          const detail = err?.response?.data?.detail;
+          if (err?.response?.status === 409 && detail?.code === "duplicate_symbol") {
+            setSchoolConflict(detail);
+            return false;
+          }
+          throw err;
+        }
         const newId = res.data.id;
         const stageOption = SCHOOL_STAGE_OPTIONS.find(s => s.value === schoolStage);
         if (stageOption?.divisionType) {
@@ -2784,6 +2796,7 @@ export default function AdminPage() {
       student_count: school.student_count ?? "",
     });
     setTriedSave(false);
+    setSchoolConflict(null);
     setShowSchoolForm(true);
     window.scrollTo({ top: 0, behavior: "smooth" });
     axios.get(`/schools/${school.id}/advisors`).then(res => {
@@ -2837,6 +2850,7 @@ export default function AdminPage() {
     setDraftTypedAdvisorIds(EMPTY_TYPED_ADVISOR_IDS);
     setOriginalTypedAdvisorIds(EMPTY_TYPED_ADVISOR_IDS);
     setYearAdminForm(EMPTY_YEAR_ADMIN_FORM);
+    setSchoolConflict(null);
     setShowSchoolForm(true);
     loadUsers();
   }
@@ -3292,7 +3306,7 @@ export default function AdminPage() {
   };
 
   // Parse one mapped Excel row into a structured plan row (no network calls, no writes).
-  function parseImportRow(row, i, mapping, idx) {
+  function parseImportRow(row, i, mapping, idx, existingBySymbol) {
     const school = {};
     const yearAdmin = {};
     const advisorRaw = { gefen: "", current: "", district: "" };
@@ -3367,8 +3381,15 @@ export default function AdminPage() {
     const financeSoftware = matchFinanceSoftware(financeSoftwareRaw);
     school.finance_software = financeSoftware.value;
 
+    // A symbol matching an existing school (active OR in the recycle bin) must never silently
+    // create a duplicate — surfaced as a problem requiring an explicit "update the existing
+    // school instead" confirmation (or row removal), mirroring the server-side 409 that
+    // create_school() now raises for the exact same collision on any other creation path.
+    const duplicateSymbol = school.symbol ? existingBySymbol?.get(school.symbol) : null;
+
     const problems = [];
     if (!school.name || !school.symbol) problems.push({ kind: "missing_identity" });
+    if (duplicateSymbol) problems.push({ kind: "duplicate_symbol", existing: duplicateSymbol });
     if (!coordinator || !coordinatorName) {
       problems.push({ kind: "coordinator_issue", suggestedRole: coordinator || "", suggestedName: coordinatorName, raw: coordinatorRaw });
     }
@@ -3385,7 +3406,7 @@ export default function AdminPage() {
       rowIndex: i, excelRow: i + 2,
       school, yearAdmin, coordinatorRaw, coordinator, coordinatorName, coordinatorVia: coordRes?.via || null, generalNotes,
       financeSoftwareRaw, financeSoftwareIssue: financeSoftware.status === "none",
-      fieldIssues, advisorRaw, advisorBase, advisorProblems, requiredTypes, problems,
+      fieldIssues, advisorRaw, advisorBase, advisorProblems, requiredTypes, problems, duplicateSymbol,
       name: school.name || "", symbol: school.symbol || "",
     };
   }
@@ -3423,7 +3444,10 @@ export default function AdminPage() {
       setImportProgressMsg("");
     }
     const idx = buildUserMatchIndex(userList);
-    const rows = dataRows.map((row, i) => parseImportRow(row, i, mapping, idx));
+    // schools is already loaded with include_deleted=true (loadSchools()), so this also
+    // catches a symbol belonging to a recycle-bin school, not just an active one.
+    const existingBySymbol = new Map(schools.filter(s => s.symbol).map(s => [s.symbol, s]));
+    const rows = dataRows.map((row, i) => parseImportRow(row, i, mapping, idx, existingBySymbol));
     if (rows.some(r => r.problems.length > 0)) {
       setImportPlan({ rows });
       return;
@@ -3455,13 +3479,22 @@ export default function AdminPage() {
         ...(r.final.advisorIdsByType?.current || []),
         ...(r.final.advisorIdsByType?.district || []),
       ])];
-      if (!school.name || !school.symbol || !school.meeting_coordinator || !school[COORDINATOR_NAME_FIELD[school.meeting_coordinator]]) {
+      const existingSchoolId = r.final.existingSchoolId;
+      // Updating an existing (duplicate-symbol) school never needs a meeting_coordinator
+      // re-supplied — PUT only overwrites whatever fields this row actually provides.
+      if (!existingSchoolId && (!school.name || !school.symbol || !school.meeting_coordinator || !school[COORDINATOR_NAME_FIELD[school.meeting_coordinator]])) {
         errors.push(`שורה ${r.excelRow}: חסרים פרטי חובה (שם / סמל / מתאם פגישות) — לא יובאה`);
         continue;
       }
       try {
-        const res = await axios.post("/schools/", school);
-        const newId = res.data.id;
+        let newId;
+        if (existingSchoolId) {
+          await axios.put(`/schools/${existingSchoolId}`, school);
+          newId = existingSchoolId;
+        } else {
+          const res = await axios.post("/schools/", school);
+          newId = res.data.id;
+        }
         imported++;
         const yearAdmin = r.final.yearAdmin || r.yearAdmin || {};
         if (Object.values(yearAdmin).some(v => v !== null && v !== undefined && v !== "")) {
@@ -3490,7 +3523,8 @@ export default function AdminPage() {
           }
         }
       } catch (err) {
-        const detail = err.response?.data?.detail || "שגיאה לא ידועה";
+        const rawDetail = err.response?.data?.detail;
+        const detail = typeof rawDetail === "string" ? rawDetail : (rawDetail?.message || "שגיאה לא ידועה");
         errors.push(`שורה ${r.excelRow} (${school.name}): ${detail}`);
       }
     }
@@ -3855,6 +3889,18 @@ export default function AdminPage() {
                       {triedSave && !schoolForm.symbol && <span className="text-xs text-red-500 block mt-0.5" role="alert">שדה חובה</span>}
                       {!editingSchool && triedSave && schoolForm.symbol && !symbolError && schools.some(s => s.symbol === schoolForm.symbol) && (
                         <span className="text-xs text-red-500 block mt-0.5" role="alert">סמל זה כבר קיים בארגון</span>
+                      )}
+                      {schoolConflict && (
+                        <div role="alert" className="text-xs text-red-600 mt-1 flex items-center gap-2 flex-wrap">
+                          <span>
+                            בית ספר עם סמל זה כבר קיים — <b>{schoolConflict.existing_school_name}</b>
+                            {schoolConflict.existing_school_status === "pending_deletion" ? " (בסל מחזור)" : ""}
+                          </span>
+                          <button type="button" onClick={() => navigate(`/school/${schoolConflict.existing_school_id}`)}
+                            className="underline font-medium hover:text-red-700">
+                            מעבר לכרטיס בית הספר
+                          </button>
+                        </div>
                       )}
                     </div>
 

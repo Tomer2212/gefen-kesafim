@@ -339,6 +339,7 @@ export default function AddSchoolPage() {
   const [triedSave, setTriedSave]   = useState(false);
   const [savingSchool, setSaving]   = useState(false);
   const [saveError, setSaveError]   = useState("");
+  const [schoolConflict, setSchoolConflict] = useState(null); // {existing_school_id, existing_school_name, existing_school_status} from a 409
 
   // Data
   const [users, setUsers]                   = useState([]);
@@ -403,9 +404,11 @@ export default function AddSchoolPage() {
           }
         }
 
-        // Load existing symbols for duplicate check
+        // Load existing symbols for duplicate check — include_deleted so a symbol belonging
+        // to a recycle-bin (pending_deletion) school is caught by this quick client-side
+        // check too, not just by the server-side 409 on submit.
         try {
-          const sRes = await axios.get("/schools/");
+          const sRes = await axios.get("/schools/", { params: { include_deleted: true } });
           setExistingSymbols((sRes.data || []).map(s => s.symbol).filter(Boolean));
         } catch {}
 
@@ -421,6 +424,7 @@ export default function AddSchoolPage() {
   async function saveSchool() {
     setTriedSave(true);
     setSaveError("");
+    setSchoolConflict(null);
     if (!schoolForm.name || validateSymbol(schoolForm.symbol)) return;
     if (existingSymbols.includes(schoolForm.symbol)) return;
     if (!schoolStage) return;
@@ -455,7 +459,17 @@ export default function AddSchoolPage() {
       const studentCountValue = schoolForm.student_count === "" || schoolForm.student_count == null
         ? null
         : parseInt(schoolForm.student_count, 10);
-      const res    = await axios.post("/schools/", { ...schoolForm, ...chativaSync, stage: schoolStage, student_count: studentCountValue });
+      let res;
+      try {
+        res = await axios.post("/schools/", { ...schoolForm, ...chativaSync, stage: schoolStage, student_count: studentCountValue });
+      } catch (err) {
+        const detail = err?.response?.data?.detail;
+        if (err?.response?.status === 409 && detail?.code === "duplicate_symbol") {
+          setSchoolConflict(detail);
+          return false;
+        }
+        throw err;
+      }
       const newId  = res.data.id;
       const option = SCHOOL_STAGE_OPTIONS.find(s => s.value === schoolStage);
 
@@ -558,6 +572,18 @@ export default function AddSchoolPage() {
                 {triedSave && !schoolForm.symbol && <span className="text-xs text-red-500 block mt-0.5" role="alert">שדה חובה</span>}
                 {triedSave && schoolForm.symbol && !symbolError && existingSymbols.includes(schoolForm.symbol) && (
                   <span className="text-xs text-red-500 block mt-0.5" role="alert">סמל זה כבר קיים בארגון</span>
+                )}
+                {schoolConflict && (
+                  <div role="alert" className="text-xs text-red-600 mt-1 flex items-center gap-2 flex-wrap">
+                    <span>
+                      בית ספר עם סמל זה כבר קיים — <b>{schoolConflict.existing_school_name}</b>
+                      {schoolConflict.existing_school_status === "pending_deletion" ? " (בסל מחזור)" : ""}
+                    </span>
+                    <button type="button" onClick={() => navigate(`/school/${schoolConflict.existing_school_id}`)}
+                      className="underline font-medium hover:text-red-700">
+                      מעבר לכרטיס בית הספר
+                    </button>
+                  </div>
                 )}
               </div>
 

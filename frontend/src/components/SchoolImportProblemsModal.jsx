@@ -97,6 +97,7 @@ export function SchoolImportProblemsModal({ rows, users, requiredTypesFor, onCom
       fields: {},  // field key -> resolved value (select string / number|null / minutes|null / array)
       drafts: {},  // field key -> working value before "אישור"
       picks: {}, adds: { gefen: [], current: [], district: [] },
+      confirmUpdateDuplicate: false, // school_not_found-style: must explicitly confirm "update the existing school" before this row can proceed
     };
   }
   const getRes = (row) => res[row.rowIndex] || defaultRes(row);
@@ -154,6 +155,7 @@ export function SchoolImportProblemsModal({ rows, users, requiredTypesFor, onCom
     const r = getRes(row);
     const items = [];
     if ((!row.name || !row.symbol) && !(r.name.trim() && r.symbol.trim())) items.push("identity");
+    if (row.duplicateSymbol && !r.confirmUpdateDuplicate) items.push("duplicate_symbol");
     if ((!row.coordinator || !row.coordinatorName) && !(r.coordRole && r.coordName.trim())) items.push("coordinator");
     if (row.financeSoftwareIssue && r.financeSoftware === undefined) items.push("finance_software");
     for (const fi of (row.fieldIssues || [])) {
@@ -171,6 +173,20 @@ export function SchoolImportProblemsModal({ rows, users, requiredTypesFor, onCom
   const remainingRows = problemRows.filter(r => rowUnresolved(r).length > 0);
   const allClear = remainingRows.length === 0;
   const includedCount = rows.length - excluded.size;
+
+  const unresolvedDuplicateRows = problemRows.filter(row =>
+    !excluded.has(row.rowIndex) && row.duplicateSymbol && !getRes(row).confirmUpdateDuplicate
+  );
+  function confirmAllDuplicates() {
+    unresolvedDuplicateRows.forEach(row => patchRes(row, { confirmUpdateDuplicate: true }));
+  }
+  function excludeAllDuplicates() {
+    setExcluded(prev => {
+      const next = new Set(prev);
+      unresolvedDuplicateRows.forEach(row => next.add(row.rowIndex));
+      return next;
+    });
+  }
 
   function toggleExcluded(rowIndex) {
     setExcluded(prev => {
@@ -212,6 +228,7 @@ export function SchoolImportProblemsModal({ rows, users, requiredTypesFor, onCom
                 current: finalIds(row, "current"),
                 district: finalIds(row, "district"),
               },
+              existingSchoolId: row.duplicateSymbol ? row.duplicateSymbol.id : undefined,
             },
           };
         });
@@ -238,6 +255,24 @@ export function SchoolImportProblemsModal({ rows, users, requiredTypesFor, onCom
           )}
           {!allClear && (
             <p className="text-slate-600">נותרו <b className="text-slate-800">{remainingRows.length}</b> שורות עם בעיות לטיפול.</p>
+          )}
+
+          {unresolvedDuplicateRows.length > 0 && (
+            <div className="border border-amber-200 bg-amber-50/60 rounded-xl p-3 space-y-2">
+              <p className="text-xs text-amber-800">
+                {unresolvedDuplicateRows.length} שורות עם סמל מוסד שכבר קיים במערכת — אפשר לטפל בכולן בבת אחת:
+              </p>
+              <div className="flex items-center gap-2 flex-wrap">
+                <button type="button" onClick={confirmAllDuplicates}
+                  className="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-amber-600 text-white hover:bg-amber-700">
+                  עדכן את כל בתי הספר הקיימים ({unresolvedDuplicateRows.length})
+                </button>
+                <button type="button" onClick={excludeAllDuplicates}
+                  className="text-xs px-2.5 py-1.5 rounded-lg font-medium border border-slate-300 text-slate-600 hover:bg-slate-50">
+                  דלג על כל ההתנגשויות ({unresolvedDuplicateRows.length})
+                </button>
+              </div>
+            </div>
           )}
 
           {problemRows.map(row => {
@@ -267,6 +302,29 @@ export function SchoolImportProblemsModal({ rows, users, requiredTypesFor, onCom
 
                 {!isExcluded && (
                   <div className="space-y-2">
+                    {row.duplicateSymbol && (
+                      r.confirmUpdateDuplicate ? (
+                        <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1.5">
+                          <span aria-hidden="true" className="text-emerald-600 text-xs font-bold">✓</span>
+                          <span className="text-xs text-emerald-800">יעדכן את בית הספר הקיים — טופל</span>
+                        </div>
+                      ) : (
+                        <div className="bg-white rounded-lg border border-amber-100 p-2.5 space-y-1.5">
+                          <p className="text-xs text-slate-700">
+                            <b>סמל מוסד זה כבר קיים במערכת</b> — <b>{row.duplicateSymbol.name}</b>
+                            {row.duplicateSymbol.status === "pending_deletion" ? " (בסל מחזור)" : ""}
+                          </p>
+                          <p className="text-[11px] text-slate-500">
+                            "עדכן" יחליף את השדות שהופיעו בקובץ בבית הספר הקיים (גם אם הם כבר מלאים) — לא ייווצר רישום כפול.
+                          </p>
+                          <button type="button" onClick={() => patchRes(row, { confirmUpdateDuplicate: true })}
+                            className="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-amber-600 text-white hover:bg-amber-700">
+                            עדכן את בית הספר הקיים
+                          </button>
+                        </div>
+                      )
+                    )}
+
                     {needIdentity && (
                       <div className="bg-white rounded-lg border border-amber-100 p-2.5 space-y-1.5">
                         <p className="text-xs text-slate-700"><b>חסר שם בית ספר או סמל מוסד</b></p>

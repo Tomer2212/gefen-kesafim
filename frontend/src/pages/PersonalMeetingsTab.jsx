@@ -11,7 +11,7 @@ import { SchoolPickerModal, SchoolPickerPopover, schoolLabel } from "../componen
 import { StageScopeModal } from "../components/meetings/StageScopeModal";
 import { MEETING_STATUS_OPTIONS, MEETING_TYPE_OPTIONS, MEETING_SERVICE_TYPE_OPTIONS, STATUS_MAP, formatMeetingDate, defaultMeetingServiceType } from "../components/meetings/constants";
 import { AcademicYearSelector } from "../components/AcademicYearSelector";
-import { DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
+import { DEFAULT_ACADEMIC_YEAR, getAcademicYearStartDate } from "../constants/academicYears";
 import MeetingNavigationGuardModal from "../components/meetings/MeetingNavigationGuardModal";
 import { getMissingCriticalFields, isMeetingIncomplete } from "../components/meetings/meetingCompleteness";
 import { buildSchoolContacts } from "../components/meetings/schoolContacts";
@@ -20,7 +20,12 @@ import { useMeetingsPolling } from "../hooks/useMeetingsPolling";
 import { mergeMeetingsSilently, visibleDateBounds } from "../components/meetings/mergeMeetings";
 
 const TODAY = new Date().toISOString().slice(0, 10);
-const DEFAULT_FILTERS = { status: "", date_from: TODAY, date_to: TODAY };
+// date_from defaults to the start of a given academic year (not a fixed value) so the list
+// doesn't silently hide that year's meetings the moment they're dated in the future relative
+// to today — see the dynamic-date-from plan. date_to intentionally stays "today" always.
+function buildDefaultFilters(academicYear) {
+  return { status: "", date_from: getAcademicYearStartDate(academicYear), date_to: TODAY };
+}
 const SS_KEY = "personal_meetings_ui_state";
 const INPUT_CLS = "text-sm border border-slate-200 rounded-lg px-2.5 py-1.5 outline-none focus:border-blue-400 bg-white";
 const ACTIVE_INPUT_CLS = " border-blue-400 ring-1 ring-blue-300 bg-blue-50/50";
@@ -50,7 +55,7 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [academicYear, setAcademicYear] = useState(DEFAULT_ACADEMIC_YEAR);
-  const [filters, setFilters] = useState(saved?.filters ?? DEFAULT_FILTERS);
+  const [filters, setFilters] = useState(saved?.filters ?? buildDefaultFilters(DEFAULT_ACADEMIC_YEAR));
   const [showAdvanced, setShowAdvanced] = useState(saved?.showAdvanced ?? false);
 
   const [nameFilter, setNameFilter] = useState(saved?.nameFilter ?? "");
@@ -359,8 +364,13 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
   }
 
   function clearFilters() {
-    setFilters(DEFAULT_FILTERS);
+    setFilters(buildDefaultFilters(academicYear));
     setNameFilter(""); setSymbolFilter(""); setCityFilter(""); setDistrictFilter("");
+  }
+
+  function handleYearChange(year) {
+    setAcademicYear(year);
+    setFilters(f => ({ ...f, date_from: getAcademicYearStartDate(year) }));
   }
 
   const displayedMeetings = useMemo(() => {
@@ -378,7 +388,7 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
   // from the "hidden" default (date_from/date_to default to today, not empty) — same pattern
   // as AdminMeetingsTab.jsx, so a filtered view is never invisible to the user.
   const activeBaseFilters = {
-    date_from: (filters.date_from || "") !== TODAY,
+    date_from: (filters.date_from || "") !== getAcademicYearStartDate(academicYear),
     date_to: (filters.date_to || "") !== TODAY,
     status: !!filters.status,
     school_name: !!nameFilter,
@@ -492,7 +502,7 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
       {/* Header row */}
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
-          <AcademicYearSelector value={academicYear} onChange={setAcademicYear} />
+          <AcademicYearSelector value={academicYear} onChange={handleYearChange} />
           <button type="button" onClick={() => setSchoolPickerFor("new")}
             className="btn-ghost flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-xl font-medium">
             <span aria-hidden="true">+</span> הוסף פגישה
