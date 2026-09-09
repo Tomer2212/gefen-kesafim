@@ -1,4 +1,5 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { DeleteMeetingModal } from "./DeleteMeetingModal";
 import { MeetingRow } from "./MeetingRow";
 import { MEETING_SERVICE_TYPE_BREAKDOWN, formatMeetingMinutes } from "./constants";
@@ -106,18 +107,20 @@ export function MeetingsTable({
 
   // One { m, filterValues } per meeting — filterValues feeds both the header menus'
   // value lists and the filter/sort helpers. School label is resolved here so the
-  // "שם מוסד" column can be filtered/sorted where it's shown.
-  const rows = meetings.map(m => ({
+  // "שם מוסד" column can be filtered/sorted where it's shown. Memoized so a large meetings
+  // list (thousands of rows for a wide filter) isn't fully re-decorated/re-sorted on every
+  // unrelated render (e.g. typing into an unrelated row's notes field).
+  const rows = useMemo(() => meetings.map(m => ({
     m,
     filterValues: computeMeetingFilterValues(m, {
       schoolLabel: schoolLabelFor ? schoolLabelFor(m) : null,
     }),
-  }));
+  })), [meetings, schoolLabelFor]);
 
-  const sortedMeetings = rows
+  const sortedMeetings = useMemo(() => rows
     .filter(r => passesMeetingColumnFilters(r.filterValues, columnFilters))
     .sort(buildMeetingRowComparator(sortSpecs))
-    .map(r => r.m);
+    .map(r => r.m), [rows, columnFilters, sortSpecs]);
 
   // Shared props for every header menu. Spread (not an inline wrapper component) so
   // MeetingColumnMenu keeps a stable identity across re-renders and its open/draft state
@@ -129,25 +132,44 @@ export function MeetingsTable({
     rows,
   };
 
-  const completedMeetings = meetings.filter(m => m.status === "completed");
-  const totalMinutes = completedMeetings.reduce((sum, m) => sum + meetingDurationMinutes(m), 0);
+  const completedMeetings = useMemo(() => meetings.filter(m => m.status === "completed"), [meetings]);
+  const totalMinutes = useMemo(
+    () => completedMeetings.reduce((sum, m) => sum + meetingDurationMinutes(m), 0),
+    [completedMeetings],
+  );
   const totalHoursText = formatMeetingMinutes(totalMinutes);
 
   // Per-service-type breakdown of completed meetings — derived from the live `meetings` prop
   // on every render, so editing a row's "סוג" recomputes these rows immediately (no extra
   // state to go stale). Only buckets with at least one completed meeting are shown.
-  const breakdownByType = completedMeetings.reduce((acc, m) => {
-    const key = m.meeting_service_type || "none";
-    const b = acc[key] || (acc[key] = { count: 0, minutes: 0 });
-    b.count += 1;
-    b.minutes += meetingDurationMinutes(m);
-    return acc;
-  }, {});
-  const breakdownRows = MEETING_SERVICE_TYPE_BREAKDOWN
-    .filter(t => breakdownByType[t.key]?.count > 0)
-    .map(t => ({ ...t, ...breakdownByType[t.key] }));
+  const breakdownRows = useMemo(() => {
+    const breakdownByType = completedMeetings.reduce((acc, m) => {
+      const key = m.meeting_service_type || "none";
+      const b = acc[key] || (acc[key] = { count: 0, minutes: 0 });
+      b.count += 1;
+      b.minutes += meetingDurationMinutes(m);
+      return acc;
+    }, {});
+    return MEETING_SERVICE_TYPE_BREAKDOWN
+      .filter(t => breakdownByType[t.key]?.count > 0)
+      .map(t => ({ ...t, ...breakdownByType[t.key] }));
+  }, [completedMeetings]);
 
   const allSelected = selectable && sortedMeetings.length > 0 && sortedMeetings.every(m => selectedIds?.[m.id]);
+
+  // Row virtualization — only the rows actually visible in the scroll viewport (~20-30
+  // regardless of how many thousands match the filter) are mounted as real <MeetingRow>
+  // subtrees at any moment. This is what keeps a wide filter (e.g. a full academic year with
+  // no status filter, thousands of results) from freezing the browser, since each row also
+  // carries its own live effects (Outlook busy-range checks, reminder-status polling, etc.).
+  const tableScrollRef = useRef(null);
+  const rowVirtualizer = useVirtualizer({
+    count: sortedMeetings.length,
+    getScrollElement: () => tableScrollRef.current,
+    estimateSize: () => 45,
+    overscan: 12,
+    getItemKey: i => sortedMeetings[i]?.id ?? i,
+  });
 
   return (
     <>
@@ -158,8 +180,15 @@ export function MeetingsTable({
           onCancel={() => setPendingDeleteId(null)}
         />
       )}
+      {meetings.length > 0 && (
+        <p className="text-sm text-slate-500 mb-2">
+          {sortedMeetings.length === meetings.length
+            ? `סה"כ ${meetings.length} פגישות`
+            : `סה"כ ${sortedMeetings.length} פגישות מתוך ${meetings.length}`}
+        </p>
+      )}
       <div className="glass-card rounded-2xl border border-slate-200 flex flex-col" style={{ minHeight: "calc(100vh - 240px)" }}>
-        <div className="flex-1 overflow-x-auto rounded-t-2xl">
+        <div ref={tableScrollRef} className="flex-1 overflow-auto rounded-t-2xl" style={{ maxHeight: "calc(100vh - 240px)" }}>
           <table className="w-full text-right border-collapse" style={{ minWidth: "1200px" }}>
             <thead>
               <tr className="border-b border-slate-200 bg-slate-50/80">
@@ -217,33 +246,53 @@ export function MeetingsTable({
                 <th scope="col" className="py-1.5 px-2 text-[11px] font-semibold text-slate-500 whitespace-nowrap text-center">סה"כ שהושקע</th>
               </tr>
             </thead>
-            <tbody>
-              {sortedMeetings.map(m => (
-                <MeetingRow key={m.id} meeting={m} onSave={onSave} onMeetingPatched={onMeetingPatched}
-                  onRequestDelete={canDeleteMeetings ? setPendingDeleteId : null}
-                  onOpenNotes={onOpenNotes}
-                  usersWithAccess={usersWithAccessFor ? usersWithAccessFor(m) : usersWithAccess}
-                  usersWithoutAccess={usersWithoutAccessFor ? usersWithoutAccessFor(m) : usersWithoutAccess}
-                  contacts={contactsFor ? contactsFor(m) : contacts} onRequestAccess={onRequestAccess}
-                  onReminderOn={() => setReminderToast(true)}
-                  showSchoolColumn={showSchoolColumn}
-                  schoolLabel={schoolLabelFor ? schoolLabelFor(m) : null}
-                  onOpenSchoolPicker={onOpenSchoolPicker}
-                  selectable={selectable}
-                  selected={!!selectedIds?.[m.id]}
-                  onToggleSelect={onToggleSelect}
-                  onSendStatusReminder={onSendStatusReminder}
-                  hideAdvisorColumn={hideAdvisorColumn}
-                  showCalendarColumn={showCalendarColumn}
-                  onOpenSummary={onOpenSummary}
-                  typedAdvisors={typedAdvisorsFor ? typedAdvisorsFor(m) : null}
-                  schoolStage={schoolStageFor ? schoolStageFor(m) : schoolStage}
-                  expanded={expandedIds.has(m.id)}
-                  onToggleExpand={toggleExpand}
-                  colSpanTotal={colSpanTotal}
-                />
-              ))}
-            </tbody>
+            {(() => {
+              const virtualItems = rowVirtualizer.getVirtualItems();
+              const totalSize = rowVirtualizer.getTotalSize();
+              const padTop = virtualItems.length ? virtualItems[0].start : 0;
+              const padBottom = virtualItems.length ? totalSize - virtualItems[virtualItems.length - 1].end : 0;
+              return (
+                <>
+                  {padTop > 0 && (
+                    <tbody aria-hidden="true"><tr style={{ height: `${padTop}px` }}><td colSpan={colSpanTotal} style={{ padding: 0, border: 0 }} /></tr></tbody>
+                  )}
+                  {virtualItems.map(vi => {
+                    const m = sortedMeetings[vi.index];
+                    if (!m) return null;
+                    return (
+                      <tbody key={m.id} data-index={vi.index} ref={rowVirtualizer.measureElement}>
+                        <MeetingRow meeting={m} onSave={onSave} onMeetingPatched={onMeetingPatched}
+                          onRequestDelete={canDeleteMeetings ? setPendingDeleteId : null}
+                          onOpenNotes={onOpenNotes}
+                          usersWithAccess={usersWithAccessFor ? usersWithAccessFor(m) : usersWithAccess}
+                          usersWithoutAccess={usersWithoutAccessFor ? usersWithoutAccessFor(m) : usersWithoutAccess}
+                          contacts={contactsFor ? contactsFor(m) : contacts} onRequestAccess={onRequestAccess}
+                          onReminderOn={() => setReminderToast(true)}
+                          showSchoolColumn={showSchoolColumn}
+                          schoolLabel={schoolLabelFor ? schoolLabelFor(m) : null}
+                          onOpenSchoolPicker={onOpenSchoolPicker}
+                          selectable={selectable}
+                          selected={!!selectedIds?.[m.id]}
+                          onToggleSelect={onToggleSelect}
+                          onSendStatusReminder={onSendStatusReminder}
+                          hideAdvisorColumn={hideAdvisorColumn}
+                          showCalendarColumn={showCalendarColumn}
+                          onOpenSummary={onOpenSummary}
+                          typedAdvisors={typedAdvisorsFor ? typedAdvisorsFor(m) : null}
+                          schoolStage={schoolStageFor ? schoolStageFor(m) : schoolStage}
+                          expanded={expandedIds.has(m.id)}
+                          onToggleExpand={toggleExpand}
+                          colSpanTotal={colSpanTotal}
+                        />
+                      </tbody>
+                    );
+                  })}
+                  {padBottom > 0 && (
+                    <tbody aria-hidden="true"><tr style={{ height: `${padBottom}px` }}><td colSpan={colSpanTotal} style={{ padding: 0, border: 0 }} /></tr></tbody>
+                  )}
+                </>
+              );
+            })()}
           </table>
         </div>
         {/* Summary footer — a 4-column grid (label / value / label / value) so both the

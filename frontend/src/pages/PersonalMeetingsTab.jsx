@@ -674,8 +674,6 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
           )}
         </div>
       )}
-
-      <p className="text-xs text-slate-400 text-left mt-2">סה"כ {displayedMeetings.length} פגישות</p>
     </div>
   );
 }

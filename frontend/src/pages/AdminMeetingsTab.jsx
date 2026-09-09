@@ -1106,7 +1106,6 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
           </svg>
           Excel
         </button>
-        <span className="text-xs text-slate-400 mr-2">{displayedMeetings.length} פגישות</span>
       </div>
     </div>
   );
