@@ -6,6 +6,12 @@
 // (advisor_name_or_email is future-only, advisor_name_text/reminder_enabled interplay is
 // past-vs-future, etc.) — this file just declares the full superset.
 
+// Row count per chunked HTTP request for the validate/commit calls (ImportMeetingsModal.jsx /
+// MeetingImportProblemsModal.jsx). Large files (2000+ rows) take longer server-side than the
+// axios timeout allows when sent as one giant request — splitting into sequential chunks keeps
+// each request well under the timeout while giving visible progress.
+export const MEETING_IMPORT_CHUNK_SIZE = 200;
+
 export const MEETING_IMPORT_FIELD_CONFIG = [
   { key: "meeting_date",          label: "תאריך פגישה",              required: true, hint: "DD/MM/YYYY או YYYY-MM-DD" },
   { key: "school_name",           label: "שם מוסד",                   required: true },

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
 import axios from "axios";
@@ -12,7 +12,7 @@ import { ParticipantsSelector } from "./ParticipantsSelector";
 import { TimeInput, normalizeTimeValue } from "./TimeInput";
 import { AdvisorReassignModal } from "./AdvisorReassignModal";
 import { MeetingActualDetail } from "./MeetingActualDetail";
-import { MEETING_STATUS_OPTIONS, MEETING_SERVICE_TYPE_OPTIONS, STATUS_MAP, formatMeetingDate } from "./constants";
+import { MEETING_STATUS_OPTIONS, MEETING_SERVICE_TYPE_OPTIONS, STATUS_MAP, getStatusDisplay, formatMeetingDate } from "./constants";
 
 function formatActualDuration(seconds) {
   if (!seconds) return "0:00";
@@ -203,7 +203,11 @@ function CalendarSyncBadge({ calendarSync }) {
   return null;
 }
 
-export function MeetingRow({
+// Wrapped in React.memo below (MeetingsTable now mounts only the visible rows via
+// virtualization, but memoizing still avoids re-rendering every mounted row's heavy internal
+// state — busy-range fetch, reminder-status fetch, draft syncing — when an unrelated row or a
+// parent-level filter/sort state changes).
+function MeetingRowImpl({
   meeting, onSave, onMeetingPatched, onRequestDelete, onOpenNotes, usersWithAccess, usersWithoutAccess,
   contacts, onRequestAccess, onReminderOn,
   showSchoolColumn, schoolLabel, onOpenSchoolPicker,
@@ -458,7 +462,7 @@ export function MeetingRow({
     }
   }
 
-  const status = STATUS_MAP[draft.status] || STATUS_MAP.other;
+  const status = getStatusDisplay(draft.status);
   const offlineSeconds = sumOfflineSeconds(meeting.offline_work_entries);
   const callsSeconds = meeting.calls_duration_seconds || 0;
 
@@ -874,3 +878,5 @@ export function MeetingRow({
     </>
   );
 }
+
+export const MeetingRow = memo(MeetingRowImpl);

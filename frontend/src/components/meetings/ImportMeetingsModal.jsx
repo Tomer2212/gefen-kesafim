@@ -6,7 +6,7 @@ import { useFocusTrap } from "../../hooks/useFocusTrap";
 import { ImportMappingModal } from "../ImportMappingModal";
 import MeetingImportProblemsModal from "./MeetingImportProblemsModal";
 import {
-  MEETING_IMPORT_FIELD_CONFIG, normalizeImportStageScope, normalizeImportMeetingType,
+  MEETING_IMPORT_FIELD_CONFIG, MEETING_IMPORT_CHUNK_SIZE, normalizeImportStageScope, normalizeImportMeetingType,
   normalizeImportServiceType, normalizeImportStatus, normalizeImportDate,
 } from "../../constants/meetingImportFieldConfig";
 
@@ -140,6 +140,7 @@ export default function ImportMeetingsModal({ orgUsers, academicYear, onClose, o
   const [sheetData, setSheetData] = useState(null); // { headers, previewRow, dataRows }
   const [validateRows, setValidateRows] = useState(null);
   const [error, setError] = useState(null);
+  const [validateProgress, setValidateProgress] = useState(null); // { done, total } while chunking /validate
   const [selectedFile, setSelectedFile] = useState(null);
   const [dragOver, setDragOver] = useState(false);
   const [endTimeMethod, setEndTimeMethod] = useState(null); // "direct" | "duration"
@@ -213,13 +214,31 @@ export default function ImportMeetingsModal({ orgUsers, academicYear, onClose, o
     const rows = buildRowsFromSheet(mode, sheetData.headers, sheetData.dataRows, mapping);
     setStep("validating");
     setError(null);
+    setValidateProgress({ done: 0, total: rows.length });
     try {
-      const res = await axios.post("/schools/meetings/import/validate", { mode, duration_priority: durationPriorityForRequest, rows });
-      setValidateRows(res.data.rows);
+      // Large files (thousands of rows) can take the server longer to validate than the axios
+      // timeout allows if sent as one request — split into sequential chunks so each request
+      // stays fast, with visible progress and a bumped per-request timeout as a safety net.
+      const mergedRows = [];
+      for (let i = 0; i < rows.length; i += MEETING_IMPORT_CHUNK_SIZE) {
+        const chunk = rows.slice(i, i + MEETING_IMPORT_CHUNK_SIZE);
+        const res = await axios.post(
+          "/schools/meetings/import/validate",
+          { mode, duration_priority: durationPriorityForRequest, rows: chunk },
+          { timeout: 60000 }
+        );
+        mergedRows.push(...res.data.rows);
+        setValidateProgress({ done: mergedRows.length, total: rows.length });
+      }
+      setValidateRows(mergedRows);
       setStep("problems");
     } catch (e) {
-      setError(e?.response?.data?.detail ? String(e.response.data.detail) : "בדיקת השורות נכשלה — נסה שוב");
+      const detail = e?.response?.data?.detail;
+      const message = typeof detail === "string" ? detail : detail?.message;
+      setError(message || "בדיקת השורות נכשלה — נסה שוב");
       setStep("mapping");
+    } finally {
+      setValidateProgress(null);
     }
   }
 
@@ -402,7 +421,11 @@ export default function ImportMeetingsModal({ orgUsers, academicYear, onClose, o
         )}
 
         {step === "validating" && (
-          <p role="status" aria-label="בודק שורות" className="text-sm text-slate-500 p-6">בודק את השורות...</p>
+          <p role="status" aria-label="בודק שורות" className="text-sm text-slate-500 p-6">
+            {validateProgress && validateProgress.total > MEETING_IMPORT_CHUNK_SIZE
+              ? `בודק שורות... ${validateProgress.done} / ${validateProgress.total}`
+              : "בודק את השורות..."}
+          </p>
         )}
       </div>
     </div>

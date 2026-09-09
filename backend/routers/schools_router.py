@@ -353,6 +353,10 @@ class MeetingImportCommitIn(BaseModel):
     mode: str
     duration_priority: str | None = None
     rows: list[MeetingImportRowIn]
+    # Optional shared id across chunked commit requests for one logical import (frontend splits
+    # large files into several /commit calls to stay under the HTTP timeout). If omitted, a fresh
+    # id is generated per request as before — backward compatible.
+    import_batch_id: str | None = None
 
 
 class MeetingImportHistoricalSchoolIn(BaseModel):
@@ -7045,9 +7049,13 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
         if remaining:
             unresolved_row_indexes.append(row.row_index)
     if unresolved_row_indexes:
-        raise HTTPException(status_code=400, detail=f"שורות עם בעיות שלא טופלו: {unresolved_row_indexes}")
+        raise HTTPException(status_code=400, detail={
+            "code": "unresolved_problems",
+            "message": f"{len(unresolved_row_indexes)} שורות בקבוצה זו עדיין מכילות בעיות שלא טופלו",
+            "row_indexes": unresolved_row_indexes,
+        })
 
-    import_batch_id = str(uuid4())
+    import_batch_id = body.import_batch_id or str(uuid4())
     imported, past_count, future_count = 0, 0, 0
     errors: list[str] = []
 

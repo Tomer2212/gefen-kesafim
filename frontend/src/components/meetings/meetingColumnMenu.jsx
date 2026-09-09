@@ -28,7 +28,11 @@ export function computeMeetingFilterValues(m, { schoolLabel } = {}) {
   const sIdx = m.status ? STATUS_ORDER.indexOf(m.status) : -1;
   return {
     date: m.meeting_date || null,
-    status: sIdx >= 0 ? sIdx : (m.status ? 99 : null),
+    // Known canonical statuses keep their ordinal (so column sort/filter groups them in the
+    // usual logical order); a past-mode import's free-text status (not one of the 5 canonical
+    // values — see ImportMeetingsModal.jsx) is kept as its own raw string instead of being
+    // collapsed into one shared "99" bucket, so it filters/labels as its real value, not "אחר".
+    status: sIdx >= 0 ? sIdx : (m.status || null),
     start: m.start_time || null,
     end: m.end_time || null,
     advisor: advisors.length ? advisors.join(", ") : null,
@@ -43,7 +47,7 @@ export function computeMeetingFilterValues(m, { schoolLabel } = {}) {
 export function meetingFilterValueLabel(key, raw) {
   if (raw === null || raw === undefined || raw === "") return "(ריקים)";
   if (key === "date") return formatMeetingDate(raw);
-  if (key === "status") return MEETING_STATUS_OPTIONS[raw]?.label || "אחר";
+  if (key === "status") return typeof raw === "number" ? (MEETING_STATUS_OPTIONS[raw]?.label || "אחר") : raw;
   if (key === "type") return TYPE_LABEL[raw] || raw;
   if (key === "service_type") return SERVICE_LABEL[raw] || raw;
   if (key === "reminder") return raw === 1 ? "מופעלת" : "כבויה";

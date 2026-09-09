@@ -7,6 +7,17 @@ export const MEETING_STATUS_OPTIONS = [
 ];
 export const STATUS_MAP = Object.fromEntries(MEETING_STATUS_OPTIONS.map(s => [s.value, s]));
 
+// Past-mode meeting imports intentionally copy the org's own status wording verbatim from their
+// Excel file (documentation only, no automations triggered) rather than forcing it onto one of
+// the 5 canonical values above — see ImportMeetingsModal.jsx's buildRowsFromSheet. That means
+// meeting.status can legitimately be free text that isn't a STATUS_MAP key. Anywhere that shows
+// a status badge/label should go through this helper instead of `STATUS_MAP[value] || STATUS_MAP.other`,
+// so an unrecognized-but-real value is shown as-is rather than being mislabeled "אחר".
+export function getStatusDisplay(rawStatus) {
+  if (!rawStatus) return STATUS_MAP.other;
+  return STATUS_MAP[rawStatus] || { value: rawStatus, label: rawStatus, color: "#475569", bg: "#f8fafc", dot: "#94a3b8" };
+}
+
 export const MEETING_TYPE_OPTIONS = [
   { value: "physical", label: "פיזי" },
   { value: "remote",   label: "מרחוק" },

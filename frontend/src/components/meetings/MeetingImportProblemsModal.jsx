@@ -3,6 +3,7 @@ import axios from "axios";
 import * as XLSX from "xlsx";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
 import { ACADEMIC_YEARS } from "../../constants/academicYears";
+import { MEETING_IMPORT_CHUNK_SIZE } from "../../constants/meetingImportFieldConfig";
 
 const STAGE_OPTIONS = [
   { value: "", label: "בחר שלב מוסד" },
@@ -292,6 +293,7 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
   const [quickAddOpenFor, setQuickAddOpenFor] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState(null);
+  const [submitProgress, setSubmitProgress] = useState(null); // { done, total } while chunking /commit
   const [submitResult, setSubmitResult] = useState(null);
   const [bulkHistoricalBusy, setBulkHistoricalBusy] = useState(false);
   const [bulkHistoricalError, setBulkHistoricalError] = useState(null);
@@ -389,32 +391,57 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
   async function handleSubmit() {
     setSubmitting(true);
     setSubmitError(null);
-    try {
-      const payloadRows = rows.map(r => {
-        const res = rowResolutions[r.row_index] || {};
-        return {
-          ...r.data,
-          row_index: r.row_index,
-          excluded: excludedRows.has(r.row_index),
-          school_id: res.school_id ?? r.data.resolved_school_id ?? r.data.school_id ?? null,
-          resolved_advisor_id: res.resolved_advisor_id ?? r.data.resolved_advisor_id ?? null,
-          academic_year_override: res.academic_year_override ?? r.data.academic_year_override ?? null,
-          meeting_date_override: res.meeting_date_override ?? r.data.meeting_date_override ?? null,
-          resolved_start_time_override: res.resolved_start_time_override ?? r.data.resolved_start_time_override ?? null,
-          resolved_end_time_override: res.resolved_end_time_override ?? r.data.resolved_end_time_override ?? null,
-          accept_mode_mismatch: res.accept_mode_mismatch ?? r.data.accept_mode_mismatch ?? false,
-          accept_conflict: res.accept_conflict ?? r.data.accept_conflict ?? false,
-          accept_duplicate: res.accept_duplicate ?? r.data.accept_duplicate ?? false,
-          stage_scope: res.stage_scope ?? r.data.stage_scope_normalized ?? r.data.stage_scope ?? null,
-        };
-      });
-      const res = await axios.post("/schools/meetings/import/commit", { mode, duration_priority: durationPriority, rows: payloadRows });
-      setSubmitResult(res.data);
-    } catch (e) {
-      setSubmitError(e?.response?.data?.detail ? String(e.response.data.detail) : "הייבוא נכשל — נסה שוב");
-    } finally {
-      setSubmitting(false);
+    const payloadRows = rows.map(r => {
+      const res = rowResolutions[r.row_index] || {};
+      return {
+        ...r.data,
+        row_index: r.row_index,
+        excluded: excludedRows.has(r.row_index),
+        school_id: res.school_id ?? r.data.resolved_school_id ?? r.data.school_id ?? null,
+        resolved_advisor_id: res.resolved_advisor_id ?? r.data.resolved_advisor_id ?? null,
+        academic_year_override: res.academic_year_override ?? r.data.academic_year_override ?? null,
+        meeting_date_override: res.meeting_date_override ?? r.data.meeting_date_override ?? null,
+        resolved_start_time_override: res.resolved_start_time_override ?? r.data.resolved_start_time_override ?? null,
+        resolved_end_time_override: res.resolved_end_time_override ?? r.data.resolved_end_time_override ?? null,
+        accept_mode_mismatch: res.accept_mode_mismatch ?? r.data.accept_mode_mismatch ?? false,
+        accept_conflict: res.accept_conflict ?? r.data.accept_conflict ?? false,
+        accept_duplicate: res.accept_duplicate ?? r.data.accept_duplicate ?? false,
+        stage_scope: res.stage_scope ?? r.data.stage_scope_normalized ?? r.data.stage_scope ?? null,
+      };
+    });
+
+    // Shared batch id across all chunks of this one logical import, so every meeting created
+    // from this file (regardless of which chunk it landed in) is tagged together — this is
+    // what makes it possible to look up "everything this import produced" later if needed.
+    const importBatchId = crypto.randomUUID();
+    const totals = { imported: 0, past: 0, future: 0, errors: [] };
+    setSubmitProgress({ done: 0, total: payloadRows.length });
+
+    for (let i = 0; i < payloadRows.length; i += MEETING_IMPORT_CHUNK_SIZE) {
+      const chunk = payloadRows.slice(i, i + MEETING_IMPORT_CHUNK_SIZE);
+      try {
+        const res = await axios.post(
+          "/schools/meetings/import/commit",
+          { mode, duration_priority: durationPriority, rows: chunk, import_batch_id: importBatchId },
+          { timeout: 60000 }
+        );
+        totals.imported += res.data.imported || 0;
+        totals.past += res.data.past || 0;
+        totals.future += res.data.future || 0;
+        if (res.data.errors?.length) totals.errors.push(...res.data.errors);
+      } catch (e) {
+        // Keep going to the next chunk rather than aborting the whole import — a transient
+        // failure on one chunk shouldn't cost the rows in every other chunk their chance.
+        const detail = e?.response?.data?.detail;
+        const message = typeof detail === "string" ? detail : detail?.message;
+        totals.errors.push(`שורות ${chunk[0]?.row_index}–${chunk[chunk.length - 1]?.row_index}: ${message || "הבקשה נכשלה — נסה לייבא שוב את השורות האלה"}`);
+      }
+      setSubmitProgress({ done: Math.min(i + MEETING_IMPORT_CHUNK_SIZE, payloadRows.length), total: payloadRows.length });
     }
+
+    setSubmitResult(totals);
+    setSubmitting(false);
+    setSubmitProgress(null);
   }
 
   if (submitResult) {
@@ -623,7 +650,11 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
             {!allClear && <span className="text-xs text-slate-500">יש לטפל בכל הבעיות או להסיר את השורות הבעייתיות כדי להמשיך</span>}
             <button type="button" onClick={handleSubmit} disabled={submitting || !allClear}
               className="text-sm px-4 py-2 rounded-xl font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed">
-              {submitting ? "מייבא..." : `ייבא ${rows.length - excludedRows.size} שורות`}
+              {submitting
+                ? (submitProgress && submitProgress.total > MEETING_IMPORT_CHUNK_SIZE
+                    ? `מייבא... ${submitProgress.done} / ${submitProgress.total}`
+                    : "מייבא...")
+                : `ייבא ${rows.length - excludedRows.size} שורות`}
             </button>
           </div>
         </div>
