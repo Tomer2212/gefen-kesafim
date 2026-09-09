@@ -25,6 +25,8 @@ const CONTACT_ROLES = [
 const PROBLEM_TITLES = {
   school_not_found: "בית ספר לא נמצא",
   invalid_date: "לא ניתן לפענח את התאריך",
+  invalid_time_start: "לא ניתן לפענח את שעת ההתחלה",
+  invalid_time_end: "לא ניתן לפענח את שעת הסיום",
   academic_year_out_of_range: "תאריך מחוץ לשנות הלימודים המוכרות",
   mode_date_mismatch: "אי-התאמה בין מצב הייבוא לתאריך השורה",
   advisor_unresolved: "לא נמצא יועץ תואם",
@@ -45,6 +47,21 @@ function InvalidDateFix({ rowIndex, onConfirm }) {
       <button type="button" disabled={!value} onClick={() => onConfirm(value)}
         className="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">
         אישור תאריך
+      </button>
+    </div>
+  );
+}
+
+function InvalidTimeFix({ rowIndex, fieldKey, onConfirm }) {
+  const [value, setValue] = useState("");
+  return (
+    <div className="flex items-center gap-2">
+      <label htmlFor={`fix-time-${fieldKey}-${rowIndex}`} className="sr-only">שעה מתוקנת</label>
+      <input id={`fix-time-${fieldKey}-${rowIndex}`} type="time" value={value} onChange={e => setValue(e.target.value)}
+        className="text-xs border border-amber-300 rounded-lg px-2 py-1.5 bg-white" />
+      <button type="button" disabled={!value} onClick={() => onConfirm(value)}
+        className="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">
+        אישור שעה
       </button>
     </div>
   );
@@ -246,7 +263,7 @@ function QuickAddSchoolForm({ row, orgUsers, academicYear, onCreated, onCancel }
   );
 }
 
-export default function MeetingImportProblemsModal({ mode, rows, orgUsers, academicYear, onSubmit, onClose }) {
+export default function MeetingImportProblemsModal({ mode, durationPriority, rows, orgUsers, academicYear, onSubmit, onClose }) {
   const { ref, handleKeyDown } = useFocusTrap(onClose);
   const [resolvedKeys, setResolvedKeys] = useState(new Set());
   const [excludedRows, setExcludedRows] = useState(new Set());
@@ -294,13 +311,15 @@ export default function MeetingImportProblemsModal({ mode, rows, orgUsers, acade
           resolved_advisor_id: res.resolved_advisor_id ?? r.data.resolved_advisor_id ?? null,
           academic_year_override: res.academic_year_override ?? r.data.academic_year_override ?? null,
           meeting_date_override: res.meeting_date_override ?? r.data.meeting_date_override ?? null,
+          resolved_start_time_override: res.resolved_start_time_override ?? r.data.resolved_start_time_override ?? null,
+          resolved_end_time_override: res.resolved_end_time_override ?? r.data.resolved_end_time_override ?? null,
           accept_mode_mismatch: res.accept_mode_mismatch ?? r.data.accept_mode_mismatch ?? false,
           accept_conflict: res.accept_conflict ?? r.data.accept_conflict ?? false,
           accept_duplicate: res.accept_duplicate ?? r.data.accept_duplicate ?? false,
           stage_scope: res.stage_scope ?? r.data.stage_scope_normalized ?? r.data.stage_scope ?? null,
         };
       });
-      const res = await axios.post("/schools/meetings/import/commit", { mode, rows: payloadRows });
+      const res = await axios.post("/schools/meetings/import/commit", { mode, duration_priority: durationPriority, rows: payloadRows });
       setSubmitResult(res.data);
     } catch (e) {
       setSubmitError(e?.response?.data?.detail ? String(e.response.data.detail) : "הייבוא נכשל — נסה שוב");
@@ -409,6 +428,16 @@ export default function MeetingImportProblemsModal({ mode, rows, orgUsers, acade
                           {p.type === "invalid_date" && (
                             <InvalidDateFix rowIndex={r.row_index}
                               onConfirm={(iso) => { setRowField(r.row_index, { meeting_date_override: iso }); markResolved("invalid_date", r.row_index); }} />
+                          )}
+
+                          {p.type === "invalid_time_start" && (
+                            <InvalidTimeFix rowIndex={r.row_index} fieldKey="start"
+                              onConfirm={(hhmm) => { setRowField(r.row_index, { resolved_start_time_override: hhmm }); markResolved("invalid_time_start", r.row_index); }} />
+                          )}
+
+                          {p.type === "invalid_time_end" && (
+                            <InvalidTimeFix rowIndex={r.row_index} fieldKey="end"
+                              onConfirm={(hhmm) => { setRowField(r.row_index, { resolved_end_time_override: hhmm }); markResolved("invalid_time_end", r.row_index); }} />
                           )}
 
                           {p.type === "academic_year_out_of_range" && (

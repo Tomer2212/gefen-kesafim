@@ -315,6 +315,14 @@ class MeetingImportRowIn(BaseModel):
     participant_email: str | None = None
     notes: str | None = None
     status: str | None = None
+    # Alternative to end_time — exactly one of the two is populated per import batch (the
+    # frontend's column-mapping step only exposes one method at a time). planned_duration_hours
+    # is available in both modes; actual_duration_hours only makes sense for past documentation
+    # (a future meeting hasn't happened yet, so it has no "actual" duration) and is only shown
+    # by the frontend when mode == "past". Kept as raw text (not float) since it comes straight
+    # from a spreadsheet cell — parsed defensively in _run_meeting_import_validation.
+    planned_duration_hours: str | None = None
+    actual_duration_hours: str | None = None
     # reminder_enabled is intentionally NOT importable from the file — every other meeting
     # creation path in this app defaults it to False and leaves it as a manual post-creation
     # toggle (MeetingRow's reminder switch); imported meetings must behave identically, not
@@ -325,6 +333,8 @@ class MeetingImportRowIn(BaseModel):
     resolved_advisor_id: str | None = None
     academic_year_override: str | None = None
     meeting_date_override: str | None = None
+    resolved_start_time_override: str | None = None
+    resolved_end_time_override: str | None = None
     accept_mode_mismatch: bool = False
     accept_conflict: bool = False
     accept_duplicate: bool = False
@@ -332,11 +342,16 @@ class MeetingImportRowIn(BaseModel):
 
 class MeetingImportValidateIn(BaseModel):
     mode: str  # "past" | "future"
+    # Which duration field wins when both planned_duration_hours and actual_duration_hours are
+    # present for the same row — the other is used only as a fallback when the preferred one is
+    # empty for that specific row. Meaningless (ignored) when end_time is mapped directly.
+    duration_priority: str | None = None  # "planned_first" | "actual_first"
     rows: list[MeetingImportRowIn]
 
 
 class MeetingImportCommitIn(BaseModel):
     mode: str
+    duration_priority: str | None = None
     rows: list[MeetingImportRowIn]
 
 
@@ -6717,7 +6732,62 @@ def _parse_import_date(raw: str | None) -> date | None:
     return None
 
 
-def _run_meeting_import_validation(db, org_id: str, mode: str, rows: list) -> list[dict]:
+_IMPORT_TIME_FORMATS = ("%H:%M", "%H:%M:%S")
+_IMPORT_TIME_AMPM_FORMATS = ("%I:%M %p", "%I:%M%p", "%I:%M:%S %p", "%I:%M:%S%p")
+
+
+def _parse_import_time(raw: str | None) -> str | None:
+    """Tolerant time-of-day parser for the meetings-import file — returns 24-hour "HH:MM" or
+    None (empty is not an error; callers must not raise a problem for it, only for a genuinely
+    unparseable non-empty value). Handles plain 24-hour "HH:MM"/"H:MM"/"HH:MM:SS" (seconds
+    dropped) and 12-hour "HH:MM AM/PM" as exported by tools like Monday.com — case-insensitive,
+    with or without a space, with or without periods ("11:00AM", "11:00 A.M.", "2:30 pm")."""
+    t = (raw or "").strip()
+    if not t:
+        return None
+
+    for fmt in _IMPORT_TIME_FORMATS:
+        try:
+            return datetime.strptime(t, fmt).strftime("%H:%M")
+        except ValueError:
+            continue
+
+    # Normalize "A.M."/"P.M."/"am"/"AM" variants (with/without periods/space) to " AM"/" PM"
+    # before matching against strptime's %p, which needs a literal space + AM/PM.
+    ampm_norm = re.sub(r"\s*([AaPp])\.?[Mm]\.?\s*$", lambda m: f" {m.group(1).upper()}M", t)
+    for fmt in _IMPORT_TIME_AMPM_FORMATS:
+        try:
+            return datetime.strptime(ampm_norm, fmt).strftime("%H:%M")
+        except ValueError:
+            continue
+    return None
+
+
+def _compute_end_time_from_duration(start_hhmm: str, hours: float) -> str | None:
+    """Adds `hours` (decimal, e.g. 0.25 = 15 minutes) to a 24-hour "HH:MM" start time, wrapping
+    past midnight via modulo rather than raising — meetings-import duration values are always
+    small (well under a day), so wraparound here just means "don't crash on unusual input"."""
+    try:
+        h, m = (int(x) for x in start_hhmm.split(":"))
+    except (ValueError, AttributeError):
+        return None
+    total_minutes = (h * 60 + m + round(hours * 60)) % 1440
+    return f"{total_minutes // 60:02d}:{total_minutes % 60:02d}"
+
+
+def _resolve_import_duration_hours(raw: str | None) -> float | None:
+    """Parses a duration-hours cell (e.g. "0.25" or the European "0,25") defensively — returns
+    None for empty/unparseable rather than raising, matching this file's other import parsers."""
+    t = (raw or "").strip().replace(",", ".")
+    if not t:
+        return None
+    try:
+        return float(t)
+    except ValueError:
+        return None
+
+
+def _run_meeting_import_validation(db, org_id: str, mode: str, rows: list, duration_priority: str | None = None) -> list[dict]:
     """Shared row-by-row validation used by both /meetings/import/validate (first pass) and
     /meetings/import/commit (mandatory server-side re-check before committing). Batch-fetches
     schools/profiles/existing-meetings once (CLAUDE.md rule 7 — no per-row queries)."""
@@ -6812,11 +6882,35 @@ def _run_meeting_import_validation(db, org_id: str, mode: str, rows: list) -> li
         if school and school.get("stage") == "sheshshnati" and not stage_scope:
             problems.append({"type": "stage_scope_ambiguous", "detail": 'בית ספר שש-שנתי — יש לבחור היקף פגישה (תיכון/חט"ב/שתיהן)'})
 
-        if effective_mode == "future" and advisor_id and true_date and row.start_time and row.end_time:
+        # Time resolution: start_time always goes through the tolerant parser (AM/PM etc.).
+        # end_time either comes directly from the file, or — when the batch used the
+        # duration-based mapping instead — is computed from start_time + a duration-hours
+        # value. Either way, an empty result is fine (a meeting can be saved without an end
+        # time); only a genuinely unparseable *non-empty* value is a blocking problem, mirroring
+        # invalid_date but never blocking on absence the way invalid_date does (meeting_date is
+        # foundational to academic-year/past-future classification, times are not).
+        resolved_start_time = _parse_import_time(row.resolved_start_time_override) or _parse_import_time(row.start_time)
+        if not resolved_start_time and (row.resolved_start_time_override or row.start_time):
+            problems.append({"type": "invalid_time_start", "detail": f"לא ניתן לפענח את שעת ההתחלה '{row.start_time or ''}' — יש להזין שעה תקינה"})
+
+        resolved_end_time = None
+        if row.end_time or row.resolved_end_time_override:
+            resolved_end_time = _parse_import_time(row.resolved_end_time_override) or _parse_import_time(row.end_time)
+            if not resolved_end_time:
+                problems.append({"type": "invalid_time_end", "detail": f"לא ניתן לפענח את שעת הסיום '{row.end_time or ''}' — יש להזין שעה תקינה"})
+        elif resolved_start_time:
+            planned_h = _resolve_import_duration_hours(row.planned_duration_hours)
+            actual_h = _resolve_import_duration_hours(row.actual_duration_hours)
+            primary_h, fallback_h = (actual_h, planned_h) if duration_priority == "actual_first" else (planned_h, actual_h)
+            chosen_h = primary_h if primary_h is not None else fallback_h
+            if chosen_h is not None:
+                resolved_end_time = _compute_end_time_from_duration(resolved_start_time, chosen_h)
+
+        if effective_mode == "future" and advisor_id and true_date and resolved_start_time and resolved_end_time:
             try:
                 has_conflict = graph_client._check_meeting_conflict(
                     db, org_id, advisor_id,
-                    {"meeting_date": true_date.isoformat(), "start_time": row.start_time, "end_time": row.end_time},
+                    {"meeting_date": true_date.isoformat(), "start_time": resolved_start_time, "end_time": resolved_end_time},
                     None,
                 )
             except Exception as exc:
@@ -6825,8 +6919,8 @@ def _run_meeting_import_validation(db, org_id: str, mode: str, rows: list) -> li
             if has_conflict and not row.accept_conflict:
                 problems.append({"type": "calendar_conflict", "detail": "קיימת התנגשות ביומן ה-Outlook של היועץ בטווח השעות שצוין"})
 
-        if school and true_date and row.start_time:
-            key = (school["id"], true_date.isoformat(), row.start_time)
+        if school and true_date and resolved_start_time:
+            key = (school["id"], true_date.isoformat(), resolved_start_time)
             if key in existing_keys and not row.accept_duplicate:
                 problems.append({"type": "possible_duplicate", "detail": "קיימת כבר פגישה עם אותו בית ספר, תאריך ושעת התחלה"})
 
@@ -6842,6 +6936,8 @@ def _run_meeting_import_validation(db, org_id: str, mode: str, rows: list) -> li
                 "academic_year": academic_year,
                 "true_date": true_date.isoformat() if true_date else None,
                 "stage_scope_normalized": stage_scope,
+                "resolved_start_time": resolved_start_time,
+                "resolved_end_time": resolved_end_time,
             },
             "problems": problems,
         })
@@ -6855,7 +6951,7 @@ def validate_meeting_import(body: MeetingImportValidateIn, user: Annotated[dict,
     for attempt in range(2):
         try:
             db = get_admin_client()
-            results = _run_meeting_import_validation(db, user["org_id"], body.mode, body.rows)
+            results = _run_meeting_import_validation(db, user["org_id"], body.mode, body.rows, body.duration_priority)
             break
         except HTTPException:
             raise
@@ -6877,7 +6973,7 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
     _require_manager(user)
     db = get_admin_client()
     active_rows = [r for r in body.rows if not r.excluded]
-    revalidated = _run_meeting_import_validation(db, user["org_id"], body.mode, active_rows)
+    revalidated = _run_meeting_import_validation(db, user["org_id"], body.mode, active_rows, body.duration_priority)
 
     unresolved_row_indexes = []
     for row, val in zip(active_rows, revalidated):
@@ -6885,6 +6981,10 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
         for p in val["problems"]:
             t = p["type"]
             if t == "school_not_found" and row.school_id:
+                continue
+            if t == "invalid_time_start" and row.resolved_start_time_override:
+                continue
+            if t == "invalid_time_end" and row.resolved_end_time_override:
                 continue
             if t == "academic_year_out_of_range" and row.academic_year_override in ACADEMIC_YEARS:
                 continue
@@ -6926,6 +7026,12 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
                 continue
             academic_year = (row.academic_year_override if row.academic_year_override in ACADEMIC_YEARS else None) or data_ctx.get("academic_year") or DEFAULT_ACADEMIC_YEAR
             stage_scope = _normalize_stage_scope(row.stage_scope) or data_ctx.get("stage_scope_normalized")
+            # Same rule as true_date above: never fall back to the raw row.start_time/end_time —
+            # those may be unparsed AM/PM text or a raw duration column, not a real "HH:MM"
+            # value. data_ctx already carries the fully resolved (parsed / override / computed
+            # from duration) values from _run_meeting_import_validation.
+            resolved_start_time = data_ctx.get("resolved_start_time")
+            resolved_end_time = data_ctx.get("resolved_end_time")
 
             participants = []
             if row.participant_name or row.participant_phone or row.participant_email:
@@ -6969,8 +7075,8 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
                     "import_batch_id": import_batch_id,
                 }
                 if true_date: insert_data["meeting_date"] = true_date
-                if row.start_time: insert_data["start_time"] = row.start_time
-                if row.end_time: insert_data["end_time"] = row.end_time
+                if resolved_start_time: insert_data["start_time"] = resolved_start_time
+                if resolved_end_time: insert_data["end_time"] = resolved_end_time
                 db.table("meetings").insert(insert_data).execute()
                 imported += 1
                 past_count += 1
@@ -6989,8 +7095,8 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
                     "import_batch_id": import_batch_id,
                 }
                 if true_date: insert_data["meeting_date"] = true_date
-                if row.start_time: insert_data["start_time"] = row.start_time
-                if row.end_time: insert_data["end_time"] = row.end_time
+                if resolved_start_time: insert_data["start_time"] = resolved_start_time
+                if resolved_end_time: insert_data["end_time"] = resolved_end_time
                 if row.meeting_service_type is not None: insert_data["meeting_service_type"] = row.meeting_service_type
                 if row.notes: insert_data["notes"] = row.notes
                 if stage_scope is not None: insert_data["stage_scope"] = stage_scope
