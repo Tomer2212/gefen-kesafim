@@ -355,6 +355,15 @@ class MeetingImportCommitIn(BaseModel):
     rows: list[MeetingImportRowIn]
 
 
+class MeetingImportHistoricalSchoolIn(BaseModel):
+    symbol: str
+    name: str | None = None
+
+
+class MeetingImportHistoricalSchoolsIn(BaseModel):
+    schools: list[MeetingImportHistoricalSchoolIn]
+
+
 class DirectCoordinationParticipantIn(BaseModel):
     key: str
     name: str
@@ -772,6 +781,18 @@ def list_schools(
     return schools
 
 
+def _find_existing_school_by_symbol(db, org_id: str, symbol: str | None) -> dict | None:
+    """Looks up an existing school in the org by exact symbol match, regardless of status
+    (active or soft-deleted/pending_deletion) — there is no DB-level uniqueness constraint on
+    `symbol`, so every school-creation path must call this before inserting to avoid silent
+    duplicates. Returns {id, name, status} or None."""
+    symbol = (symbol or "").strip()
+    if not symbol:
+        return None
+    res = db.table("schools").select("id, name, status").eq("org_id", org_id).eq("symbol", symbol).execute()
+    return res.data[0] if res.data else None
+
+
 @router.post("/")
 def create_school(
     body: SchoolIn,
@@ -784,6 +805,15 @@ def create_school(
         raise HTTPException(status_code=403, detail="אין הרשאה להוסיף בתי ספר")
     if not body.meeting_coordinator:
         raise HTTPException(status_code=400, detail="יש להגדיר אחראי/ת לתיאום פגישות")
+    existing = _find_existing_school_by_symbol(db, user["org_id"], body.symbol)
+    if existing:
+        raise HTTPException(status_code=409, detail={
+            "code": "duplicate_symbol",
+            "message": "בית ספר עם סמל מוסד זה כבר קיים במערכת",
+            "existing_school_id": existing["id"],
+            "existing_school_name": existing["name"],
+            "existing_school_status": existing["status"],
+        })
     payload = body.model_dump(exclude_none=True)
     payload["org_id"] = user["org_id"]
     row = db.table("schools").insert(payload).execute()
@@ -916,6 +946,7 @@ def delete_school(
     db.table("schools").update({
         "status": "pending_deletion",
         "deleted_at": datetime.now(timezone.utc).isoformat(),
+        "deleted_by": user["id"],
     }).eq("id", school_id).eq("org_id", user["org_id"]).execute()
 
     # Cancel the Outlook events for this school's future meetings — a deleted school's
@@ -964,6 +995,7 @@ def restore_school(
             db.table("schools").update({
                 "status": "active",
                 "deleted_at": None,
+                "restored_by": user["id"],
             }).eq("id", school_id).eq("org_id", user["org_id"]).execute()
             break
         except Exception as exc:
@@ -2509,6 +2541,7 @@ def review_update_request(
                     db.table("schools").update({
                         "status": "pending_deletion",
                         "deleted_at": datetime.now(timezone.utc).isoformat(),
+                        "deleted_by": user["id"],
                     }).eq("id", req["school_id"]).execute()
                     school_deleted = True
                     break
@@ -2881,11 +2914,16 @@ def list_all_meetings(
         try:
             db = get_admin_client()
 
+            # Deliberately NOT filtered by status="active" — a soft-deleted ("recycle bin")
+            # school's meeting history must stay visible here even though the school itself
+            # no longer appears in the active roster (GET /schools/). Excluding it would make
+            # every meeting ever held with that school vanish from view the moment an org
+            # deletes it, even though the rows are still in the DB — a real data-loss-looking
+            # bug from the org's perspective, not just a cosmetic one.
             schools_q = (
                 db.table("schools")
                 .select("id, name, symbol, city, authority, district")
                 .eq("org_id", user["org_id"])
-                .eq("status", "active")
             )
             if school_id:
                 schools_q = schools_q.eq("id", school_id)
@@ -2974,9 +3012,11 @@ def list_my_meetings(
         try:
             db = get_admin_client()
 
-            # All school IDs in the org (needed to scope the query)
+            # All school IDs in the org (needed to scope the query). Deliberately NOT filtered
+            # by status="active" — see the identical comment in list_all_meetings: a
+            # soft-deleted school's meeting history must stay visible here too.
             schools_res = db.table("schools").select("id, name, symbol, city, district") \
-                .eq("org_id", user["org_id"]).eq("status", "active").execute()
+                .eq("org_id", user["org_id"]).execute()
             schools_map = {s["id"]: s for s in (schools_res.data or [])}
             school_ids = list(schools_map.keys())
 
@@ -6879,7 +6919,10 @@ def _run_meeting_import_validation(db, org_id: str, mode: str, rows: list, durat
                 problems.append({"type": "advisor_unresolved", "detail": f"לא נמצא יועץ תואם ל-'{row.advisor_name_or_email or ''}'"})
 
         stage_scope = _normalize_stage_scope(row.stage_scope)
-        if school and school.get("stage") == "sheshshnati" and not stage_scope:
+        # Only required for future meetings — a past-documentation row doesn't need this
+        # structure forced onto it, same philosophy as the free-copy status/service/location
+        # fields (past = pure record-keeping, future = needs real structure for automations).
+        if school and school.get("stage") == "sheshshnati" and not stage_scope and effective_mode == "future":
             problems.append({"type": "stage_scope_ambiguous", "detail": 'בית ספר שש-שנתי — יש לבחור היקף פגישה (תיכון/חט"ב/שתיהן)'})
 
         # Time resolution: start_time always goes through the tolerant parser (AM/PM etc.).
@@ -7111,6 +7154,59 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
             errors.append(f"שורה {row.row_index}: {str(exc)}")
 
     return {"imported": imported, "past": past_count, "future": future_count, "errors": errors}
+
+
+@router.post("/meetings/import/historical-schools")
+def create_historical_schools_for_import(body: MeetingImportHistoricalSchoolsIn, user: Annotated[dict, Depends(get_current_user)]):
+    """Bulk-creates minimal 'historical' school stubs for the meetings-import 'school_not_found'
+    problem — used when an org wants to document past meetings with a school that's no longer
+    in their active roster, without going through the full quick-add-school form (which asks
+    for stage/city/authority/district/contacts that make no sense for a defunct relationship).
+
+    Each stub is created via the same insert create_school() uses, then immediately soft-deleted
+    (status='pending_deletion' + deleted_at, same fields delete_school() sets) — so it behaves
+    exactly like a school the org already deleted: absent from the active roster/dashboard, but
+    (per the list_all_meetings/list_my_meetings fix) its meetings still show up in meeting-history
+    screens, and an owner can always restore it into a real active school later via the existing
+    recycle-bin restore flow if the relationship resumes.
+
+    Deliberately skips create_school()'s notification/advisor-auto-assign side effects (a stub
+    being born pre-deleted has no "new school" story worth notifying owners about) and doesn't
+    require can_add_school/can_delete_schools permissions — manager+ (already required to reach
+    this endpoint) is sufficient for an import-only action.
+    """
+    _require_manager(user)
+    db = get_admin_client()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    created: dict[str, str] = {}
+    errors: list[str] = []
+    for item in body.schools:
+        symbol = (item.symbol or "").strip()
+        if not symbol:
+            continue
+        try:
+            # Never create a duplicate — if a school with this symbol already exists (active
+            # or already a historical/deleted stub, e.g. from a previous run of this same
+            # import), just reuse it instead of inserting a second row.
+            existing = _find_existing_school_by_symbol(db, user["org_id"], symbol)
+            if existing:
+                created[symbol] = existing["id"]
+                continue
+            payload = {
+                "org_id": user["org_id"],
+                "name": (item.name or "").strip() or symbol,
+                "symbol": symbol,
+                "meeting_coordinator": "secretary",
+                "secretary_name": "מתאם פגישות (רשומה היסטורית)",
+                "status": "pending_deletion",
+                "deleted_at": now_iso,
+            }
+            row = db.table("schools").insert(payload).execute()
+            created[symbol] = row.data[0]["id"]
+        except Exception as exc:
+            logger.warning("create_historical_schools_for_import failed for symbol %s: %s", symbol, exc)
+            errors.append(f"סמל {symbol}: {str(exc)}")
+    return {"created": created, "errors": errors}
 
 
 _DIRECT_COORDINATION_SERVICE_TYPES = {"gefen": "גפן", "current": "שוטף", "district": "מחוז"}

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import axios from "axios";
+import * as XLSX from "xlsx";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
 import { ACADEMIC_YEARS } from "../../constants/academicYears";
 
@@ -81,6 +82,7 @@ function QuickAddSchoolForm({ row, orgUsers, academicYear, onCreated, onCancel }
   const [pickedRole, setPickedRole] = useState("");
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState(null);
+  const [conflict, setConflict] = useState(null); // {existing_school_id, existing_school_name, existing_school_status}
 
   function set(patch) { setDraft(p => ({ ...p, ...patch })); }
 
@@ -93,6 +95,7 @@ function QuickAddSchoolForm({ row, orgUsers, academicYear, onCreated, onCancel }
   async function handleSubmit() {
     if (!requiredOk) { setError("יש למלא את כל שדות החובה, כולל לפחות פרט זיהוי אחד של מתאם הפגישות"); return; }
     setError(null);
+    setConflict(null);
 
     let coordinatorRole = null;
     let autoSecretary = null;
@@ -147,7 +150,12 @@ function QuickAddSchoolForm({ row, orgUsers, academicYear, onCreated, onCancel }
       }
       onCreated(newSchoolId, draft.name.trim());
     } catch (e) {
-      setError(e?.response?.data?.detail || "יצירת בית הספר נכשלה — נסה שוב");
+      const detail = e?.response?.data?.detail;
+      if (e?.response?.status === 409 && detail?.code === "duplicate_symbol") {
+        setConflict(detail);
+      } else {
+        setError(typeof detail === "string" ? detail : "יצירת בית הספר נכשלה — נסה שוב");
+      }
     } finally {
       setCreating(false);
     }
@@ -252,6 +260,19 @@ function QuickAddSchoolForm({ row, orgUsers, academicYear, onCreated, onCancel }
 
       {error && <p role="alert" className="text-xs text-red-600">{error}</p>}
 
+      {conflict && (
+        <div role="alert" className="bg-amber-50 border border-amber-200 rounded-lg p-2.5 space-y-1.5">
+          <p className="text-xs text-amber-800">
+            בית ספר עם סמל מוסד זה כבר קיים במערכת — <b>{conflict.existing_school_name}</b>
+            {conflict.existing_school_status === "pending_deletion" ? " (בסל מחזור)" : ""}.
+          </p>
+          <button type="button" onClick={() => onCreated(conflict.existing_school_id, conflict.existing_school_name)}
+            className="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-amber-600 text-white hover:bg-amber-700">
+            קשר את הפגישה לבית ספר זה
+          </button>
+        </div>
+      )}
+
       <div className="flex items-center gap-2">
         <button type="button" onClick={handleSubmit} disabled={creating || !requiredOk || (needsCoordinatorPick && !pickedRole)}
           className="text-xs px-3 py-1.5 rounded-lg font-medium bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">
@@ -272,6 +293,8 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState(null);
   const [submitResult, setSubmitResult] = useState(null);
+  const [bulkHistoricalBusy, setBulkHistoricalBusy] = useState(false);
+  const [bulkHistoricalError, setBulkHistoricalError] = useState(null);
 
   function key(type, rowIndex) { return `${type}:${rowIndex}`; }
   function isResolved(type, rowIndex) { return resolvedKeys.has(key(type, rowIndex)); }
@@ -296,6 +319,72 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
   }
   const remainingRows = problemRows.filter(r => rowUnresolvedCount(r) > 0);
   const allClear = remainingRows.length === 0;
+
+  const unresolvedSchoolNotFoundRows = problemRows.filter(r =>
+    !excludedRows.has(r.row_index) && r.problems.some(p => p.type === "school_not_found") && !isResolved("school_not_found", r.row_index)
+  );
+
+  // "רישום ללא זיהוי, בפעולה מרוכזת" — for every currently-unresolved school_not_found row,
+  // auto-creates one minimal (name+symbol only, no form) historical school stub per UNIQUE
+  // symbol (rows sharing a symbol get the same stub, not duplicates), pre-marked as soft-
+  // deleted server-side — so it never clutters the org's active roster, but its meetings still
+  // show up in meeting-history screens (see backend fix). Resolves every matching row at once.
+  async function handleBulkCreateHistorical() {
+    if (!unresolvedSchoolNotFoundRows.length) return;
+    const bySymbol = new Map();
+    for (const r of unresolvedSchoolNotFoundRows) {
+      const symbol = (r.data.school_symbol || "").trim();
+      if (symbol && !bySymbol.has(symbol)) bySymbol.set(symbol, r.data.school_name || "");
+    }
+    setBulkHistoricalBusy(true);
+    setBulkHistoricalError(null);
+    try {
+      const payload = { schools: [...bySymbol.entries()].map(([symbol, name]) => ({ symbol, name })) };
+      const res = await axios.post("/schools/meetings/import/historical-schools", payload);
+      const created = res.data.created || {};
+      for (const r of unresolvedSchoolNotFoundRows) {
+        const symbol = (r.data.school_symbol || "").trim();
+        const schoolId = created[symbol];
+        if (schoolId) {
+          setRowField(r.row_index, { school_id: schoolId });
+          markResolved("school_not_found", r.row_index);
+        }
+      }
+      if (res.data.errors?.length) setBulkHistoricalError(`חלק מהרישום נכשל: ${res.data.errors.join(", ")}`);
+    } catch (e) {
+      setBulkHistoricalError(e?.response?.data?.detail ? String(e.response.data.detail) : "הפעולה נכשלה — נסה שוב");
+    } finally {
+      setBulkHistoricalBusy(false);
+    }
+  }
+
+  function handleBulkSkipSchoolNotFound() {
+    setExcludedRows(prev => {
+      const next = new Set(prev);
+      unresolvedSchoolNotFoundRows.forEach(r => next.add(r.row_index));
+      return next;
+    });
+  }
+
+  // Exports every row that still has at least one unresolved problem (any type) — lets the
+  // manager skip them now and handle/re-import separately later, per the user's request.
+  function handleExportProblems() {
+    const wsData = [["שורה", "שם מוסד", "סמל מוסד", "תאריך", "בעיות שלא טופלו"]];
+    for (const r of remainingRows) {
+      const unresolved = r.problems.filter(p => !isResolved(p.type, r.row_index));
+      wsData.push([
+        r.row_index + 1,
+        r.data.school_name || "",
+        r.data.school_symbol || "",
+        r.data.meeting_date || "",
+        unresolved.map(p => `${PROBLEM_TITLES[p.type] || p.type}: ${p.detail}`).join(" | "),
+      ]);
+    }
+    const ws = XLSX.utils.aoa_to_sheet(wsData);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "בעיות");
+    XLSX.writeFile(wb, "בעיות_ייבוא_פגישות.xlsx");
+  }
 
   async function handleSubmit() {
     setSubmitting(true);
@@ -372,6 +461,25 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
           )}
           {!allClear && (
             <p className="text-slate-600">נותרו <b className="text-slate-800">{remainingRows.length}</b> שורות עם בעיות לטיפול.</p>
+          )}
+
+          {unresolvedSchoolNotFoundRows.length > 0 && (
+            <div className="border border-amber-200 bg-amber-50/60 rounded-xl p-3 space-y-2">
+              <p className="text-xs text-amber-800">
+                {unresolvedSchoolNotFoundRows.length} שורות עם בית ספר לא-מזוהה — אפשר לטפל בכולן בבת אחת:
+              </p>
+              <div className="flex items-center gap-2 flex-wrap">
+                <button type="button" onClick={handleBulkCreateHistorical} disabled={bulkHistoricalBusy}
+                  className="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">
+                  {bulkHistoricalBusy ? "רושם..." : `רשום את כל בתי הספר הלא-מזוהים (${unresolvedSchoolNotFoundRows.length})`}
+                </button>
+                <button type="button" onClick={handleBulkSkipSchoolNotFound}
+                  className="text-xs px-2.5 py-1.5 rounded-lg font-medium border border-slate-300 text-slate-600 hover:bg-slate-50">
+                  דלג על כל בתי הספר הלא-מזוהים ({unresolvedSchoolNotFoundRows.length})
+                </button>
+              </div>
+              {bulkHistoricalError && <p role="alert" className="text-xs text-red-600">{bulkHistoricalError}</p>}
+            </div>
           )}
 
           {problemRows.map(r => {
@@ -502,7 +610,15 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
         </div>
 
         <div className="flex items-center justify-between gap-2 px-6 py-4 border-t border-slate-100 flex-wrap">
-          <button type="button" onClick={onClose} className="text-sm px-4 py-2 rounded-xl font-medium text-slate-500 hover:bg-slate-50">ביטול</button>
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={onClose} className="text-sm px-4 py-2 rounded-xl font-medium text-slate-500 hover:bg-slate-50">ביטול</button>
+            {!allClear && (
+              <button type="button" onClick={handleExportProblems}
+                className="text-sm px-4 py-2 rounded-xl font-medium border border-slate-300 text-slate-600 hover:bg-slate-50">
+                ייצוא הבעיות לאקסל
+              </button>
+            )}
+          </div>
           <div className="flex flex-col items-end gap-1">
             {!allClear && <span className="text-xs text-slate-500">יש לטפל בכל הבעיות או להסיר את השורות הבעייתיות כדי להמשיך</span>}
             <button type="button" onClick={handleSubmit} disabled={submitting || !allClear}

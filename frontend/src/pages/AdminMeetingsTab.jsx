@@ -15,14 +15,19 @@ import ImportMeetingsModal from "../components/meetings/ImportMeetingsModal";
 import { AdvisorFinderModal } from "../components/meetings/AdvisorFinderModal";
 import { MEETING_STATUS_OPTIONS, MEETING_TYPE_OPTIONS, MEETING_SERVICE_TYPE_OPTIONS, STATUS_MAP, formatMeetingDate, defaultMeetingServiceType, resolveDefaultAdvisorIds } from "../components/meetings/constants";
 import { AcademicYearSelector } from "../components/AcademicYearSelector";
-import { DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
+import { DEFAULT_ACADEMIC_YEAR, getAcademicYearStartDate } from "../constants/academicYears";
 import { getMissingCriticalFields, isMeetingIncomplete } from "../components/meetings/meetingCompleteness";
 import { buildSchoolContacts } from "../components/meetings/schoolContacts";
 import { useMeetingsPolling } from "../hooks/useMeetingsPolling";
 import { mergeMeetingsSilently, visibleDateBounds } from "../components/meetings/mergeMeetings";
 
 const TODAY = new Date().toISOString().slice(0, 10);
-const DEFAULT_FILTERS = { status: "scheduled", date_from: null, date_to: TODAY, advisor_id: null, school_id: null };
+// date_from defaults to the start of a given academic year (not a fixed value) so the list
+// doesn't silently hide that year's meetings the moment they're dated in the future relative
+// to today — see the dynamic-date-from plan. date_to intentionally stays "today" always.
+function buildDefaultFilters(academicYear) {
+  return { status: "scheduled", date_from: getAcademicYearStartDate(academicYear), date_to: TODAY, advisor_id: null, school_id: null };
+}
 const SS_KEY = "admin_meetings_ui_state";
 
 const INPUT_CLS = "text-sm border border-slate-200 rounded-lg px-2.5 py-1.5 outline-none focus:border-blue-400 bg-white";
@@ -54,7 +59,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [academicYear, setAcademicYear] = useState(DEFAULT_ACADEMIC_YEAR);
-  const [filters, setFilters] = useState(saved?.filters ?? DEFAULT_FILTERS);
+  const [filters, setFilters] = useState(saved?.filters ?? buildDefaultFilters(DEFAULT_ACADEMIC_YEAR));
   const [showAdvanced, setShowAdvanced] = useState(saved?.showAdvanced ?? false);
   const [search] = useState("");
 
@@ -123,7 +128,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
     // filter UI use) and updates the client-side text filters.
     applyAgentFilters: (filterObj) => {
       const next = {
-        ...DEFAULT_FILTERS,
+        ...buildDefaultFilters(academicYear),
         ...filters,
         ...(filterObj?.status !== undefined ? { status: filterObj.status } : {}),
         ...(filterObj?.date_from !== undefined ? { date_from: filterObj.date_from } : {}),
@@ -210,7 +215,9 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
 
   function handleYearChange(year) {
     setAcademicYear(year);
-    loadAllMeetings(filters, year);
+    const next = { ...filters, date_from: getAcademicYearStartDate(year) };
+    setFilters(next);
+    loadAllMeetings(next, year);
   }
 
   async function loadOrgSchools() {
@@ -260,7 +267,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
   }
 
   function clearFilters() {
-    const reset = DEFAULT_FILTERS;
+    const reset = buildDefaultFilters(academicYear);
     setFilters(reset);
     setNameFilter("");
     setSymbolFilter("");
@@ -704,7 +711,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
   // moment its value diverges from that default, so the active filter is always visible at a
   // glance without needing to open/inspect the field.
   const activeBaseFilters = {
-    date_from: !!filters.date_from,
+    date_from: (filters.date_from || "") !== getAcademicYearStartDate(academicYear),
     date_to: (filters.date_to || "") !== TODAY,
     status: (filters.status || "") !== "scheduled",
     advisor_id: !!filters.advisor_id,
