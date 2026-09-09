@@ -190,7 +190,7 @@ export function MeetingsTable({
       <div className="glass-card rounded-2xl border border-slate-200 flex flex-col" style={{ minHeight: "calc(100vh - 240px)" }}>
         <div ref={tableScrollRef} className="flex-1 overflow-auto rounded-t-2xl" style={{ maxHeight: "calc(100vh - 240px)" }}>
           <table className="w-full text-right border-collapse" style={{ minWidth: "1200px" }}>
-            <thead>
+            <thead style={{ position: "sticky", top: 0, zIndex: 10, background: "rgba(241,245,249,0.97)", backdropFilter: "blur(8px)" }}>
               <tr className="border-b border-slate-200 bg-slate-50/80">
                 {selectable && (
                   <th scope="col" rowSpan={2} className="py-3 px-2 text-center">
