@@ -155,7 +155,17 @@ export function MeetingColumnMenu({
 
   useEffect(() => {
     if (!isOpen) return;
-    function handleScroll() { setOpenKey(null); }
+    // Close on a scroll of the underlying page/table (the menu is `position: fixed`, positioned
+    // once from the trigger button's on-open coordinates — if the table scrolls, those
+    // coordinates go stale and the menu would float disconnected from its column). But the
+    // value checklist below has its own internal scroll area (`overflow-y-auto`, capped height)
+    // — a native scroll event fired by scrolling THAT list must NOT close the menu, since a
+    // capture-phase listener on `document` sees it too. Ignore any scroll whose target is the
+    // menu itself or something inside it.
+    function handleScroll(e) {
+      if (menuRef.current && (e.target === menuRef.current || menuRef.current.contains(e.target))) return;
+      setOpenKey(null);
+    }
     document.addEventListener("scroll", handleScroll, true);
     return () => document.removeEventListener("scroll", handleScroll, true);
   }, [isOpen, setOpenKey]);
