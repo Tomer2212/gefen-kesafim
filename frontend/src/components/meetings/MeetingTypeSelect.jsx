@@ -12,6 +12,11 @@ export function MeetingTypeSelect({ value, onChange }) {
   }, []);
 
   const selected = MEETING_TYPE_OPTIONS.find(o => o.value === value);
+  // Past-mode meeting imports copy this field as free text verbatim from the org's Excel file
+  // (see ImportMeetingsModal.jsx's buildRowsFromSheet) rather than forcing it onto "פיזי"/"מרחוק"
+  // — so `value` can legitimately be real text that isn't one of the two closed options. Show it
+  // as-is instead of silently rendering the blank "+" placeholder as if nothing were saved.
+  const rawLabel = !selected && value ? value : null;
 
   return (
     <div ref={containerRef} className="relative w-full">
@@ -19,6 +24,8 @@ export function MeetingTypeSelect({ value, onChange }) {
         onClick={() => setOpen(o => !o)}>
         {selected
           ? <span className="text-slate-700">{selected.label}</span>
+          : rawLabel
+          ? <span className="text-slate-700">{rawLabel}</span>
           : <span className="text-slate-400 text-lg font-light leading-none">+</span>}
       </div>
       {open && (
