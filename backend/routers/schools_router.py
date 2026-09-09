@@ -2838,6 +2838,29 @@ def update_notification_preferences(
     return {"ok": True, "notification_preferences": new_prefs}
 
 
+def _fetch_all_rows(query, order_col: str | None = None, order_desc: bool = False, page_size: int = 1000):
+    """Execute a Supabase/PostgREST query across as many pages as needed.
+
+    PostgREST caps a single response at 1,000 rows by default (db-max-rows) regardless of how
+    many rows actually match the query's filters — a plain `.execute()` on a large org's
+    meetings silently truncates at exactly 1,000 with no error, which looks like data loss to
+    the user. `query` must already have every semantic filter (`.eq`/`.gte`/`.in_`/...) applied;
+    this only pages through that already-filtered result set via `.range()`, it does not scan an
+    unfiltered table (see CLAUDE.md "DB-level filtering — no Python-side table scans").
+    """
+    if order_col:
+        query = query.order(order_col, desc=order_desc)
+    rows: list = []
+    offset = 0
+    while True:
+        page = query.range(offset, offset + page_size - 1).execute().data or []
+        rows.extend(page)
+        if len(page) < page_size:
+            break
+        offset += page_size
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Meetings stats (aggregate per school — used by dashboard columns)
 # ---------------------------------------------------------------------------
@@ -2849,7 +2872,9 @@ def get_meetings_stats(user: Annotated[dict, Depends(get_current_user)]):
     try:
         if user["role"] in ("owner", "manager"):
             # Owners/managers see all schools — skip the schools filter query entirely
-            meetings_res = db.table("meetings").select("school_id, status, start_time, end_time, meeting_service_type").execute()
+            meetings_rows = _fetch_all_rows(
+                db.table("meetings").select("school_id, status, start_time, end_time, meeting_service_type")
+            )
         else:
             # Advisors: fetch schools + assignments in parallel, then meetings
             with ThreadPoolExecutor(max_workers=2) as pool:
@@ -2870,12 +2895,14 @@ def get_meetings_stats(user: Annotated[dict, Depends(get_current_user)]):
             ]
             if not accessible:
                 return {}
-            meetings_res = db.table("meetings").select("school_id, status, start_time, end_time, meeting_service_type").in_("school_id", accessible).execute()
+            meetings_rows = _fetch_all_rows(
+                db.table("meetings").select("school_id, status, start_time, end_time, meeting_service_type").in_("school_id", accessible)
+            )
     except Exception as exc:
         logger.warning("get_meetings_stats failed: %s", exc)
         return {}
     stats: dict = {}
-    for m in (meetings_res.data or []):
+    for m in meetings_rows:
         sid = m["school_id"]
         if sid not in stats:
             stats[sid] = {"completed": 0, "total_minutes": 0, "by_type": {}}
@@ -2953,8 +2980,11 @@ def list_all_meetings(
                 q = q.filter("advisor_ids", "cs", json.dumps([advisor_id]))
             if academic_year:
                 q = q.eq("academic_year", academic_year)
-            res = q.order("meeting_date", desc=True).execute()
-            meetings = res.data or []
+            # A wide filter (e.g. a full academic year, no status) can easily match 1,000+
+            # meetings for a large org — PostgREST caps a single .execute() at 1,000 rows, so a
+            # plain call here would silently truncate the result with no error. _fetch_all_rows
+            # pages through the (already filtered) result set instead.
+            meetings = _fetch_all_rows(q, order_col="meeting_date", order_desc=True)
             break
         except Exception as exc:
             if attempt == 0:
@@ -3038,8 +3068,9 @@ def list_my_meetings(
                 q = q.lte("meeting_date", date_to)
             if academic_year:
                 q = q.eq("academic_year", academic_year)
-            res = q.order("meeting_date", desc=True).execute()
-            meetings = res.data or []
+            # Same 1,000-row PostgREST response cap as list_all_meetings — page through the
+            # already-filtered result set instead of truncating silently.
+            meetings = _fetch_all_rows(q, order_col="meeting_date", order_desc=True)
             break
         except Exception as exc:
             if attempt == 0:
@@ -6600,8 +6631,7 @@ def list_meetings(school_id: str, user: Annotated[dict, Depends(get_current_user
             q = db.table("meetings").select("*").eq("school_id", school_id)
             if academic_year:
                 q = q.eq("academic_year", academic_year)
-            res = q.order("created_at", desc=True).execute()
-            meetings = res.data or []
+            meetings = _fetch_all_rows(q, order_col="created_at", order_desc=True)
             break
         except Exception as exc:
             if attempt == 0:
@@ -6872,8 +6902,10 @@ def _run_meeting_import_validation(db, org_id: str, mode: str, rows: list, durat
     existing_keys = set()
     if candidate_school_ids:
         try:
-            m_res = db.table("meetings").select("school_id, meeting_date, start_time").in_("school_id", list(candidate_school_ids)).execute()
-            for m in (m_res.data or []):
+            # _fetch_all_rows — a large org's candidate schools can easily hold 1,000+ existing
+            # meetings between them; a plain .execute() would silently truncate at PostgREST's
+            # 1,000-row cap and miss real duplicates past that point.
+            for m in _fetch_all_rows(db.table("meetings").select("school_id, meeting_date, start_time").in_("school_id", list(candidate_school_ids))):
                 if m.get("meeting_date") and m.get("start_time"):
                     existing_keys.add((m["school_id"], m["meeting_date"], m["start_time"]))
         except Exception as exc:

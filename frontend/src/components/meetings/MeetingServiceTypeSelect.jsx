@@ -15,6 +15,11 @@ export function MeetingServiceTypeSelect({ value, onChange, hasError }) {
   }, []);
 
   const selected = MEETING_SERVICE_TYPE_OPTIONS.find(o => o.value === value);
+  // Past-mode meeting imports copy this field as free text verbatim from the org's Excel file
+  // (see ImportMeetingsModal.jsx's buildRowsFromSheet) rather than forcing it onto one of the 4
+  // closed options — so `value` can legitimately be real text that isn't a recognized option.
+  // Show it as-is instead of silently rendering the blank "+" placeholder as if nothing were saved.
+  const rawLabel = !selected && value ? value : null;
 
   return (
     <div ref={containerRef} className="relative w-full">
@@ -26,6 +31,8 @@ export function MeetingServiceTypeSelect({ value, onChange, hasError }) {
         title={hasError ? "יש לבחור סוג" : undefined}>
         {selected
           ? <span className={hasError ? "text-red-700" : "text-slate-700"}>{selected.label}</span>
+          : rawLabel
+          ? <span className={hasError ? "text-red-700" : "text-slate-700"}>{rawLabel}</span>
           : <span className={`text-lg font-light leading-none ${hasError ? "text-red-400" : "text-slate-400"}`}>+</span>}
       </div>
       {open && (

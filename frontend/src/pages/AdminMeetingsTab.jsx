@@ -579,7 +579,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
       m.meeting_time || "",
       STATUS_MAP[m.status]?.label || m.status || "",
       MEETING_TYPE_OPTIONS.find(o => o.value === m.meeting_type)?.label || m.meeting_type || "",
-      MEETING_SERVICE_TYPE_OPTIONS.find(o => o.value === m.meeting_service_type)?.label || "",
+      MEETING_SERVICE_TYPE_OPTIONS.find(o => o.value === m.meeting_service_type)?.label || m.meeting_service_type || "",
       (m.advisor_profiles || []).map(p => p?.full_name || p?.email || "").filter(Boolean).join(", "),
       m.school_city || "",
     ]);
@@ -603,7 +603,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
       m.meeting_time || "",
       STATUS_MAP[m.status]?.label || m.status || "",
       MEETING_TYPE_OPTIONS.find(o => o.value === m.meeting_type)?.label || m.meeting_type || "",
-      MEETING_SERVICE_TYPE_OPTIONS.find(o => o.value === m.meeting_service_type)?.label || "",
+      MEETING_SERVICE_TYPE_OPTIONS.find(o => o.value === m.meeting_service_type)?.label || m.meeting_service_type || "",
       (m.advisor_profiles || []).map(p => p?.full_name || p?.email || "").filter(Boolean).join(", "),
       m.school_city || "",
     ]);
@@ -659,8 +659,8 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
       m.end_time || "",
       (m.advisor_profiles || []).map(p => p.full_name || p.email).join(", "),
       (m.participants || []).map(p => p.name).join(", "),
-      MEETING_TYPE_OPTIONS.find(o => o.value === m.meeting_type)?.label || "",
-      MEETING_SERVICE_TYPE_OPTIONS.find(o => o.value === m.meeting_service_type)?.label || "",
+      MEETING_TYPE_OPTIONS.find(o => o.value === m.meeting_type)?.label || m.meeting_type || "",
+      MEETING_SERVICE_TYPE_OPTIONS.find(o => o.value === m.meeting_service_type)?.label || m.meeting_service_type || "",
       m.notes || "",
       m.reminder_enabled ? "פעיל" : "כבוי",
     ];

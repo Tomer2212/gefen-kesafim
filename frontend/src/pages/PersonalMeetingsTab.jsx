@@ -326,7 +326,7 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
       m.meeting_time || "",
       STATUS_MAP[m.status]?.label || m.status || "",
       MEETING_TYPE_OPTIONS.find(o => o.value === m.meeting_type)?.label || m.meeting_type || "",
-      MEETING_SERVICE_TYPE_OPTIONS.find(o => o.value === m.meeting_service_type)?.label || "",
+      MEETING_SERVICE_TYPE_OPTIONS.find(o => o.value === m.meeting_service_type)?.label || m.meeting_service_type || "",
       m.school_city || "",
     ]);
     const wsData = [headers, ...rows];
@@ -348,7 +348,7 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
       m.meeting_time || "",
       STATUS_MAP[m.status]?.label || m.status || "",
       MEETING_TYPE_OPTIONS.find(o => o.value === m.meeting_type)?.label || m.meeting_type || "",
-      MEETING_SERVICE_TYPE_OPTIONS.find(o => o.value === m.meeting_service_type)?.label || "",
+      MEETING_SERVICE_TYPE_OPTIONS.find(o => o.value === m.meeting_service_type)?.label || m.meeting_service_type || "",
       m.school_city || "",
     ]);
     try {
