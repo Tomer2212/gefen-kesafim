@@ -2889,15 +2889,19 @@ def get_meetings_stats(user: Annotated[dict, Depends(get_current_user)]):
 
     try:
         if user["role"] in ("owner", "manager"):
-            # Owners/managers see all schools — skip the schools filter query entirely
+            # Owners/managers see every school in their org — scope via an embedded inner-join
+            # on schools.org_id (not a school_id IN list, which blows the URL limit for a large
+            # org; and not an unfiltered scan, which would pull other orgs' meetings too).
             meetings_rows = _fetch_all_rows(
-                db.table("meetings").select("school_id, status, start_time, end_time, meeting_service_type")
+                db.table("meetings")
+                .select("school_id, status, start_time, end_time, meeting_service_type, schools!inner(org_id)")
+                .eq("schools.org_id", user["org_id"])
             )
         else:
-            # Advisors: fetch schools + assignments in parallel, then meetings
+            # Advisors: fetch org schools + assignments in parallel, then meetings
             with ThreadPoolExecutor(max_workers=2) as pool:
                 schools_future = pool.submit(
-                    lambda: db.table("schools").select("id, restrict_access_to").execute()
+                    lambda: db.table("schools").select("id, restrict_access_to").eq("org_id", user["org_id"]).execute()
                 )
                 assigned_future = pool.submit(
                     lambda: db.table("advisor_schools").select("school_id").eq("advisor_id", user["id"]).execute()
@@ -2905,17 +2909,22 @@ def get_meetings_stats(user: Annotated[dict, Depends(get_current_user)]):
                 all_schools = schools_future.result().data or []
                 advisor_ids = {r["school_id"] for r in (assigned_future.result().data or [])}
 
-            accessible = [
+            accessible = {
                 s["id"] for s in all_schools
                 if s.get("restrict_access_to") is None
                 or user["id"] in (s.get("restrict_access_to") or [])
                 or s["id"] in advisor_ids
-            ]
+            }
             if not accessible:
                 return {}
-            meetings_rows = _fetch_all_rows(
-                db.table("meetings").select("school_id, status, start_time, end_time, meeting_service_type").in_("school_id", accessible)
+            # Fetch org-scoped meetings via the embedded join (no school_id IN list — see
+            # list_all_meetings), then keep only this advisor's accessible schools.
+            org_rows = _fetch_all_rows(
+                db.table("meetings")
+                .select("school_id, status, start_time, end_time, meeting_service_type, schools!inner(org_id)")
+                .eq("schools.org_id", user["org_id"])
             )
+            meetings_rows = [m for m in org_rows if m.get("school_id") in accessible]
     except Exception as exc:
         logger.warning("get_meetings_stats failed: %s", exc)
         return {}
@@ -2957,37 +2966,27 @@ def list_all_meetings(
     """Org-wide meetings list for the admin 'פגישות' tab. Owner/manager only."""
     _require_manager(user)
     meetings: list = []
-    schools_map: dict = {}
 
     for attempt in range(2):
         try:
             db = get_admin_client()
 
-            # Deliberately NOT filtered by status="active" — a soft-deleted ("recycle bin")
-            # school's meeting history must stay visible here even though the school itself
-            # no longer appears in the active roster (GET /schools/). Excluding it would make
-            # every meeting ever held with that school vanish from view the moment an org
-            # deletes it, even though the rows are still in the DB — a real data-loss-looking
-            # bug from the org's perspective, not just a cosmetic one.
-            schools_q = (
-                db.table("schools")
-                .select("id, name, symbol, city, authority, district")
-                .eq("org_id", user["org_id"])
+            # Org scoping is done via a PostgREST embedded inner-join on schools.org_id — NOT by
+            # fetching every school id and passing `school_id=in.(...)`. A large org (600+ schools)
+            # turned that IN list into a ~25KB URL that the server rejected with a bare 400
+            # ("JSON could not be generated"), surfacing to the user as a 503. Deliberately NOT
+            # filtered by school status — a soft-deleted ("recycle bin") school's meeting history
+            # must stay visible here even though the school itself is off the active roster.
+            q = (
+                db.table("meetings")
+                .select("*, schools!inner(id, name, symbol, city, authority, district, org_id)")
+                .eq("schools.org_id", user["org_id"])
             )
             if school_id:
-                schools_q = schools_q.eq("id", school_id)
+                q = q.eq("schools.id", school_id)
             if search and search.strip():
                 s = search.strip().replace(",", "")
-                schools_q = schools_q.or_(f"name.ilike.%{s}%,symbol.ilike.%{s}%,city.ilike.%{s}%")
-            schools_rows = schools_q.execute().data or []
-            school_ids = [s["id"] for s in schools_rows]
-            schools_map = {s["id"]: s for s in schools_rows}
-
-            if not school_ids:
-                meetings = []
-                break
-
-            q = db.table("meetings").select("*").in_("school_id", school_ids)
+                q = q.or_(f"name.ilike.%{s}%,symbol.ilike.%{s}%,city.ilike.%{s}%", reference_table="schools")
             if status:
                 q = q.eq("status", status)
             if date_from:
@@ -2998,10 +2997,8 @@ def list_all_meetings(
                 q = q.filter("advisor_ids", "cs", json.dumps([advisor_id]))
             if academic_year:
                 q = q.eq("academic_year", academic_year)
-            # A wide filter (e.g. a full academic year, no status) can easily match 1,000+
-            # meetings for a large org — PostgREST caps a single .execute() at 1,000 rows, so a
-            # plain call here would silently truncate the result with no error. _fetch_all_rows
-            # pages through the (already filtered) result set instead.
+            # A wide filter (a full academic year, no status) can match many thousands of rows
+            # for a large org — PostgREST caps a single .execute() at 1,000, so page through it.
             meetings = _fetch_all_rows(q, order_col="meeting_date", order_desc=True)
             break
         except Exception as exc:
@@ -3014,7 +3011,7 @@ def list_all_meetings(
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
     for m in meetings:
-        sc = schools_map.get(m.get("school_id"), {})
+        sc = m.pop("schools", None) or {}
         m["school_name"] = sc.get("name", "")
         m["school_symbol"] = sc.get("symbol", "")
         m["school_city"] = sc.get("city", "")
@@ -3064,20 +3061,16 @@ def list_my_meetings(
         try:
             db = get_admin_client()
 
-            # All school IDs in the org (needed to scope the query). Deliberately NOT filtered
-            # by status="active" — see the identical comment in list_all_meetings: a
-            # soft-deleted school's meeting history must stay visible here too.
-            schools_res = db.table("schools").select("id, name, symbol, city, district") \
-                .eq("org_id", user["org_id"]).execute()
-            schools_map = {s["id"]: s for s in (schools_res.data or [])}
-            school_ids = list(schools_map.keys())
-
-            if not school_ids:
-                return []
-
-            q = db.table("meetings").select("*") \
-                .in_("school_id", school_ids) \
+            # Org scoping via a PostgREST embedded inner-join on schools.org_id (see the detailed
+            # comment in list_all_meetings — a 600+ school org made the old school_id=in.(...)
+            # list a ~25KB URL the server rejected with a 400). Deliberately NOT filtered by
+            # school status — a soft-deleted school's meeting history must stay visible here too.
+            q = (
+                db.table("meetings")
+                .select("*, schools!inner(id, name, symbol, city, district, org_id)")
+                .eq("schools.org_id", user["org_id"])
                 .filter("advisor_ids", "cs", json.dumps([user["id"]]))
+            )
             if status:
                 q = q.eq("status", status)
             if date_from:
@@ -3086,8 +3079,7 @@ def list_my_meetings(
                 q = q.lte("meeting_date", date_to)
             if academic_year:
                 q = q.eq("academic_year", academic_year)
-            # Same 1,000-row PostgREST response cap as list_all_meetings — page through the
-            # already-filtered result set instead of truncating silently.
+            # Same 1,000-row PostgREST response cap as list_all_meetings — page through it.
             meetings = _fetch_all_rows(q, order_col="meeting_date", order_desc=True)
             break
         except Exception as exc:
@@ -3100,7 +3092,7 @@ def list_my_meetings(
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
     for m in meetings:
-        sc = schools_map.get(m.get("school_id"), {})
+        sc = m.pop("schools", None) or {}
         m["school_name"] = sc.get("name", "")
         m["school_symbol"] = sc.get("symbol", "")
         m["school_city"] = sc.get("city", "")
