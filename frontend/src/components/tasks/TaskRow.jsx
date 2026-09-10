@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import axios from "axios";
 import TaskRowMenu from "./TaskRowMenu";
 import TaskRowExpandedDetail from "./TaskRowExpandedDetail";
@@ -40,7 +40,7 @@ function GenericCell({ col, task }) {
 // One row of the redesigned Tasks table. Clicking the row (outside the 3-dot menu / rename
 // input) toggles inline expansion via TaskRowExpandedDetail, matching TaskMeetingResolutionModal
 // .jsx's existing expand/collapse card pattern, just hosted inside a real <table> row.
-export default function TaskRow({ task, visibleColumns, expanded, onToggleExpand, onChanged, onTaskRefreshed, onRequestDelete }) {
+function TaskRow({ task, visibleColumns, expanded, onToggleExpand, onChanged, onTaskRefreshed, onRequestDelete }) {
   const [renaming, setRenaming] = useState(false);
   const [nameDraft, setNameDraft] = useState(task.name || "");
   const [saving, setSaving] = useState(false);
@@ -139,3 +139,5 @@ export default function TaskRow({ task, visibleColumns, expanded, onToggleExpand
     </>
   );
 }
+
+export default memo(TaskRow);

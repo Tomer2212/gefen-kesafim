@@ -12,6 +12,7 @@ import { DirectCoordinationModal } from "../components/meetings/DirectCoordinati
 import AdvisorAccessGrantModal from "../components/meetings/AdvisorAccessGrantModal";
 import MeetingAutomationsModal from "../components/meetings/MeetingAutomationsModal";
 import ImportMeetingsModal from "../components/meetings/ImportMeetingsModal";
+import ImportValueMappingModal from "../components/meetings/ImportValueMappingModal";
 import { AdvisorFinderModal } from "../components/meetings/AdvisorFinderModal";
 import { MEETING_STATUS_OPTIONS, MEETING_TYPE_OPTIONS, MEETING_SERVICE_TYPE_OPTIONS, STATUS_MAP, formatMeetingDate, defaultMeetingServiceType, resolveDefaultAdvisorIds } from "../components/meetings/constants";
 import { AcademicYearSelector } from "../components/AcademicYearSelector";
@@ -88,6 +89,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
   const showImportMeetingsButton = myRole === "owner" || myRole === "manager";
   const [advisorFinderOpen, setAdvisorFinderOpen] = useState(false);
   const [importMeetingsOpen, setImportMeetingsOpen] = useState(false);
+  const [valueMappingOpen, setValueMappingOpen] = useState(false);
 
   // Status reminder states
   const [alreadySentModal, setAlreadySentModal] = useState(null); // { meeting, lastSentAt, recipients }
@@ -304,6 +306,32 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
     }
     return result;
   }, [meetings, search, nameFilter, symbolFilter, cityFilter, districtFilter]);
+
+  // Non-canonical status values present in imported meetings the org chose to keep as free
+  // text — added to the status filter dropdown so they're still filterable.
+  const extraStatusOptions = useMemo(() => {
+    const canon = new Set(MEETING_STATUS_OPTIONS.map(o => o.value));
+    const seen = new Set();
+    for (const m of meetings) {
+      const s = (m.status || "").trim();
+      if (s && !canon.has(s)) seen.add(s);
+    }
+    return [...seen].sort((a, b) => a.localeCompare(b, "he"));
+  }, [meetings]);
+
+  // Cheap client-side signal that there's imported free-text data worth offering to map —
+  // any of the three label fields carrying a value that isn't one of the canonical options.
+  const hasUnrecognizedImportValues = useMemo(() => {
+    const canonStatus = new Set(MEETING_STATUS_OPTIONS.map(o => o.value));
+    const canonType = new Set(MEETING_TYPE_OPTIONS.map(o => o.value));
+    const canonSvc = new Set(MEETING_SERVICE_TYPE_OPTIONS.map(o => o.value));
+    return meetings.some(m => {
+      const s = (m.status || "").trim();
+      const t = (m.meeting_type || "").trim();
+      const v = (m.meeting_service_type || "").trim();
+      return (s && !canonStatus.has(s)) || (t && !canonType.has(t)) || (v && !canonSvc.has(v));
+    });
+  }, [meetings]);
 
   function normalizeTime(t) {
     if (!t) return null;
@@ -848,6 +876,13 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
         />
       )}
 
+      {valueMappingOpen && (
+        <ImportValueMappingModal
+          onClose={() => setValueMappingOpen(false)}
+          onDone={() => loadAllMeetings(filters)}
+        />
+      )}
+
       {advisorFinderOpen && (
         <AdvisorFinderModal schools={schools} users={users} onClose={() => setAdvisorFinderOpen(false)}
           onBook={createMeetingFromAdvisorFinder} />
@@ -901,6 +936,14 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
               <button type="button" onClick={() => setImportMeetingsOpen(true)}
                 className="btn-ghost flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-xl font-medium">
                 <span aria-hidden="true">📥</span> ייבא פגישות
+              </button>
+            </div>
+          )}
+          {showImportMeetingsButton && hasUnrecognizedImportValues && (
+            <div className="relative">
+              <button type="button" onClick={() => setValueMappingOpen(true)}
+                className="btn-ghost flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-xl font-medium text-amber-700">
+                <span aria-hidden="true">🏷️</span> מיפוי ערכים מיובאים
               </button>
             </div>
           )}
@@ -966,6 +1009,11 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
               className={INPUT_CLS + (activeBaseFilters.status ? ACTIVE_INPUT_CLS : "")}>
               <option value="">הכל</option>
               {MEETING_STATUS_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              {extraStatusOptions.length > 0 && (
+                <optgroup label="ערכים מיובאים (טקסט חופשי)">
+                  {extraStatusOptions.map(v => <option key={v} value={v}>{v}</option>)}
+                </optgroup>
+              )}
             </select>
           </div>
           <div>

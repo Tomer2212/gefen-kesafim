@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import axios from "axios";
 import { useCallNoteWindows } from "../../context/CallNoteWindowsContext";
 import { SchoolPickerModal } from "../meetings/SchoolPickerCell";
@@ -65,7 +65,7 @@ function buildWindowTitle(call, advisorLabel) {
   return parts.join(" - ");
 }
 
-export function CallRow({ call, onDelete, hideSchoolColumn, canManage = true, schoolId }) {
+function CallRowBase({ call, onDelete, hideSchoolColumn, canManage = true, schoolId }) {
   const { openCallNote } = useCallNoteWindows();
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -227,3 +227,5 @@ export function CallRow({ call, onDelete, hideSchoolColumn, canManage = true, sc
     </>
   );
 }
+
+export const CallRow = memo(CallRowBase);

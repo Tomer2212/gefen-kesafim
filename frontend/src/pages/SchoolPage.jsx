@@ -16,6 +16,8 @@ import { ControlLetterTab } from "../components/ControlLetterTab";
 import SchoolTasksTab from "../components/SchoolTasksTab";
 import { CallsTable } from "../components/calls/CallsTable";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { useRowVirtualizer } from "../hooks/useRowVirtualizer";
+import { VirtualRows } from "../components/common/VirtualRows";
 import { useMeetingsPolling } from "../hooks/useMeetingsPolling";
 import { mergeMeetingsSilently } from "../components/meetings/mergeMeetings";
 import { useCompareChecks } from "../context/CompareChecksContext";
@@ -1532,7 +1534,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
 
   useEffect(() => { setSelectedHistBudget(null); }, [activeSubTab]);
 
-  const filteredLogs = isSheshsSnati
+  const filteredLogs = useMemo(() => (isSheshsSnati
     ? logs.filter(log => {
         if (!log.gefen_account_id) {
           // Use detected division from doch summary to route to the correct sub-tab
@@ -1546,7 +1548,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
           ? acc?.division_type === "tikkon"
           : acc?.division_type === "beinayim";
       })
-    : logs;
+    : logs), [isSheshsSnati, logs, activeSubTab, accounts]);
 
   const allHistBudgets = useMemo(() => {
     const seen = new Set();
@@ -1564,6 +1566,20 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
     }
     return result;
   }, [filteredLogs]);
+
+  // Row virtualization for the check-history table — only the rows in the scroll viewport are
+  // mounted, so a school with a long history opens instantly. Bound to the existing
+  // historyScrollRef so the horizontal keyboard/arrow scrolling keeps working unchanged.
+  const {
+    virtualizer: historyRowVirtualizer,
+    items: historyVirtualItems,
+    padTop: historyPadTop,
+    padBottom: historyPadBottom,
+  } = useRowVirtualizer(filteredLogs, {
+    estimateSize: 56,
+    getItemKey: l => l.id,
+    scrollRef: historyScrollRef,
+  });
 
   // No "כולם" (all) pill anymore — once multiple budgets are detected, always
   // land on a real budget name instead of the ambiguous null/"all" state.
@@ -2144,8 +2160,18 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
                     {canDelete && <td className="border-r border-slate-100" />}
                   </tr>
                 )}
+              </tbody>
 
-                {filteredLogs.map(log => {
+              <VirtualRows
+                items={historyVirtualItems}
+                padTop={historyPadTop}
+                padBottom={historyPadBottom}
+                colSpan={4 + visibleColOrder.length + (canDelete ? 1 : 0)}
+                measureElement={historyRowVirtualizer.measureElement}
+                rows={filteredLogs}
+                rowKey={l => l.id}
+              >
+                {log => {
                   const fc = getLogFileCols(log);
                   const isLoadingThis = loadingLogId === log.id ||
                     (pendingRun?.updateLogId === log.id && pendingRun?.status === "loading");
@@ -2156,7 +2182,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
                   const fileState = (colKey) => getFileState(fc, budgetEntries, colKey);
                   const fileNotCheckedReason = (colKey) => getFileNotCheckedReason(colKey, budgetEntries, selectedHistBudget);
                   return (
-                    <tr key={log.id} className="border-b border-slate-100 hover:bg-slate-50 transition-colors">
+                    <tr className="border-b border-slate-100 hover:bg-slate-50 transition-colors">
                       <td className="px-3 py-3 font-medium whitespace-nowrap" style={{ borderLeft: "1px solid black", position: "sticky", right: 0, zIndex: 5, background: "white", boxShadow: "-6px 0 6px -6px rgba(0,0,0,0.15)" }}>
                         {isLoadingThis ? (
                           <div className="flex items-center gap-1.5">
@@ -2257,8 +2283,10 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
                       )}
                     </tr>
                   );
-                })}
+                }}
+              </VirtualRows>
 
+              <tbody>
                 {filteredLogs.length === 0 && !pendingRun && (
                   <tr>
                     <td colSpan={4 + visibleColOrder.length + (canDelete ? 1 : 0)} className="px-5 py-10 text-center text-slate-400">

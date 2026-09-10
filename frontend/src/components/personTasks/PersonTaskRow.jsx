@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import axios from "axios";
 import { supabase } from "../../lib/supabase";
@@ -104,7 +104,7 @@ function GenericCell({ col, task }) {
 // Mirrors frontend/src/components/tasks/TaskRow.jsx exactly (same status badge/rename/pin/menu
 // pattern, same single-open-accordion expand), swapped to /person-tasks/ endpoints and
 // PersonTaskRowExpandedDetail for the expanded content.
-export default function PersonTaskRow({ task, visibleColumns, expanded, onToggleExpand, onChanged, onTaskRefreshed, onRequestDelete, onRequestEdit, groupByAssignee = false, onlyCurrentUser = false }) {
+function PersonTaskRow({ task, visibleColumns, expanded, onToggleExpand, onChanged, onTaskRefreshed, onRequestDelete, onRequestEdit, groupByAssignee = false, onlyCurrentUser = false }) {
   const [renaming, setRenaming] = useState(false);
   const displayName = onlyCurrentUser ? (task.display_name ?? task.name) : task.name;
   const [nameDraft, setNameDraft] = useState(displayName || "");
@@ -221,3 +221,5 @@ export default function PersonTaskRow({ task, visibleColumns, expanded, onToggle
     </>
   );
 }
+
+export default memo(PersonTaskRow);

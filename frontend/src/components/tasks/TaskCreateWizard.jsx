@@ -50,6 +50,33 @@ const PHASE_TITLES = {
   review: "סיכום ואישור",
 };
 
+// The audience preview is a quick sanity-check list, not something anyone scrolls through — so
+// it renders at most this many rows and then a "…ועוד N" line, keeping a wide (unfiltered)
+// match from re-rendering thousands of <li>s on every debounced filter change. The true total
+// is always shown separately from preview.count.
+const PREVIEW_SCHOOL_LIMIT = 200;
+
+function SchoolPreviewList({ schools }) {
+  const shown = schools.slice(0, PREVIEW_SCHOOL_LIMIT);
+  const extra = schools.length - shown.length;
+  return (
+    <ul className="mt-2 max-h-40 overflow-auto space-y-1 border-t border-slate-200 pt-2">
+      {shown.map(s => (
+        <li key={s.school_id} className="text-xs text-slate-600 flex items-center gap-2">
+          <span className="font-medium text-slate-800">{s.school_name}</span>
+          {s.symbol && <bdi className="text-slate-400">({s.symbol})</bdi>}
+          {s.authority && <span className="text-slate-400">— {s.authority}</span>}
+        </li>
+      ))}
+      {extra > 0 && (
+        <li className="text-xs text-slate-400 italic pt-1">
+          …ועוד {extra} בתי ספר (הרשימה נחתכה לתצוגה; המספר המלא מוצג למעלה)
+        </li>
+      )}
+    </ul>
+  );
+}
+
 // Round-2 redesign: two parallel wizard tracks sharing the message-config/review steps.
 // "קביעת פגישות" (isMeetingTask) — 4 steps, success is always "a meeting got booked", no
 // separate success-definition step. "תקשורת כללית" — 5 steps, adds the "מה נחשב הצלחה?" step
@@ -711,15 +738,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
                   </div>
                 </div>
                 {showPreviewList && preview?.schools?.length > 0 && (
-                  <ul className="mt-2 max-h-40 overflow-auto space-y-1 border-t border-slate-200 pt-2">
-                    {preview.schools.map(s => (
-                      <li key={s.school_id} className="text-xs text-slate-600 flex items-center gap-2">
-                        <span className="font-medium text-slate-800">{s.school_name}</span>
-                        {s.symbol && <bdi className="text-slate-400">({s.symbol})</bdi>}
-                        {s.authority && <span className="text-slate-400">— {s.authority}</span>}
-                      </li>
-                    ))}
-                  </ul>
+                  <SchoolPreviewList schools={preview.schools} />
                 )}
               </div>
 
@@ -825,15 +844,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
                   </div>
                 </div>
                 {showPreviewList && preview?.schools?.length > 0 && (
-                  <ul className="mt-2 max-h-40 overflow-auto space-y-1 border-t border-slate-200 pt-2">
-                    {preview.schools.map(s => (
-                      <li key={s.school_id} className="text-xs text-slate-600 flex items-center gap-2">
-                        <span className="font-medium text-slate-800">{s.school_name}</span>
-                        {s.symbol && <bdi className="text-slate-400">({s.symbol})</bdi>}
-                        {s.authority && <span className="text-slate-400">— {s.authority}</span>}
-                      </li>
-                    ))}
-                  </ul>
+                  <SchoolPreviewList schools={preview.schools} />
                 )}
               </div>
             </div>

@@ -1,5 +1,7 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import axios from "axios";
+import { useRowVirtualizer } from "../hooks/useRowVirtualizer";
+import { VirtualRows } from "./common/VirtualRows";
 import { formatDateDMY } from "./tasks/taskShared";
 import { matchesColumnFilter } from "./tasks/taskColumns";
 import ColumnFilterButton from "./tasks/ColumnFilterButton";
@@ -170,6 +172,11 @@ export default function SchoolTasksTab({ schoolId }) {
     return sortSpec.dir === "asc" ? cmp : -cmp;
   }), [filtered, sortSpec]);
 
+  const { scrollRef, virtualizer, items, padTop, padBottom } = useRowVirtualizer(sorted, {
+    estimateSize: 48,
+    getItemKey: t => t.id,
+  });
+
   function setColumnFilter(key, value) {
     setColumnFilters(prev => {
       const next = { ...prev };
@@ -194,8 +201,9 @@ export default function SchoolTasksTab({ schoolId }) {
         <ColumnPickerButton colVisible={colVisible} setColVisible={setColVisible} size="md" columns={ALL_PERSON_TASK_COLUMNS} storageKey={COL_STORAGE_KEY} />
       </div>
       <div className="glass-card rounded-2xl border border-slate-200 overflow-hidden">
+        <div ref={scrollRef} className="overflow-auto max-h-[70vh]">
         <table className="w-full text-sm">
-          <thead className="bg-slate-50 border-b border-slate-200">
+          <thead className="bg-slate-50 border-b border-slate-200" style={{ position: "sticky", top: 0, zIndex: 10 }}>
             <tr>
               <th scope="col" className="px-2 py-2" aria-hidden="true" />
               {visibleColumns.map(col => (
@@ -215,33 +223,46 @@ export default function SchoolTasksTab({ schoolId }) {
               ))}
             </tr>
           </thead>
-          <tbody className="bg-white">
-            {sorted.length === 0 ? (
+          {sorted.length === 0 ? (
+            <tbody className="bg-white">
               <tr>
                 <td colSpan={visibleColumns.length + 1} className="text-sm text-slate-400 p-8 text-center">
                   אין משימות תואמות לסינון הנוכחי
                 </td>
               </tr>
-            ) : sorted.map(t => (
-              <Fragment key={t.id}>
-                <tr
-                  onClick={() => setExpandedId(prev => (prev === t.id ? null : t.id))}
-                  className="border-b border-slate-300 cursor-pointer hover:bg-slate-50"
-                >
-                  <td className="px-2 py-2 text-center text-slate-400" aria-hidden="true">{expandedId === t.id ? "▼" : "◀"}</td>
-                  {visibleColumns.map(col => <GenericCell key={col.key} col={col} task={t} />)}
-                </tr>
-                {expandedId === t.id && (
-                  <tr className="border-b border-slate-300 bg-slate-50/40">
-                    <td colSpan={visibleColumns.length + 1} className="px-3 py-3">
-                      <PersonTaskRowExpandedDetail taskId={t.id} onTaskChange={() => loadTasks({ silent: true })} scopeSchoolId={schoolId} />
-                    </td>
+            </tbody>
+          ) : (
+            <VirtualRows
+              items={items}
+              padTop={padTop}
+              padBottom={padBottom}
+              colSpan={visibleColumns.length + 1}
+              measureElement={virtualizer.measureElement}
+              rows={sorted}
+              rowKey={t => t.id}
+            >
+              {t => (
+                <Fragment>
+                  <tr
+                    onClick={() => setExpandedId(prev => (prev === t.id ? null : t.id))}
+                    className="border-b border-slate-300 cursor-pointer hover:bg-slate-50 bg-white"
+                  >
+                    <td className="px-2 py-2 text-center text-slate-400" aria-hidden="true">{expandedId === t.id ? "▼" : "◀"}</td>
+                    {visibleColumns.map(col => <GenericCell key={col.key} col={col} task={t} />)}
                   </tr>
-                )}
-              </Fragment>
-            ))}
-          </tbody>
+                  {expandedId === t.id && (
+                    <tr className="border-b border-slate-300 bg-slate-50/40">
+                      <td colSpan={visibleColumns.length + 1} className="px-3 py-3">
+                        <PersonTaskRowExpandedDetail taskId={t.id} onTaskChange={() => loadTasks({ silent: true })} scopeSchoolId={schoolId} />
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              )}
+            </VirtualRows>
+          )}
         </table>
+        </div>
       </div>
     </div>
   );
