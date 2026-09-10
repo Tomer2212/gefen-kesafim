@@ -39,7 +39,21 @@ function ColumnSelect({ headers, previewRow, value, required, error, placeholder
     if (!open) return;
     const rect = btnRef.current?.getBoundingClientRect();
     if (rect) {
-      setPos({ top: rect.bottom + 4, left: rect.left, width: rect.width });
+      const MARGIN = 12;
+      const spaceBelow = window.innerHeight - rect.bottom - MARGIN;
+      const spaceAbove = rect.top - MARGIN;
+      // Open upward when there isn't room below (rows near the bottom of the modal) and there's
+      // more room above — so the options are always visible.
+      const openUp = spaceBelow < 240 && spaceAbove > spaceBelow;
+      const avail = Math.max(160, (openUp ? spaceAbove : spaceBelow));
+      setPos({
+        openUp,
+        left: rect.left,
+        width: rect.width,
+        top: openUp ? undefined : rect.bottom + 4,
+        bottom: openUp ? window.innerHeight - rect.top + 4 : undefined,
+        maxH: Math.min(320, avail),
+      });
     }
     setQuery("");
     const t = setTimeout(() => searchRef.current?.focus(), 0);
@@ -97,10 +111,14 @@ function ColumnSelect({ headers, previewRow, value, required, error, placeholder
         <div
           ref={popRef}
           dir="rtl"
-          className="fixed z-[80] bg-white border border-slate-200 rounded-xl shadow-xl overflow-hidden"
-          style={{ top: pos.top, left: pos.left, width: Math.max(pos.width, 320), maxWidth: "calc(100vw - 24px)" }}
+          className="fixed z-[80] bg-white border border-slate-200 rounded-xl shadow-xl overflow-hidden flex flex-col"
+          style={{
+            top: pos.top, bottom: pos.bottom, left: pos.left,
+            width: Math.max(pos.width, 320), maxWidth: "calc(100vw - 24px)",
+            maxHeight: pos.maxH,
+          }}
         >
-          <div className="p-2 border-b border-slate-100">
+          <div className="p-2 border-b border-slate-100 flex-shrink-0">
             <input
               ref={searchRef}
               type="text"
@@ -111,11 +129,11 @@ function ColumnSelect({ headers, previewRow, value, required, error, placeholder
               className="w-full text-sm border border-slate-200 rounded-lg px-3 py-1.5 outline-none focus:border-blue-400"
             />
           </div>
-          <div className="grid grid-cols-2 bg-slate-50 border-b border-slate-100 text-[10px] font-semibold text-slate-400 uppercase tracking-wide">
+          <div className="grid grid-cols-2 bg-slate-50 border-b border-slate-100 text-[10px] font-semibold text-slate-400 uppercase tracking-wide flex-shrink-0">
             <span className="px-3 py-1.5 text-right border-l border-slate-100">כותרת בקובץ</span>
             <span className="px-3 py-1.5 text-right">ערך לדוגמה</span>
           </div>
-          <div className="max-h-64 overflow-y-auto divide-y divide-slate-100" role="listbox">
+          <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-slate-100" role="listbox">
             <button
               type="button"
               role="option"
