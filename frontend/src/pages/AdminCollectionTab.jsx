@@ -1149,7 +1149,7 @@ export default function AdminCollectionTab() {
             <div aria-hidden="true" className="spinner w-8 h-8" />
           </div>
         ) : (
-          <div ref={collectionScrollRef} className="flex-1 overflow-auto dash-scroll-x">
+          <div ref={collectionScrollRef} className="flex-1 min-h-0 overflow-auto dash-scroll-x" style={{ maxHeight: "calc(100vh - 260px)" }}>
             <table className="w-full text-sm border-collapse">
               <thead>
                 <tr
