@@ -382,6 +382,18 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
     return list;
   }, [meetings, nameFilter, symbolFilter, cityFilter, districtFilter]);
 
+  // Non-canonical status values present in imported meetings kept as free text — added to the
+  // status filter dropdown so they stay filterable.
+  const extraStatusOptions = useMemo(() => {
+    const canon = new Set(MEETING_STATUS_OPTIONS.map(o => o.value));
+    const seen = new Set();
+    for (const m of meetings) {
+      const s = (m.status || "").trim();
+      if (s && !canon.has(s)) seen.add(s);
+    }
+    return [...seen].sort((a, b) => a.localeCompare(b, "he"));
+  }, [meetings]);
+
   const advancedFilterCount = (cityFilter ? 1 : 0) + (districtFilter ? 1 : 0);
 
   // Highlights each base filter field (blue label+dot+ring) the moment its value diverges
@@ -563,6 +575,11 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
               className={INPUT_CLS + (activeBaseFilters.status ? ACTIVE_INPUT_CLS : "")}>
               <option value="">הכל</option>
               {MEETING_STATUS_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              {extraStatusOptions.length > 0 && (
+                <optgroup label="ערכים מיובאים (טקסט חופשי)">
+                  {extraStatusOptions.map(v => <option key={v} value={v}>{v}</option>)}
+                </optgroup>
+              )}
             </select>
           </div>
           <div>

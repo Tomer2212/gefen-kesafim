@@ -42,33 +42,62 @@ export function normalizeImportStageScope(raw) {
   return null;
 }
 
+// Hebrew final-form letters -> regular form, so substring matching isn't defeated by
+// "התקיים" (final-mem) not being a prefix of "התקיימה" (regular-mem). Mirror of
+// backend/meeting_labels.py _definalize — keep the two synonym sets in sync.
+const _FINALS = { "ך": "כ", "ם": "מ", "ן": "נ", "ף": "פ", "ץ": "צ" };
+function definalize(s) {
+  return String(s).replace(/[ךםןףץ]/g, c => _FINALS[c]);
+}
+function matchSynonyms(raw, table) {
+  if (raw == null) return null;
+  const t = definalize(String(raw).trim().toLowerCase());
+  if (!t) return null;
+  for (const [keys, canonical] of table) {
+    for (const key of keys) {
+      if (t.includes(definalize(key.toLowerCase()))) return canonical;
+    }
+  }
+  return null;
+}
+
+const _STATUS_SYNONYMS = [
+  [["אחר", "other"], "other"],
+  [["בוטל", "מבוטל", "ביטול", "cancel"], "cancelled"],
+  [["נדח", "דחיי", "דחייה", "postpon"], "postponed"],
+  [["בוצע", "התקיי", "הושלמ", "נערכ", "קוימ", "complete", "done"], "completed"],
+  [["נקבע", "מתוכנ", "מתוזמ", "עתידי", "טרמ", "schedul", "planned"], "scheduled"],
+];
+const _TYPE_SYNONYMS = [
+  [["מרחוק", "טלפו", "זומ", "zoom", "וידאו", "video", "online", "אונלי", "remote"], "remote"],
+  [["פיזי", "שטח", "פרונטל", "פנימ אל פנימ", "פנימ", "בבית הספר", "physical", "in person", "onsite"], "physical"],
+];
+const _SERVICE_TYPE_SYNONYMS = [
+  [["מחוז", "district"], "district"],
+  [["גפנ", 'גפ"נ', "גפ״נ", "מכתב בקרה", "gefen"], "gefen"],
+  [["שוטפ", "סגירת שנה", "current"], "current"],
+];
+
 export function normalizeImportMeetingType(raw) {
   const t = String(raw || "").trim();
   if (t === "physical" || t === "remote") return t;
-  if (t.includes("פיזי")) return "physical";
-  if (t.includes("מרחוק")) return "remote";
-  return null;
+  return matchSynonyms(raw, _TYPE_SYNONYMS);
 }
 
 export function normalizeImportServiceType(raw) {
   const t = String(raw || "").trim();
   if (["gefen", "current", "gefen_current", "district"].includes(t)) return t;
-  if (t.includes("גפן") && t.includes("שוטף")) return "gefen_current";
-  if (t.includes("גפן")) return "gefen";
-  if (t.includes("שוטף")) return "current";
-  if (t.includes("מחוז")) return "district";
-  return null;
+  const d = definalize(t.toLowerCase());
+  const hasGefen = d.includes("גפנ") || d.includes('גפ"נ') || d.includes("gefen");
+  const hasCurrent = d.includes("שוטפ") || d.includes("current");
+  if (hasGefen && hasCurrent) return "gefen_current";
+  return matchSynonyms(raw, _SERVICE_TYPE_SYNONYMS);
 }
 
 export function normalizeImportStatus(raw) {
   const t = String(raw || "").trim();
   if (["scheduled", "completed", "cancelled", "postponed", "other"].includes(t)) return t;
-  if (t === "נקבעה") return "scheduled";
-  if (t === "בוצעה") return "completed";
-  if (t === "בוטלה") return "cancelled";
-  if (t === "נדחתה") return "postponed";
-  if (t === "אחר") return "other";
-  return null;
+  return matchSynonyms(raw, _STATUS_SYNONYMS);
 }
 
 // Best-effort date normalization to YYYY-MM-DD before sending to the backend — purely

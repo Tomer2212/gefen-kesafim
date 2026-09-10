@@ -37,6 +37,11 @@ const STEP_TITLES = {
   problems: "פתרון בעיות ניתוב",
 };
 
+// The advisor-check preview is a quick sanity-check list — render at most this many rows, then
+// a "…ועוד N" line, so a wide (unfiltered) match doesn't re-render thousands of <tr>s on every
+// debounced check. The true total is shown separately from advisorCheck.total_schools.
+const PREVIEW_ROW_LIMIT = 200;
+
 // Mirrors TaskCreateWizard.jsx's step-based flow, scoped to the new "אנשי הארגון" track. Step 1
 // merges the task's basic details with the target picker (tabs: "לפי בתי ספר" default / "משתמשים
 // ספציפיים" — both tabs' content is visible inline immediately, no extra click-to-open-modal,
@@ -325,7 +330,7 @@ export default function PersonTaskCreateWizard({ onClose, onCreated, initialAcad
                                 </tr>
                               </thead>
                               <tbody className="divide-y divide-slate-100">
-                                {advisorCheck.rows.map((r, i) => (
+                                {advisorCheck.rows.slice(0, PREVIEW_ROW_LIMIT).map((r, i) => (
                                   <tr key={`${r.school_id}-${r.division || "none"}-${i}`}>
                                     <td className="px-2.5 py-1.5 text-slate-800">
                                       {[r.school_name, r.authority, r.symbol].filter(Boolean).join(" - ")}
@@ -341,6 +346,13 @@ export default function PersonTaskCreateWizard({ onClose, onCreated, initialAcad
                                     </td>
                                   </tr>
                                 ))}
+                                {advisorCheck.rows.length > PREVIEW_ROW_LIMIT && (
+                                  <tr>
+                                    <td colSpan={2} className="px-2.5 py-1.5 text-slate-400 italic">
+                                      …ועוד {advisorCheck.rows.length - PREVIEW_ROW_LIMIT} שורות (הרשימה נחתכה לתצוגה)
+                                    </td>
+                                  </tr>
+                                )}
                               </tbody>
                             </table>
                           </div>

@@ -1,5 +1,7 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { CallRow, computeEndTimeIso } from "./CallRow";
+import { useRowVirtualizer } from "../../hooks/useRowVirtualizer";
+import { VirtualRows } from "../common/VirtualRows";
 
 function SortableHeader({ field, sortField, sortDir, onSort, children }) {
   const icon = sortField !== field
@@ -75,11 +77,18 @@ export function CallsTable({ calls, showGapRows, hideSchoolColumn, canManage = t
 
   const rows = buildRowsWithGaps(sortedCalls, showGapRows);
 
+  const handleRowDelete = useCallback(id => setRemovedIds(prev => new Set(prev).add(id)), []);
+
+  const { scrollRef, virtualizer, items, padTop, padBottom } = useRowVirtualizer(rows, {
+    estimateSize: 44,
+    getItemKey: r => (r.type === "gap" ? r.key : r.call.call_id),
+  });
+
   return (
     <div className="glass-card rounded-2xl border border-slate-200 flex flex-col" style={{ minHeight: "calc(100vh - 320px)" }}>
-      <div className="flex-1 overflow-x-auto rounded-t-2xl">
+      <div ref={scrollRef} className="flex-1 overflow-auto rounded-t-2xl" style={{ maxHeight: "calc(100vh - 320px)" }}>
         <table className="w-full text-right border-collapse" style={{ minWidth: "1200px" }}>
-          <thead>
+          <thead style={{ position: "sticky", top: 0, zIndex: 10, background: "rgba(248,250,252,0.97)", backdropFilter: "blur(8px)" }}>
             <tr className="border-b border-slate-200 bg-slate-50/80">
               <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">תאריך</th>
               <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">
@@ -107,18 +116,26 @@ export function CallsTable({ calls, showGapRows, hideSchoolColumn, canManage = t
               <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap"><span className="sr-only">פעולות</span></th>
             </tr>
           </thead>
-          <tbody>
-            {rows.map(row => row.type === "gap" ? (
-              <tr key={row.key} aria-hidden="true">
+          <VirtualRows
+            items={items}
+            padTop={padTop}
+            padBottom={padBottom}
+            colSpan={numColumns}
+            measureElement={virtualizer.measureElement}
+            rows={rows}
+            rowKey={r => (r.type === "gap" ? r.key : r.call.call_id)}
+          >
+            {row => row.type === "gap" ? (
+              <tr aria-hidden="true">
                 <td colSpan={numColumns} className="p-0">
                   <div style={{ height: `${gapHeightPx(row.gapSeconds)}px`, background: "#16a34a", opacity: 0.5 }} />
                 </td>
               </tr>
             ) : (
-              <CallRow key={row.call.call_id} call={row.call} hideSchoolColumn={hideSchoolColumn} canManage={canManage} schoolId={schoolId}
-                onDelete={id => setRemovedIds(prev => new Set(prev).add(id))} />
-            ))}
-          </tbody>
+              <CallRow call={row.call} hideSchoolColumn={hideSchoolColumn} canManage={canManage} schoolId={schoolId}
+                onDelete={handleRowDelete} />
+            )}
+          </VirtualRows>
         </table>
       </div>
       <div className="border-t border-slate-200 bg-slate-50/80 px-4 py-2.5 flex items-center gap-6 flex-shrink-0 rounded-b-2xl" dir="rtl">

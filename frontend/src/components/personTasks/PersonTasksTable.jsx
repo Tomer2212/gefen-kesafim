@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import axios from "axios";
 import PersonTaskRow from "./PersonTaskRow";
 import PersonTaskEditModal from "./PersonTaskEditModal";
@@ -6,6 +6,8 @@ import ColumnFilterButton from "../tasks/ColumnFilterButton";
 import { matchesColumnFilter } from "../tasks/taskColumns";
 import { ALL_PERSON_TASK_COLUMNS } from "./personTaskColumns";
 import { DeleteMeetingModal } from "../meetings/DeleteMeetingModal";
+import { useRowVirtualizer } from "../../hooks/useRowVirtualizer";
+import { VirtualRows } from "../common/VirtualRows";
 
 const TIER_ORDER = { active: 0, archived: 1 };
 
@@ -34,9 +36,9 @@ export default function PersonTasksTable({ tasks, onChanged, onTaskRefreshed, co
 
   const visibleColumns = ALL_PERSON_TASK_COLUMNS.filter(c => colVisible[c.key]);
 
-  function toggleExpand(taskId) {
+  const toggleExpand = useCallback(taskId => {
     setExpandedId(prev => (prev === taskId ? null : taskId));
-  }
+  }, []);
   function setColumnFilter(key, value) {
     setColumnFilters(prev => {
       const next = { ...prev };
@@ -78,6 +80,11 @@ export default function PersonTasksTable({ tasks, onChanged, onTaskRefreshed, co
     return sortSpec.dir === "asc" ? cmp : -cmp;
   }), [filtered, sortSpec]);
 
+  const { scrollRef, virtualizer, items, padTop, padBottom } = useRowVirtualizer(sorted, {
+    estimateSize: 52,
+    getItemKey: t => t.id,
+  });
+
   async function confirmDelete() {
     setDeleting(true);
     try {
@@ -93,7 +100,7 @@ export default function PersonTasksTable({ tasks, onChanged, onTaskRefreshed, co
     <div className="glass-card rounded-2xl border border-slate-200 flex flex-col">
       {/* When a row is expanded the outer scroll box doubles its height cap (70vh → 140vh) so the
           per-assignee detail has real room instead of being squeezed into a sliver. */}
-      <div className={`overflow-auto rounded-2xl ${expandedId ? "max-h-[140vh]" : "max-h-[70vh]"}`}>
+      <div ref={scrollRef} className={`overflow-auto rounded-2xl ${expandedId ? "max-h-[140vh]" : "max-h-[70vh]"}`}>
         <table className="w-full text-sm min-w-[1100px] border-collapse">
           <thead style={{ position: "sticky", top: 0, zIndex: 10, background: "rgba(241,245,249,0.97)", backdropFilter: "blur(8px)" }}>
             <tr className="border-b border-slate-200">
@@ -116,29 +123,40 @@ export default function PersonTasksTable({ tasks, onChanged, onTaskRefreshed, co
               <th scope="col" className="px-2 py-3" aria-hidden="true" />
             </tr>
           </thead>
-          <tbody className="bg-white">
-            {sorted.length === 0 ? (
+          {sorted.length === 0 ? (
+            <tbody className="bg-white">
               <tr>
                 <td colSpan={visibleColumns.length + 2} className="text-sm text-slate-400 p-8 text-center">
                   אין משימות תואמות לסינון הנוכחי
                 </td>
               </tr>
-            ) : sorted.map(t => (
-              <PersonTaskRow
-                key={t.id}
-                task={t}
-                visibleColumns={visibleColumns}
-                expanded={expandedId === t.id}
-                onToggleExpand={toggleExpand}
-                onChanged={onChanged}
-                onTaskRefreshed={onTaskRefreshed}
-                onRequestDelete={setPendingDeleteId}
-                onRequestEdit={setEditingTask}
-                groupByAssignee={groupByAssignee}
-                onlyCurrentUser={onlyCurrentUser}
-              />
-            ))}
-          </tbody>
+            </tbody>
+          ) : (
+            <VirtualRows
+              items={items}
+              padTop={padTop}
+              padBottom={padBottom}
+              colSpan={visibleColumns.length + 2}
+              measureElement={virtualizer.measureElement}
+              rows={sorted}
+              rowKey={t => t.id}
+            >
+              {t => (
+                <PersonTaskRow
+                  task={t}
+                  visibleColumns={visibleColumns}
+                  expanded={expandedId === t.id}
+                  onToggleExpand={toggleExpand}
+                  onChanged={onChanged}
+                  onTaskRefreshed={onTaskRefreshed}
+                  onRequestDelete={setPendingDeleteId}
+                  onRequestEdit={setEditingTask}
+                  groupByAssignee={groupByAssignee}
+                  onlyCurrentUser={onlyCurrentUser}
+                />
+              )}
+            </VirtualRows>
+          )}
         </table>
       </div>
 

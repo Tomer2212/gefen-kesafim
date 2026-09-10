@@ -40,6 +40,16 @@ from academic_years import (
 )
 from auth import get_current_user, invalidate_profile_cache
 from email_resend import send_resend_email
+from meeting_labels import (
+    CANONICAL_LABELS,
+    MEETING_SERVICE_TYPE_VALUES,
+    MEETING_STATUS_VALUES,
+    MEETING_TYPE_VALUES,
+    NORMALIZERS,
+    normalize_meeting_service_type,
+    normalize_meeting_status,
+    normalize_meeting_type,
+)
 from meeting_upload_logic import build_upload_checklist, get_or_create_upload_token
 from supabase_client import get_admin_client, reset_admin_client
 
@@ -338,6 +348,12 @@ class MeetingImportRowIn(BaseModel):
     accept_mode_mismatch: bool = False
     accept_conflict: bool = False
     accept_duplicate: bool = False
+    # Per-row canonical value chosen in the "unrecognized value" mapping step for the three
+    # free-text fields (status / meeting_type / meeting_service_type). One of the canonical
+    # values, or the literal "__keep__" meaning "the user deliberately keeps the raw free text".
+    status_override: str | None = None
+    meeting_type_override: str | None = None
+    meeting_service_type_override: str | None = None
 
 
 class MeetingImportValidateIn(BaseModel):
@@ -1000,6 +1016,8 @@ def restore_school(
                 "status": "active",
                 "deleted_at": None,
                 "restored_by": user["id"],
+                # A restored "historical" import stub becomes a normal active school.
+                "created_via": None,
             }).eq("id", school_id).eq("org_id", user["org_id"]).execute()
             break
         except Exception as exc:
@@ -6768,6 +6786,21 @@ def _normalize_stage_scope(raw: str | None) -> str | None:
     return None
 
 
+# Sentinel an "unrecognized value" mapping step writes into <field>_override when the user
+# chooses to keep the raw free text as-is instead of mapping it to a canonical value.
+_KEEP_RAW = "__keep__"
+
+
+def _resolve_import_label(raw, override, normalizer):
+    """Decide the final stored value for a free-text meeting field on import:
+    an explicit user mapping wins; else the synonym table; else the raw text as-is."""
+    if override and override != _KEEP_RAW:
+        return override
+    if override == _KEEP_RAW:
+        return (raw or None)
+    return normalizer(raw) or (raw or None)
+
+
 _IMPORT_DATE_FORMATS = (
     "%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d",   # ISO-ish, year-first
     "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y",   # day-first, 4-digit year (Israeli convention)
@@ -7003,6 +7036,27 @@ def _run_meeting_import_validation(db, org_id: str, mode: str, rows: list, durat
             if key in existing_keys and not row.accept_duplicate:
                 problems.append({"type": "possible_duplicate", "detail": "קיימת כבר פגישה עם אותו בית ספר, תאריך ושעת התחלה"})
 
+        # Free-text status / meeting_type / meeting_service_type that neither the synonym table
+        # nor a user mapping (override) can turn into a canonical value → surface it so the org
+        # maps it once in the "unrecognized values" step. "__keep__" = the user chose to keep
+        # the raw text as-is (still counts as resolved).
+        for raw_val, prob_type, field_label, override_val, normalizer in (
+            (row.status, "unrecognized_status", "סטטוס", row.status_override, normalize_meeting_status),
+            (row.meeting_type, "unrecognized_meeting_type", "מיקום", row.meeting_type_override, normalize_meeting_type),
+            (row.meeting_service_type, "unrecognized_service_type", "סוג", row.meeting_service_type_override, normalize_meeting_service_type),
+        ):
+            if not (raw_val or "").strip():
+                continue
+            if override_val:  # user already mapped it or chose to keep it
+                continue
+            if normalizer(raw_val) is not None:
+                continue
+            problems.append({
+                "type": prob_type,
+                "detail": f"הערך '{raw_val}' בעמודת '{field_label}' אינו מזוהה — יש למפות אותו לקטגוריה מוכרת",
+                "raw_value": str(raw_val).strip(),
+            })
+
         results.append({
             "row_index": row.row_index,
             "data": {
@@ -7077,6 +7131,12 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
                 continue
             if t == "possible_duplicate" and row.accept_duplicate:
                 continue
+            if t == "unrecognized_status" and row.status_override:
+                continue
+            if t == "unrecognized_meeting_type" and row.meeting_type_override:
+                continue
+            if t == "unrecognized_service_type" and row.meeting_service_type_override:
+                continue
             remaining.append(p)
         if remaining:
             unresolved_row_indexes.append(row.row_index)
@@ -7134,7 +7194,18 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
             # calendar sync as if scheduling a real future meeting while marked done); a row
             # truly in the past can't still be "scheduled" (pending). Neutral statuses that are
             # valid regardless of timing (cancelled/postponed/other) are left untouched.
-            row_status = row.status
+            # Free-text status / מיקום / סוג from the Excel file are turned into the app's
+            # canonical values here (user mapping > synonym table > raw text), so every filter,
+            # stat and automation that assumes canonical values works for imported meetings too.
+            # The exact original wording is preserved in `import_raw` (nothing is lost).
+            row_status = _resolve_import_label(row.status, row.status_override, normalize_meeting_status)
+            final_meeting_type = _resolve_import_label(row.meeting_type, row.meeting_type_override, normalize_meeting_type)
+            final_service_type = _resolve_import_label(row.meeting_service_type, row.meeting_service_type_override, normalize_meeting_service_type)
+            import_raw = {
+                "status": row.status,
+                "meeting_type": row.meeting_type,
+                "meeting_service_type": row.meeting_service_type,
+            }
             if effective_mode == "future" and row_status == "completed":
                 row_status = "scheduled"
             elif effective_mode == "past" and row_status == "scheduled":
@@ -7145,8 +7216,8 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
                     "school_id": school_id,
                     "created_by": user["id"],
                     "status": row_status or "completed",
-                    "meeting_type": row.meeting_type or "remote",
-                    "meeting_service_type": row.meeting_service_type,
+                    "meeting_type": final_meeting_type or "remote",
+                    "meeting_service_type": final_service_type,
                     "stage_scope": stage_scope,
                     "advisor_ids": [],
                     "advisor_name_text": row.advisor_name_text,
@@ -7156,6 +7227,7 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
                     "academic_year": academic_year,
                     "created_via": "import",
                     "import_batch_id": import_batch_id,
+                    "import_raw": import_raw,
                 }
                 if true_date: insert_data["meeting_date"] = true_date
                 if resolved_start_time: insert_data["start_time"] = resolved_start_time
@@ -7172,15 +7244,16 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
                     "reminder_enabled": False,
                     "participants": participants,
                     "academic_year": academic_year,
-                    "meeting_type": row.meeting_type or "remote",
+                    "meeting_type": final_meeting_type or "remote",
                     "advisor_ids": [advisor_id] if advisor_id else [],
                     "created_via": "import",
                     "import_batch_id": import_batch_id,
+                    "import_raw": import_raw,
                 }
                 if true_date: insert_data["meeting_date"] = true_date
                 if resolved_start_time: insert_data["start_time"] = resolved_start_time
                 if resolved_end_time: insert_data["end_time"] = resolved_end_time
-                if row.meeting_service_type is not None: insert_data["meeting_service_type"] = row.meeting_service_type
+                if final_service_type is not None: insert_data["meeting_service_type"] = final_service_type
                 if row.notes: insert_data["notes"] = row.notes
                 if stage_scope is not None: insert_data["stage_scope"] = stage_scope
 
@@ -7240,6 +7313,9 @@ def create_historical_schools_for_import(body: MeetingImportHistoricalSchoolsIn,
                 "secretary_name": "מתאם פגישות (רשומה היסטורית)",
                 "status": "pending_deletion",
                 "deleted_at": now_iso,
+                # Marks this as a stub born only to host imported past meetings — the recycle-bin
+                # UI groups these separately from schools the org actually chose to delete.
+                "created_via": "import_historical",
             }
             row = db.table("schools").insert(payload).execute()
             created[symbol] = row.data[0]["id"]
@@ -7247,6 +7323,96 @@ def create_historical_schools_for_import(body: MeetingImportHistoricalSchoolsIn,
             logger.warning("create_historical_schools_for_import failed for symbol %s: %s", symbol, exc)
             errors.append(f"סמל {symbol}: {str(exc)}")
     return {"created": created, "errors": errors}
+
+
+_IMPORT_LABEL_FIELDS = {
+    "status": (MEETING_STATUS_VALUES, normalize_meeting_status),
+    "meeting_type": (MEETING_TYPE_VALUES, normalize_meeting_type),
+    "meeting_service_type": (MEETING_SERVICE_TYPE_VALUES, normalize_meeting_service_type),
+}
+
+
+def _org_school_ids(db, org_id: str) -> list[str]:
+    rows = db.table("schools").select("id").eq("org_id", org_id).execute().data or []
+    return [r["id"] for r in rows]
+
+
+@router.get("/meetings/import/unrecognized-values")
+def list_unrecognized_import_values(user: Annotated[dict, Depends(get_current_user)]):
+    """Distinct non-canonical status / meeting_type / meeting_service_type values across the
+    org's imported meetings, each with an occurrence count and a suggested canonical mapping
+    (from the synonym table, may be null). Drives the standalone "map imported values" screen."""
+    _require_manager(user)
+    db = get_admin_client()
+    school_ids = _org_school_ids(db, user["org_id"])
+    out = {"status": [], "meeting_type": [], "meeting_service_type": []}
+    if not school_ids:
+        return out
+    rows = _fetch_all_rows(
+        db.table("meetings").select("status, meeting_type, meeting_service_type")
+        .eq("created_via", "import").in_("school_id", school_ids)
+    )
+    for field, (canonical_values, normalizer) in _IMPORT_LABEL_FIELDS.items():
+        counts: dict[str, int] = {}
+        for m in rows:
+            v = (m.get(field) or "").strip()
+            if not v or v in canonical_values:
+                continue
+            counts[v] = counts.get(v, 0) + 1
+        out[field] = [
+            {"value": v, "count": c, "suggestion": normalizer(v)}
+            for v, c in sorted(counts.items(), key=lambda kv: -kv[1])
+        ]
+    return out
+
+
+class RemapImportValuesIn(BaseModel):
+    # {field: {raw_value: canonical_value_or "__keep__"}}
+    status: dict[str, str] | None = None
+    meeting_type: dict[str, str] | None = None
+    meeting_service_type: dict[str, str] | None = None
+
+
+@router.post("/meetings/import/remap-values")
+def remap_import_values(body: RemapImportValuesIn, user: Annotated[dict, Depends(get_current_user)]):
+    """Bulk-rewrites free-text label values on the org's already-imported meetings to canonical
+    values. The pre-existing raw value is kept in each row's `import_raw` (populated here for any
+    row that doesn't have it yet — normally the one-time backfill has already done that)."""
+    _require_manager(user)
+    db = get_admin_client()
+    school_ids = _org_school_ids(db, user["org_id"])
+    if not school_ids:
+        return {"updated": {}}
+    updated: dict[str, int] = {}
+    payload = {"status": body.status, "meeting_type": body.meeting_type, "meeting_service_type": body.meeting_service_type}
+    for field, mapping in payload.items():
+        if not mapping:
+            continue
+        canonical_values, _ = _IMPORT_LABEL_FIELDS[field]
+        for raw_value, target in mapping.items():
+            raw_value = (raw_value or "").strip()
+            if not raw_value or not target or target == _KEEP_RAW:
+                continue
+            if target not in canonical_values:
+                raise HTTPException(status_code=400, detail=f"ערך יעד לא חוקי '{target}' עבור השדה {field}")
+            matched = _fetch_all_rows(
+                db.table("meetings").select("id, status, meeting_type, meeting_service_type, import_raw")
+                .eq("created_via", "import").in_("school_id", school_ids).eq(field, raw_value)
+            )
+            missing_raw = [m for m in matched if not m.get("import_raw")]
+            if len(missing_raw) > 300:
+                raise HTTPException(status_code=400, detail="יש להריץ תחילה את פעולת ה-backfill (יותר מדי שורות ללא גיבוי של הערך המקורי)")
+            for m in missing_raw:
+                db.table("meetings").update({"import_raw": {
+                    "status": m.get("status"),
+                    "meeting_type": m.get("meeting_type"),
+                    "meeting_service_type": m.get("meeting_service_type"),
+                }}).eq("id", m["id"]).execute()
+            if matched:
+                ids = [m["id"] for m in matched]
+                db.table("meetings").update({field: target}).in_("id", ids).execute()
+            updated[f"{field}:{raw_value}"] = len(matched)
+    return {"updated": updated}
 
 
 _DIRECT_COORDINATION_SERVICE_TYPES = {"gefen": "גפן", "current": "שוטף", "district": "מחוז"}

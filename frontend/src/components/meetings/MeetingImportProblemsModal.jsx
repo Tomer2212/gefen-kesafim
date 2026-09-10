@@ -3,7 +3,26 @@ import axios from "axios";
 import * as XLSX from "xlsx";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
 import { ACADEMIC_YEARS } from "../../constants/academicYears";
-import { MEETING_IMPORT_CHUNK_SIZE } from "../../constants/meetingImportFieldConfig";
+import {
+  MEETING_IMPORT_CHUNK_SIZE,
+  normalizeImportStatus,
+  normalizeImportMeetingType,
+  normalizeImportServiceType,
+} from "../../constants/meetingImportFieldConfig";
+import {
+  MEETING_STATUS_OPTIONS,
+  MEETING_TYPE_OPTIONS,
+  MEETING_SERVICE_TYPE_OPTIONS,
+} from "./constants";
+
+// The three free-text label fields a past-mode import may carry values for that don't match
+// the app's closed option lists — mapped once (per distinct value) in the section below.
+const UNRECOGNIZED_FIELD_CONFIG = {
+  unrecognized_status:       { overrideKey: "status_override",               rawKey: "status",               label: "סטטוס", options: MEETING_STATUS_OPTIONS,       normalize: normalizeImportStatus },
+  unrecognized_meeting_type: { overrideKey: "meeting_type_override",         rawKey: "meeting_type",         label: "מיקום", options: MEETING_TYPE_OPTIONS,         normalize: normalizeImportMeetingType },
+  unrecognized_service_type: { overrideKey: "meeting_service_type_override", rawKey: "meeting_service_type", label: "סוג",   options: MEETING_SERVICE_TYPE_OPTIONS, normalize: normalizeImportServiceType },
+};
+const KEEP_RAW = "__keep__";
 
 const STAGE_OPTIONS = [
   { value: "", label: "בחר שלב מוסד" },
@@ -35,6 +54,9 @@ const PROBLEM_TITLES = {
   stage_scope_ambiguous: "היקף פגישה לא ברור (בית ספר שש-שנתי)",
   calendar_conflict: "התנגשות ביומן Outlook",
   possible_duplicate: "ייתכן שזו כפילות של פגישה קיימת",
+  unrecognized_status: "ערך סטטוס לא מזוהה",
+  unrecognized_meeting_type: "ערך מיקום לא מזוהה",
+  unrecognized_service_type: "ערך סוג לא מזוהה",
 };
 
 function normStr(s) { return (s || "").trim().toLowerCase(); }
@@ -368,6 +390,42 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
     });
   }
 
+  // Distinct unrecognized status/מיקום/סוג values across the batch, one mapping control each
+  // (not one per row). Same "resolve many rows at once" idea as the school_not_found banner.
+  const unrecognizedGroups = (() => {
+    const groups = new Map(); // `${type}|${rawValue}` -> { type, rawValue, cfg, rowIndexes, unresolvedCount }
+    for (const r of problemRows) {
+      if (excludedRows.has(r.row_index)) continue;
+      for (const p of r.problems) {
+        const cfg = UNRECOGNIZED_FIELD_CONFIG[p.type];
+        if (!cfg) continue;
+        const raw = p.raw_value ?? "";
+        const k = `${p.type}|${raw}`;
+        if (!groups.has(k)) groups.set(k, { type: p.type, rawValue: raw, cfg, rowIndexes: [], unresolvedCount: 0 });
+        const g = groups.get(k);
+        g.rowIndexes.push(r.row_index);
+        if (!isResolved(p.type, r.row_index)) g.unresolvedCount += 1;
+      }
+    }
+    return [...groups.values()].filter(g => g.unresolvedCount > 0);
+  })();
+
+  function mapUnrecognizedValue(group, choice) {
+    if (!choice) return;
+    setRowResolutions(prev => {
+      const next = { ...prev };
+      for (const idx of group.rowIndexes) {
+        next[idx] = { ...next[idx], [group.cfg.overrideKey]: choice };
+      }
+      return next;
+    });
+    setResolvedKeys(prev => {
+      const next = new Set(prev);
+      for (const idx of group.rowIndexes) next.add(key(group.type, idx));
+      return next;
+    });
+  }
+
   // Exports every row that still has at least one unresolved problem (any type) — lets the
   // manager skip them now and handle/re-import separately later, per the user's request.
   function handleExportProblems() {
@@ -407,6 +465,9 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
         accept_conflict: res.accept_conflict ?? r.data.accept_conflict ?? false,
         accept_duplicate: res.accept_duplicate ?? r.data.accept_duplicate ?? false,
         stage_scope: res.stage_scope ?? r.data.stage_scope_normalized ?? r.data.stage_scope ?? null,
+        status_override: res.status_override ?? null,
+        meeting_type_override: res.meeting_type_override ?? null,
+        meeting_service_type_override: res.meeting_service_type_override ?? null,
       };
     });
 
@@ -506,6 +567,31 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
                 </button>
               </div>
               {bulkHistoricalError && <p role="alert" className="text-xs text-red-600">{bulkHistoricalError}</p>}
+            </div>
+          )}
+
+          {unrecognizedGroups.length > 0 && (
+            <div className="border border-amber-200 bg-amber-50/60 rounded-xl p-3 space-y-2">
+              <p className="text-xs text-amber-800">
+                מיפוי ערכים לא מזוהים — כל ערך ממופה פעם אחת וחל על כל השורות איתו:
+              </p>
+              {unrecognizedGroups.map(g => {
+                const suggestion = g.cfg.normalize(g.rawValue);
+                return (
+                  <div key={`${g.type}|${g.rawValue}`} className="flex items-center gap-2 flex-wrap bg-white rounded-lg border border-amber-100 px-2.5 py-1.5">
+                    <span className="text-xs text-slate-500">{g.cfg.label}:</span>
+                    <b className="text-xs text-slate-800">"{g.rawValue}"</b>
+                    <span className="text-xs text-slate-400">({g.rowIndexes.length} שורות)</span>
+                    <select aria-label={`מיפוי הערך ${g.rawValue}`} defaultValue={suggestion || ""}
+                      onChange={e => mapUnrecognizedValue(g, e.target.value)}
+                      className="text-xs border border-amber-300 rounded-lg px-2 py-1.5 bg-white mr-auto">
+                      <option value="" disabled>בחר קטגוריה...</option>
+                      {g.cfg.options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                      <option value={KEEP_RAW}>השאר כטקסט חופשי ("{g.rawValue}")</option>
+                    </select>
+                  </div>
+                );
+              })}
             </div>
           )}
 
@@ -623,6 +709,10 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
                               className="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-amber-600 text-white hover:bg-amber-700">
                               לייבא בכל זאת
                             </button>
+                          )}
+
+                          {UNRECOGNIZED_FIELD_CONFIG[p.type] && (
+                            <p className="text-[11px] text-slate-400">יש למפות את הערך בסקשן "מיפוי ערכים לא מזוהים" למעלה.</p>
                           )}
                         </div>
                       );

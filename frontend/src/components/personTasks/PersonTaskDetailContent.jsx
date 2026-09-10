@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import { supabase } from "../../lib/supabase";
 import { describeCondition } from "../tasks/taskShared";
@@ -6,6 +6,13 @@ import ColumnFilterButton from "../tasks/ColumnFilterButton";
 import PersonTaskTableToolbar from "./PersonTaskTableToolbar";
 import { makeSchoolColumns, distinctFor, applyPersonTaskFilters, EMPTY_SUB_FILTER } from "./personTaskSchoolFilter";
 import FieldMetricEditor, { getSingleCondition } from "./FieldMetricEditor";
+import { useRowVirtualizer } from "../../hooks/useRowVirtualizer";
+import { VirtualRows } from "../common/VirtualRows";
+
+// Pure column factory result — hoisted so the same array identity feeds both the header
+// filters and the displayTargets memo (a fresh makeSchoolColumns() call each render would
+// needlessly bust that memo).
+const PT_FILTER_COLS = makeSchoolColumns({ hasMetricCol: false });
 
 export const METRIC_KIND_LABELS = {
   field: "עדכון שדה קיים במערכת",
@@ -82,6 +89,27 @@ export default function PersonTaskDetailContent({ taskId, onTaskChange, onlyCurr
       divisionOptions: r.data?.division_options || [], controlLetterFields: r.data?.control_letter_fields || [],
     })).catch(() => {});
   }, []);
+
+  // Hoisted above the early returns (rules of hooks) — same target scoping + filter/sort
+  // pipeline that used to run inline below, memoized so the row virtualizer gets a stable list.
+  const displayTargets = useMemo(() => {
+    if (!task) return [];
+    let tg = task.targets || [];
+    if (onlyCurrentUser && currentUserId) tg = tg.filter(t => (t.assignee_ids || []).includes(currentUserId));
+    if (scopeSchoolId) tg = tg.filter(t => t.school_id === scopeSchoolId);
+    const showFilters = task.assignment_mode === "schools" && !scopeSchoolId;
+    return showFilters ? applyPersonTaskFilters(tg, subFilter, PT_FILTER_COLS) : tg;
+  }, [task, onlyCurrentUser, currentUserId, scopeSchoolId, subFilter]);
+
+  // Row virtualization for the targets table — only the rows in the scroll viewport are
+  // mounted, so a task assigning many schools opens instantly.
+  const {
+    scrollRef: targetsScrollRef,
+    virtualizer: targetsRowVirtualizer,
+    items: targetsVirtualItems,
+    padTop: targetsPadTop,
+    padBottom: targetsPadBottom,
+  } = useRowVirtualizer(displayTargets, { estimateSize: 44, getItemKey: t => t.id });
 
   async function completeTarget(targetId, metricValue) {
     setSavingTargetId(targetId);
@@ -198,9 +226,8 @@ export default function PersonTaskDetailContent({ taskId, onTaskChange, onlyCurr
   // Identity-column search/filter/sort — only where there are actually many schools to sift
   // through: schools-mode, and not the single-school card (hideSchoolColumn).
   const showSchoolFilters = task.assignment_mode === "schools" && !hideSchoolColumn;
-  const filterCols = makeSchoolColumns({ hasMetricCol: false });
+  const filterCols = PT_FILTER_COLS;
   const colBy = Object.fromEntries(filterCols.map(c => [c.key, c]));
-  const displayTargets = showSchoolFilters ? applyPersonTaskFilters(targets, subFilter, filterCols) : targets;
 
   function setColFilter(key, v) {
     setSubFilter(s => {
@@ -260,9 +287,9 @@ export default function PersonTaskDetailContent({ taskId, onTaskChange, onlyCurr
         />
       )}
 
-      <div className="overflow-x-auto border border-slate-100 rounded-xl">
+      <div ref={targetsScrollRef} className="overflow-auto max-h-[60vh] border border-slate-100 rounded-xl">
         <table className={compact ? "text-sm" : "w-full text-sm"}>
-          <thead className="bg-slate-50 border-b border-slate-200">
+          <thead className="bg-slate-50 border-b border-slate-200" style={{ position: "sticky", top: 0, zIndex: 10 }}>
             <tr>
               {!hideSchoolColumn && (
                 <th scope="col" className={`text-right px-3 py-2 font-semibold text-slate-600 ${onlyCurrentUser ? "w-96" : ""}`}>
@@ -306,7 +333,17 @@ export default function PersonTaskDetailContent({ taskId, onTaskChange, onlyCurr
             {displayTargets.length === 0 && showSchoolFilters && (
               <tr><td colSpan={12} className="py-4 px-3 text-center text-xs text-slate-400">אין בתי ספר תואמים</td></tr>
             )}
-            {displayTargets.map(t => {
+          </tbody>
+          <VirtualRows
+            items={targetsVirtualItems}
+            padTop={targetsPadTop}
+            padBottom={targetsPadBottom}
+            colSpan={12}
+            measureElement={targetsRowVirtualizer.measureElement}
+            rows={displayTargets}
+            rowKey={t => t.id}
+          >
+            {t => {
               const isAssignee = currentUserId && (t.assignee_ids || []).includes(currentUserId);
               const canUndo = t.completed && isAssignee && (metric.kind === "checkbox" || metric.kind === "number");
               // Field-kind edits (goal/control_letter/year-admin-data) are written through to
@@ -534,8 +571,8 @@ export default function PersonTaskDetailContent({ taskId, onTaskChange, onlyCurr
                   </td>
                 </tr>
               );
-            })}
-          </tbody>
+            }}
+          </VirtualRows>
         </table>
       </div>
     </div>

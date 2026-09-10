@@ -1,9 +1,11 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import axios from "axios";
 import TaskRow from "./TaskRow";
 import ColumnFilterButton from "./ColumnFilterButton";
 import { ALL_TASK_COLUMNS, matchesColumnFilter } from "./taskColumns";
 import { DeleteMeetingModal } from "../meetings/DeleteMeetingModal";
+import { useRowVirtualizer } from "../../hooks/useRowVirtualizer";
+import { VirtualRows } from "../common/VirtualRows";
 
 const TIER_ORDER = { active: 0, archived: 1, scheduled: 2 };
 
@@ -36,9 +38,9 @@ export default function TasksTable({ tasks, onChanged, onTaskRefreshed, colVisib
 
   const visibleColumns = ALL_TASK_COLUMNS.filter(c => colVisible[c.key]);
 
-  function toggleExpand(taskId) {
+  const toggleExpand = useCallback(taskId => {
     setExpandedId(prev => (prev === taskId ? null : taskId));
-  }
+  }, []);
 
   function setColumnFilter(key, value) {
     setColumnFilters(prev => {
@@ -85,6 +87,11 @@ export default function TasksTable({ tasks, onChanged, onTaskRefreshed, colVisib
     return withPin;
   }, [filtered, sortSpec]);
 
+  const { scrollRef, virtualizer, items, padTop, padBottom } = useRowVirtualizer(sorted, {
+    estimateSize: 52,
+    getItemKey: t => t.id,
+  });
+
   async function confirmDelete() {
     setDeleting(true);
     try {
@@ -100,7 +107,7 @@ export default function TasksTable({ tasks, onChanged, onTaskRefreshed, colVisib
     <div className="glass-card rounded-2xl border border-slate-200 flex flex-col">
       {/* When a row is expanded the outer scroll box doubles its height cap (70vh → 140vh) so the
           heavy per-school detail table has real room instead of being squeezed into a sliver. */}
-      <div className={`overflow-auto rounded-2xl ${expandedId ? "max-h-[140vh]" : "max-h-[70vh]"}`}>
+      <div ref={scrollRef} className={`overflow-auto rounded-2xl ${expandedId ? "max-h-[140vh]" : "max-h-[70vh]"}`}>
           <table className="w-full text-sm min-w-[1100px] border-collapse">
             <thead style={{ position: "sticky", top: 0, zIndex: 10, background: "rgba(241,245,249,0.97)", backdropFilter: "blur(8px)" }}>
               <tr className="border-b border-slate-200">
@@ -123,26 +130,37 @@ export default function TasksTable({ tasks, onChanged, onTaskRefreshed, colVisib
                 <th scope="col" className="px-2 py-3" aria-hidden="true" />
               </tr>
             </thead>
-            <tbody className="bg-white">
-              {sorted.length === 0 ? (
+            {sorted.length === 0 ? (
+              <tbody className="bg-white">
                 <tr>
                   <td colSpan={visibleColumns.length + 2} className="text-sm text-slate-400 p-8 text-center">
                     אין משימות תואמות לסינון הנוכחי
                   </td>
                 </tr>
-              ) : sorted.map(t => (
-                <TaskRow
-                  key={t.id}
-                  task={t}
-                  visibleColumns={visibleColumns}
-                  expanded={expandedId === t.id}
-                  onToggleExpand={toggleExpand}
-                  onChanged={onChanged}
-                  onTaskRefreshed={onTaskRefreshed}
-                  onRequestDelete={setPendingDeleteId}
-                />
-              ))}
-            </tbody>
+              </tbody>
+            ) : (
+              <VirtualRows
+                items={items}
+                padTop={padTop}
+                padBottom={padBottom}
+                colSpan={visibleColumns.length + 2}
+                measureElement={virtualizer.measureElement}
+                rows={sorted}
+                rowKey={t => t.id}
+              >
+                {t => (
+                  <TaskRow
+                    task={t}
+                    visibleColumns={visibleColumns}
+                    expanded={expandedId === t.id}
+                    onToggleExpand={toggleExpand}
+                    onChanged={onChanged}
+                    onTaskRefreshed={onTaskRefreshed}
+                    onRequestDelete={setPendingDeleteId}
+                  />
+                )}
+              </VirtualRows>
+            )}
           </table>
         </div>
 

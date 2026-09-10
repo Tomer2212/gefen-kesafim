@@ -2099,6 +2099,9 @@ export default function AdminPage() {
   const [showSchoolFormDots, setShowSchoolFormDots] = useState(false);
   const [recycleInfoSchoolName, setRecycleInfoSchoolName] = useState(null);
   const [restoreSuccessSchoolName, setRestoreSuccessSchoolName] = useState(null);
+  // Both recycle-bin groups are collapsed by default — rarely used.
+  const [recycleBinOpen, setRecycleBinOpen] = useState(false);
+  const [historicalSchoolsOpen, setHistoricalSchoolsOpen] = useState(false);
   const schoolFormDotsRef = useRef(null);
 
   // Users state
@@ -4584,42 +4587,105 @@ export default function AdminPage() {
                 )}
               </div>
 
-              {schools.some(s => s.status === "pending_deletion") && (
-                <div className="mt-8">
-                  <h3 className="text-sm font-semibold text-slate-500 mb-3 flex items-center gap-2">
-                    🗑️ סל מחזור ({schools.filter(s => s.status === "pending_deletion").length})
-                  </h3>
-                  <div className="flex flex-col gap-3">
-                    {schools.filter(s => s.status === "pending_deletion").map(school => {
-                      const daysLeft = Math.max(0, 30 - Math.floor((Date.now() - new Date(school.deleted_at)) / 86400000));
-                      return (
-                        <div key={school.id} className="glass-card rounded-2xl overflow-hidden opacity-50 grayscale">
-                          <div className="flex items-center justify-between px-6 py-4 gap-4">
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center gap-3 flex-wrap">
-                                <span className="font-bold text-slate-900">{school.name}</span>
-                                {school.symbol && <span className="text-xs text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">סמל {school.symbol}</span>}
-                                {school.city && <span className="text-xs text-slate-800">{school.city}</span>}
-                                <span className="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-medium">מיועד למחיקה</span>
-                                <span className="text-xs text-slate-500">{daysLeft} ימים נותרו</span>
-                              </div>
-                            </div>
-                            {myRole === "owner" && (
-                              <button
-                                onClick={() => restoreSchool(school.id)}
-                                className="btn-ghost text-xs px-3 py-1.5 text-emerald-700 border border-emerald-200 hover:bg-emerald-50"
-                                aria-label={`שחזר את ${school.name}`}
-                              >
-                                שחזר
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })}
+              {(() => {
+                const deletedSchools = schools.filter(s => s.status === "pending_deletion");
+                // Stubs auto-created only to host imported past meetings — never a real org
+                // deletion, so they get their own clearly-labeled group, not "מיועד למחיקה".
+                const trueDeleted = deletedSchools.filter(s => s.created_via !== "import_historical");
+                const historical = deletedSchools.filter(s => s.created_via === "import_historical");
+
+                const RestoreBtn = ({ school }) => myRole === "owner" && (
+                  <button
+                    onClick={() => restoreSchool(school.id)}
+                    className="btn-ghost text-xs px-3 py-1.5 text-emerald-700 border border-emerald-200 hover:bg-emerald-50"
+                    aria-label={`שחזר את ${school.name}`}
+                  >
+                    שחזר
+                  </button>
+                );
+                const IdentityRow = ({ school }) => (
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <span className="font-bold text-slate-900">{school.name}</span>
+                    {school.symbol && <span className="text-xs text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">סמל {school.symbol}</span>}
+                    {school.city && <span className="text-xs text-slate-800">{school.city}</span>}
                   </div>
-                </div>
-              )}
+                );
+                const Chevron = ({ open }) => (
+                  <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+                    style={{ transform: open ? "rotate(90deg)" : "none", transition: "transform .15s" }}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 6l6 6-6 6" />
+                  </svg>
+                );
+
+                return (
+                  <>
+                    {trueDeleted.length > 0 && (
+                      <div className="mt-8">
+                        <button type="button" onClick={() => setRecycleBinOpen(o => !o)}
+                          aria-expanded={recycleBinOpen}
+                          className="text-sm font-semibold text-slate-500 mb-3 flex items-center gap-2 hover:text-slate-700">
+                          <Chevron open={recycleBinOpen} />
+                          🗑️ סל מחזור ({trueDeleted.length})
+                        </button>
+                        {recycleBinOpen && (
+                          <div className="flex flex-col gap-3">
+                            {trueDeleted.map(school => {
+                              const daysLeft = Math.max(0, 30 - Math.floor((Date.now() - new Date(school.deleted_at)) / 86400000));
+                              return (
+                                <div key={school.id} className="glass-card rounded-2xl overflow-hidden opacity-50 grayscale">
+                                  <div className="flex items-center justify-between px-6 py-4 gap-4">
+                                    <div className="flex-1 min-w-0">
+                                      <div className="flex items-center gap-3 flex-wrap">
+                                        <IdentityRow school={school} />
+                                        <span className="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-medium">מיועד למחיקה</span>
+                                        <span className="text-xs text-slate-500">{daysLeft} ימים נותרו</span>
+                                      </div>
+                                    </div>
+                                    <RestoreBtn school={school} />
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {historical.length > 0 && (
+                      <div className="mt-8">
+                        <button type="button" onClick={() => setHistoricalSchoolsOpen(o => !o)}
+                          aria-expanded={historicalSchoolsOpen}
+                          className="text-sm font-semibold text-slate-500 mb-1 flex items-center gap-2 hover:text-slate-700">
+                          <Chevron open={historicalSchoolsOpen} />
+                          📎 בתי ספר לתיעוד פגישות עבר ({historical.length})
+                        </button>
+                        {historicalSchoolsOpen && (
+                          <>
+                            <p className="text-xs text-slate-400 mb-3">
+                              נוצרו אוטומטית בעת ייבוא פגישות עבר, כדי לשמור את היסטוריית הפגישות מולם. אינם מופיעים ברשימת בתי הספר הפעילים ואינם מיועדים למחיקה. ניתן לשחזר לכרטיס מלא אם הקשר מתחדש.
+                            </p>
+                            <div className="flex flex-col gap-3">
+                              {historical.map(school => (
+                                <div key={school.id} className="glass-card rounded-2xl overflow-hidden opacity-60">
+                                  <div className="flex items-center justify-between px-6 py-4 gap-4">
+                                    <div className="flex-1 min-w-0">
+                                      <div className="flex items-center gap-3 flex-wrap">
+                                        <IdentityRow school={school} />
+                                        <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 font-medium">רשומה היסטורית</span>
+                                      </div>
+                                    </div>
+                                    <RestoreBtn school={school} />
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
               </>
               )}
             </div>

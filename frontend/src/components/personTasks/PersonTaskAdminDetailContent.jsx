@@ -1,9 +1,11 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import { metricDescription, STAGE_LABELS } from "./PersonTaskDetailContent";
 import ColumnFilterButton from "../tasks/ColumnFilterButton";
 import PersonTaskTableToolbar from "./PersonTaskTableToolbar";
 import { makeSchoolColumns, distinctFor, applyPersonTaskFilters, EMPTY_SUB_FILTER } from "./personTaskSchoolFilter";
+import { useRowVirtualizer } from "../../hooks/useRowVirtualizer";
+import { VirtualRows } from "../common/VirtualRows";
 
 // Read-only mirror of PersonTaskDetailContent's own number/file value display — the task
 // creator (who drills in here, not into the per-assignee detail view) must be able to see WHAT
@@ -55,6 +57,78 @@ function SchoolCellValue({ col, t, taskId, metric, taskName }) {
   }
   if (col.key === "school_name") return t.school_name || taskName || "—";
   return col.getValue(t) || "—";
+}
+
+// One open assignee's drill-in schools table. Split into its own component so the row
+// virtualizer's hooks are called unconditionally (the parent renders this only for the single
+// open assignee). Same markup as before — the bordered box just gained a vertical scroll cap.
+function AssigneeSchoolsTable({ targets, subFilter, cols, onColFilter, onColSort, taskId, metric, taskName }) {
+  const rows = useMemo(
+    () => applyPersonTaskFilters(targets, subFilter, cols),
+    [targets, subFilter, cols],
+  );
+  const { scrollRef, virtualizer, items, padTop, padBottom } = useRowVirtualizer(rows, {
+    estimateSize: 40,
+    getItemKey: t => t.id,
+  });
+  return (
+    <div ref={scrollRef} className="inline-block align-top max-w-full overflow-auto max-h-[60vh] rounded-lg border border-slate-200 bg-white">
+      {/* width:1px + nowrap cells = the table collapses to exactly its content width. */}
+      <table className="text-sm" style={{ width: "1px" }}>
+        <thead style={{ position: "sticky", top: 0, zIndex: 10 }}>
+          <tr className="bg-white text-slate-700 font-bold text-xs border-b border-slate-200 divide-x divide-slate-200/60">
+            {cols.map(col => (
+              <th
+                key={col.key}
+                scope="col"
+                className={`${col.key === "status" || col.key === "metric" ? "text-center" : "text-right"} py-2 px-3 whitespace-nowrap`}
+              >
+                <span className="inline-flex items-center gap-1">
+                  {col.label}
+                  <ColumnFilterButton
+                    col={col}
+                    filter={subFilter.columnFilters[col.key]}
+                    onFilterChange={v => onColFilter(col.key, v)}
+                    sortDir={subFilter.sortSpec?.key === col.key ? subFilter.sortSpec.dir : null}
+                    onSort={dir => onColSort(col.key, dir)}
+                    distinctOptions={col.kind === "enum" ? distinctFor(targets, col) : undefined}
+                  />
+                </span>
+              </th>
+            ))}
+          </tr>
+        </thead>
+        {rows.length === 0 ? (
+          <tbody>
+            <tr><td colSpan={cols.length} className="py-4 px-3 text-center text-xs text-slate-400">אין בתי ספר תואמים</td></tr>
+          </tbody>
+        ) : (
+          <VirtualRows
+            items={items}
+            padTop={padTop}
+            padBottom={padBottom}
+            colSpan={cols.length}
+            measureElement={virtualizer.measureElement}
+            rows={rows}
+            rowKey={t => t.id}
+          >
+            {t => (
+              <tr className="border-b border-slate-200/60 text-slate-900 divide-x divide-slate-200/60">
+                {cols.map(col => (
+                  <td
+                    key={col.key}
+                    className={`${col.key === "status" || col.key === "metric" ? "text-center" : "text-right"} py-2 px-3 text-sm ${col.key === "stage_label" ? "text-slate-600" : ""} whitespace-nowrap`}
+                  >
+                    <SchoolCellValue col={col} t={t} taskId={taskId} metric={metric} taskName={taskName} />
+                  </td>
+                ))}
+              </tr>
+            )}
+          </VirtualRows>
+        )}
+      </table>
+    </div>
+  );
 }
 
 // Admin-only ("ניהול -> משימות -> אנשי הארגון") variant of the expanded-task detail — grouped by
@@ -176,7 +250,6 @@ export default function PersonTaskAdminDetailContent({ taskId, onTaskChange }) {
         <div className="text-center text-slate-400 text-xs py-6">אין יעדים למשימה זו</div>
       ) : assignees.map(a => {
         const isOpen = expandedAssignee === a.id;
-        const rows = isOpen ? applyPersonTaskFilters(a.targets, subFilter, cols) : [];
         return (
           <Fragment key={a.id}>
             <div
@@ -213,50 +286,16 @@ export default function PersonTaskAdminDetailContent({ taskId, onTaskChange }) {
                 {/* inline-block + max-w-full — the bordered white box shrinks to exactly the
                 table's width (the grey panel shows to its left), and only scrolls if a school
                 name is genuinely wider than the panel. */}
-                <div className="inline-block align-top max-w-full overflow-x-auto rounded-lg border border-slate-200 bg-white">
-                  {/* width:1px + nowrap cells = the table collapses to exactly its content width. */}
-                  <table className="text-sm" style={{ width: "1px" }}>
-                    <thead>
-                      <tr className="bg-white text-slate-700 font-bold text-xs border-b border-slate-200 divide-x divide-slate-200/60">
-                        {cols.map(col => (
-                          <th
-                            key={col.key}
-                            scope="col"
-                            className={`${col.key === "status" || col.key === "metric" ? "text-center" : "text-right"} py-2 px-3 whitespace-nowrap`}
-                          >
-                            <span className="inline-flex items-center gap-1">
-                              {col.label}
-                              <ColumnFilterButton
-                                col={col}
-                                filter={subFilter.columnFilters[col.key]}
-                                onFilterChange={v => setColFilter(col.key, v)}
-                                sortDir={subFilter.sortSpec?.key === col.key ? subFilter.sortSpec.dir : null}
-                                onSort={dir => setColSort(col.key, dir)}
-                                distinctOptions={col.kind === "enum" ? distinctFor(a.targets, col) : undefined}
-                              />
-                            </span>
-                          </th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {rows.length === 0 ? (
-                        <tr><td colSpan={cols.length} className="py-4 px-3 text-center text-xs text-slate-400">אין בתי ספר תואמים</td></tr>
-                      ) : rows.map(t => (
-                        <tr key={t.id} className="border-b border-slate-200/60 text-slate-900 last:border-b-0 divide-x divide-slate-200/60">
-                          {cols.map(col => (
-                            <td
-                              key={col.key}
-                              className={`${col.key === "status" || col.key === "metric" ? "text-center" : "text-right"} py-2 px-3 text-sm ${col.key === "stage_label" ? "text-slate-600" : ""} whitespace-nowrap`}
-                            >
-                              <SchoolCellValue col={col} t={t} taskId={taskId} metric={metric} taskName={task.name} />
-                            </td>
-                          ))}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                <AssigneeSchoolsTable
+                  targets={a.targets}
+                  subFilter={subFilter}
+                  cols={cols}
+                  onColFilter={setColFilter}
+                  onColSort={setColSort}
+                  taskId={taskId}
+                  metric={metric}
+                  taskName={task.name}
+                />
               </div>
             )}
           </Fragment>

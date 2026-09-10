@@ -1,6 +1,8 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import * as XLSX from "xlsx";
+import { useRowVirtualizer } from "../../hooks/useRowVirtualizer";
+import { VirtualRows } from "../common/VirtualRows";
 import TaskMissingContactModal from "./TaskMissingContactModal";
 import TaskDateTimeInput from "./TaskDateTimeInput";
 import OutlookLimitModal from "./OutlookLimitModal";
@@ -250,6 +252,38 @@ export default function TaskDetailContent({ taskId, onTaskChange }) {
   }, []);
   const taskFieldMeta = { fieldOptions, goalOptions, divisionOptions, controlLetterFields };
 
+  // Hoisted above the early returns (rules of hooks) — same filter/sort pipeline that used to
+  // run inline further down, now memoized so the row virtualizer gets a stable list identity.
+  const displayRows = useMemo(() => {
+    const src = task?.progress?.schools || [];
+    return src
+      .filter(r => {
+        if (filterResultIds !== null && !filterResultIds.has(r.school_id)) return false;
+        if (rowStatusFilter === "done" && !r.done) return false;
+        if (rowStatusFilter === "not_done" && r.done) return false;
+        if (!rowFilterText.trim()) return true;
+        const q = rowFilterText.trim().toLowerCase();
+        return [r.school_name, r.symbol, r.authority].some(v => (v || "").toLowerCase().includes(q));
+      })
+      .sort((a, b) => {
+        if (!sortSpec) return 0;
+        const av = (a[sortSpec.key] || "").toString();
+        const bv = (b[sortSpec.key] || "").toString();
+        const cmp = av.localeCompare(bv, "he");
+        return sortSpec.dir === "asc" ? cmp : -cmp;
+      });
+  }, [task, filterResultIds, rowStatusFilter, rowFilterText, sortSpec]);
+
+  // Row virtualization for the per-school progress table — only the rows visible in the scroll
+  // viewport are mounted, so a task targeting the whole org (1,000+ rows) opens instantly.
+  const {
+    scrollRef: detailScrollRef,
+    virtualizer: detailRowVirtualizer,
+    items: detailVirtualItems,
+    padTop: detailPadTop,
+    padBottom: detailPadBottom,
+  } = useRowVirtualizer(displayRows, { estimateSize: 44, getItemKey: r => r.school_id });
+
   async function handleBulkSend(confirmOutlookLimit = false) {
     setSending(true);
     const wasScheduled = !!scheduleSendAt;
@@ -466,7 +500,6 @@ export default function TaskDetailContent({ taskId, onTaskChange }) {
   // there's no success tree to describe, so the per-condition columns are hidden entirely
   // rather than rendered empty (see displayRows/table below).
   const conditions = trackSuccess ? firstDisplayGroupConditions(task.effective_success_criteria) : [];
-  const rows = task.progress.schools || [];
 
   // Movable middle-band columns in their current (user-dragged) order, visible ones only.
   const visibleMovableCols = detailColOrder
@@ -483,23 +516,6 @@ export default function TaskDetailContent({ taskId, onTaskChange }) {
       return next;
     });
   }
-
-  const displayRows = rows
-    .filter(r => {
-      if (filterResultIds !== null && !filterResultIds.has(r.school_id)) return false;
-      if (rowStatusFilter === "done" && !r.done) return false;
-      if (rowStatusFilter === "not_done" && r.done) return false;
-      if (!rowFilterText.trim()) return true;
-      const q = rowFilterText.trim().toLowerCase();
-      return [r.school_name, r.symbol, r.authority].some(v => (v || "").toLowerCase().includes(q));
-    })
-    .sort((a, b) => {
-      if (!sortSpec) return 0;
-      const av = (a[sortSpec.key] || "").toString();
-      const bv = (b[sortSpec.key] || "").toString();
-      const cmp = av.localeCompare(bv, "he");
-      return sortSpec.dir === "asc" ? cmp : -cmp;
-    });
 
   function toggleSort(key) {
     setSortSpec(prev => {
@@ -835,7 +851,7 @@ export default function TaskDetailContent({ taskId, onTaskChange }) {
         </div>
       )}
 
-      <div className="flex-1 overflow-auto min-h-0">
+      <div ref={detailScrollRef} className="flex-1 overflow-auto min-h-0">
         <table className="w-full text-sm">
           <thead className="sticky top-0 z-20 bg-white border-t-2 border-b-2 border-slate-300">
             <tr>
@@ -887,8 +903,16 @@ export default function TaskDetailContent({ taskId, onTaskChange }) {
               <th scope="col" className="px-3 py-2" />
             </tr>
           </thead>
-          <tbody>
-            {displayRows.map((r, groupIdx) => {
+          <VirtualRows
+            items={detailVirtualItems}
+            padTop={detailPadTop}
+            padBottom={detailPadBottom}
+            colSpan={visibleMovableCols.length + conditions.length + 5}
+            measureElement={detailRowVirtualizer.measureElement}
+            rows={displayRows}
+            rowKey={r => r.school_id}
+          >
+            {(r, groupIdx) => {
               // Zebra striping by school group (both sub-rows of a six-year school share the
               // shade) so the eye tracks a row's values across the wide table. A completed
               // school stays green — that signal wins over the stripe.
@@ -1113,8 +1137,8 @@ export default function TaskDetailContent({ taskId, onTaskChange }) {
               })}
               </Fragment>
               );
-            })}
-          </tbody>
+            }}
+          </VirtualRows>
         </table>
       </div>
 
