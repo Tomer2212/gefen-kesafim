@@ -1,27 +1,156 @@
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 
 // Extracted from AdminPage.jsx (was defined inline there, duplicated conceptually between
 // the schools-import and users-import flows). Generic {key, label, required, hint}-driven
 // column mapper with a live preview of the file's first data row — used by any bulk-import
 // flow in the app that needs to map arbitrary Excel columns onto known field keys.
+
+// Custom searchable column picker (replaces a native <select>): a free-text search box to
+// narrow the list, and each option laid out as two bordered columns — the file's column
+// header on one side, its sample value on the other — so long lists are quick to scan.
 function ColumnSelect({ headers, previewRow, value, required, error, placeholder, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [pos, setPos] = useState(null);
+  const btnRef = useRef(null);
+  const popRef = useRef(null);
+  const searchRef = useRef(null);
+
+  const noneLabel = placeholder ?? (required ? "— בחר עמודה —" : "— לא ממפה —");
+  const options = useMemo(
+    () => headers.map((h, i) => ({
+      idx: i,
+      header: h || `עמודה ${i + 1}`,
+      sample: previewRow[i] != null && previewRow[i] !== "" ? String(previewRow[i]).slice(0, 60) : "",
+    })),
+    [headers, previewRow],
+  );
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return options;
+    return options.filter(o => o.header.toLowerCase().includes(q) || o.sample.toLowerCase().includes(q));
+  }, [options, query]);
+
+  const selected = value === null || value === undefined ? null : options[value];
+
+  useEffect(() => {
+    if (!open) return;
+    const rect = btnRef.current?.getBoundingClientRect();
+    if (rect) {
+      setPos({ top: rect.bottom + 4, left: rect.left, width: rect.width });
+    }
+    setQuery("");
+    const t = setTimeout(() => searchRef.current?.focus(), 0);
+    return () => clearTimeout(t);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    function onDown(e) {
+      if (btnRef.current?.contains(e.target) || popRef.current?.contains(e.target)) return;
+      setOpen(false);
+    }
+    function onKey(e) { if (e.key === "Escape") setOpen(false); }
+    function onScroll(e) {
+      // Don't close when the scroll happens inside the popover's own list.
+      if (popRef.current && (e.target === popRef.current || popRef.current.contains(e.target))) return;
+      setOpen(false);
+    }
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    document.addEventListener("scroll", onScroll, true);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("scroll", onScroll, true);
+    };
+  }, [open]);
+
+  function pick(idx) {
+    onChange(idx);
+    setOpen(false);
+  }
+
   return (
-    <select
-      className={`input-field text-sm ${error ? "border-red-400" : ""}`}
-      value={value === null || value === undefined ? "" : String(value)}
-      onChange={e => onChange(e.target.value === "" ? null : Number(e.target.value))}
-    >
-      <option value="">{placeholder ?? (required ? "— בחר עמודה —" : "— לא ממפה —")}</option>
-      {headers.map((h, i) => {
-        const preview = previewRow[i] ? String(previewRow[i]).slice(0, 35) : "";
-        return (
-          <option key={i} value={String(i)}>
-            {h || `עמודה ${i + 1}`}{preview ? `  (${preview})` : ""}
-          </option>
-        );
-      })}
-    </select>
+    <>
+      <button
+        type="button"
+        ref={btnRef}
+        onClick={() => setOpen(o => !o)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        className={`input-field text-sm text-right flex items-center justify-between gap-2 ${error ? "border-red-400" : ""}`}
+      >
+        <span className={`truncate ${selected ? "text-slate-800" : "text-slate-400"}`}>
+          {selected ? selected.header : noneLabel}
+          {selected?.sample ? <span className="text-slate-400 text-xs"> ({selected.sample})</span> : null}
+        </span>
+        <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+          className="flex-shrink-0 text-slate-400">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M6 9l6 6 6-6" />
+        </svg>
+      </button>
+
+      {open && pos && createPortal(
+        <div
+          ref={popRef}
+          dir="rtl"
+          className="fixed z-[80] bg-white border border-slate-200 rounded-xl shadow-xl overflow-hidden"
+          style={{ top: pos.top, left: pos.left, width: Math.max(pos.width, 320), maxWidth: "calc(100vw - 24px)" }}
+        >
+          <div className="p-2 border-b border-slate-100">
+            <input
+              ref={searchRef}
+              type="text"
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder="חיפוש עמודה..."
+              aria-label="חיפוש עמודה"
+              className="w-full text-sm border border-slate-200 rounded-lg px-3 py-1.5 outline-none focus:border-blue-400"
+            />
+          </div>
+          <div className="grid grid-cols-2 bg-slate-50 border-b border-slate-100 text-[10px] font-semibold text-slate-400 uppercase tracking-wide">
+            <span className="px-3 py-1.5 text-right border-l border-slate-100">כותרת בקובץ</span>
+            <span className="px-3 py-1.5 text-right">ערך לדוגמה</span>
+          </div>
+          <div className="max-h-64 overflow-y-auto divide-y divide-slate-100" role="listbox">
+            <button
+              type="button"
+              role="option"
+              aria-selected={selected === null}
+              onClick={() => pick(null)}
+              className={`w-full text-right px-3 py-2 text-sm hover:bg-slate-50 ${selected === null ? "bg-blue-50 text-blue-700" : "text-slate-500"}`}
+            >
+              {noneLabel}
+            </button>
+            {filtered.length === 0 ? (
+              <p className="px-3 py-3 text-xs text-slate-400 text-center">לא נמצאו עמודות תואמות</p>
+            ) : (
+              filtered.map(o => (
+                <button
+                  type="button"
+                  key={o.idx}
+                  role="option"
+                  aria-selected={value === o.idx}
+                  onClick={() => pick(o.idx)}
+                  className={`w-full grid grid-cols-2 hover:bg-blue-50/60 ${value === o.idx ? "bg-blue-50" : ""}`}
+                >
+                  <span className={`px-3 py-2 text-sm text-right truncate border-l border-slate-100 ${value === o.idx ? "text-blue-700 font-medium" : "text-slate-800"}`}>
+                    {o.header}
+                  </span>
+                  <span className="px-3 py-2 text-xs text-right truncate text-slate-500">
+                    {o.sample || "—"}
+                  </span>
+                </button>
+              ))
+            )}
+          </div>
+        </div>,
+        document.body,
+      )}
+    </>
   );
 }
 
