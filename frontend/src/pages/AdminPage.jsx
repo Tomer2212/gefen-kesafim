@@ -4738,6 +4738,14 @@ export default function AdminPage() {
                 </p>
               )}
 
+              {!loadingUsers && (
+                <p className="text-sm text-slate-500 mb-2">
+                  {displayUsers.length === users.length
+                    ? `סה"כ ${users.length} משתמשים`
+                    : `סה"כ ${displayUsers.length} משתמשים מתוך ${users.length}`}
+                </p>
+              )}
+
               <div className="glass-card rounded-2xl overflow-hidden">
                 <table className="w-full text-sm">
                   <thead>
