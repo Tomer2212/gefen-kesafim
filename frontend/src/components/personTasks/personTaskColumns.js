@@ -28,14 +28,14 @@ export function responsibleSummary(task) {
   return label ? `יועץ מלווה [${label}]` : "יועץ מלווה";
 }
 
-// Days remaining until due_date (positive), 0 for today, negative when overdue — plain
+// Days remaining until due_date, floored at 0 once the deadline has passed — plain
 // day-granularity diff, recomputed on every render (so it's always current as of page load,
 // "once a day" in practice since nobody keeps this table open for days without a refresh).
 export function daysToDeadline(task) {
   if (!task.due_date) return null;
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const due = new Date(`${task.due_date}T00:00:00`);
-  return Math.round((due - today) / 86400000);
+  return Math.max(0, Math.round((due - today) / 86400000));
 }
 
 export const ALL_PERSON_TASK_COLUMNS = [

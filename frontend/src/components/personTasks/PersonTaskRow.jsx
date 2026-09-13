@@ -62,7 +62,7 @@ function GenericCell({ col, task }) {
   }
   if (col.key === "days_to_deadline") {
     const days = daysToDeadline(task);
-    const overdue = days !== null && days < 0 && task.status !== "archived";
+    const overdue = task.due_date && task.status !== "archived" && task.due_date < new Date().toISOString().slice(0, 10);
     return (
       <td className={`px-3 py-2 text-center whitespace-nowrap text-xs ${overdue ? "text-red-600 font-semibold" : "text-slate-700"}`}>
         {days === null ? "—" : days}
