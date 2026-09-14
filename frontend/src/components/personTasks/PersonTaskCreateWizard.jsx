@@ -111,13 +111,32 @@ export default function PersonTaskCreateWizard({ onClose, onCreated, initialAcad
     setSelectedUserIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
   }
 
+  const allUsersSelected = assignableUsers.length > 0 && assignableUsers.every(u => selectedUserIds.includes(u.id));
+  function toggleAllUsers() {
+    setSelectedUserIds(allUsersSelected ? [] : assignableUsers.map(u => u.id));
+  }
+
+  const advisorAccounts = assignableUsers.filter(u => u.role === "advisor");
+  const managerAccounts = assignableUsers.filter(u => u.role === "manager");
+  const allAdvisorsSelected = advisorAccounts.length > 0 && advisorAccounts.every(u => selectedUserIds.includes(u.id));
+  const allManagersSelected = managerAccounts.length > 0 && managerAccounts.every(u => selectedUserIds.includes(u.id));
+
+  function toggleGroup(groupUsers, groupSelected) {
+    const groupIds = groupUsers.map(u => u.id);
+    setSelectedUserIds(prev => groupSelected
+      ? prev.filter(id => !groupIds.includes(id))
+      : [...new Set([...prev, ...groupIds])]);
+  }
+
   // client_status and service_type are both mandatory (service_type decides routing;
   // client_status defaults to "active" but can be cleared/blanked out) — "יועץ מלווה" mode
   // can't proceed until both have a value, matching the meeting-task wizard's mandatory-field
   // red-border pattern.
   const advisorClientStatusSet = advisorFieldGroups.some(g => g.conditions.some(c => c.type === "field" && c.field === "client_status" && c.value));
   const advisorServiceTypeSet = advisorFieldGroups.some(g => g.conditions.some(c => c.type === "field" && c.field === "service_type" && c.value));
-  const canProceedDetails = name.trim().length > 0
+  const nameSet = name.trim().length > 0;
+  const descriptionSet = description.trim().length > 0;
+  const canProceedDetails = nameSet && descriptionSet
     && (assignmentMode === "users"
       ? selectedUserIds.length > 0
       // A scheduled task defers matching entirely to activation time, so the live check isn't
@@ -257,10 +276,12 @@ export default function PersonTaskCreateWizard({ onClose, onCreated, initialAcad
               <div>
                 <label htmlFor="pt-name" className="block text-xs font-semibold text-slate-600 mb-1">שם המשימה</label>
                 <input id="pt-name" value={name} onChange={e => setName(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2" placeholder="למשל: בדיקת חוזים לרבעון 3" />
+                {!nameSet && <p role="alert" className="text-xs text-red-600 mt-1">יש למלא שם למשימה — שדה חובה.</p>}
               </div>
               <div>
                 <label htmlFor="pt-desc" className="block text-xs font-semibold text-slate-600 mb-1">מה צריך לעשות? (ההסבר יוצג למשתמשים שעליהם מוטלת המשימה, מומלץ לכלול מהו המדד להשלמת המשימה)</label>
                 <textarea id="pt-desc" rows={3} value={description} onChange={e => setDescription(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2" placeholder="מה בדיוק צריך לבצע..." />
+                {!descriptionSet && <p role="alert" className="text-xs text-red-600 mt-1">יש למלא הסבר למשימה — שדה חובה.</p>}
               </div>
               <div className="flex items-center gap-4">
                 <div>
@@ -372,6 +393,24 @@ export default function PersonTaskCreateWizard({ onClose, onCreated, initialAcad
                       className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 outline-none focus:border-blue-400"
                     />
                     <div className="border border-slate-200 rounded-xl max-h-56 overflow-y-auto divide-y divide-slate-100">
+                      {assignableUsers.length > 0 && (
+                        <label className="flex items-center gap-2 px-3 py-2 hover:bg-slate-50 cursor-pointer">
+                          <input type="checkbox" checked={allUsersSelected} onChange={toggleAllUsers} />
+                          <span className="text-slate-800">כולם</span>
+                        </label>
+                      )}
+                      {advisorAccounts.length > 0 && (
+                        <label className="flex items-center gap-2 px-3 py-2 hover:bg-slate-50 cursor-pointer">
+                          <input type="checkbox" checked={allAdvisorsSelected} onChange={() => toggleGroup(advisorAccounts, allAdvisorsSelected)} />
+                          <span className="text-slate-800">כל חשבונות היועצים</span>
+                        </label>
+                      )}
+                      {managerAccounts.length > 0 && (
+                        <label className="flex items-center gap-2 px-3 py-2 hover:bg-slate-50 cursor-pointer">
+                          <input type="checkbox" checked={allManagersSelected} onChange={() => toggleGroup(managerAccounts, allManagersSelected)} />
+                          <span className="text-slate-800">כל חשבונות המנהלים</span>
+                        </label>
+                      )}
                       {filteredAssignableUsers.map(u => (
                         <label key={u.id} className="flex items-center gap-2 px-3 py-2 hover:bg-slate-50 cursor-pointer">
                           <input type="checkbox" checked={selectedUserIds.includes(u.id)} onChange={() => toggleUser(u.id)} />

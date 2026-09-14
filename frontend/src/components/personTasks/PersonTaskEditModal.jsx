@@ -17,13 +17,15 @@ export default function PersonTaskEditModal({ task, onClose, onSaved }) {
   const [urgency, setUrgency] = useState(task.urgency ?? 1);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+  const nameSet = name.trim().length > 0;
+  const descriptionSet = description.trim().length > 0;
 
   async function handleSave() {
     setSaving(true);
     setError(null);
     try {
       const res = await axios.patch(`/person-tasks/${task.id}`, {
-        name: name.trim(), description: description.trim() || undefined,
+        name: name.trim(), description: description.trim(),
         due_date: dueDate || undefined, urgency,
       });
       onSaved(res.data);
@@ -53,10 +55,12 @@ export default function PersonTaskEditModal({ task, onClose, onSaved }) {
           <div>
             <label htmlFor="pte-name" className="block text-xs font-semibold text-slate-600 mb-1">שם המשימה</label>
             <input id="pte-name" value={name} onChange={e => setName(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2" />
+            {!nameSet && <p role="alert" className="text-xs text-red-600 mt-1">יש למלא שם למשימה — שדה חובה.</p>}
           </div>
           <div>
             <label htmlFor="pte-desc" className="block text-xs font-semibold text-slate-600 mb-1">מה צריך לעשות? (ההסבר יוצג למשתמשים שעליהם מוטלת המשימה, מומלץ לכלול מהו המדד להשלמת המשימה)</label>
             <textarea id="pte-desc" rows={3} value={description} onChange={e => setDescription(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2" />
+            {!descriptionSet && <p role="alert" className="text-xs text-red-600 mt-1">יש למלא הסבר למשימה — שדה חובה.</p>}
           </div>
           <div className="flex items-center gap-4">
             <div>
@@ -76,7 +80,7 @@ export default function PersonTaskEditModal({ task, onClose, onSaved }) {
 
         <div className="flex items-center justify-between gap-2 px-6 py-4 border-t border-slate-100">
           <button type="button" onClick={onClose} className="text-sm px-4 py-2 rounded-xl font-medium text-slate-500 hover:bg-slate-50">ביטול</button>
-          <button type="button" onClick={handleSave} disabled={saving || !name.trim()} className="text-sm px-4 py-2 rounded-xl font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40">
+          <button type="button" onClick={handleSave} disabled={saving || !nameSet || !descriptionSet} className="text-sm px-4 py-2 rounded-xl font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40">
             {saving ? "שומר..." : "שמור שינויים"}
           </button>
         </div>

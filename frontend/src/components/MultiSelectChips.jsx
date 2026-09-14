@@ -16,16 +16,21 @@ import { createPortal } from "react-dom";
 // `position: absolute` dropdown gets silently clipped/covered by any ancestor `.glass-card`
 // (backdrop-filter creates a new stacking context, so a sibling card painted later can cover
 // it regardless of z-index).
-export function MultiSelectChips({ options, selected, onChange, placeholder = "בחר", className = "", compact = false, neutral = false, emptyIcon = false }) {
+export function MultiSelectChips({ options, selected, onChange, placeholder = "בחר", className = "", compact = false, neutral = false, emptyIcon = false, placeholderClassName = "text-slate-400", boxClassName = null, showChevron = false, searchable = false }) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState(null);
+  const [search, setSearch] = useState("");
   const triggerRef = useRef(null);
   const dropdownRef = useRef(null);
+  const searchRef = useRef(null);
   const sel = selected || [];
+  const visibleOptions = searchable && search.trim()
+    ? options.filter(o => o.label.toLowerCase().includes(search.trim().toLowerCase()))
+    : options;
 
-  const boxCls = compact
+  const boxCls = boxClassName ?? (compact
     ? "w-full text-sm border border-slate-300 rounded-md px-2 py-0.5 bg-transparent flex flex-wrap items-center gap-1 min-h-[26px] cursor-pointer focus-within:border-blue-400 focus-within:ring-1 focus-within:ring-blue-100"
-    : "input-field flex flex-wrap items-center gap-1.5 min-h-[38px] cursor-pointer";
+    : "input-field flex flex-wrap items-center gap-1.5 min-h-[38px] cursor-pointer");
   const chipCls = (compact || neutral)
     ? "inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 border border-slate-200"
     : "inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full";
@@ -36,6 +41,10 @@ export function MultiSelectChips({ options, selected, onChange, placeholder = "�
     if (!open || !triggerRef.current) return;
     const rect = triggerRef.current.getBoundingClientRect();
     setPos({ top: rect.bottom + 4, left: rect.left, width: rect.width });
+  }, [open]);
+
+  useEffect(() => {
+    if (open) setSearch("");
   }, [open]);
 
   useEffect(() => {
@@ -93,7 +102,7 @@ export function MultiSelectChips({ options, selected, onChange, placeholder = "�
           aria-haspopup="listbox"
         >
           {sel.length === 0 ? (
-            <span className="text-sm text-slate-400">{placeholder}</span>
+            <span className={`text-sm ${placeholderClassName}`}>{placeholder}</span>
           ) : sel.map(v => {
             const opt = options.find(o => o.value === v);
             return (
@@ -110,6 +119,12 @@ export function MultiSelectChips({ options, selected, onChange, placeholder = "�
           })}
         </div>
       )}
+      {showChevron && !showIconOnly && (
+        <svg aria-hidden="true" className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500"
+          width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M7 10l5 5 5-5z" />
+        </svg>
+      )}
 
       {open && pos && createPortal(
         <div
@@ -117,8 +132,25 @@ export function MultiSelectChips({ options, selected, onChange, placeholder = "�
           className="fixed z-[9999] border border-slate-200 rounded-xl bg-white shadow-lg"
           style={{ top: pos.top, left: pos.left, width: Math.max(pos.width, 160) }}
         >
+          {searchable && (
+            <div className="p-2 border-b border-slate-100">
+              <input
+                ref={searchRef}
+                type="text"
+                autoFocus
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                placeholder="חיפוש..."
+                aria-label="חיפוש באפשרויות"
+                dir="rtl"
+                className="w-full text-sm border border-slate-200 rounded-lg px-2.5 py-1.5 outline-none focus:border-blue-400 bg-white"
+              />
+            </div>
+          )}
           <div className="max-h-44 overflow-y-auto divide-y divide-slate-50" role="listbox">
-            {options.map(o => (
+            {visibleOptions.length === 0 ? (
+              <p className="px-4 py-2.5 text-sm text-slate-400 text-center">לא נמצאו תוצאות</p>
+            ) : visibleOptions.map(o => (
               <button
                 key={o.value}
                 type="button"

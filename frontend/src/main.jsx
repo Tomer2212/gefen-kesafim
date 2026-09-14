@@ -56,6 +56,7 @@ axios.interceptors.response.use(
             data: original.data,
             params: original.params,
             timeout: original.timeout,
+            responseType: original.responseType,
             headers: { Authorization: `Bearer ${token}` },
             _retried: true,
           });
@@ -89,6 +90,7 @@ axios.interceptors.response.use(
             data: original.data,
             params: original.params,
             timeout: original.timeout,
+            responseType: original.responseType,
             headers: { Authorization: `Bearer ${token}` },
             _retried: true,
           });
