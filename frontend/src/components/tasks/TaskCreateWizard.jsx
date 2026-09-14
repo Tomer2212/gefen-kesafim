@@ -94,6 +94,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
   const phase = PHASES[step - 1];
 
   const [name, setName] = useState("");
+  const nameSet = name.trim().length > 0;
   const [scheduledFor, setScheduledFor] = useState(""); // datetime-local string, empty = evaluate now
   const [showScheduleModal, setShowScheduleModal] = useState(false);
 
@@ -594,10 +595,10 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
     }
   }
 
-  const canNextFromMeetingAudience = isMeetingTask && name.trim().length > 0 && (
+  const canNextFromMeetingAudience = isMeetingTask && nameSet && (
     audienceMode === "manual" ? manualSchoolIds.length > 0 : fieldGroups.some(g => g.conditions.length > 0)
   );
-  const canNextFromAudience = !isMeetingTask && name.trim().length > 0 && (
+  const canNextFromAudience = !isMeetingTask && nameSet && (
     audienceMode === "manual" ? manualSchoolIds.length > 0 : groups.some(g => g.conditions.length > 0)
   );
   const canNextFromSuccess = !isMeetingTask && !!successMode && (successMode !== "custom" || successGroups.some(g => g.conditions.length > 0));
@@ -668,6 +669,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
                   placeholder='למשל: "קביעת פגישות גפן — רבעון 1"'
                   className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 outline-none focus:border-blue-400"
                 />
+                {!nameSet && <p role="alert" className="text-xs text-red-600 mt-1">יש למלא שם למשימה — שדה חובה.</p>}
               </div>
 
               <div className="flex items-center gap-2 border border-slate-200 rounded-lg p-1 w-fit">
@@ -777,6 +779,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
                   placeholder='למשל: "עדכון לקראת סוף שנה"'
                   className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 outline-none focus:border-blue-400"
                 />
+                {!nameSet && <p role="alert" className="text-xs text-red-600 mt-1">יש למלא שם למשימה — שדה חובה.</p>}
               </div>
 
               <div className="flex items-center gap-2 border border-slate-200 rounded-lg p-1 w-fit">

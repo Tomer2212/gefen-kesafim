@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import axios from "axios";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
 import { MultiSelectChips } from "../MultiSelectChips";
 import { DOMAIN_OPTIONS } from "../../constants/domains";
 import { SchoolPickerModal } from "./SchoolPickerCell";
 import AdvisorFinderSettingsModal from "./AdvisorFinderSettingsModal";
+import { DatePickerPopover } from "./DatePickerPopover";
 
 const DURATION_OPTIONS = Array.from({ length: (180 - 15) / 15 + 1 }, (_, i) => 15 + i * 15);
 
@@ -41,11 +42,25 @@ function formatDateHe(iso) {
   return `${d}/${m}`;
 }
 
+// ISO ("YYYY-MM-DD", as returned by DatePickerPopover) -> the DD/MM/YY text these inputs use.
+function isoToDDMMYY(iso) {
+  const [y, m, d] = iso.split("-");
+  return `${d}/${m}/${y.slice(2)}`;
+}
+
+function todayDDMMYY() {
+  const now = new Date();
+  const dd = String(now.getDate()).padStart(2, "0");
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const yy = String(now.getFullYear()).slice(2);
+  return `${dd}/${mm}/${yy}`;
+}
+
 export function AdvisorFinderModal({ onClose, schools, users, onBook }) {
   const { ref, handleKeyDown } = useFocusTrap(onClose);
   const [domains, setDomains] = useState([]);
   const [duration, setDuration] = useState(60);
-  const [fromText, setFromText] = useState("");
+  const [fromText, setFromText] = useState(todayDDMMYY);
   const [toText, setToText] = useState("");
   const [searching, setSearching] = useState(false);
   const [error, setError] = useState("");
@@ -53,8 +68,25 @@ export function AdvisorFinderModal({ onClose, schools, users, onBook }) {
   const [pendingSlot, setPendingSlot] = useState(null); // { advisorId, date, startTime, endTime }
   const [booking, setBooking] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [showFromPicker, setShowFromPicker] = useState(false);
+  const [showToPicker, setShowToPicker] = useState(false);
+  const [exclusionCount, setExclusionCount] = useState(0);
+  const fromAnchorRef = useRef(null);
+  const toAnchorRef = useRef(null);
 
   const allDates = results ? [...new Set(results.flatMap(a => a.days.map(d => d.date)))].sort() : [];
+
+  function refreshExclusionCount() {
+    axios.get("/schools/advisor-finder/settings")
+      .then(res => {
+        const ids = res.data?.advisor_finder_excluded_ids || [];
+        const roles = res.data?.advisor_finder_excluded_roles || [];
+        setExclusionCount(ids.length + roles.length);
+      })
+      .catch(() => {});
+  }
+
+  useEffect(() => { refreshExclusionCount(); }, []);
 
   async function handleSearch() {
     const dateFrom = parseDateDDMMYY(fromText);
@@ -102,48 +134,80 @@ export function AdvisorFinderModal({ onClose, schools, users, onBook }) {
       onClick={e => { if (e.target === e.currentTarget && !pendingSlot) onClose(); }}>
       <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="advisor-finder-title"
         onKeyDown={handleKeyDown} dir="rtl"
-        className="glass-card rounded-2xl p-6 w-full max-w-4xl max-h-[90vh] overflow-y-auto flex flex-col gap-4">
-        <div className="flex items-center justify-between">
-          <h2 id="advisor-finder-title" className="font-bold text-slate-900 text-lg">איתור יועץ</h2>
-          <button type="button" onClick={() => setSettingsOpen(true)}
-            className="btn-ghost flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-xl font-medium">
-            <span aria-hidden="true">⚙</span> החרג יועצים
-          </button>
-        </div>
+        className="glass-card rounded-2xl p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto flex flex-col gap-4">
+        <h2 id="advisor-finder-title" className="font-bold text-slate-900 text-lg">איתור יועץ</h2>
 
         {error && <p role="alert" className="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">{error}</p>}
 
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-start">
+        <div className="flex flex-wrap items-start justify-center gap-4">
           <div className="flex flex-col gap-1">
             <span className="text-xs font-semibold text-slate-500">תחומי ידע</span>
-            <MultiSelectChips options={DOMAIN_OPTIONS} selected={domains} onChange={setDomains} placeholder="בחר תחומי ידע" />
+            <MultiSelectChips options={DOMAIN_OPTIONS} selected={domains} onChange={setDomains} placeholder="בחר תחומי ידע"
+              className="w-40"
+              boxClassName="w-40 text-sm border border-slate-200 rounded-lg pl-6 pr-2.5 py-1.5 outline-none focus:border-blue-400 bg-white flex flex-wrap items-center gap-1.5 cursor-pointer"
+              showChevron />
           </div>
           <div className="flex flex-col gap-1">
             <label htmlFor="af-duration" className="text-xs font-semibold text-slate-500">משך זמן נחוץ</label>
             <select id="af-duration" value={duration} onChange={e => setDuration(Number(e.target.value))}
-              className="text-sm border border-slate-200 rounded-lg px-2.5 py-1.5 outline-none focus:border-blue-400 bg-white">
+              className="w-40 text-sm border border-slate-200 rounded-lg px-2.5 py-1.5 outline-none focus:border-blue-400 bg-white">
               {DURATION_OPTIONS.map(m => <option key={m} value={m}>{formatDuration(m)}</option>)}
             </select>
           </div>
           <div className="flex flex-col gap-1">
-            <span className="text-xs font-semibold text-slate-500">טווח תאריכים</span>
-            <div className="flex items-center gap-2">
+            <span className="text-xs font-semibold text-slate-500 text-center">טווח תאריכים</span>
+            <div className="flex items-center gap-1.5">
               <label htmlFor="af-from" className="sr-only">מתאריך</label>
-              <input id="af-from" type="text" inputMode="numeric" placeholder="מתאריך DD/MM/YY" maxLength={8}
-                value={fromText} onChange={e => setFromText(maskDateInput(e.target.value))}
-                className="w-full text-sm border border-slate-200 rounded-lg px-2.5 py-1.5 outline-none focus:border-blue-400 bg-white" />
+              <div ref={fromAnchorRef} className="relative w-28">
+                <input id="af-from" type="text" inputMode="numeric" placeholder="DD/MM/YY" maxLength={8}
+                  value={fromText} onChange={e => setFromText(maskDateInput(e.target.value))}
+                  className="w-28 text-sm border border-slate-200 rounded-lg pl-7 pr-2 py-1.5 outline-none focus:border-blue-400 bg-white" />
+                <button type="button" onClick={() => setShowFromPicker(o => !o)} aria-label="פתח יומן לבחירת תאריך התחלה"
+                  className="absolute left-1.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-blue-600">
+                  <span aria-hidden="true">📅</span>
+                </button>
+                {showFromPicker && (
+                  <DatePickerPopover value={parseDateDDMMYY(fromText)}
+                    anchorRef={fromAnchorRef}
+                    onChange={v => setFromText(isoToDDMMYY(v))}
+                    onClose={() => setShowFromPicker(false)} />
+                )}
+              </div>
+              <span className="text-xs text-slate-500 whitespace-nowrap">עד</span>
               <label htmlFor="af-to" className="sr-only">עד תאריך</label>
-              <input id="af-to" type="text" inputMode="numeric" placeholder="עד תאריך DD/MM/YY" maxLength={8}
-                value={toText} onChange={e => setToText(maskDateInput(e.target.value))}
-                className="w-full text-sm border border-slate-200 rounded-lg px-2.5 py-1.5 outline-none focus:border-blue-400 bg-white" />
+              <div ref={toAnchorRef} className="relative w-28">
+                <input id="af-to" type="text" inputMode="numeric" placeholder="DD/MM/YY" maxLength={8}
+                  value={toText} onChange={e => setToText(maskDateInput(e.target.value))}
+                  className="w-28 text-sm border border-slate-200 rounded-lg pl-7 pr-2 py-1.5 outline-none focus:border-blue-400 bg-white" />
+                <button type="button" onClick={() => setShowToPicker(o => !o)} aria-label="פתח יומן לבחירת תאריך סיום"
+                  className="absolute left-1.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-blue-600">
+                  <span aria-hidden="true">📅</span>
+                </button>
+                {showToPicker && (
+                  <DatePickerPopover value={parseDateDDMMYY(toText)}
+                    anchorRef={toAnchorRef}
+                    onChange={v => setToText(isoToDDMMYY(v))}
+                    onClose={() => setShowToPicker(false)} />
+                )}
+              </div>
             </div>
           </div>
         </div>
 
-        <div className="flex justify-end">
+        <div className="flex items-center justify-center gap-2">
           <button type="button" onClick={handleSearch} disabled={searching}
             className="btn-blue text-sm px-5 py-2 disabled:opacity-50">
             {searching ? "מאתר..." : "איתור"}
+          </button>
+          <button type="button" onClick={onClose} className="btn-ghost text-sm px-4 py-2">סגירה</button>
+          <button type="button" onClick={() => setSettingsOpen(true)}
+            className="btn-ghost flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-xl font-medium">
+            <span aria-hidden="true">⚙</span> החרג יועצים
+            {exclusionCount > 0 && (
+              <span className="inline-flex items-center justify-center w-4 h-4 text-xs font-bold rounded-full bg-blue-50 text-blue-700 leading-none">
+                {exclusionCount}
+              </span>
+            )}
           </button>
         </div>
 
@@ -196,10 +260,6 @@ export function AdvisorFinderModal({ onClose, schools, users, onBook }) {
             </div>
           )
         )}
-
-        <div className="flex justify-end">
-          <button type="button" onClick={onClose} className="btn-ghost text-sm px-4 py-2">סגירה</button>
-        </div>
       </div>
 
       {pendingSlot && (
@@ -207,7 +267,7 @@ export function AdvisorFinderModal({ onClose, schools, users, onBook }) {
       )}
 
       {settingsOpen && (
-        <AdvisorFinderSettingsModal users={users} onClose={() => setSettingsOpen(false)} />
+        <AdvisorFinderSettingsModal users={users} onClose={() => { setSettingsOpen(false); refreshExclusionCount(); }} />
       )}
     </div>
   );

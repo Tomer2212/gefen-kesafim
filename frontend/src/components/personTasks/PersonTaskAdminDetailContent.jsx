@@ -33,7 +33,7 @@ function MetricValueDisplay({ taskId, target, metric }) {
               a.click();
               URL.revokeObjectURL(url);
             } catch {
-              /* non-fatal */
+              window.alert("הורדת הקובץ נכשלה — נסה שוב.");
             }
           }}
           className="px-1.5 py-0.5 rounded font-medium bg-slate-100 text-slate-600 hover:bg-slate-200"

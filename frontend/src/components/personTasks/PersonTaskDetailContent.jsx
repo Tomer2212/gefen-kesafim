@@ -149,6 +149,24 @@ export default function PersonTaskDetailContent({ taskId, onTaskChange, onlyCurr
     }
   }
 
+  // Hovering/focusing a target's upload icon "arms" it for a clipboard paste (Ctrl+V) —
+  // set on mouseenter/focus, cleared on mouseleave/blur. Clicking the icon still opens the
+  // native file picker as before; a click can't ALSO listen for paste, because opening that
+  // OS-level dialog steals focus away from the page entirely, so any paste while it's open
+  // goes to the dialog's own search box, never to us. Arming via hover/focus (not click)
+  // lets a paste land on the right target without ever opening that dialog.
+  const [pasteArmedId, setPasteArmedId] = useState(null);
+  useEffect(() => {
+    function handlePaste(e) {
+      if (!pasteArmedId) return;
+      const item = [...(e.clipboardData?.items || [])].find(i => i.type.startsWith("image/"));
+      const f = item?.getAsFile();
+      if (f) uploadTargetFile(pasteArmedId, f);
+    }
+    document.addEventListener("paste", handlePaste);
+    return () => document.removeEventListener("paste", handlePaste);
+  }, [pasteArmedId]);
+
   async function uploadTargetFile(targetId, file) {
     setUploadingTargetId(targetId);
     try {
@@ -184,7 +202,7 @@ export default function PersonTaskDetailContent({ taskId, onTaskChange, onlyCurr
       a.click();
       URL.revokeObjectURL(url);
     } catch {
-      /* non-fatal */
+      window.alert("הורדת הקובץ נכשלה — נסה שוב.");
     }
   }
 
@@ -520,7 +538,14 @@ export default function PersonTaskDetailContent({ taskId, onTaskChange, onlyCurr
                               {metric.label && <span className="text-xs text-slate-500">{metric.label}</span>}
                               <label
                                 htmlFor={`ptask-file-${t.id}`}
-                                aria-label="העלאת קובץ"
+                                tabIndex={0}
+                                onMouseEnter={() => setPasteArmedId(t.id)}
+                                onMouseLeave={() => setPasteArmedId(id => (id === t.id ? null : id))}
+                                onFocus={() => setPasteArmedId(t.id)}
+                                onBlur={() => setPasteArmedId(id => (id === t.id ? null : id))}
+                                onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); document.getElementById(`ptask-file-${t.id}`)?.click(); } }}
+                                title="לחיצה לבחירת קובץ, או הדבקת צילום מסך (Ctrl+V) בזמן ריחוף/מיקוד כאן"
+                                aria-label="העלאת קובץ (ניתן גם להדביק צילום מסך בזמן ריחוף כאן)"
                                 className="cursor-pointer text-sm w-6 h-6 flex items-center justify-center rounded-lg font-bold bg-blue-50 text-blue-700 hover:bg-blue-100"
                               >
                                 {busy ? "…" : "+"}

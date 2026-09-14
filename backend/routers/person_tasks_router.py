@@ -18,6 +18,7 @@ import secrets
 import shutil
 import tempfile
 import time
+import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
@@ -1117,11 +1118,21 @@ def download_person_task_target_file(task_id: str, target_id: str, user: Annotat
     if not file_key:
         raise HTTPException(status_code=404, detail="לא הועלה קובץ")
     filename = metric_value.get("filename") or "file"
-    content = db.storage.from_("check-files").download(file_key)
+    try:
+        content = db.storage.from_("check-files").download(file_key)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"שגיאה בהורדת הקובץ: {exc}")
+    # HTTP headers must be ASCII — a raw Hebrew filename in Content-Disposition breaks the
+    # response entirely (matches the fix in analyze_router.py / meeting_upload_router.py).
+    # RFC 5987's filename* handles non-ASCII names correctly (with an ASCII fallback for
+    # older clients).
+    ext = Path(filename).suffix or ""
+    ascii_fallback = f"file{ext}"
+    encoded_name = urllib.parse.quote(filename)
     return Response(
         content=content,
         media_type="application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{encoded_name}"},
     )
 
 
