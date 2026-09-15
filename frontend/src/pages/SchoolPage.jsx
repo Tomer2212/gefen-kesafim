@@ -8,6 +8,7 @@ import FileUpload from "../components/FileUpload";
 import LoadingScreen from "../components/LoadingScreen";
 import ResultsView from "../components/ResultsView";
 import ClassifyModal from "../components/ClassifyModal";
+import { SchoolSymbolMismatchModal } from "../components/SchoolSymbolMismatchModal";
 import { NotesThread } from "../components/SchoolNotesModal";
 import { FilesThread } from "../components/SchoolFilesSection";
 import { GoalsTab } from "../components/GoalsTab";
@@ -1483,6 +1484,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
   const [loadingLogId, setLoadingLogId] = useState(null);
   const [divisionMismatch, setDivisionMismatch] = useState(null); // { runId, result, detectedDivision }
   const [stageMismatch, setStageMismatch]       = useState(null); // { runId, result, detectedDivision, savedLogId }
+  const [symbolMismatch, setSymbolMismatch] = useState(false);
   const [selectedHistBudget, setSelectedHistBudget] = useState(null);
   const [renameTarget, setRenameTarget] = useState(null); // { log }
   const [renameValue, setRenameValue] = useState("");
@@ -1660,7 +1662,12 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
             if (queue.length > 0) setClassifyQueue(queue);
           } else if (r.status === "error") {
             clearInterval(pollRef.current);
-            setPendingRun(prev => ({ ...prev, status: "error", error: r.user_message || r.error || "הבדיקה נכשלה" }));
+            if (r.error_code === "symbol_mismatch") {
+              setPendingRun(null);
+              setSymbolMismatch(true);
+            } else {
+              setPendingRun(prev => ({ ...prev, status: "error", error: r.user_message || r.error || "הבדיקה נכשלה" }));
+            }
           }
         } catch {
           clearInterval(pollRef.current);
@@ -1711,7 +1718,12 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
             if (queue.length > 0) setClassifyQueue(queue);
           } else if (r.status === "error") {
             clearInterval(pollRef.current);
-            setPendingRun(prev => ({ ...prev, status: "error", error: r.user_message || r.error || "הבדיקה נכשלה" }));
+            if (r.error_code === "symbol_mismatch") {
+              setPendingRun(null);
+              setSymbolMismatch(true);
+            } else {
+              setPendingRun(prev => ({ ...prev, status: "error", error: r.user_message || r.error || "הבדיקה נכשלה" }));
+            }
           }
         } catch {
           clearInterval(pollRef.current);
@@ -2452,6 +2464,13 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
             setClassifyQueue([]);
             setPendingRun(null);
           }}
+        />
+      )}
+
+      {symbolMismatch && (
+        <SchoolSymbolMismatchModal
+          schoolName={schoolName}
+          onClose={() => setSymbolMismatch(false)}
         />
       )}
     </div>
