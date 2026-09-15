@@ -377,7 +377,7 @@ def _fetch_schools_and_meetings(
                     advisor_ids_by_school[service_type].setdefault(r["school_id"], []).append(r["advisor_id"])
 
             try:
-                stats_rows = db.rpc("get_meetings_stats", {"school_ids": school_ids}).execute().data or []
+                stats_rows = db.rpc("get_meetings_stats", {"school_ids": school_ids, "p_academic_year": academic_year}).execute().data or []
                 stats_by_school = {r["school_id"]: r for r in stats_rows}
             except Exception as exc:
                 _log.warning("get_meetings_stats RPC failed (non-fatal, meetings_completed/hours will be 0): %s", exc)
