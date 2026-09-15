@@ -633,7 +633,7 @@ def list_schools(
 
     if school_ids:
         try:
-            stats_res = db.rpc("get_meetings_stats", {"school_ids": school_ids}).execute()
+            stats_res = db.rpc("get_meetings_stats", {"school_ids": school_ids, "p_academic_year": academic_year}).execute()
             # RPC now returns one row per (school_id, service_type). Aggregate back into a
             # per-school grand total + a by_type breakdown (service_type "none" = no סוג set).
             for r in (stats_res.data or []):
@@ -5173,28 +5173,24 @@ def _pseudo_run_from_summary(summary: dict | None) -> dict:
 def _recompute_goals_after_log_delete(db, school_id: str, deleted_row: dict) -> None:
     """After a check is deleted, re-point every (division, budget) it touched at the latest
     remaining check for that combo — or reset the automation-set goals if none remains.
-    Gated by organizations.goal_auto_update_enabled. Non-fatal."""
+    Also keeps check_metrics (the dashboard's per-combo cache table) in sync: upserts it to
+    the remaining check's values, or deletes the row entirely when nothing remains for that
+    combo+year — otherwise a stale row keeps showing the deleted check's numbers forever.
+    The check_metrics sync always runs; only the goal-automation part is gated by
+    organizations.goal_auto_update_enabled. Non-fatal."""
     try:
         from routers.analyze_router import _compute_check_metrics_rows
         from goals_logic import apply_goal_automation, reset_auto_goals_for_combo, normalize_metric_rows
 
         ay = deleted_row.get("academic_year") or DEFAULT_ACADEMIC_YEAR
 
-        org_flag_on = True
-        try:
-            sch = db.table("schools").select("org_id").eq("id", school_id).single().execute().data or {}
-            if sch.get("org_id"):
-                org = db.table("organizations").select("goal_auto_update_enabled").eq("id", sch["org_id"]).single().execute().data or {}
-                org_flag_on = org.get("goal_auto_update_enabled", True)
-        except Exception:
-            pass
-        if not org_flag_on:
-            return
-
-        deleted_rows = normalize_metric_rows(_compute_check_metrics_rows(
+        # Raw (non-normalized) rows — budget_name here matches what's actually stored in
+        # check_metrics ("כללי" for a non-split school), unlike the "גפן"-renamed names
+        # normalize_metric_rows produces for the goals/UI side below.
+        deleted_rows_raw = _compute_check_metrics_rows(
             school_id, deleted_row.get("gefen_account_id"), ay, _pseudo_run_from_summary(deleted_row.get("summary")), db=db
-        ))
-        affected = sorted({(r["division_type"], r["budget_name"]) for r in deleted_rows})
+        )
+        affected = sorted({(r["division_type"], r["budget_name"]) for r in deleted_rows_raw})
         if not affected:
             return
 
@@ -5209,26 +5205,55 @@ def _recompute_goals_after_log_delete(db, school_id: str, deleted_row: dict) -> 
         ) or []
         computed_cache: dict[int, list] = {}
 
+        org_flag_on = True
+        try:
+            sch = db.table("schools").select("org_id").eq("id", school_id).single().execute().data or {}
+            if sch.get("org_id"):
+                org = db.table("organizations").select("goal_auto_update_enabled").eq("id", sch["org_id"]).single().execute().data or {}
+                org_flag_on = org.get("goal_auto_update_enabled", True)
+        except Exception:
+            pass
+
         for division_type, budget_name in affected:
             matched = None
             for idx, log in enumerate(remaining):
                 rows = computed_cache.get(idx)
                 if rows is None:
-                    rows = normalize_metric_rows(_compute_check_metrics_rows(
+                    rows = _compute_check_metrics_rows(
                         school_id, log.get("gefen_account_id"), ay, _pseudo_run_from_summary(log.get("summary")), db=db
-                    ))
+                    )
                     computed_cache[idx] = rows
                 hit = next((r for r in rows if r["division_type"] == division_type and r["budget_name"] == budget_name), None)
                 if hit is not None:
                     matched = (log.get("run_at"), hit)
                     break
+
+            try:
+                if matched is not None:
+                    db.table("check_metrics").upsert(
+                        matched[1], on_conflict="school_id,division_type,budget_name,academic_year"
+                    ).execute()
+                else:
+                    db.table("check_metrics").delete().eq("school_id", school_id).eq(
+                        "division_type", division_type
+                    ).eq("budget_name", budget_name).eq("academic_year", ay).execute()
+            except Exception as exc:
+                logger.warning(
+                    "check_metrics sync failed (non-fatal) for school %s combo %s/%s: %s",
+                    school_id, division_type, budget_name, exc,
+                )
+
+            if not org_flag_on:
+                continue
             if matched is not None:
+                goal_row = normalize_metric_rows([dict(matched[1])])[0]
                 apply_goal_automation(
-                    db, school_id=school_id, metric_rows=[matched[1]], check_run_at=matched[0],
+                    db, school_id=school_id, metric_rows=[goal_row], check_run_at=matched[0],
                     academic_year=ay, org_flag_on=True,
                 )
             else:
-                reset_auto_goals_for_combo(db, school_id, division_type, budget_name, ay)
+                goal_budget_name = normalize_metric_rows([{"budget_name": budget_name}])[0]["budget_name"]
+                reset_auto_goals_for_combo(db, school_id, division_type, goal_budget_name, ay)
     except Exception as exc:
         logger.warning("_recompute_goals_after_log_delete failed (non-fatal) for school %s: %s", school_id, exc)
 
