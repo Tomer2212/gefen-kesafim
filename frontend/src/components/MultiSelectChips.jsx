@@ -16,7 +16,7 @@ import { createPortal } from "react-dom";
 // `position: absolute` dropdown gets silently clipped/covered by any ancestor `.glass-card`
 // (backdrop-filter creates a new stacking context, so a sibling card painted later can cover
 // it regardless of z-index).
-export function MultiSelectChips({ options, selected, onChange, placeholder = "בחר", className = "", compact = false, neutral = false, emptyIcon = false, placeholderClassName = "text-slate-400", boxClassName = null, showChevron = false, searchable = false }) {
+export function MultiSelectChips({ options, selected, onChange, placeholder = "בחר", className = "", compact = false, neutral = false, emptyIcon = false, placeholderClassName = "text-slate-400", boxClassName = null, showChevron = false, searchable = false, onConfirm = null, onCancel = null, cancelLabel = "ביטול" }) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState(null);
   const [search, setSearch] = useState("");
@@ -167,10 +167,17 @@ export function MultiSelectChips({ options, selected, onChange, placeholder = "�
               </button>
             ))}
           </div>
-          <div className="p-2 border-t border-slate-100 flex justify-end">
+          <div className={`p-2 border-t border-slate-100 flex ${onCancel ? "justify-between" : "justify-end"}`}>
+            {onCancel && (
+              <button
+                type="button"
+                onClick={() => { onCancel(); setOpen(false); }}
+                className="text-xs px-3 py-1.5 rounded-lg font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 transition-colors"
+              >{cancelLabel}</button>
+            )}
             <button
               type="button"
-              onClick={() => setOpen(false)}
+              onClick={() => { onConfirm?.(); setOpen(false); }}
               className="btn-blue text-xs px-3 py-1.5"
             >אישור</button>
           </div>
