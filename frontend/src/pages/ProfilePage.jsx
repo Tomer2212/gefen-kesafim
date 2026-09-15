@@ -612,18 +612,10 @@ export default function ProfilePage() {
                             selected={domainsDraft}
                             onChange={setDomainsDraft}
                             placeholder="בחר תחומים"
+                            onConfirm={handleSaveDomains}
+                            onCancel={() => { setDomainsEdit(false); setDomainsDraft(controlDomains); }}
                           />
                           {!canEditDomains && <p className="text-xs text-amber-600">השינוי יישלח לאישור בעלים/מנהל</p>}
-                          <div className="flex gap-2">
-                            <button type="button" onClick={handleSaveDomains} disabled={domainsSaving}
-                              className="flex-1 py-2 rounded-xl text-sm font-medium text-white transition-colors" style={{ background: "#0070F3" }}>
-                              {domainsSaving ? "שומר..." : "שמור"}
-                            </button>
-                            <button type="button" onClick={() => { setDomainsEdit(false); setDomainsDraft(controlDomains); }}
-                              className="flex-1 py-2 rounded-xl text-sm font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 transition-colors">
-                              ביטול
-                            </button>
-                          </div>
                         </div>
                       ) : (
                         <>
