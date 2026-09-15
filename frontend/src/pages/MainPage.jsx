@@ -6,6 +6,7 @@ import LoadingScreen from "../components/LoadingScreen";
 import ResultsView from "../components/ResultsView";
 import Sidebar from "../components/Sidebar";
 import ClassifyModal from "../components/ClassifyModal";
+import { SchoolSymbolMismatchModal } from "../components/SchoolSymbolMismatchModal";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 
 function SingleFileWarningModal({ onConfirm, onCancel }) {
@@ -126,6 +127,7 @@ export default function MainPage() {
   const [userMsg, setUserMsg]   = useState("");
   const [showConfirm, setShowConfirm] = useState(false);
   const [showSingleFileWarning, setShowSingleFileWarning] = useState(false);
+  const [symbolMismatch, setSymbolMismatch] = useState(false);
   const [classifyQueue, setClassifyQueue] = useState([]);
   const pollRef = useRef(null);
   const navigate = useNavigate();
@@ -179,9 +181,13 @@ export default function MainPage() {
           if (queue.length > 0) setClassifyQueue(queue);
         } else if (data.status === "error") {
           clearInterval(pollRef.current);
-          setUserMsg(data.user_message || "");
-          setErrorMsg(data.error || "הבדיקה נכשלה. אנא נסה שוב.");
-          setStatus("error");
+          if (data.error_code === "symbol_mismatch") {
+            setSymbolMismatch(true);
+          } else {
+            setUserMsg(data.user_message || "");
+            setErrorMsg(data.error || "הבדיקה נכשלה. אנא נסה שוב.");
+            setStatus("error");
+          }
         }
       } catch {
         clearInterval(pollRef.current);
@@ -238,6 +244,13 @@ export default function MainPage() {
             setClassifyQueue(prev => prev.slice(1));
           }}
           onCancel={handleNewRun}
+        />
+      )}
+
+      {symbolMismatch && (
+        <SchoolSymbolMismatchModal
+          schoolName={school_name}
+          onClose={() => { setSymbolMismatch(false); handleNewRun(); }}
         />
       )}
 

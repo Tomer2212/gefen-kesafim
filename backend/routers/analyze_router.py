@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
+import openpyxl
 import pandas as pd
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
@@ -2651,6 +2652,24 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
         gefen_paths, finance_paths, finance_type, tikhnun_paths = _classify_files(paths)
         finance_path = finance_paths[0] if finance_paths else None
 
+        # ── Verify tikhnun file(s) belong to this school (סמל מוסד) ──────────
+        if tikhnun_paths and school_id:
+            school_row = get_admin_client().table("schools").select("symbol, name").eq("id", school_id).single().execute().data
+            expected_symbol = _normalize_symbol((school_row or {}).get("symbol"))
+            if expected_symbol:
+                for t_path in tikhnun_paths:
+                    found_symbols = _read_tikhnun_institution_symbols(t_path)
+                    if found_symbols and found_symbols != {expected_symbol}:
+                        _update_run(run_id, {
+                            "status": "error",
+                            "error_code": "symbol_mismatch",
+                            "error": (
+                                f"שים לב - הקבצים שהועלו אינם שייכים לבית הספר "
+                                f"{(school_row or {}).get('name', '')}, אנא העלה קבצים מתאימים."
+                            ),
+                        })
+                        return
+
         # ── Tikhnun-only run (no gefen doch) ─────────────────────────────────
         if not gefen_paths and tikhnun_paths:
             if len(tikhnun_paths) == 2:
@@ -3001,6 +3020,52 @@ def _build_no_pdf_from_results_clean(results_clean: list) -> dict[str, list[dict
         }
         per_budget.setdefault(budget_norm, []).append(record)
     return per_budget
+
+
+def _normalize_symbol(value) -> str | None:
+    """Normalize a school symbol (סמל מוסד) for comparison, handling numeric/text mismatches
+    (e.g. "123456", 123456, 123456.0 must all be treated as equal)."""
+    if value is None or str(value).strip() == "":
+        return None
+    raw = str(value).strip()
+    try:
+        return str(int(float(raw)))
+    except (ValueError, TypeError):
+        return raw
+
+
+def _read_tikhnun_institution_symbols(path: Path) -> set[str]:
+    """Lightweight peek at column C (סמל מוסד) of the הכל sheet in a tikhnun planning
+    file, across all data rows. Does not call into logic/tikhnun_processor.py.
+    Returns an empty set if the sheet/column can't be identified or has no values."""
+    try:
+        wb = openpyxl.load_workbook(str(path), read_only=True)
+        try:
+            hakol_ws = None
+            for sh in wb.sheetnames:
+                rows_peek = list(wb[sh].iter_rows(min_row=1, max_row=1, values_only=True))
+                if not rows_peek:
+                    continue
+                header = rows_peek[0]
+                if len(header) > 14 and header[10] == "השתתפות רשות/ בעלות" and header[14] == "תאריך אחרון לאישור רשות":
+                    hakol_ws = sh
+                    break
+            if not hakol_ws:
+                return set()
+            symbols: set[str] = set()
+            for i, row in enumerate(wb[hakol_ws].iter_rows(values_only=True)):
+                if i == 0:
+                    continue  # skip header row
+                if len(row) > 2:
+                    norm = _normalize_symbol(row[2])
+                    if norm is not None:
+                        symbols.add(norm)
+            return symbols
+        finally:
+            wb.close()
+    except Exception as exc:
+        logger.warning("Could not read institution symbols from tikhnun file %s: %s", path, exc)
+        return set()
 
 
 def _classify_files(paths: list[Path]) -> tuple[list[Path], list[Path], str | None, list[Path]]:
