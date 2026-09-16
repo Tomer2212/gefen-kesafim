@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { DatePickerPopover } from "../meetings/DatePickerPopover";
 
 // Extracted from ConditionGroupsEditor.jsx so it can be reused outside the condition-tree UI
 // (e.g. PersonTaskCreateWizard.jsx's own "תאריך יעד" field) — same DD/MM/YY masked-text field
@@ -53,6 +54,11 @@ function isPastDate(iso) { return iso < todayIso(); }
 export default function DirectStyleDateInput({ id, value, onChange, invalid }) {
   const [text, setText] = useState(() => isoToDDMMYY(value));
   const [lastEmitted, setLastEmitted] = useState(value);
+  // Calendar-icon popover picker — same component/pattern as AdvisorFinderModal.jsx's date
+  // fields ("איתור יועץ"), reused here as-is (no advisorId — its free/busy overlay is simply
+  // absent, same as that caller).
+  const [showPicker, setShowPicker] = useState(false);
+  const anchorRef = useRef(null);
   // True only once all 6 digits are typed but they don't form a real calendar date (e.g.
   // 31/02/26) — day/month range is already clamped per-segment by maskDateInput, so this is
   // just the day-vs-days-in-month case parseDateDDMMYY catches.
@@ -67,8 +73,24 @@ export default function DirectStyleDateInput({ id, value, onChange, invalid }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value]);
   const showInvalid = invalid || localInvalid || pastInvalid;
+
+  // Shared by the popover's day-click and (indirectly) the typed-input path above — a past
+  // date is rejected exactly the same way either way.
+  function applyIso(iso) {
+    if (isPastDate(iso)) {
+      setText(isoToDDMMYY(iso));
+      setPastInvalid(true);
+      return;
+    }
+    setLocalInvalid(false);
+    setPastInvalid(false);
+    setText(isoToDDMMYY(iso));
+    setLastEmitted(iso);
+    onChange(iso);
+  }
+
   return (
-    <div>
+    <div ref={anchorRef} className="relative">
       <input
         id={id} type="text" inputMode="numeric" placeholder="DD/MM/YY" maxLength={8}
         aria-invalid={showInvalid || undefined}
@@ -101,8 +123,20 @@ export default function DirectStyleDateInput({ id, value, onChange, invalid }) {
             setLocalInvalid(digitCount === 6);
           }
         }}
-        className={`text-sm border rounded-lg px-2.5 py-1.5 w-full ${showInvalid ? "border-red-400 focus:border-red-500" : "border-slate-200"}`}
+        className={`text-sm border rounded-lg pl-7 pr-2.5 py-1.5 w-full ${showInvalid ? "border-red-400 focus:border-red-500" : "border-black"}`}
       />
+      <button type="button" onClick={() => setShowPicker(o => !o)} aria-label="פתח יומן לבחירת תאריך"
+        className="absolute left-1.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-blue-600">
+        <span aria-hidden="true">📅</span>
+      </button>
+      {showPicker && (
+        <DatePickerPopover
+          value={parseDateDDMMYY(text)}
+          anchorRef={anchorRef}
+          onChange={iso => { applyIso(iso); setShowPicker(false); }}
+          onClose={() => setShowPicker(false)}
+        />
+      )}
       {localInvalid && <p className="text-[11px] text-red-600 mt-0.5">תאריך לא קיים בלוח השנה</p>}
       {pastInvalid && <p className="text-[11px] text-red-600 mt-0.5">לא ניתן לבחור תאריך שחלף — יש לבחור מהיום והלאה</p>}
     </div>

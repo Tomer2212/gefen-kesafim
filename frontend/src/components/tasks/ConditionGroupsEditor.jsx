@@ -116,7 +116,7 @@ export function MultiSelectChips({ options, selected, onChange }) {
               isSelected ? (selected || []).filter(v => v !== o.value) : [...(selected || []), o.value],
             )}
             className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
-              isSelected ? "bg-blue-600 border-blue-600 text-white font-semibold" : "border-slate-200 text-slate-600 hover:bg-slate-50"
+              isSelected ? "bg-blue-600 border-blue-600 text-white font-semibold" : "border-black text-black hover:bg-slate-50"
             }`}>
             {o.label}
           </button>
@@ -152,13 +152,13 @@ function TypeaheadValueInput({ value, options, onChange }) {
         onChange={e => { onChange(e.target.value); setOpen(true); }}
         onFocus={() => setOpen(true)}
         autoComplete="off"
-        className="w-full mt-0.5 text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white"
+        className="w-full mt-0.5 text-xs border border-black rounded-lg px-2 py-1.5 bg-white"
       />
       {open && suggestions.length > 0 && (
         <div
           ref={scrollRef}
           role="listbox"
-          className="absolute z-30 right-0 left-0 mt-1 border border-slate-200 rounded-lg bg-white shadow-lg max-h-56 overflow-y-auto"
+          className="absolute z-30 right-0 left-0 mt-1 border border-black rounded-lg bg-white shadow-lg max-h-56 overflow-y-auto"
         >
           <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
             {items.map(vi => {
@@ -219,6 +219,11 @@ export default function ConditionGroupsEditor({
   // used to define task success; "audience" is for the same condition type used to filter WHICH
   // schools a task applies to, where the question is "current status", not a success target.
   goalValueContext = "success",
+  // Field conditions whose "X" removal button is hidden entirely — for a mandatory condition
+  // (e.g. PersonTaskCreateWizard.jsx's "יועץ מלווה" audience filter, where client_status and
+  // service_type are always required) that the caller pre-fills into every group via
+  // defaultGroupConditions, so it should never be removable, in any group.
+  nonRemovableFields = [],
 }) {
   function updateCondition(gi, ci, patch) {
     setGroups(prev => prev.map((g, i) => i !== gi ? g : {
@@ -273,10 +278,10 @@ export default function ConditionGroupsEditor({
           {!hideGroupChrome && gi > 0 && (
             <div className="text-center text-xs font-bold text-blue-600 my-2">— או —</div>
           )}
-          <div className={hideGroupChrome ? "space-y-2" : `border border-slate-200 rounded-xl p-3 space-y-2 ${groupToneClassName}`}>
-            {!hideGroupChrome && (
+          <div className={hideGroupChrome ? "space-y-2" : `border border-black rounded-xl p-3 space-y-2 ${groupToneClassName}`}>
+            {!hideGroupChrome && (groupTitle || groups.length > 1) && (
               <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-slate-500">{groupTitle}</span>
+                {groupTitle && <span className="text-xs font-semibold text-black">{groupTitle}</span>}
                 {groups.length > 1 && (
                   <button onClick={() => removeGroup(gi)} className="text-xs text-red-600 hover:bg-red-50 rounded px-2 py-0.5">
                     הסר קבוצה
@@ -287,10 +292,14 @@ export default function ConditionGroupsEditor({
             {group.conditions.map((cond, ci) => {
               const isMeetingCard = cond.type === "meeting" && forceMeetingNegateFalse;
               return (
-              <div key={ci} className={isMeetingCard ? "border border-slate-200 rounded-xl p-4 bg-white/60 space-y-3" : "border border-slate-200 rounded-lg p-2.5 bg-slate-100 space-y-2"}>
+              <div key={ci}>
+                {!hideGroupChrome && ci > 0 && (
+                  <div className="text-center text-xs font-bold text-blue-600 my-2">וגם</div>
+                )}
+                <div className={isMeetingCard ? "border border-black rounded-xl p-4 bg-white/60 space-y-3" : "border border-black rounded-lg p-2.5 bg-slate-100 space-y-2"}>
                 <div className="flex items-center gap-2">
                   {isMeetingCard && <span className="text-sm font-semibold text-slate-700">פגישה {ci + 1}</span>}
-                  {group.conditions.length > 1 && (
+                  {group.conditions.length > 1 && !(cond.type === "field" && nonRemovableFields.includes(cond.field)) && (
                     <button onClick={() => removeCondition(gi, ci)} aria-label={`הסרת פגישה ${ci + 1}`} className="text-slate-400 hover:text-red-500 mr-auto">
                       {isMeetingCard ? "✕" : (
                         <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -318,7 +327,7 @@ export default function ConditionGroupsEditor({
                       </p>
                     )}
                     <fieldset className="flex flex-col gap-1.5">
-                      <legend className="text-xs font-medium text-slate-500">סוג פגישה</legend>
+                      <legend className="text-xs font-medium text-black">סוג פגישה</legend>
                       <div className={`flex gap-2 ${showValidationErrors && !cond.meeting_service_type ? "border border-red-400 rounded-lg p-1.5 -m-1.5" : ""}`}>
                         {MEETING_TYPE_PILLS.map(opt => (
                           <button key={opt.value} type="button"
@@ -327,7 +336,7 @@ export default function ConditionGroupsEditor({
                             className={`text-sm px-4 py-1.5 rounded-lg border transition-colors ${
                               cond.meeting_service_type === opt.value
                                 ? "bg-blue-600 border-blue-600 text-white font-semibold"
-                                : "border-slate-200 text-slate-600 hover:bg-slate-50"
+                                : "border-black text-black hover:bg-slate-50"
                             }`}>
                             {opt.label}
                           </button>
@@ -337,18 +346,18 @@ export default function ConditionGroupsEditor({
 
                     <div className="grid grid-cols-2 gap-3">
                       <div className="flex flex-col gap-1">
-                        <label htmlFor={`mtg-start-${gi}-${ci}`} className="text-xs font-medium text-slate-500">מתאריך</label>
+                        <label htmlFor={`mtg-start-${gi}-${ci}`} className="text-xs font-medium text-black">מתאריך</label>
                         <DirectStyleDateInput id={`mtg-start-${gi}-${ci}`} value={cond.date_from} onChange={v => updateCondition(gi, ci, { date_from: v })} invalid={showValidationErrors && !cond.date_from} />
                       </div>
                       <div className="flex flex-col gap-1">
-                        <label htmlFor={`mtg-end-${gi}-${ci}`} className="text-xs font-medium text-slate-500">עד תאריך</label>
+                        <label htmlFor={`mtg-end-${gi}-${ci}`} className="text-xs font-medium text-black">עד תאריך</label>
                         <DirectStyleDateInput id={`mtg-end-${gi}-${ci}`} value={cond.date_to} onChange={v => updateCondition(gi, ci, { date_to: v })} invalid={showValidationErrors && !cond.date_to} />
                       </div>
                     </div>
 
                     <div className="grid grid-cols-2 gap-3">
                       <div className="flex flex-col gap-1 relative group">
-                        <label htmlFor={`mtg-advisor-${gi}-${ci}`} className="text-xs font-medium text-slate-500">יועץ מבצע</label>
+                        <label htmlFor={`mtg-advisor-${gi}-${ci}`} className="text-xs font-medium text-black">יועץ מבצע</label>
                         <select id={`mtg-advisor-${gi}-${ci}`}
                           value={cond.advisor_mode === "manual" ? (cond.advisor_ids?.[0] || "") : "__default__"}
                           onChange={e => {
@@ -356,7 +365,7 @@ export default function ConditionGroupsEditor({
                             if (v === "__default__") updateCondition(gi, ci, { advisor_mode: "default", advisor_ids: [] });
                             else updateCondition(gi, ci, { advisor_mode: "manual", advisor_ids: [v] });
                           }}
-                          className="text-sm border border-slate-200 rounded-lg px-2.5 py-1.5 w-full">
+                          className="text-sm border border-black rounded-lg px-2.5 py-1.5 w-full">
                           <option value="__default__">
                             {cond.meeting_service_type ? `יועץ מלווה [${MEETING_SERVICE_TYPE_LABELS[cond.meeting_service_type]}]` : "יועץ מלווה"}
                           </option>
@@ -367,7 +376,7 @@ export default function ConditionGroupsEditor({
                         </div>
                       </div>
                       <div className="flex flex-col gap-1 relative group">
-                        <label htmlFor={`mtg-duration-${gi}-${ci}`} className="text-xs font-medium text-slate-500">משך הפגישה</label>
+                        <label htmlFor={`mtg-duration-${gi}-${ci}`} className="text-xs font-medium text-black">משך הפגישה</label>
                         <select id={`mtg-duration-${gi}-${ci}`}
                           value={cond.duration_mode === "manual" ? String(cond.duration_minutes || 60) : "__default__"}
                           onChange={e => {
@@ -375,7 +384,7 @@ export default function ConditionGroupsEditor({
                             if (v === "__default__") updateCondition(gi, ci, { duration_mode: "default", duration_minutes: null });
                             else updateCondition(gi, ci, { duration_mode: "manual", duration_minutes: Number(v) });
                           }}
-                          className="text-sm border border-slate-200 rounded-lg px-2.5 py-1.5 w-full">
+                          className="text-sm border border-black rounded-lg px-2.5 py-1.5 w-full">
                           <option value="__default__">
                             {cond.meeting_service_type ? `זמן פגישה [${MEETING_SERVICE_TYPE_LABELS[cond.meeting_service_type]}]` : "זמן פגישה"}
                           </option>
@@ -388,12 +397,12 @@ export default function ConditionGroupsEditor({
                     </div>
 
                     <fieldset className="flex flex-col gap-1.5">
-                      <legend className="text-xs font-medium text-slate-500">משתתפים מצד בית הספר</legend>
+                      <legend className="text-xs font-medium text-black">משתתפים מצד בית הספר</legend>
                       <div className={`flex flex-wrap gap-2 ${showValidationErrors && (cond.participant_roles || []).length === 0 ? "border border-red-400 rounded-lg p-1.5 -m-1.5" : ""}`}>
                         {PARTICIPANT_ROLE_OPTIONS.map(opt => {
                           const checked = (cond.participant_roles || []).includes(opt.value);
                           return (
-                            <label key={opt.value} className="flex items-center gap-1.5 text-sm border border-slate-200 rounded-lg px-2.5 py-1.5 cursor-pointer hover:bg-slate-50">
+                            <label key={opt.value} className="flex items-center gap-1.5 text-sm border border-black rounded-lg px-2.5 py-1.5 cursor-pointer hover:bg-slate-50">
                               <input type="checkbox" checked={checked}
                                 onChange={() => updateCondition(gi, ci, {
                                   participant_roles: checked ? (cond.participant_roles || []).filter(r => r !== opt.value) : [...(cond.participant_roles || []), opt.value],
@@ -408,7 +417,7 @@ export default function ConditionGroupsEditor({
 
                     {needsStageScope(cond) && (
                       <fieldset className="flex flex-col gap-1.5">
-                        <legend className="text-xs font-medium text-slate-500">חטיבה</legend>
+                        <legend className="text-xs font-medium text-black">חטיבה</legend>
                         <p className="text-[11px] text-slate-400">
                           רלוונטי לבתי ספר שש-שנתיים בלבד, לשאר בתי הספר תיקבע פגישה עם המנהל היחיד שלהם.
                         </p>
@@ -420,7 +429,7 @@ export default function ConditionGroupsEditor({
                               className={`text-sm px-4 py-1.5 rounded-lg border transition-colors ${
                                 cond.stage_scope === opt.value
                                   ? "bg-blue-600 border-blue-600 text-white font-semibold"
-                                  : "border-slate-200 text-slate-600 hover:bg-slate-50"
+                                  : "border-black text-black hover:bg-slate-50"
                               }`}>
                               {opt.label}
                             </button>
@@ -434,7 +443,7 @@ export default function ConditionGroupsEditor({
                   </div>
                 ) : cond.type === "meeting" ? (
                   <div className="grid grid-cols-2 gap-2">
-                    <label className="text-xs text-slate-500 col-span-2">
+                    <label className="text-xs text-black col-span-2">
                       שדה
                       <div className="mt-0.5">
                         <FieldPickerButton
@@ -447,39 +456,39 @@ export default function ConditionGroupsEditor({
                         />
                       </div>
                     </label>
-                    <label className="text-xs text-slate-500">
+                    <label className="text-xs text-black">
                       קיימת/אין
                       <select value={cond.negate ? "no" : "yes"} onChange={e => updateCondition(gi, ci, { negate: e.target.value === "no" })}
-                        className="w-full mt-0.5 text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white">
+                        className="w-full mt-0.5 text-xs border border-black rounded-lg px-2 py-1.5 bg-white">
                         <option value="yes">יש פגישה</option>
                         <option value="no">אין פגישה</option>
                       </select>
                     </label>
-                    <label className="text-xs text-slate-500">
+                    <label className="text-xs text-black">
                       סוג פגישה
                       <select value={cond.meeting_service_type} onChange={e => updateCondition(gi, ci, { meeting_service_type: e.target.value })}
-                        className="w-full mt-0.5 text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white">
+                        className="w-full mt-0.5 text-xs border border-black rounded-lg px-2 py-1.5 bg-white">
                         <option value="">כל סוג</option>
                         {(meetingTypes || []).map(mt => <option key={mt} value={mt}>{MEETING_SERVICE_TYPE_LABELS[mt] || mt}</option>)}
                       </select>
                     </label>
-                    <label className="text-xs text-slate-500">
+                    <label className="text-xs text-black">
                       סטטוס פגישה
                       <select value={cond.status || ""} onChange={e => updateCondition(gi, ci, { status: e.target.value })}
-                        className="w-full mt-0.5 text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white">
+                        className="w-full mt-0.5 text-xs border border-black rounded-lg px-2 py-1.5 bg-white">
                         <option value="">כל סטטוס</option>
                         {MEETING_CONDITION_STATUS_OPTIONS.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
                       </select>
                     </label>
-                    <label className="text-xs text-slate-500">
+                    <label className="text-xs text-black">
                       מיקום פגישה
                       <select value={cond.meeting_type || ""} onChange={e => updateCondition(gi, ci, { meeting_type: e.target.value })}
-                        className="w-full mt-0.5 text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white">
+                        className="w-full mt-0.5 text-xs border border-black rounded-lg px-2 py-1.5 bg-white">
                         <option value="">כל מיקום</option>
                         {MEETING_TYPE_OPTIONS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
                       </select>
                     </label>
-                    <label className="text-xs text-slate-500">
+                    <label className="text-xs text-black">
                       מתאריך
                       <div className="mt-0.5">
                         <TaskDateTimeInput
@@ -489,7 +498,7 @@ export default function ConditionGroupsEditor({
                         />
                       </div>
                     </label>
-                    <label className="text-xs text-slate-500">
+                    <label className="text-xs text-black">
                       עד תאריך
                       <div className="mt-0.5">
                         <TaskDateTimeInput
@@ -502,7 +511,7 @@ export default function ConditionGroupsEditor({
                   </div>
                 ) : cond.type === "goal" ? (
                   <div className="grid grid-cols-2 gap-2">
-                    <label className="text-xs text-slate-500 col-span-2">
+                    <label className="text-xs text-black col-span-2">
                       יעד
                       <div className="mt-0.5">
                         <FieldPickerButton
@@ -515,7 +524,7 @@ export default function ConditionGroupsEditor({
                         />
                       </div>
                     </label>
-                    <div className="text-xs text-slate-500">
+                    <div className="text-xs text-black">
                       סוג תקציב
                       <MultiSelectChips
                         options={budgetNameOptions}
@@ -523,7 +532,7 @@ export default function ConditionGroupsEditor({
                         onChange={v => updateCondition(gi, ci, { budget_names: v })}
                       />
                     </div>
-                    <div className="text-xs text-slate-500">
+                    <div className="text-xs text-black">
                       {goalValueContext === "audience" ? "מצב נוכחי" : "ערך מדד הצלחה"}
                       <MultiSelectChips
                         options={(goalValueOptions || []).map(v => ({
@@ -540,7 +549,7 @@ export default function ConditionGroupsEditor({
                   const ops = OPS_BY_TYPE[clOpt?.type] || OPS_BY_TYPE.text;
                   return (
                     <div className="grid grid-cols-2 gap-2">
-                      <label className="text-xs text-slate-500 col-span-2">
+                      <label className="text-xs text-black col-span-2">
                         שדה
                         <div className="mt-0.5">
                           <FieldPickerButton
@@ -554,15 +563,15 @@ export default function ConditionGroupsEditor({
                         </div>
                       </label>
                       {clOpt?.type !== "select" && ops.length > 1 && (
-                        <label className="text-xs text-slate-500">
+                        <label className="text-xs text-black">
                           יחס
                           <select value={cond.op} onChange={e => updateCondition(gi, ci, { op: e.target.value })}
-                            className="w-full mt-0.5 text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white">
+                            className="w-full mt-0.5 text-xs border border-black rounded-lg px-2 py-1.5 bg-white">
                             {ops.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                           </select>
                         </label>
                       )}
-                      <label className="text-xs text-slate-500 col-span-2">
+                      <label className="text-xs text-black col-span-2">
                         ערך
                         {(() => {
                           if (clOpt?.options) {
@@ -577,12 +586,12 @@ export default function ConditionGroupsEditor({
                           if (clOpt?.type === "number") {
                             return (
                               <input type="number" value={cond.value} onChange={e => updateCondition(gi, ci, { value: e.target.value })}
-                                className="w-full mt-0.5 text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white" />
+                                className="w-full mt-0.5 text-xs border border-black rounded-lg px-2 py-1.5 bg-white" />
                             );
                           }
                           return (
                             <input value={cond.value} onChange={e => updateCondition(gi, ci, { value: e.target.value })}
-                              className="w-full mt-0.5 text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white" />
+                              className="w-full mt-0.5 text-xs border border-black rounded-lg px-2 py-1.5 bg-white" />
                           );
                         })()}
                       </label>
@@ -595,7 +604,7 @@ export default function ConditionGroupsEditor({
                   const isSelect = opt?.type === "select";
                   return (
                     <div className={`grid gap-2 ${isBool || isSelect ? "grid-cols-2" : "grid-cols-3"}`}>
-                      <label className="text-xs text-slate-500 col-span-1">
+                      <label className="text-xs text-black col-span-1">
                         שדה
                         <div className="mt-0.5">
                           <FieldPickerButton
@@ -609,15 +618,15 @@ export default function ConditionGroupsEditor({
                         </div>
                       </label>
                       {!isBool && !isSelect && ops.length > 1 && (
-                        <label className="text-xs text-slate-500 col-span-1">
+                        <label className="text-xs text-black col-span-1">
                           יחס
                           <select value={cond.op} onChange={e => updateCondition(gi, ci, { op: e.target.value })}
-                            className="w-full mt-0.5 text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white">
+                            className="w-full mt-0.5 text-xs border border-black rounded-lg px-2 py-1.5 bg-white">
                             {ops.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                           </select>
                         </label>
                       )}
-                      <label className="text-xs text-slate-500 col-span-1">
+                      <label className="text-xs text-black col-span-1">
                         {valueFieldLabel}
                         {(() => {
                           if (opt?.options) {
@@ -632,7 +641,7 @@ export default function ConditionGroupsEditor({
                           if (opt?.type === "number") {
                             return (
                               <input type="number" value={cond.value} onChange={e => updateCondition(gi, ci, { value: e.target.value })}
-                                className="w-full mt-0.5 text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white" />
+                                className="w-full mt-0.5 text-xs border border-black rounded-lg px-2 py-1.5 bg-white" />
                             );
                           }
                           if (opt?.type === "text" && opt?.table === "schools" && allSchools) {
@@ -646,7 +655,7 @@ export default function ConditionGroupsEditor({
                           }
                           return (
                             <input value={cond.value} onChange={e => updateCondition(gi, ci, { value: e.target.value })}
-                              className="w-full mt-0.5 text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white" />
+                              className="w-full mt-0.5 text-xs border border-black rounded-lg px-2 py-1.5 bg-white" />
                           );
                         })()}
                       </label>
@@ -654,14 +663,15 @@ export default function ConditionGroupsEditor({
                   );
                 })()}
               </div>
+              </div>
               );
             })}
             <div className="flex items-center gap-2">
-              <button onClick={() => addCondition(gi)} className="text-xs px-3 py-1.5 rounded-full font-medium bg-slate-100 text-slate-600 hover:bg-slate-200 whitespace-nowrap">
+              <button onClick={() => addCondition(gi)} className="text-xs px-3 py-1.5 rounded-full font-medium bg-slate-100 text-black hover:bg-slate-200 whitespace-nowrap">
                 {addConditionLabel}
               </button>
               {!hideGroupChrome && gi === groups.length - 1 && (
-                <button onClick={addGroup} className="text-xs px-3 py-1.5 rounded-full font-medium bg-slate-100 text-slate-600 hover:bg-slate-200 whitespace-nowrap">
+                <button onClick={addGroup} className="text-xs px-3 py-1.5 rounded-full font-medium bg-slate-100 text-black hover:bg-slate-200 whitespace-nowrap">
                   + הוסף קבוצת "או"
                 </button>
               )}

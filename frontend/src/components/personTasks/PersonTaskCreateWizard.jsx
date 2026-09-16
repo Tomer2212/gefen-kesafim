@@ -160,17 +160,17 @@ export default function PersonTaskCreateWizard({ onClose, onCreated, initialAcad
 
   // Every distinct service_type value checked anywhere in the audience filter (across all "או"
   // groups) — used only to decide whether "which advisor division(s) should receive this" can be
-  // inferred automatically or must be chosen explicitly. Unambiguous exactly when a single,
-  // non-combined value is selected (e.g. only "גפן") — "גפן+שוטף", or several distinct values
-  // together, always require an explicit choice since either legitimately implies more than one
-  // division. No service_type condition at all is also treated as ambiguous — there's nothing to
-  // infer from.
+  // inferred automatically or must be chosen explicitly. Unambiguous whenever there's at most
+  // one distinct value selected so far (including none yet — the creator just hasn't gotten
+  // there, that's not a conflict) — "גפן+שוטף", or 2+ distinct values together, are the only
+  // cases that actually require an explicit choice, since either legitimately implies more than
+  // one division.
   const serviceTypeValues = new Set(
     advisorFieldGroups.flatMap(g => g.conditions
       .filter(c => c.type === "field" && c.field === "service_type")
       .flatMap(c => (Array.isArray(c.value) ? c.value : (c.value ? [c.value] : [])))),
   );
-  const advisorDivisionsAmbiguous = serviceTypeValues.size !== 1 || serviceTypeValues.has("gefen_current");
+  const advisorDivisionsAmbiguous = serviceTypeValues.size > 1 || serviceTypeValues.has("gefen_current");
   useEffect(() => {
     if (serviceTypeValues.size === 1 && !serviceTypeValues.has("gefen_current")) {
       setAdvisorDivisions(SERVICE_TYPE_TO_DIVISIONS[[...serviceTypeValues][0]] || []);
@@ -315,74 +315,85 @@ export default function PersonTaskCreateWizard({ onClose, onCreated, initialAcad
         <div className="overflow-y-auto flex-1 px-6 py-4 space-y-4 text-sm">
           {step === "details" && (
             <>
-              <div>
-                <span className="block text-xs font-semibold text-slate-600 mb-1">שנת לימודים</span>
-                <AcademicYearSelector value={academicYear} onChange={setAcademicYear} />
-              </div>
-              <div>
-                <label htmlFor="pt-name" className="block text-xs font-semibold text-slate-600 mb-1">שם המשימה</label>
-                <input id="pt-name" value={name} onChange={e => setName(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2" placeholder="למשל: בדיקת חוזים לרבעון 3" />
-                {!nameSet && <p role="alert" className="text-xs text-red-600 mt-1">יש למלא שם למשימה — שדה חובה.</p>}
-              </div>
-              <div>
-                <label htmlFor="pt-desc" className="block text-xs font-semibold text-slate-600 mb-1">מה צריך לעשות? (ההסבר יוצג למשתמשים שעליהם מוטלת המשימה, מומלץ לכלול מהו המדד להשלמת המשימה)</label>
-                <textarea id="pt-desc" rows={3} value={description} onChange={e => setDescription(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2" placeholder="מה בדיוק צריך לבצע..." />
-                {!descriptionSet && <p role="alert" className="text-xs text-red-600 mt-1">יש למלא הסבר למשימה — שדה חובה.</p>}
-              </div>
-              <div className="flex items-center gap-4">
+              <div className="space-y-[1.2rem]">
                 <div>
-                  <label htmlFor="pt-due" className="block text-xs font-semibold text-slate-600 mb-1">תאריך יעד (אופציונלי)</label>
-                  <DirectStyleDateInput id="pt-due" value={dueDate} onChange={setDueDate} />
+                  <span className="block text-[1.2rem] font-semibold text-black mb-1">שנת לימודים</span>
+                  <AcademicYearSelector value={academicYear} onChange={setAcademicYear} borderClassName="border-black" />
                 </div>
                 <div>
-                  <label htmlFor="pt-urgency" className="block text-xs font-semibold text-slate-600 mb-1">רמת דחיפות</label>
-                  <select id="pt-urgency" value={urgency} onChange={e => setUrgency(Number(e.target.value))} className="border border-slate-200 rounded-lg px-3 py-2 bg-white">
-                    {Object.entries(URGENCY_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-                  </select>
+                  <label htmlFor="pt-name" className="block text-[1.2rem] font-semibold text-black mb-1">
+                    שם המשימה{!nameSet && <span role="alert" className="text-red-600 font-normal text-xs"> (שדה חובה)</span>}
+                  </label>
+                  <input id="pt-name" value={name} onChange={e => setName(e.target.value)} className="w-full border border-black rounded-lg px-3 py-2" placeholder="למשל: עמידה ביעד 70% תכנון תקציב" />
+                </div>
+                <div>
+                  <label htmlFor="pt-desc" className="block text-[1.2rem] font-semibold text-black mb-1">
+                    הסבר המשימה שיוצג למשתמשים{!descriptionSet && <span role="alert" className="text-red-600 font-normal text-xs"> (שדה חובה)</span>}
+                  </label>
+                  <textarea id="pt-desc" rows={3} value={description} onChange={e => setDescription(e.target.value)} className="w-full border border-black rounded-lg px-3 py-2" placeholder="נא לפרט מה המשתמש צריך לעשות ומהו המדד לעמידה במשימה." />
+                </div>
+                <div className="flex items-center gap-4">
+                  <div>
+                    <label htmlFor="pt-due" className="block text-[1.2rem] font-semibold text-black mb-1">
+                      תאריך יעד <span className="text-xs font-normal">(אופציונלי)</span>
+                    </label>
+                    <DirectStyleDateInput id="pt-due" value={dueDate} onChange={setDueDate} />
+                  </div>
+                  <div>
+                    <label htmlFor="pt-urgency" className="block text-[1.2rem] font-semibold text-black mb-1">רמת דחיפות</label>
+                    <select id="pt-urgency" value={urgency} onChange={e => setUrgency(Number(e.target.value))} className="border border-black rounded-lg px-3 py-1.5 text-sm bg-white">
+                      {Object.entries(URGENCY_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                    </select>
+                  </div>
                 </div>
               </div>
 
               <div className="border-t border-slate-100 pt-3">
-                <p className="text-xs font-semibold text-slate-600 mb-2">על מי מוטלת המשימה?</p>
-                <div className="flex items-center gap-2 border border-slate-200 rounded-lg p-1 w-fit mb-3">
-                  <button
-                    type="button"
-                    onClick={() => setAssignmentMode("schools")}
-                    className={`text-xs px-3 py-1.5 rounded-md font-medium ${assignmentMode === "schools" ? "bg-blue-600 text-white" : "text-slate-600 hover:bg-slate-50"}`}
-                  >
-                    יועץ מלווה
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setAssignmentMode("users")}
-                    className={`text-xs px-3 py-1.5 rounded-md font-medium ${assignmentMode === "users" ? "bg-blue-600 text-white" : "text-slate-600 hover:bg-slate-50"}`}
-                  >
-                    משתמשים ספציפיים
-                  </button>
-                </div>
-
-                {assignmentMode === "schools" ? (
-                  <div className="space-y-2">
-                    <div className="border border-slate-200 rounded-xl p-3 space-y-1 bg-slate-100">
-                      <span className="text-xs font-semibold text-slate-500">המשימה תישלח ליועץ המלווה בתחום:</span>
+                <p className="text-[1.2rem] font-semibold text-black mb-2">על מי מוטלת המשימה?</p>
+                <div className="border border-black rounded-xl p-3 space-y-2 bg-slate-100">
+                  <div className="flex items-center gap-2 border border-black rounded-lg p-1 w-fit">
+                    <button
+                      type="button"
+                      onClick={() => setAssignmentMode("schools")}
+                      className={`text-xs px-3 py-1.5 rounded-md font-medium ${assignmentMode === "schools" ? "bg-blue-600 text-white" : "text-black hover:bg-slate-50"}`}
+                    >
+                      יועץ מלווה
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAssignmentMode("users")}
+                      className={`text-xs px-3 py-1.5 rounded-md font-medium ${assignmentMode === "users" ? "bg-blue-600 text-white" : "text-black hover:bg-slate-50"}`}
+                    >
+                      משתמשים ספציפיים
+                    </button>
+                  </div>
+                  {assignmentMode === "schools" && (
+                    <div className="flex items-center gap-2 flex-wrap border-t border-black pt-2">
+                      <span className="text-xs font-semibold text-black whitespace-nowrap">בתחום:</span>
                       <MultiSelectChips
                         options={ADVISOR_DIVISION_OPTIONS}
                         selected={advisorDivisions}
                         onChange={setAdvisorDivisions}
                       />
-                      {advisorDivisionsAmbiguous && !advisorDivisionsSet && (
-                        <p role="alert" className="text-xs text-red-600">
-                          נבחרו כמה סוגי שירות (או "גפן+שוטף") — יש לבחור במפורש לאיזה יועץ לשלוח.
-                        </p>
-                      )}
                     </div>
-                    <div className="h-2" />
+                  )}
+                  {assignmentMode === "schools" && advisorDivisionsAmbiguous && !advisorDivisionsSet && (
+                    <p role="alert" className="text-xs text-red-600">
+                      נבחרו מספר סוגי שירות שונים. נא לבחור את תחום היועץ המלווה שאחראי לביצוע המשימה.
+                    </p>
+                  )}
+                </div>
+
+                {assignmentMode === "schools" ? (
+                  <div className="space-y-2">
+                    <p className="text-[1.2rem] font-semibold text-black mt-[1.2rem] mb-2">אילו בתי ספר ייכללו במשימה? (נא לסנן)</p>
                     <ConditionGroupsEditor
                       groups={advisorFieldGroups} setGroups={setAdvisorFieldGroups} fieldOptions={fieldOptions} meetingTypes={meetingTypes}
                       allowedTypes={["field"]} goalOptions={goalOptions} divisionOptions={divisionOptions}
                       budgetNameOptions={budgetNameOptions} controlLetterFields={controlLetterFields} goalValueOptions={goalValueOptions}
                       defaultGroupConditions={ADVISOR_DEFAULT_CONDITIONS} allSchools={allSchools}
-                      goalValueContext="audience" groupTitle='אילו בתי ספר ייכללו במשימה? (נא לסנן)'
+                      goalValueContext="audience" groupTitle=""
+                      nonRemovableFields={["client_status", "service_type"]}
                     />
                     {!advisorClientStatusSet && (
                       <p role="alert" className="text-xs text-red-600">יש לבחור ערך עבור "סטטוס לקוח" — שדה חובה.</p>
@@ -517,14 +528,14 @@ export default function PersonTaskCreateWizard({ onClose, onCreated, initialAcad
               )}
               {(metricKind === "checkbox" || metricKind === "number" || metricKind === "file") && (
                 <div>
-                  <label htmlFor="pt-metric-label" className="block text-xs font-semibold text-slate-600 mb-1">
+                  <label htmlFor="pt-metric-label" className="block text-xs font-semibold text-black mb-1">
                     {metricKind === "checkbox"
                       ? 'טקסט הכפתור/הפעולה (למשל: "בדקתי את הדוח")'
                       : metricKind === "number"
                         ? "מה מייצג הערך המספרי (למשל: כמות שיחות)"
                         : "מה יש להעלות (למשל: קובץ אישור חתום)"}
                   </label>
-                  <input id="pt-metric-label" value={metricLabel} onChange={e => setMetricLabel(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2" />
+                  <input id="pt-metric-label" value={metricLabel} onChange={e => setMetricLabel(e.target.value)} className="w-full border border-black rounded-lg px-3 py-2" />
                 </div>
               )}
               {error && <p role="alert" className="text-red-600 bg-red-50 rounded-lg px-3 py-2">{error}</p>}
