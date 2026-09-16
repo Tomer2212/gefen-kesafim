@@ -105,7 +105,12 @@ function toValueArray(value) {
 // value too (see the "field"/"control_letter"/"goal" branches below). Selecting several chips
 // means "one of these" (OR) — there's no separate "יחס" (=/≠) concept for these fields anymore;
 // the checked set of chips already says everything that needs saying.
-export function MultiSelectChips({ options, selected, onChange }) {
+// `heightClassName`: a fixed height (+ flex-centering) instead of the default padding-based
+// sizing — padding alone doesn't reliably match a <select>'s native rendered height across
+// browsers (its own intrinsic padding differs from a <button>'s), so callers that need exact
+// parity with an adjacent <select> (e.g. the "יעד" condition's "מצב נוכחי" row) pass an
+// explicit height like "h-[30px]" instead of relying on py-*.
+export function MultiSelectChips({ options, selected, onChange, heightClassName = "py-1" }) {
   return (
     <div className="flex flex-wrap gap-1.5 mt-0.5">
       {(options || []).map(o => {
@@ -115,7 +120,7 @@ export function MultiSelectChips({ options, selected, onChange }) {
             onClick={() => onChange(
               isSelected ? (selected || []).filter(v => v !== o.value) : [...(selected || []), o.value],
             )}
-            className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
+            className={`text-xs px-2.5 ${heightClassName} inline-flex items-center rounded-lg border transition-colors ${
               isSelected ? "bg-blue-600 border-blue-600 text-white font-semibold" : "border-black text-black hover:bg-slate-50"
             }`}>
             {o.label}
@@ -524,14 +529,19 @@ export default function ConditionGroupsEditor({
                         />
                       </div>
                     </label>
-                    <div className="text-xs text-black">
+                    <label className="text-xs text-black">
                       סוג תקציב
-                      <MultiSelectChips
-                        options={budgetNameOptions}
-                        selected={cond.budget_names}
-                        onChange={v => updateCondition(gi, ci, { budget_names: v })}
-                      />
-                    </div>
+                      <select value={(cond.budget_names || [])[0] || ""}
+                        onChange={e => updateCondition(gi, ci, { budget_names: e.target.value ? [e.target.value] : [] })}
+                        className="w-full mt-0.5 h-[30px] text-xs border border-black rounded-lg px-2 bg-white">
+                        <option value="">בחר</option>
+                        {/* "גפן" listed first — the overwhelmingly common case (see
+                        EMPTY_GOAL_CONDITION's own default) — ahead of backend's
+                        BUDGET_NAME_OPTIONS order, which happens to list "גפן חירום" first. */}
+                        {[...(budgetNameOptions || [])].sort((a, b) => (a.value === "גפן" ? -1 : b.value === "גפן" ? 1 : 0))
+                          .map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                      </select>
+                    </label>
                     <div className="text-xs text-black">
                       {goalValueContext === "audience" ? "מצב נוכחי" : "ערך מדד הצלחה"}
                       <MultiSelectChips
@@ -541,6 +551,7 @@ export default function ConditionGroupsEditor({
                         }))}
                         selected={toValueArray(cond.value)}
                         onChange={v => updateCondition(gi, ci, { value: v })}
+                        heightClassName="h-[30px]"
                       />
                     </div>
                   </div>
