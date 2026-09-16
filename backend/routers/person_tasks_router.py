@@ -105,13 +105,19 @@ _SERVICE_TYPE_TO_DIVISIONS = {
 _DIVISION_LABELS = {"gefen": "גפן", "current": "שוטף", "district": "מחוז"}
 
 
-def _resolve_school_advisor_candidates(db, org_id: str, criteria: dict, academic_year: str):
+def _resolve_school_advisor_candidates(db, org_id: str, criteria: dict, academic_year: str, advisor_divisions: list[str] | None = None):
     """Runs the audience filter (task_logic.find_matching_schools — same engine school-tasks'
     audience criteria already uses) and, for every matched school, batches the 3 typed-advisor-
     table lookups ONCE each (never per-school — Architecture Invariant #7) to build:
     divisions_by_school[school_id] -> which division(s) that school's service_type requires,
     candidates_by_school[school_id][division] -> the advisor_ids currently assigned there
-    (0, 1, or 2+ — school_advisors_gefen/current/district is NOT 1:1)."""
+    (0, 1, or 2+ — school_advisors_gefen/current/district is NOT 1:1).
+
+    `advisor_divisions` (task-level, from org_person_tasks.advisor_divisions) is an EXPLICIT
+    override: when set, every matched school routes to exactly these division(s) regardless of
+    its own service_type (e.g. a "gefen_current" school still routes only to "gefen" if that's
+    all the creator picked) — a school missing an advisor there still surfaces as "missing", same
+    as today. None/empty means the legacy behavior: derive per-school from _SERVICE_TYPE_TO_DIVISIONS."""
     matched = task_logic.find_matching_schools(org_id, criteria, academic_year)
     matched_school_ids = [m["school_id"] for m in matched]
     if not matched_school_ids:
@@ -136,7 +142,7 @@ def _resolve_school_advisor_candidates(db, org_id: str, criteria: dict, academic
     divisions_by_school = {}
     candidates_by_school = {}
     for school_id in matched_school_ids:
-        divisions = _SERVICE_TYPE_TO_DIVISIONS.get(service_type_map.get(school_id), [])
+        divisions = advisor_divisions or _SERVICE_TYPE_TO_DIVISIONS.get(service_type_map.get(school_id), [])
         divisions_by_school[school_id] = divisions
         candidates_by_school[school_id] = {
             div: candidates_by_division.get(div, {}).get(school_id, []) for div in divisions
@@ -154,16 +160,19 @@ class SchoolsCheckIn(BaseModel):
     # (though not server-enforced) to include a service_type condition, since that's what
     # determines routing per point above.
     academic_year: str | None = None
+    # Explicit routing override (see _resolve_school_advisor_candidates) — None/empty means the
+    # legacy per-school service_type-derived routing.
+    advisor_divisions: list[str] | None = None
 
 
-def _build_check_rows(db, org_id: str, criteria: dict, academic_year: str):
+def _build_check_rows(db, org_id: str, criteria: dict, academic_year: str, advisor_divisions: list[str] | None = None):
     """Shared by check_person_task_schools (live preview + pre-creation block) and
     _try_activate_scheduled_person_task (re-validation on activation) — one row per (school,
     required division), 'ok' rows carry the resolved advisor, others describe the problem.
     Also returns the raw resolution maps so callers that need to build target rows don't have
     to re-fetch them."""
     matched_school_ids, schools_map, divisions_by_school, candidates_by_school = (
-        _resolve_school_advisor_candidates(db, org_id, criteria, academic_year)
+        _resolve_school_advisor_candidates(db, org_id, criteria, academic_year, advisor_divisions)
     )
     advisor_ids = {aid for cands in candidates_by_school.values() for ids in cands.values() for aid in ids}
     names_map = _enrich_profile_names(db, advisor_ids)
@@ -205,7 +214,7 @@ def check_person_task_schools(body: SchoolsCheckIn, user: Annotated[dict, Depend
     db = get_admin_client()
     academic_year = body.academic_year or DEFAULT_ACADEMIC_YEAR
     rows, matched_school_ids, _schools_map, _divisions_by_school, _candidates_by_school = (
-        _build_check_rows(db, user["org_id"], body.criteria, academic_year)
+        _build_check_rows(db, user["org_id"], body.criteria, academic_year, body.advisor_divisions)
     )
     problem_school_ids = {r["school_id"] for r in rows if r["kind"] != "ok"}
     return {
@@ -287,6 +296,10 @@ class PersonTaskCreateIn(BaseModel):
     target_user_ids: list[str] | None = None
     target_criteria: dict | None = None  # schools mode: the audience-filter tree (must resolve
     # via schools' own service_type — see _resolve_school_advisor_candidates)
+    # Explicit routing override (see _resolve_school_advisor_candidates) — None/empty means the
+    # legacy per-school service_type-derived routing. Persisted on the task so scheduled
+    # activation (_try_activate_scheduled_person_task) re-applies the same override later.
+    advisor_divisions: list[str] | None = None
     academic_year: str | None = None
     success_metric: dict  # {"kind": "field"|"checkbox"|"number"|"file", ...}
     # "{school_id}:{division}" -> chosen assignee_ids, filled in by the creator when
@@ -337,7 +350,7 @@ def create_person_task(body: PersonTaskCreateIn, user: Annotated[dict, Depends(g
             # tasks_router.create_task) — no point resolving advisors against data that will be
             # stale by the time it actually matters.
             matched_school_ids, schools_map, divisions_by_school, candidates_by_school = (
-                _resolve_school_advisor_candidates(db, user["org_id"], body.target_criteria, academic_year)
+                _resolve_school_advisor_candidates(db, user["org_id"], body.target_criteria, academic_year, body.advisor_divisions)
             )
             if not matched_school_ids:
                 raise HTTPException(status_code=400, detail="לא נמצאו בתי ספר התואמים לסינון")
@@ -349,6 +362,7 @@ def create_person_task(body: PersonTaskCreateIn, user: Annotated[dict, Depends(g
         "target_user_ids": body.target_user_ids,
         "target_school_ids": matched_school_ids if (body.assignment_mode == "schools" and not is_future_scheduled) else None,
         "target_criteria": body.target_criteria if body.assignment_mode == "schools" else None,
+        "advisor_divisions": body.advisor_divisions if body.assignment_mode == "schools" else None,
         "academic_year": academic_year,
         "success_metric": body.success_metric,
         "scheduled_for": scheduled_for_dt.isoformat() if is_future_scheduled else None,
@@ -414,7 +428,7 @@ def _try_activate_scheduled_person_task(db, task: dict) -> dict:
     org_id = task["org_id"]
     academic_year = task.get("academic_year") or DEFAULT_ACADEMIC_YEAR
     rows, matched_school_ids, schools_map, divisions_by_school, candidates_by_school = (
-        _build_check_rows(db, org_id, task.get("target_criteria") or {}, academic_year)
+        _build_check_rows(db, org_id, task.get("target_criteria") or {}, academic_year, task.get("advisor_divisions"))
     )
     has_problems = any(r["kind"] != "ok" for r in rows)
 

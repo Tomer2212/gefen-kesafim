@@ -105,7 +105,7 @@ function toValueArray(value) {
 // value too (see the "field"/"control_letter"/"goal" branches below). Selecting several chips
 // means "one of these" (OR) — there's no separate "יחס" (=/≠) concept for these fields anymore;
 // the checked set of chips already says everything that needs saying.
-function MultiSelectChips({ options, selected, onChange }) {
+export function MultiSelectChips({ options, selected, onChange }) {
   return (
     <div className="flex flex-wrap gap-1.5 mt-0.5">
       {(options || []).map(o => {
@@ -205,7 +205,7 @@ export default function ConditionGroupsEditor({
   groups, setGroups, fieldOptions, meetingTypes, allSchools, allowedTypes = ["meeting", "field"],
   goalOptions, divisionOptions, budgetNameOptions, controlLetterFields, goalValueOptions, orgUsers,
   hideGroupChrome = false, forceMeetingNegateFalse = false, addConditionLabel = "+ הוסף תנאי (וגם)",
-  showValidationErrors = false, valueFieldLabel = "ערך",
+  showValidationErrors = false, valueFieldLabel = "ערך", groupTitle = "קבוצת תנאים (וגם ביניהם)",
   // Optional extra class(es) for the bordered condition-group box (e.g. a "bg-slate-100" tint so
   // the fields box stands out from its surrounding panel). Empty by default — no visual change
   // for the other call sites.
@@ -276,7 +276,7 @@ export default function ConditionGroupsEditor({
           <div className={hideGroupChrome ? "space-y-2" : `border border-slate-200 rounded-xl p-3 space-y-2 ${groupToneClassName}`}>
             {!hideGroupChrome && (
               <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-slate-500">קבוצת תנאים (וגם ביניהם)</span>
+                <span className="text-xs font-semibold text-slate-500">{groupTitle}</span>
                 {groups.length > 1 && (
                   <button onClick={() => removeGroup(gi)} className="text-xs text-red-600 hover:bg-red-50 rounded px-2 py-0.5">
                     הסר קבוצה
