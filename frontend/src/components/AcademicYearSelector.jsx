@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ACADEMIC_YEARS } from "../constants/academicYears";
 
-export function AcademicYearSelector({ value, onChange }) {
+export function AcademicYearSelector({ value, onChange, borderClassName = "border-slate-200" }) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef(null);
 
@@ -18,7 +18,7 @@ export function AcademicYearSelector({ value, onChange }) {
         onClick={() => setOpen(o => !o)}
         aria-haspopup="listbox"
         aria-expanded={open}
-        className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-full border border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50 transition-all"
+        className={`flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-full border ${borderClassName} bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50 transition-all`}
       >
         <span>{value}</span>
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">

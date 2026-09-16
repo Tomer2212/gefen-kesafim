@@ -149,7 +149,7 @@ export default function FieldPickerButton({ value, fieldOptions, goalOptions, co
         onClick={() => (open ? setOpen(false) : openPanel())}
         aria-expanded={open}
         aria-haspopup="true"
-        className="w-full text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white text-right"
+        className="w-full text-xs border border-black rounded-lg px-2 py-1.5 bg-white text-right text-black"
       >
         {value ? (labelByField[value] || value) : "בחר שדה"}
       </button>
