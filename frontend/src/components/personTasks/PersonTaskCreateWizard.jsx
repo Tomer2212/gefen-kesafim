@@ -334,14 +334,16 @@ export default function PersonTaskCreateWizard({ onClose, onCreated, initialAcad
                 </div>
                 <div className="flex items-center gap-4">
                   <div>
-                    <label htmlFor="pt-due" className="block text-[1.2rem] font-semibold text-black mb-1">
+                    <label htmlFor="pt-due" className="block text-[1.2rem] font-semibold text-black mb-1 whitespace-nowrap">
                       תאריך יעד <span className="text-xs font-normal">(אופציונלי)</span>
                     </label>
-                    <DirectStyleDateInput id="pt-due" value={dueDate} onChange={setDueDate} />
+                    <div className="w-28">
+                      <DirectStyleDateInput id="pt-due" value={dueDate} onChange={setDueDate} />
+                    </div>
                   </div>
                   <div>
                     <label htmlFor="pt-urgency" className="block text-[1.2rem] font-semibold text-black mb-1">רמת דחיפות</label>
-                    <select id="pt-urgency" value={urgency} onChange={e => setUrgency(Number(e.target.value))} className="border border-black rounded-lg px-3 py-1.5 text-sm bg-white">
+                    <select id="pt-urgency" value={urgency} onChange={e => setUrgency(Number(e.target.value))} className="h-[30px] border border-black rounded-lg px-3 text-sm bg-white">
                       {Object.entries(URGENCY_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                     </select>
                   </div>

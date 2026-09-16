@@ -123,7 +123,7 @@ export default function DirectStyleDateInput({ id, value, onChange, invalid }) {
             setLocalInvalid(digitCount === 6);
           }
         }}
-        className={`text-sm border rounded-lg pl-7 pr-2.5 py-1.5 w-full ${showInvalid ? "border-red-400 focus:border-red-500" : "border-black"}`}
+        className={`h-[30px] text-sm text-center border rounded-lg pl-7 pr-2.5 w-full bg-white ${showInvalid ? "border-red-400 focus:border-red-500" : "border-black"}`}
       />
       <button type="button" onClick={() => setShowPicker(o => !o)} aria-label="פתח יומן לבחירת תאריך"
         className="absolute left-1.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-blue-600">
