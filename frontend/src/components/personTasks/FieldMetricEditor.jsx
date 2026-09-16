@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import axios from "axios";
+import { goalShortLabel } from "../tasks/taskShared";
 
 // Extracts the single condition a field-kind success_metric's criteria tree must reduce to for
 // inline editing to be possible ("one group, one condition") — anything more complex (multiple
@@ -15,12 +16,10 @@ export function getSingleCondition(metric) {
 
 const OP_SYMBOLS = { eq: "=", ne: "≠", gt: ">", gte: "≥", lt: "<", lte: "≤" };
 
-// "תכנון 70%"/"דיווח 25%" — goal.kind (planning/reporting, from GET /tasks/field-options'
-// goal_options) + goal_number, exactly the short form the user asked for instead of the raw
-// goal_key or the long GOAL_DEFINITIONS label ("יעד תכנון: לפחות 70% מתקציב הגפ\"ן").
+// "תכנון 70%"/"דיווח 25%" — see taskShared.js's goalShortLabel for the shared implementation.
 function goalTitle(cond, goalOptions, budgetName, showBudget) {
   const def = (goalOptions || []).find(g => g.key === cond.goal_key);
-  const base = def ? `${def.kind === "reporting" ? "דיווח" : "תכנון"} ${def.goal_number}%` : (cond.goal_key || "יעד");
+  const base = goalShortLabel(def) || cond.goal_key || "יעד";
   return showBudget ? `${base} (${budgetName})` : base;
 }
 
@@ -31,8 +30,15 @@ function goalTitle(cond, goalOptions, budgetName, showBudget) {
 function fieldTitle(fieldDef, cond) {
   const label = fieldDef?.label || cond.field;
   const opSymbol = OP_SYMBOLS[cond.op] || "=";
-  const opt = fieldDef?.options?.find(o => String(o.value) === String(cond.value));
-  const valueLabel = opt ? opt.label : (typeof cond.value === "boolean" ? (cond.value ? "כן" : "לא") : cond.value);
+  if (fieldDef?.options) {
+    // cond.value is a list going forward (multi-select chips, OR'd) — the real field this
+    // editor writes to is still single-valued, success is achieved once it matches ANY one of
+    // these. Legacy conditions saved before the multi-select UI existed carry a bare scalar.
+    const values = Array.isArray(cond.value) ? cond.value : (cond.value ? [cond.value] : []);
+    const valueLabel = values.map(v => fieldDef.options.find(o => String(o.value) === String(v))?.label ?? v).join(" או ");
+    return `${label} ${opSymbol} ${valueLabel || "—"}`;
+  }
+  const valueLabel = typeof cond.value === "boolean" ? (cond.value ? "כן" : "לא") : cond.value;
   return `${label} ${opSymbol} ${valueLabel ?? "—"}`;
 }
 

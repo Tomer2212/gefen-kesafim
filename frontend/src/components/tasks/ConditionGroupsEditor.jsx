@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import TaskDateTimeInput from "./TaskDateTimeInput";
 import DirectStyleDateInput from "./DirectStyleDateInput";
 import FieldPickerButton from "./FieldPickerButton";
@@ -70,8 +71,10 @@ const EMPTY_CONTROL_LETTER_CONDITION = { type: "control_letter", field: "", op: 
 // but ">"/"<" on a closed dropdown or a boolean is meaningless. Bool fields get no operator UI
 // at all (their value IS the whole condition — "yes"/"no").
 const OPS_BY_TYPE = {
-  text: [{ value: "eq", label: "=" }, { value: "ne", label: "≠" }, { value: "contains", label: "מכיל" }],
-  select: [{ value: "eq", label: "=" }, { value: "ne", label: "≠" }],
+  // "contains" listed (and defaulted to, see EMPTY_FIELD_CONDITION/conditionForPickedKey) first —
+  // with hundreds/thousands of schools, users rarely recall a free-text value's exact spelling.
+  text: [{ value: "contains", label: "מכיל" }, { value: "eq", label: "שווה ל" }, { value: "ne", label: "שונה מ" }],
+  select: [{ value: "eq", label: "שווה ל" }, { value: "ne", label: "שונה מ" }],
   number: [
     { value: "eq", label: "=" }, { value: "ne", label: "≠" }, { value: "gt", label: ">" },
     { value: "gte", label: "≥" }, { value: "lt", label: "<" }, { value: "lte", label: "≤" },
@@ -79,18 +82,69 @@ const OPS_BY_TYPE = {
   bool: [],
 };
 
+// Same "yes"/"no"/"unset" values the backend uses, relabeled for the audience-filter context
+// (goalValueContext="audience") — there the question is "does the school currently meet this
+// goal", not "what value counts as success" (the default/success-metric wording, "כן"/"לא").
+const GOAL_STATUS_LABELS = { yes: "עומד ביעד", no: "לא עומד ביעד", unset: "טרם הוגדר" };
+
 function uniq(arr) {
   return [...new Set(arr.filter(v => v !== null && v !== undefined && v !== ""))].sort();
 }
 
-// Single-value autocomplete for free-text school fields (symbol/city/authority/etc.) — typing
-// narrows suggestions built from real distinct values already on the school list, but doesn't
-// force a pick (useful for op="contains" or a value that doesn't exist yet).
+// A condition's `value` for a select-type field/goal is always a list going forward (multiple
+// checked chips ORed together — see OPS_BY_TYPE's select comment), but conditions saved before
+// this multi-select UI existed still carry a bare scalar string. Normalizing on read (rather
+// than migrating stored data) means old conditions keep working and keep displaying correctly.
+function toValueArray(value) {
+  if (Array.isArray(value)) return value;
+  return value ? [value] : [];
+}
+
+// Shared "pick any number of these" chip picker — the same visual/interaction pattern the
+// "סוג תקציב" panel already used for goal conditions, now reused for every select-type field's
+// value too (see the "field"/"control_letter"/"goal" branches below). Selecting several chips
+// means "one of these" (OR) — there's no separate "יחס" (=/≠) concept for these fields anymore;
+// the checked set of chips already says everything that needs saying.
+function MultiSelectChips({ options, selected, onChange }) {
+  return (
+    <div className="flex flex-wrap gap-1.5 mt-0.5">
+      {(options || []).map(o => {
+        const isSelected = (selected || []).includes(o.value);
+        return (
+          <button key={o.value} type="button" aria-pressed={isSelected}
+            onClick={() => onChange(
+              isSelected ? (selected || []).filter(v => v !== o.value) : [...(selected || []), o.value],
+            )}
+            className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
+              isSelected ? "bg-blue-600 border-blue-600 text-white font-semibold" : "border-slate-200 text-slate-600 hover:bg-slate-50"
+            }`}>
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// Single-value autocomplete for free-text school fields (symbol/city/authority/etc.) — opens on
+// focus showing EVERY distinct value already on the school list (not just a capped handful), and
+// typing narrows it live by substring; doesn't force a pick (useful for op="contains" or a value
+// that doesn't exist yet). The list is row-virtualized (same @tanstack/react-virtual already used
+// for data tables, see hooks/useRowVirtualizer.js) since a field like "עיר" can have hundreds of
+// distinct values — mounting them all as real DOM would be slow to open and scroll.
+const SUGGESTION_ROW_HEIGHT = 30;
 function TypeaheadValueInput({ value, options, onChange }) {
   const [open, setOpen] = useState(false);
+  const scrollRef = useRef(null);
   const suggestions = (options || [])
-    .filter(o => !value || o.toLowerCase().includes(String(value).toLowerCase()))
-    .slice(0, 8);
+    .filter(o => !value || o.toLowerCase().includes(String(value).toLowerCase()));
+  const virtualizer = useVirtualizer({
+    count: suggestions.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => SUGGESTION_ROW_HEIGHT,
+    overscan: 8,
+  });
+  const items = virtualizer.getVirtualItems();
   return (
     <div className="relative" onBlur={e => { if (!e.currentTarget.contains(e.relatedTarget)) setOpen(false); }}>
       <input
@@ -101,17 +155,29 @@ function TypeaheadValueInput({ value, options, onChange }) {
         className="w-full mt-0.5 text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white"
       />
       {open && suggestions.length > 0 && (
-        <div className="absolute z-30 right-0 left-0 mt-1 border border-slate-200 rounded-lg bg-white shadow-lg max-h-40 overflow-y-auto">
-          {suggestions.map(s => (
-            <button
-              key={s}
-              type="button"
-              onMouseDown={e => { e.preventDefault(); onChange(s); setOpen(false); }}
-              className="w-full text-right px-3 py-1.5 text-xs text-slate-700 hover:bg-blue-50"
-            >
-              {s}
-            </button>
-          ))}
+        <div
+          ref={scrollRef}
+          role="listbox"
+          className="absolute z-30 right-0 left-0 mt-1 border border-slate-200 rounded-lg bg-white shadow-lg max-h-56 overflow-y-auto"
+        >
+          <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
+            {items.map(vi => {
+              const s = suggestions[vi.index];
+              return (
+                <button
+                  key={vi.key}
+                  type="button"
+                  role="option"
+                  aria-selected={s === value}
+                  onMouseDown={e => { e.preventDefault(); onChange(s); setOpen(false); }}
+                  style={{ position: "absolute", top: 0, right: 0, left: 0, height: `${vi.size}px`, transform: `translateY(${vi.start}px)` }}
+                  className="w-full text-right px-3 py-1.5 text-xs text-slate-700 hover:bg-blue-50 truncate"
+                >
+                  {s}
+                </button>
+              );
+            })}
+          </div>
         </div>
       )}
     </div>
@@ -149,6 +215,10 @@ export default function ConditionGroupsEditor({
   // alternative group needs the same client_status/service_type pair the first group starts
   // with (a bare group otherwise gives no hint that service_type is expected there too).
   defaultGroupConditions = null,
+  // "success" (default) keeps the original "ערך מדד הצלחה"/כן-לא wording for a goal condition
+  // used to define task success; "audience" is for the same condition type used to filter WHICH
+  // schools a task applies to, where the question is "current status", not a success target.
+  goalValueContext = "success",
 }) {
   function updateCondition(gi, ci, patch) {
     setGroups(prev => prev.map((g, i) => i !== gi ? g : {
@@ -165,7 +235,10 @@ export default function ConditionGroupsEditor({
     if (key.startsWith("goal:")) return { ...EMPTY_GOAL_CONDITION, goal_key: key.slice("goal:".length) };
     if (key.startsWith("control_letter:")) return { ...EMPTY_CONTROL_LETTER_CONDITION, field: key.slice("control_letter:".length) };
     if (key === "meeting:has") return { ...EMPTY_MEETING_CONDITION };
-    return { type: "field", field: key, op: "eq", value: "" };
+    // Free-text fields default to "contains" (see OPS_BY_TYPE comment) — everything else (select/
+    // number/bool) keeps the previous "eq" default.
+    const opt = (fieldOptions || []).find(f => f.field === key);
+    return { type: "field", field: key, op: opt?.type === "text" ? "contains" : "eq", value: "" };
   }
   function handleFieldPick(gi, ci, keys) {
     if (!keys.length) return;
@@ -214,7 +287,7 @@ export default function ConditionGroupsEditor({
             {group.conditions.map((cond, ci) => {
               const isMeetingCard = cond.type === "meeting" && forceMeetingNegateFalse;
               return (
-              <div key={ci} className={isMeetingCard ? "border border-slate-200 rounded-xl p-4 bg-white/60 space-y-3" : "border border-slate-100 rounded-lg p-2.5 bg-slate-50 space-y-2"}>
+              <div key={ci} className={isMeetingCard ? "border border-slate-200 rounded-xl p-4 bg-white/60 space-y-3" : "border border-slate-200 rounded-lg p-2.5 bg-slate-100 space-y-2"}>
                 <div className="flex items-center gap-2">
                   {isMeetingCard && <span className="text-sm font-semibold text-slate-700">פגישה {ci + 1}</span>}
                   {group.conditions.length > 1 && (
@@ -444,33 +517,23 @@ export default function ConditionGroupsEditor({
                     </label>
                     <div className="text-xs text-slate-500">
                       סוג תקציב
-                      <div className="flex flex-wrap gap-1.5 mt-0.5">
-                        {(budgetNameOptions || []).map(b => {
-                          const selected = (cond.budget_names || []).includes(b.value);
-                          return (
-                            <button key={b.value} type="button" aria-pressed={selected}
-                              onClick={() => updateCondition(gi, ci, {
-                                budget_names: selected
-                                  ? (cond.budget_names || []).filter(v => v !== b.value)
-                                  : [...(cond.budget_names || []), b.value],
-                              })}
-                              className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
-                                selected ? "bg-blue-600 border-blue-600 text-white font-semibold" : "border-slate-200 text-slate-600 hover:bg-slate-50"
-                              }`}>
-                              {b.label}
-                            </button>
-                          );
-                        })}
-                      </div>
+                      <MultiSelectChips
+                        options={budgetNameOptions}
+                        selected={cond.budget_names}
+                        onChange={v => updateCondition(gi, ci, { budget_names: v })}
+                      />
                     </div>
-                    <label className="text-xs text-slate-500">
-                      ערך מדד הצלחה
-                      <select value={cond.value} onChange={e => updateCondition(gi, ci, { value: e.target.value })}
-                        className="w-full mt-0.5 text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white">
-                        <option value="">בחר</option>
-                        {(goalValueOptions || []).map(v => <option key={v.value} value={v.value}>{v.label}</option>)}
-                      </select>
-                    </label>
+                    <div className="text-xs text-slate-500">
+                      {goalValueContext === "audience" ? "מצב נוכחי" : "ערך מדד הצלחה"}
+                      <MultiSelectChips
+                        options={(goalValueOptions || []).map(v => ({
+                          value: v.value,
+                          label: goalValueContext === "audience" ? (GOAL_STATUS_LABELS[v.value] || v.label) : v.label,
+                        }))}
+                        selected={toValueArray(cond.value)}
+                        onChange={v => updateCondition(gi, ci, { value: v })}
+                      />
+                    </div>
                   </div>
                 ) : cond.type === "control_letter" ? (() => {
                   const clOpt = (controlLetterFields || []).find(f => f.field === cond.field);
@@ -490,7 +553,7 @@ export default function ConditionGroupsEditor({
                           />
                         </div>
                       </label>
-                      {ops.length > 1 && (
+                      {clOpt?.type !== "select" && ops.length > 1 && (
                         <label className="text-xs text-slate-500">
                           יחס
                           <select value={cond.op} onChange={e => updateCondition(gi, ci, { op: e.target.value })}
@@ -504,11 +567,11 @@ export default function ConditionGroupsEditor({
                         {(() => {
                           if (clOpt?.options) {
                             return (
-                              <select value={cond.value} onChange={e => updateCondition(gi, ci, { value: e.target.value })}
-                                className="w-full mt-0.5 text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white">
-                                <option value="">בחר</option>
-                                {clOpt.options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                              </select>
+                              <MultiSelectChips
+                                options={clOpt.options}
+                                selected={toValueArray(cond.value)}
+                                onChange={v => updateCondition(gi, ci, { value: v })}
+                              />
                             );
                           }
                           if (clOpt?.type === "number") {
@@ -529,8 +592,9 @@ export default function ConditionGroupsEditor({
                   const opt = (fieldOptions || []).find(f => f.field === cond.field);
                   const ops = OPS_BY_TYPE[opt?.type] || OPS_BY_TYPE.text;
                   const isBool = opt?.type === "bool";
+                  const isSelect = opt?.type === "select";
                   return (
-                    <div className={`grid gap-2 ${isBool ? "grid-cols-2" : "grid-cols-3"}`}>
+                    <div className={`grid gap-2 ${isBool || isSelect ? "grid-cols-2" : "grid-cols-3"}`}>
                       <label className="text-xs text-slate-500 col-span-1">
                         שדה
                         <div className="mt-0.5">
@@ -544,7 +608,7 @@ export default function ConditionGroupsEditor({
                           />
                         </div>
                       </label>
-                      {!isBool && ops.length > 1 && (
+                      {!isBool && !isSelect && ops.length > 1 && (
                         <label className="text-xs text-slate-500 col-span-1">
                           יחס
                           <select value={cond.op} onChange={e => updateCondition(gi, ci, { op: e.target.value })}
@@ -558,11 +622,11 @@ export default function ConditionGroupsEditor({
                         {(() => {
                           if (opt?.options) {
                             return (
-                              <select value={cond.value} onChange={e => updateCondition(gi, ci, { value: e.target.value })}
-                                className="w-full mt-0.5 text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white">
-                                <option value="">בחר</option>
-                                {opt.options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                              </select>
+                              <MultiSelectChips
+                                options={opt.options}
+                                selected={toValueArray(cond.value)}
+                                onChange={v => updateCondition(gi, ci, { value: v })}
+                              />
                             );
                           }
                           if (opt?.type === "number") {

@@ -64,6 +64,24 @@ function meetingDateRange(cond) {
 
 const GOAL_VALUE_LABELS = { yes: "כן", no: "לא", unset: "טרם הוגדר" };
 
+// "תכנון X%"/"דיווח X%" — the approved short form (not "ביצוע"), used everywhere a goal is
+// displayed or picked, instead of GOAL_DEFINITIONS' long sentence label (e.g. "יעד תכנון:
+// לפחות 40% מהתקציב."). `goalDef` is one entry of goal_options (GET /tasks/field-options):
+// {key, label, goal_number, kind}.
+export function goalShortLabel(goalDef) {
+  if (!goalDef) return null;
+  return `${goalDef.kind === "reporting" ? "דיווח" : "תכנון"} ${goalDef.goal_number}%`;
+}
+
+// A condition's `value` for a select-type field/goal is a list going forward (multiple values
+// ORed together — see ConditionGroupsEditor.jsx's MultiSelectChips), but conditions saved
+// before that multi-select UI existed still carry a bare scalar. Normalize on read so both
+// display correctly.
+function toValueArray(value) {
+  if (Array.isArray(value)) return value;
+  return value || value === 0 ? [value] : [];
+}
+
 // `meta` (optional) is a bag of the GET /tasks/field-options payload's pieces —
 // {fieldOptions, goalOptions, divisionOptions, controlLetterFields} — used to resolve raw
 // stored values (e.g. "gefen", a goal_key, a division_type) to their Hebrew labels. Callers
@@ -79,23 +97,26 @@ export function describeCondition(cond, meta) {
   if (cond.type === "goal") {
     const goalOptions = meta?.goalOptions || [];
     const divisionOptions = meta?.divisionOptions || [];
-    const goalLabel = goalOptions.find(g => g.key === cond.goal_key)?.label || cond.goal_key || "—";
+    const goalDef = goalOptions.find(g => g.key === cond.goal_key);
+    const goalLabel = goalShortLabel(goalDef) || cond.goal_key || "—";
     const budgetNames = cond.budget_names || (cond.budget_name ? [cond.budget_name] : []);
-    const budgetLabel = budgetNames.length ? budgetNames.join(" + ") : "—";
-    const valueLabel = GOAL_VALUE_LABELS[cond.value] || cond.value || "—";
+    const budgetLabel = budgetNames.length ? budgetNames.join(" או ") : "—";
+    const valueLabel = toValueArray(cond.value).map(v => GOAL_VALUE_LABELS[v] || v).join(" או ") || "—";
     // Legacy conditions still carry a fixed division_type — shown as-is for those; new
     // conditions have none (auto-detected per school server-side, see task_logic.py).
     const divisionSuffix = cond.division_type
       ? ` — ${divisionOptions.find(d => d.value === cond.division_type)?.label || cond.division_type}`
       : "";
-    return `יעד: ${goalLabel}${divisionSuffix} / ${budgetLabel} = ${valueLabel}`;
+    return `יעד ${goalLabel}${divisionSuffix} / ${budgetLabel} = ${valueLabel}`;
   }
   if (cond.type === "control_letter") {
     const divisionOptions = meta?.divisionOptions || [];
     const controlLetterFields = meta?.controlLetterFields || [];
     const fieldDef = controlLetterFields.find(f => f.field === cond.field);
     const opLabel = NUMBER_OP_LABELS[cond.op] || "=";
-    const valueLabel = fieldDef?.options?.find(o => o.value === cond.value)?.label ?? cond.value;
+    const valueLabel = fieldDef?.options
+      ? toValueArray(cond.value).map(v => fieldDef.options.find(o => o.value === v)?.label ?? v).join(" או ")
+      : cond.value;
     const divisionSuffix = cond.division_type
       ? ` (${divisionOptions.find(d => d.value === cond.division_type)?.label || cond.division_type})`
       : "";
@@ -105,8 +126,9 @@ export function describeCondition(cond, meta) {
   if (cond.type === "field") {
     const opLabel = NUMBER_OP_LABELS[cond.op] || "=";
     const opt = fieldOptions.find(f => f.field === cond.field);
-    const optionLabel = opt?.options?.find(o => o.value === cond.value)?.label;
-    const valueLabel = optionLabel ?? (typeof cond.value === "boolean" ? (cond.value ? "כן" : "לא") : cond.value);
+    const valueLabel = opt?.options
+      ? toValueArray(cond.value).map(v => opt.options.find(o => o.value === v)?.label ?? v).join(" או ")
+      : (typeof cond.value === "boolean" ? (cond.value ? "כן" : "לא") : cond.value);
     return `${label} ${opLabel} ${valueLabel}`;
   }
   return label;

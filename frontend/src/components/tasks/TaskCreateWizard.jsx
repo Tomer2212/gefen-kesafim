@@ -697,6 +697,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
                     allSchools={allSchools} allowedTypes={["field"]}
                     goalOptions={goalOptions} divisionOptions={divisionOptions} budgetNameOptions={budgetNameOptions}
                     controlLetterFields={controlLetterFields} goalValueOptions={goalValueOptions}
+                    goalValueContext="audience"
                   />
                 </>
               ) : (
@@ -806,6 +807,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
                     groups={groups} setGroups={setGroups} fieldOptions={fieldOptions} meetingTypes={meetingTypes} allSchools={allSchools}
                     goalOptions={goalOptions} divisionOptions={divisionOptions} budgetNameOptions={budgetNameOptions}
                     controlLetterFields={controlLetterFields} goalValueOptions={goalValueOptions}
+                    goalValueContext="audience"
                   />
                 </>
               ) : (

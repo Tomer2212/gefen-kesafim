@@ -76,6 +76,10 @@ export default function PersonTaskCreateWizard({ onClose, onCreated, initialAcad
   const [budgetNameOptions, setBudgetNameOptions] = useState([]);
   const [goalValueOptions, setGoalValueOptions] = useState([]);
   const [meetingTypes, setMeetingTypes] = useState([]);
+  // Full school list — used only to build autocomplete suggestions for free-text field
+  // conditions (ConditionGroupsEditor's TypeaheadValueInput), same source TaskCreateWizard.jsx
+  // and DashboardPage's own filters already use (GET /schools/, role-scoped).
+  const [allSchools, setAllSchools] = useState([]);
   const [fieldGroups, setFieldGroups] = useState(() => [newConditionGroup(["field"])]);
   const [checking, setChecking] = useState(false);
   const [resolvedAssignees, setResolvedAssignees] = useState({}); // "school_id:division" -> [advisor_ids]
@@ -94,6 +98,7 @@ export default function PersonTaskCreateWizard({ onClose, onCreated, initialAcad
       setControlLetterFields(r.data?.control_letter_fields || []);
       setGoalValueOptions(r.data?.goal_value_options || []);
     }).catch(() => {});
+    axios.get("/schools/").then(r => setAllSchools(r.data || [])).catch(() => {});
   }, []);
 
   const assignableUsers = orgUsers.filter(u => {
@@ -132,8 +137,11 @@ export default function PersonTaskCreateWizard({ onClose, onCreated, initialAcad
   // client_status defaults to "active" but can be cleared/blanked out) — "יועץ מלווה" mode
   // can't proceed until both have a value, matching the meeting-task wizard's mandatory-field
   // red-border pattern.
-  const advisorClientStatusSet = advisorFieldGroups.some(g => g.conditions.some(c => c.type === "field" && c.field === "client_status" && c.value));
-  const advisorServiceTypeSet = advisorFieldGroups.some(g => g.conditions.some(c => c.type === "field" && c.field === "service_type" && c.value));
+  // c.value is a list going forward (multi-select chips) — [] is truthy in JS, so this must
+  // check length, not just truthiness, or an empty selection would wrongly count as "set".
+  const hasConditionValue = c => (Array.isArray(c.value) ? c.value.length > 0 : !!c.value);
+  const advisorClientStatusSet = advisorFieldGroups.some(g => g.conditions.some(c => c.type === "field" && c.field === "client_status" && hasConditionValue(c)));
+  const advisorServiceTypeSet = advisorFieldGroups.some(g => g.conditions.some(c => c.type === "field" && c.field === "service_type" && hasConditionValue(c)));
   const nameSet = name.trim().length > 0;
   const descriptionSet = description.trim().length > 0;
   const canProceedDetails = nameSet && descriptionSet
@@ -324,7 +332,8 @@ export default function PersonTaskCreateWizard({ onClose, onCreated, initialAcad
                       groups={advisorFieldGroups} setGroups={setAdvisorFieldGroups} fieldOptions={fieldOptions} meetingTypes={meetingTypes}
                       allowedTypes={["field"]} goalOptions={goalOptions} divisionOptions={divisionOptions}
                       budgetNameOptions={budgetNameOptions} controlLetterFields={controlLetterFields} goalValueOptions={goalValueOptions}
-                      defaultGroupConditions={ADVISOR_DEFAULT_CONDITIONS}
+                      defaultGroupConditions={ADVISOR_DEFAULT_CONDITIONS} allSchools={allSchools}
+                      goalValueContext="audience"
                     />
                     {!advisorClientStatusSet && (
                       <p role="alert" className="text-xs text-red-600">יש לבחור ערך עבור "סטטוס לקוח" — שדה חובה.</p>
@@ -454,6 +463,7 @@ export default function PersonTaskCreateWizard({ onClose, onCreated, initialAcad
                   groups={fieldGroups} setGroups={setFieldGroups} fieldOptions={fieldOptions} meetingTypes={meetingTypes}
                   allowedTypes={["field"]} goalOptions={goalOptions} divisionOptions={divisionOptions}
                   budgetNameOptions={budgetNameOptions} controlLetterFields={controlLetterFields} goalValueOptions={goalValueOptions}
+                  allSchools={allSchools}
                 />
               )}
               {(metricKind === "checkbox" || metricKind === "number" || metricKind === "file") && (

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { goalShortLabel } from "./taskShared";
 
 // Categorizes SCHOOL_FIELDS/YEAR_ADMIN_FIELDS (backend/task_logic.py) into named groups for
 // the wide picker panel below — mirrors DashboardPage.jsx's "עמודות להצגה" column picker
@@ -68,7 +69,7 @@ export default function FieldPickerButton({ value, fieldOptions, goalOptions, co
   const panelRef = useRef(null);
 
   const labelByField = Object.fromEntries((fieldOptions || []).map(f => [f.field, f.label]));
-  for (const g of (goalOptions || [])) labelByField[`goal:${g.key}`] = `יעד: ${g.label}`;
+  for (const g of (goalOptions || [])) labelByField[`goal:${g.key}`] = `יעד ${goalShortLabel(g)}`;
   for (const f of (controlLetterFields || [])) labelByField[`control_letter:${f.field}`] = `מכתב בקרה: ${f.label}`;
   if (allowMeeting) labelByField["meeting:has"] = "פגישה (סוג / סטטוס / תאריכים)";
   const knownFields = new Set(Object.keys(labelByField));
