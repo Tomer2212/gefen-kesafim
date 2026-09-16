@@ -15,7 +15,10 @@ export function advisorDivisionLabel(task) {
   const values = new Set();
   for (const group of task.target_criteria?.groups || []) {
     for (const cond of group.conditions || []) {
-      if (cond.type === "field" && cond.field === "service_type" && cond.value) values.add(cond.value);
+      if (cond.type !== "field" || cond.field !== "service_type" || !cond.value) continue;
+      // cond.value is a list going forward (multi-select chips, ORed) — conditions saved before
+      // that UI existed still carry a bare scalar.
+      for (const v of Array.isArray(cond.value) ? cond.value : [cond.value]) values.add(v);
     }
   }
   if (!values.size) return null;

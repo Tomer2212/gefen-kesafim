@@ -534,6 +534,14 @@ def _compare(ftype: str | None, op: str, actual, target) -> bool:
         }[op]
     if op == "contains":
         return str(target or "").strip().lower() in str(actual or "").lower()
+    if isinstance(target, (list, tuple)):
+        # Multi-select "one of" condition (select-type fields in ConditionGroupsEditor no
+        # longer offer a single-value dropdown — the value is always a list of accepted raw
+        # values now, ORed together). "ne" isn't exposed in the UI for select fields (the
+        # relation picker is hidden entirely) but inverting here costs nothing and keeps the
+        # door open.
+        is_member = str(actual or "").strip() in {str(t or "").strip() for t in target}
+        return not is_member if op == "ne" else is_member
     if isinstance(actual, list):
         is_member = target in actual
         return not is_member if op == "ne" else is_member
@@ -567,7 +575,17 @@ def _goal_budget_names(cond: dict) -> list[str]:
     return [legacy] if legacy else [None]
 
 
-def _eval_single_goal(division_type, budget_name, goal_key: str, value: str, goal_rows: list[dict]) -> bool:
+def _goal_values(cond: dict) -> list[str]:
+    """`value` (new, list — same multi-select convention as budget_names) with a fallback for
+    conditions saved before the multi-select value picker existed (a bare "yes"/"no"/"unset"
+    string, or falsy meaning "unset")."""
+    value = cond.get("value")
+    if isinstance(value, list):
+        return value or ["unset"]
+    return [value] if value else ["unset"]
+
+
+def _eval_single_goal(division_type, budget_name, goal_key: str, values: list[str], goal_rows: list[dict]) -> bool:
     row = next((
         r for r in goal_rows
         if r.get("division_type") == division_type
@@ -575,14 +593,11 @@ def _eval_single_goal(division_type, budget_name, goal_key: str, value: str, goa
         and r.get("goal_key") == goal_key
     ), None)
     met = row.get("met") if row else None
-    if value == "yes":
-        return met is True
-    if value == "no":
-        return met is False
-    return met is None
+    met_str = "yes" if met is True else "no" if met is False else "unset"
+    return met_str in values
 
 
-def _eval_goal_condition(cond: dict, goal_rows: list[dict]) -> bool:
+def _eval_goal_condition(cond: dict, goal_rows: list[dict], combine_divisions: str = "and") -> bool:
     """No negate/op concept — `value` ("yes"/"no"/"unset") is the whole comparison. "unset"
     means no school_goals row exists for the relevant (division_type, budget_name, goal_key)
     combination, or one exists with met still NULL (never explicitly toggled).
@@ -590,20 +605,33 @@ def _eval_goal_condition(cond: dict, goal_rows: list[dict]) -> bool:
     `division_type`: legacy exact-match path when a condition still has one saved (old data) —
     unchanged single-row check. New conditions never set it: instead every division_type that
     actually has a school_goals row for this goal_key is checked (a six-year school naturally
-    has two), ANDed together — a division the school doesn't have simply contributes nothing.
-    `budget_names` is always ANDed across every listed budget (see _goal_budget_names)."""
+    has two). Both `budget_names` and `value` are multi-select lists ORed together within a
+    division — matching any one of the checked budgets against any one of the checked
+    yes/no/unset values is enough (see _goal_budget_names/_goal_values for the legacy-scalar
+    fallback each one supports).
+
+    `combine_divisions` controls how the per-division results are combined:
+    - "and" (default, used for success-criteria evaluation via _resolve_condition): every
+      division the school has must satisfy the condition. Unchanged from the original
+      behavior — success tracking shouldn't silently change semantics for existing tasks.
+    - "or" (used for audience/targeting evaluation via _eval_condition_for_matching): any one
+      division satisfying the condition is enough — e.g. a six-year school where only the
+      ביניים division fails a goal should still match a "לא עומד ביעד" audience filter, even
+      though the עליונה division meets it.
+    """
     goal_key = cond.get("goal_key")
-    value = cond.get("value") or "unset"
+    values = _goal_values(cond)
     budget_names = _goal_budget_names(cond)
     division_type = cond.get("division_type")
     if division_type:
         divisions = [division_type]
     else:
         divisions = sorted({r["division_type"] for r in goal_rows if r.get("goal_key") == goal_key}) or [None]
-    return all(
-        _eval_single_goal(d, b, goal_key, value, goal_rows)
-        for d in divisions for b in budget_names
-    )
+    per_division = [
+        any(_eval_single_goal(d, b, goal_key, values, goal_rows) for b in budget_names)
+        for d in divisions
+    ]
+    return any(per_division) if combine_divisions == "or" else all(per_division)
 
 
 def _eval_single_control_letter(division_type, field: str, op: str, target, cl_rows: list[dict]) -> bool:
@@ -639,7 +667,7 @@ def _eval_condition_for_matching(
     if ctype == "meeting":
         return _eval_meeting_condition(cond, school_meetings)
     if ctype == "goal":
-        return _eval_goal_condition(cond, goal_rows)
+        return _eval_goal_condition(cond, goal_rows, combine_divisions="or")
     if ctype == "control_letter":
         return _eval_control_letter_condition(cond, cl_rows)
     return _eval_field_condition(cond, school, year_row)
