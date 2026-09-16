@@ -59,6 +59,7 @@ function parseAmount(raw) {
 // Column-filter/sort type per column — only columns backed by real data get a sort/filter
 // icon (mirrors AdminPage's getAdminColumnFilterType: no entry here means no icon rendered).
 const COLLECTION_FILTER_TYPES = {
+  name: "text",
   gefen_organized: "select",
   order_amount_gefen: "number",
   amount_paid: "number",
@@ -98,6 +99,8 @@ const GEFEN_ORGANIZED_SORT_RANK = { mismatch: 0, matched: 1, not_checked: 2, not
 // deposit date / smallest invoice number) since a school can have several of each.
 function getCollectionSortValue(yad, key) {
   switch (key) {
+    case "name":
+      return yad.name || "";
     case "gefen_organized":
       return GEFEN_ORGANIZED_SORT_RANK[getGefenOrganizedStatus(yad)];
     case "order_amount_gefen":
@@ -137,9 +140,15 @@ function passesCollectionColumnFilters(yad, filters) {
     if (type === "text") {
       const needle = (spec.value || "").trim();
       if (!needle) continue;
-      const values = yad.invoice_numbers || [];
-      const matches = spec.op === "equals" ? values.includes(needle) : values.some(v => v.includes(needle));
-      if (!matches) return false;
+      if (key === "invoice_number") {
+        const values = yad.invoice_numbers || [];
+        const matches = spec.op === "equals" ? values.includes(needle) : values.some(v => v.includes(needle));
+        if (!matches) return false;
+      } else {
+        const cellValue = String(yad[key] ?? "");
+        const matches = spec.op === "equals" ? cellValue === needle : cellValue.includes(needle);
+        if (!matches) return false;
+      }
     } else if (type === "number") {
       if (spec.value === "" || spec.value === null || spec.value === undefined) continue;
       const cellValue = Number(getCollectionSortValue(yad, key));
@@ -680,16 +689,11 @@ function ClientStatusFilter({ selected, onChange }) {
       <button
         type="button"
         onClick={() => (open ? setOpen(false) : openDropdown())}
-        className="input-field text-sm text-right"
-        style={{ minWidth: 160 }}
+        className="btn-ghost text-xs px-3 py-1.5"
         aria-expanded={open}
         aria-haspopup="listbox"
       >
-        {selected.length > 0 ? (
-          <span className="text-slate-700">סטטוס לקוח: {selected.length} נבחרו</span>
-        ) : (
-          <span className="text-slate-300 select-none">סטטוס לקוח: הכל</span>
-        )}
+        {selected.length > 0 ? `סטטוס לקוח: ${selected.length} נבחרו` : "סטטוס לקוח: הכל"}
       </button>
       {open && (
         <div
@@ -1069,12 +1073,12 @@ export default function AdminCollectionTab() {
         });
 
     if (Object.keys(columnFilters).length > 0) {
-      rows = rows.filter(s => passesCollectionColumnFilters(yearAdminData[s.id] || {}, columnFilters));
+      rows = rows.filter(s => passesCollectionColumnFilters({ ...(yearAdminData[s.id] || {}), name: s.name }, columnFilters));
     }
 
     if (sortKey) {
       // decorate-sort: compute each row's sort value once, not twice per comparison.
-      const sv = new Map(rows.map(s => [s.id, getCollectionSortValue(yearAdminData[s.id] || {}, sortKey)]));
+      const sv = new Map(rows.map(s => [s.id, getCollectionSortValue({ ...(yearAdminData[s.id] || {}), name: s.name }, sortKey)]));
       rows = [...rows].sort((a, b) => {
         const va = sv.get(a.id);
         const vb = sv.get(b.id);
@@ -1091,6 +1095,32 @@ export default function AdminCollectionTab() {
     return rows;
   }, [schools, yearAdminData, statusFilter, columnFilters, sortKey, sortDir, sortMismatchFirst]);
 
+  // Sums for the frozen summary row — over the currently filtered/visible set of schools,
+  // per-column, skipping rows with no value for that field (null stays null when nothing
+  // in the set has a value, so the row shows "—" instead of a misleading 0).
+  const collectionTotals = useMemo(() => {
+    let orderSum = 0, paidSum = 0, remainingSum = 0;
+    let hasOrder = false, hasPaid = false, hasRemaining = false;
+    for (const s of filteredSchools) {
+      const yad = yearAdminData[s.id] || {};
+      if (yad.order_amount_gefen != null) {
+        orderSum += yad.order_amount_gefen;
+        hasOrder = true;
+        remainingSum += yad.order_amount_gefen - (yad.amount_paid ?? 0);
+        hasRemaining = true;
+      }
+      if (yad.amount_paid != null) {
+        paidSum += yad.amount_paid;
+        hasPaid = true;
+      }
+    }
+    return {
+      order_amount_gefen: hasOrder ? orderSum : null,
+      amount_paid: hasPaid ? paidSum : null,
+      remaining_to_pay: hasRemaining ? remainingSum : null,
+    };
+  }, [filteredSchools, yearAdminData]);
+
   const hasResults = Object.values(yearAdminData).some(yad => yad.gefen_organized_checked_at);
 
   // Stable per-row save handler for <CollectionRow> (always the latest closure via ref).
@@ -1100,6 +1130,33 @@ export default function AdminCollectionTab() {
 
   // Row virtualization — keeps only ~40 <tr>s in the DOM regardless of school count.
   const collectionScrollRef = useRef(null);
+  // Summary row lives in its own non-scrolling table below the main one (so it stays pinned
+  // to the bottom of the white card regardless of row count) — its horizontal scroll is kept
+  // in sync with the main table's via this ref.
+  const collectionFooterScrollRef = useRef(null);
+  const handleCollectionScroll = useCallback(() => {
+    if (collectionFooterScrollRef.current && collectionScrollRef.current) {
+      collectionFooterScrollRef.current.scrollLeft = collectionScrollRef.current.scrollLeft;
+    }
+  }, []);
+
+  // Column widths, measured from the main table's (always-rendered, non-virtualized) header
+  // cells, so the separate footer table's columns line up with the ones they summarize —
+  // two independent <table>s otherwise auto-size their columns differently.
+  const collectionTheadRowRef = useRef(null);
+  const [collectionColWidths, setCollectionColWidths] = useState([]);
+  useLayoutEffect(() => {
+    const row = collectionTheadRowRef.current;
+    if (!row) return;
+    const cells = Array.from(row.children);
+    function measure() {
+      setCollectionColWidths(cells.map(c => c.getBoundingClientRect().width));
+    }
+    measure();
+    const ro = new ResizeObserver(measure);
+    cells.forEach(c => ro.observe(c));
+    return () => ro.disconnect();
+  }, [visibleColumns, loading]);
   const collectionRowVirtualizer = useVirtualizer({
     count: filteredSchools.length,
     getScrollElement: () => collectionScrollRef.current,
@@ -1143,16 +1200,25 @@ export default function AdminCollectionTab() {
         <AcademicYearSelector value={academicYear} onChange={setAcademicYear} />
       </div>
 
+      {!loading && (
+        <p className="text-sm text-slate-500 mb-2">
+          {filteredSchools.length === schools.length
+            ? `סה"כ ${schools.length} בתי ספר`
+            : `סה"כ ${filteredSchools.length} בתי ספר מתוך ${schools.length}`}
+        </p>
+      )}
+
       <div className="glass-card rounded-2xl overflow-hidden relative mb-3 flex flex-col" style={{ minHeight: "calc(100vh - 260px)" }}>
         {loading ? (
           <div role="status" aria-label="טוען נתוני גבייה" className="flex justify-center py-10">
             <div aria-hidden="true" className="spinner w-8 h-8" />
           </div>
         ) : (
-          <div ref={collectionScrollRef} className="flex-1 min-h-0 overflow-auto dash-scroll-x" style={{ maxHeight: "calc(100vh - 260px)" }}>
+          <div ref={collectionScrollRef} onScroll={handleCollectionScroll} className="flex-1 min-h-0 overflow-auto dash-scroll-x" style={{ maxHeight: "calc(100vh - 260px)" }}>
             <table className="w-full text-sm border-collapse">
               <thead>
                 <tr
+                  ref={collectionTheadRowRef}
                   className="border-b border-slate-200"
                   style={{ position: "sticky", top: 0, background: "rgba(241,245,249,0.97)", zIndex: 10, backdropFilter: "blur(8px)" }}
                 >
@@ -1161,7 +1227,31 @@ export default function AdminCollectionTab() {
                     className="text-right px-5 py-3 text-slate-900 font-semibold border-l border-slate-200 whitespace-nowrap"
                     style={{ position: "sticky", right: 0, zIndex: 11, background: "rgba(241,245,249,0.97)", minWidth: "14rem" }}
                   >
-                    שם מוסד
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => toggleSort("name")}
+                        className={`flex items-center gap-1 hover:text-blue-600 ${sortKey === "name" ? "text-blue-600" : ""}`}
+                      >
+                        <span className="whitespace-nowrap">שם מוסד</span>
+                        {sortKey === "name" && (
+                          <svg aria-hidden="true" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                            {sortDir === "asc" ? <polyline points="18 15 12 9 6 15" /> : <polyline points="6 9 12 15 18 9" />}
+                          </svg>
+                        )}
+                      </button>
+                      <CollectionFilterButton
+                        col={{ key: "name", label: "שם מוסד" }}
+                        filterType="text"
+                        isFiltered={isCollectionFilterActive(columnFilters.name)}
+                        isOpen={openFilterKey === "name"}
+                        onToggle={() => setOpenFilterKey(o => (o === "name" ? null : "name"))}
+                        onClose={() => setOpenFilterKey(null)}
+                        spec={columnFilters.name}
+                        onChange={spec => setColumnFilters(prev => ({ ...prev, name: spec }))}
+                        onClear={() => setColumnFilters(prev => { const next = { ...prev }; delete next.name; return next; })}
+                      />
+                    </div>
                   </th>
                   {visibleColumns.map((col, i) => {
                     const isLast = i === visibleColumns.length - 1;
@@ -1252,6 +1342,44 @@ export default function AdminCollectionTab() {
                   </>
                 );
               })()}
+            </table>
+          </div>
+        )}
+        {!loading && filteredSchools.length > 0 && (
+          <div
+            ref={collectionFooterScrollRef}
+            className="flex-shrink-0 overflow-x-hidden border-t-2 border-slate-200"
+            style={{ background: "rgba(241,245,249,0.97)" }}
+          >
+            <table className="w-full text-sm border-collapse" style={{ tableLayout: "fixed" }}>
+              {collectionColWidths.length > 0 && (
+                <colgroup>
+                  {collectionColWidths.map((w, i) => (
+                    <col key={i} style={{ width: `${w}px` }} />
+                  ))}
+                </colgroup>
+              )}
+              <tbody>
+                <tr>
+                  <td
+                    className="px-5 py-3 text-slate-900 font-semibold border-l border-slate-100 whitespace-nowrap overflow-hidden text-ellipsis"
+                    style={{ position: "sticky", right: 0, zIndex: 1, background: "rgba(241,245,249,0.97)" }}
+                  >
+                    סה"כ
+                  </td>
+                  {visibleColumns.map((col, i) => {
+                    const isLast = i === visibleColumns.length - 1;
+                    const tdClass = `px-4 py-3 text-slate-900 font-semibold whitespace-nowrap overflow-hidden text-ellipsis ${isLast ? "" : "border-l border-slate-100"}`;
+                    const total = collectionTotals[col.key];
+                    const showTotal = col.key === "order_amount_gefen" || col.key === "amount_paid" || col.key === "remaining_to_pay";
+                    return (
+                      <td key={col.key} className={tdClass}>
+                        {showTotal ? (total === null ? "—" : formatAmount(total)) : ""}
+                      </td>
+                    );
+                  })}
+                </tr>
+              </tbody>
             </table>
           </div>
         )}

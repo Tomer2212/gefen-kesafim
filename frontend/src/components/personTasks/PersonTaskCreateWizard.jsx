@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import axios from "axios";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
-import ConditionGroupsEditor, { newConditionGroup } from "../tasks/ConditionGroupsEditor";
+import ConditionGroupsEditor, { newConditionGroup, MultiSelectChips } from "../tasks/ConditionGroupsEditor";
 import ScheduleCriteriaModal from "../tasks/ScheduleCriteriaModal";
 import DirectStyleDateInput from "../tasks/DirectStyleDateInput";
 import { AcademicYearSelector } from "../AcademicYearSelector";
@@ -21,6 +21,16 @@ const ADVISOR_DEFAULT_CONDITIONS = [
 function defaultAdvisorFieldGroups() {
   return [{ conditions: ADVISOR_DEFAULT_CONDITIONS.map(c => ({ ...c })) }];
 }
+// Mirrors backend/routers/person_tasks_router.py's _SERVICE_TYPE_TO_DIVISIONS exactly — used
+// only to auto-fill the "advisor routing" chips when the audience filter's service_type
+// selection is unambiguous (see advisorDivisions below); the actual routing decision always
+// happens server-side against live data.
+const SERVICE_TYPE_TO_DIVISIONS = {
+  gefen: ["gefen"], current: ["current"], district: ["district"], gefen_current: ["gefen", "current"],
+};
+const ADVISOR_DIVISION_OPTIONS = [
+  { value: "gefen", label: "גפן" }, { value: "current", label: "שוטף" }, { value: "district", label: "מחוז" },
+];
 const METRIC_KIND_OPTIONS = [
   { value: "field", pill: "עדכון שדה קיים", label: "עדכון שדה קיים במערכת", hint: "בחר/י את השדה וערכו הרצוי שיעידו על השלמת המשימה בהצלחה." },
   { value: "checkbox", pill: 'כפתור "בוצע"', label: "כפתור \"סימנתי שביצעתי\"", hint: "המשתמש עצמו מסמן שהשלים." },
@@ -63,6 +73,11 @@ export default function PersonTaskCreateWizard({ onClose, onCreated, initialAcad
   const [selectedUserIds, setSelectedUserIds] = useState([]);
   const [userSearch, setUserSearch] = useState("");
   const [advisorFieldGroups, setAdvisorFieldGroups] = useState(() => defaultAdvisorFieldGroups());
+  // Explicit "which advisor division(s) should this task reach" override, independent of the
+  // audience filter's service_type condition(s) — a school whose service_type is "gefen_current"
+  // otherwise always routes to BOTH its גפן and שוטף advisors, with no way to target just one.
+  // See advisorDivisionsAmbiguous below for when this must be chosen explicitly vs. auto-filled.
+  const [advisorDivisions, setAdvisorDivisions] = useState([]);
   const [advisorCheck, setAdvisorCheck] = useState(null); // {rows, matched_school_ids, total_schools, ok_schools}
   const [advisorCheckLoading, setAdvisorCheckLoading] = useState(false);
   const [scheduledFor, setScheduledFor] = useState(""); // datetime-local string, empty = create now
@@ -142,6 +157,28 @@ export default function PersonTaskCreateWizard({ onClose, onCreated, initialAcad
   const hasConditionValue = c => (Array.isArray(c.value) ? c.value.length > 0 : !!c.value);
   const advisorClientStatusSet = advisorFieldGroups.some(g => g.conditions.some(c => c.type === "field" && c.field === "client_status" && hasConditionValue(c)));
   const advisorServiceTypeSet = advisorFieldGroups.some(g => g.conditions.some(c => c.type === "field" && c.field === "service_type" && hasConditionValue(c)));
+
+  // Every distinct service_type value checked anywhere in the audience filter (across all "או"
+  // groups) — used only to decide whether "which advisor division(s) should receive this" can be
+  // inferred automatically or must be chosen explicitly. Unambiguous exactly when a single,
+  // non-combined value is selected (e.g. only "גפן") — "גפן+שוטף", or several distinct values
+  // together, always require an explicit choice since either legitimately implies more than one
+  // division. No service_type condition at all is also treated as ambiguous — there's nothing to
+  // infer from.
+  const serviceTypeValues = new Set(
+    advisorFieldGroups.flatMap(g => g.conditions
+      .filter(c => c.type === "field" && c.field === "service_type")
+      .flatMap(c => (Array.isArray(c.value) ? c.value : (c.value ? [c.value] : [])))),
+  );
+  const advisorDivisionsAmbiguous = serviceTypeValues.size !== 1 || serviceTypeValues.has("gefen_current");
+  useEffect(() => {
+    if (serviceTypeValues.size === 1 && !serviceTypeValues.has("gefen_current")) {
+      setAdvisorDivisions(SERVICE_TYPE_TO_DIVISIONS[[...serviceTypeValues][0]] || []);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [[...serviceTypeValues].sort().join(",")]);
+  const advisorDivisionsSet = !advisorDivisionsAmbiguous || advisorDivisions.length > 0;
+
   const nameSet = name.trim().length > 0;
   const descriptionSet = description.trim().length > 0;
   const canProceedDetails = nameSet && descriptionSet
@@ -149,7 +186,7 @@ export default function PersonTaskCreateWizard({ onClose, onCreated, initialAcad
       ? selectedUserIds.length > 0
       // A scheduled task defers matching entirely to activation time, so the live check isn't
       // required to proceed (see handleMetricNext/submitTask).
-      : advisorClientStatusSet && advisorServiceTypeSet && (!!scheduledFor || !!advisorCheck?.total_schools));
+      : advisorClientStatusSet && advisorServiceTypeSet && advisorDivisionsSet && (!!scheduledFor || !!advisorCheck?.total_schools));
 
   function advisorCriteria() {
     return { groups: advisorFieldGroups.filter(g => g.conditions.length > 0) };
@@ -164,14 +201,14 @@ export default function PersonTaskCreateWizard({ onClose, onCreated, initialAcad
     if (!criteria.groups.some(g => g.conditions.length > 0)) { setAdvisorCheck(null); return; }
     setAdvisorCheckLoading(true);
     const timer = setTimeout(() => {
-      axios.post("/person-tasks/schools/check", { criteria, academic_year: academicYear })
+      axios.post("/person-tasks/schools/check", { criteria, academic_year: academicYear, advisor_divisions: advisorDivisions })
         .then(r => setAdvisorCheck(r.data))
         .catch(() => setAdvisorCheck(null))
         .finally(() => setAdvisorCheckLoading(false));
     }, 400);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [assignmentMode, scheduledFor, academicYear, JSON.stringify(advisorFieldGroups)]);
+  }, [assignmentMode, scheduledFor, academicYear, JSON.stringify(advisorFieldGroups), JSON.stringify(advisorDivisions)]);
   const canProceedMetric = metricKind === "field"
     ? fieldGroups.some(g => g.conditions.length > 0)
     : true;
@@ -191,7 +228,7 @@ export default function PersonTaskCreateWizard({ onClose, onCreated, initialAcad
     setChecking(true);
     setError(null);
     try {
-      const res = await axios.post("/person-tasks/schools/check", { criteria: advisorCriteria(), academic_year: academicYear });
+      const res = await axios.post("/person-tasks/schools/check", { criteria: advisorCriteria(), academic_year: academicYear, advisor_divisions: advisorDivisions });
       setAdvisorCheck(res.data);
       if ((res.data?.rows || []).some(r => r.kind !== "ok")) {
         setStep("problems");
@@ -233,6 +270,7 @@ export default function PersonTaskCreateWizard({ onClose, onCreated, initialAcad
         assignment_mode: assignmentMode,
         target_user_ids: assignmentMode === "users" ? selectedUserIds : null,
         target_criteria: assignmentMode === "schools" ? advisorCriteria() : null,
+        advisor_divisions: assignmentMode === "schools" ? advisorDivisions : null,
         academic_year: academicYear,
         success_metric,
         resolved_school_assignees: { ...resolvedAssignees, ...extraResolved },
@@ -249,7 +287,7 @@ export default function PersonTaskCreateWizard({ onClose, onCreated, initialAcad
   async function retryAfterFixingMissing() {
     setChecking(true);
     try {
-      const res = await axios.post("/person-tasks/schools/check", { criteria: advisorCriteria(), academic_year: academicYear });
+      const res = await axios.post("/person-tasks/schools/check", { criteria: advisorCriteria(), academic_year: academicYear, advisor_divisions: advisorDivisions });
       setAdvisorCheck(res.data);
       if (!(res.data?.rows || []).some(r => r.kind !== "ok")) setStep("metric");
     } finally {
@@ -325,15 +363,26 @@ export default function PersonTaskCreateWizard({ onClose, onCreated, initialAcad
 
                 {assignmentMode === "schools" ? (
                   <div className="space-y-2">
-                    <p className="text-xs text-slate-500">
-                      יש לסנן את בתי הספר שהמשימה תוטל על היועצים המלווים שלהם.
-                    </p>
+                    <div className="border border-slate-200 rounded-xl p-3 space-y-1 bg-slate-100">
+                      <span className="text-xs font-semibold text-slate-500">המשימה תישלח ליועץ המלווה בתחום:</span>
+                      <MultiSelectChips
+                        options={ADVISOR_DIVISION_OPTIONS}
+                        selected={advisorDivisions}
+                        onChange={setAdvisorDivisions}
+                      />
+                      {advisorDivisionsAmbiguous && !advisorDivisionsSet && (
+                        <p role="alert" className="text-xs text-red-600">
+                          נבחרו כמה סוגי שירות (או "גפן+שוטף") — יש לבחור במפורש לאיזה יועץ לשלוח.
+                        </p>
+                      )}
+                    </div>
+                    <div className="h-2" />
                     <ConditionGroupsEditor
                       groups={advisorFieldGroups} setGroups={setAdvisorFieldGroups} fieldOptions={fieldOptions} meetingTypes={meetingTypes}
                       allowedTypes={["field"]} goalOptions={goalOptions} divisionOptions={divisionOptions}
                       budgetNameOptions={budgetNameOptions} controlLetterFields={controlLetterFields} goalValueOptions={goalValueOptions}
                       defaultGroupConditions={ADVISOR_DEFAULT_CONDITIONS} allSchools={allSchools}
-                      goalValueContext="audience"
+                      goalValueContext="audience" groupTitle='אילו בתי ספר ייכללו במשימה? (נא לסנן)'
                     />
                     {!advisorClientStatusSet && (
                       <p role="alert" className="text-xs text-red-600">יש לבחור ערך עבור "סטטוס לקוח" — שדה חובה.</p>
