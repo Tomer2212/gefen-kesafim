@@ -57,9 +57,12 @@ def create_direct_booking_token(db, org_id: str, school_id: str, advisor_ids: li
     token = secrets.token_urlsafe(32)
     now = datetime.now(timezone.utc)
     last_end = max(date.fromisoformat(r["end_date"]) for r in ranges)
+    # Floor is 30 days regardless of range length — a busy school secretary who opens the
+    # link late (or opens it, doesn't book yet, and comes back later) must not find it expired
+    # before then. Still extends past 30 days when the requested date range itself runs longer.
     expires_at = max(
         datetime.combine(last_end, datetime.min.time(), tzinfo=timezone.utc) + timedelta(days=3),
-        now + timedelta(days=7),
+        now + timedelta(days=30),
     )
     res = db.table("meeting_booking_tokens").insert({
         "org_id": org_id,

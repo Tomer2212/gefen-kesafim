@@ -42,6 +42,7 @@ from auth import get_current_user, invalidate_profile_cache
 from email_resend import send_resend_email
 from meeting_labels import (
     CANONICAL_LABELS,
+    MEETING_SERVICE_TYPE_LABELS,
     MEETING_SERVICE_TYPE_VALUES,
     MEETING_STATUS_VALUES,
     MEETING_TYPE_VALUES,
@@ -1060,7 +1061,7 @@ def restore_school(
                 continue  # already synced (wasn't touched by the delete flow)
             with graph_client.calendar_sync_lock(db, m["id"]) as acquired:
                 if acquired:
-                    subject = _build_meeting_subject(db, school_id, m.get("participants"), m.get("primary_contact_key"))
+                    subject = _build_meeting_subject(db, school_id, m.get("participants"), m.get("primary_contact_key"), m.get("meeting_service_type"))
                     sync_map = graph_client.sync_meeting_create(db, user["org_id"], m, subject)
                     if sync_map:
                         graph_client.persist_calendar_sync(db, m["id"], sync_map)
@@ -4965,7 +4966,7 @@ def transfer_user_meetings(user_id: str, body: TransferMeetingsIn, user: Annotat
                 if acquired:
                     fresh = db.table("meetings").select("calendar_sync").eq("id", m["id"]).execute()
                     previous_sync = (fresh.data[0].get("calendar_sync") or {}) if fresh.data else {}
-                    subject = _build_meeting_subject(db, m["school_id"], m.get("participants"), m.get("primary_contact_key"))
+                    subject = _build_meeting_subject(db, m["school_id"], m.get("participants"), m.get("primary_contact_key"), m.get("meeting_service_type"))
                     sync_map = graph_client.sync_meeting_update(db, user["org_id"], {**m, "advisor_ids": new_ids}, previous_sync, subject)
                     graph_client.persist_calendar_sync(db, m["id"], sync_map)
                     conflict = bool(sync_map.get(body.new_advisor_id, {}).get("conflict"))
@@ -5992,8 +5993,11 @@ def download_school_file(
 # Meetings
 # ---------------------------------------------------------------------------
 
-def _build_meeting_subject(db, school_id: str, participants: list[dict] | None, primary_contact_key: str | None) -> str:
-    """Outlook event subject: "<school>, <city> - <contact name> - <contact phone>".
+def _build_meeting_subject(db, school_id: str, participants: list[dict] | None, primary_contact_key: str | None,
+                            meeting_service_type: str | None = None) -> str:
+    """Outlook event subject: "<service type> - <school>, <city> - <contact name> - <contact phone>".
+    The service-type prefix is omitted entirely when the meeting has none set — never shows
+    an empty leading " - ".
 
     The contact is resolved from `participants` (selected in the meeting row): if exactly
     one principal-like contact (principal / principal_chativa) is among them, it wins;
@@ -6039,13 +6043,18 @@ def _build_meeting_subject(db, school_id: str, participants: list[dict] | None, 
 
     name, phone = contact_map.get(key, (None, None)) if key else (None, None)
     if name:
-        return f"{base} - {name} - {phone or ''}".rstrip(" -")
+        base = f"{base} - {name} - {phone or ''}".rstrip(" -")
+
+    service_label = MEETING_SERVICE_TYPE_LABELS.get(meeting_service_type)
+    if service_label:
+        return f"{service_label} - {base}"
     return base
 
 
 class MeetingSubjectPreviewIn(BaseModel):
     participants: list[dict] | None = None
     primary_contact_key: str | None = None
+    meeting_service_type: str | None = None
 
 
 @router.post("/{school_id}/meeting-subject-preview")
@@ -6054,7 +6063,7 @@ def preview_meeting_subject(school_id: str, body: MeetingSubjectPreviewIn, user:
     selection — used by the frontend's conflict-warning dialog so it shows the same
     text that will actually be sent to Outlook, not a stale hardcoded guess."""
     db = get_admin_client()
-    subject = _build_meeting_subject(db, school_id, body.participants, body.primary_contact_key)
+    subject = _build_meeting_subject(db, school_id, body.participants, body.primary_contact_key, body.meeting_service_type)
     return {"subject": subject}
 
 
@@ -6761,7 +6770,7 @@ def _sync_new_meeting_calendar(db, org_id: str, school_id: str, meeting: dict, u
     try:
         with graph_client.calendar_sync_lock(db, meeting["id"]) as acquired:
             if acquired:
-                subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"))
+                subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"), meeting.get("meeting_service_type"))
                 sync_map = graph_client.sync_meeting_create(db, org_id, meeting, subject)
                 if sync_map:
                     graph_client.persist_calendar_sync(db, meeting["id"], sync_map)
@@ -7606,7 +7615,7 @@ def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annot
                     graph_client.sync_meeting_cancel(db, user["org_id"], previous_sync)
                     sync_map = {}
                 else:
-                    subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"))
+                    subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"), meeting.get("meeting_service_type"))
                     sync_map = graph_client.sync_meeting_update(db, user["org_id"], {**meeting, "id": meeting_id}, previous_sync, subject)
                 graph_client.persist_calendar_sync(db, meeting_id, sync_map)
                 meeting["calendar_sync"] = sync_map
@@ -7639,7 +7648,7 @@ def _apply_meeting_patch(db, org_id: str, school_id: str, meeting_id: str, patch
                         graph_client.sync_meeting_cancel(db, org_id, previous_sync)
                         sync_map = {}
                     else:
-                        subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"))
+                        subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"), meeting.get("meeting_service_type"))
                         sync_map = graph_client.sync_meeting_update(db, org_id, meeting, previous_sync, subject)
                     graph_client.persist_calendar_sync(db, meeting_id, sync_map)
     except Exception as exc:
@@ -7727,7 +7736,7 @@ def reassign_meeting_school(meeting_id: str, body: MeetingReassignSchoolIn, user
             if acquired:
                 existing = db.table("meetings").select("calendar_sync").eq("id", meeting_id).execute()
                 previous_sync = (existing.data[0].get("calendar_sync") or {}) if existing.data else {}
-                subject = _build_meeting_subject(db, body.new_school_id, [], None)
+                subject = _build_meeting_subject(db, body.new_school_id, [], None, meeting.get("meeting_service_type"))
                 sync_map = graph_client.sync_meeting_update(db, user["org_id"], {**meeting, "id": meeting_id}, previous_sync, subject)
                 graph_client.persist_calendar_sync(db, meeting_id, sync_map)
     except Exception as exc:
