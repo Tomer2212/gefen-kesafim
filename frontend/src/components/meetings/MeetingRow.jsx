@@ -325,6 +325,7 @@ function MeetingRowImpl({
       const res = await axios.post(`/schools/${draftToSave.school_id}/meeting-subject-preview`, {
         participants: draftToSave.participants || [],
         primary_contact_key: draftToSave.primary_contact_key || null,
+        meeting_service_type: draftToSave.meeting_service_type || null,
       });
       return res.data?.subject || "פגישת ליווי כלכלי";
     } catch {

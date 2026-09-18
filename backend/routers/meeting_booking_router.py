@@ -348,7 +348,7 @@ def book_meeting_slot(token: str, body: dict):
         from routers.schools_router import _build_meeting_subject
         with graph_client.calendar_sync_lock(db, meeting["id"]) as acquired:
             if acquired:
-                subject = _build_meeting_subject(db, token_row["school_id"], meeting.get("participants"), meeting.get("primary_contact_key"))
+                subject = _build_meeting_subject(db, token_row["school_id"], meeting.get("participants"), meeting.get("primary_contact_key"), meeting.get("meeting_service_type"))
                 sync_map = graph_client.sync_meeting_create(db, token_row["org_id"], meeting, subject=subject)
                 if sync_map:
                     graph_client.persist_calendar_sync(db, meeting["id"], sync_map)
@@ -447,7 +447,7 @@ def _book_range_slot(db, token_row: dict, range_key: str, body: dict) -> dict:
         from routers.schools_router import _build_meeting_subject
         with graph_client.calendar_sync_lock(db, meeting["id"]) as acquired:
             if acquired:
-                subject = _build_meeting_subject(db, token_row["school_id"], meeting.get("participants"), meeting.get("primary_contact_key"))
+                subject = _build_meeting_subject(db, token_row["school_id"], meeting.get("participants"), meeting.get("primary_contact_key"), meeting.get("meeting_service_type"))
                 sync_map = graph_client.sync_meeting_create(db, token_row["org_id"], meeting, subject=subject)
                 if sync_map:
                     graph_client.persist_calendar_sync(db, meeting["id"], sync_map)
