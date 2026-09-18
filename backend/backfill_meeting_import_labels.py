@@ -70,7 +70,7 @@ while True:
             canon = normalizer(cur)
             if canon is None:
                 if cur not in ("scheduled", "completed", "cancelled", "postponed", "other",
-                               "physical", "remote", "gefen", "current", "gefen_current", "district"):
+                               "physical", "remote", "gefen", "current", "gefen_current", "district", "takuma"):
                     per_field_left[field] += 1
                 continue
             if canon != cur:

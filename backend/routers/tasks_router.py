@@ -47,7 +47,7 @@ _PARTICIPANT_ROLE_LABELS = {
     "principal": "מנהל/ת", "principal_chativa": 'מנהל/ת חט"ב',
     "secretary": "מנהלנ/ית", "finance_contact": "אחראי/ת כספים",
 }
-_MEETING_TYPE_LABELS = {"gefen": "גפן", "current": "שוטף", "district": "מחוז"}
+_MEETING_TYPE_LABELS = {"gefen": "גפן", "current": "שוטף", "district": "מחוז", "takuma": "תקומה"}
 _TYPED_ADVISOR_TABLES = {"gefen": "school_advisors_gefen", "current": "school_advisors_current", "district": "school_advisors_district"}
 
 
@@ -804,6 +804,10 @@ def _check_meeting_problems(
         rows = db.table(table_name).select("school_id, advisor_id").in_("school_id", school_ids).execute().data or []
         for r in rows:
             advisor_map.setdefault(r["school_id"], {}).setdefault(service_type, []).append(r["advisor_id"])
+    # "takuma" has no typed advisor table of its own — it reuses the school's גפן advisor list,
+    # same convention as everywhere else in the app (SERVICE_TYPE_TO_DIVISIONS, resolveDefaultAdvisorIds, etc.).
+    for school_id, by_type in advisor_map.items():
+        by_type["takuma"] = by_type.get("gefen", [])
 
     duration_rows = (
         db.table("school_year_admin_data")
@@ -865,7 +869,8 @@ def _check_meeting_problems(
             entry = type_needs.setdefault(service_type, {"missing_advisor": False, "missing_duration": False})
             if req.advisor_mode != "manual" and not advisor_map.get(school["id"], {}).get(service_type):
                 entry["missing_advisor"] = True
-            if req.duration_mode != "manual" and not duration_row.get(f"meeting_duration_{service_type}"):
+            duration_col_type = "gefen" if service_type == "takuma" else service_type
+            if req.duration_mode != "manual" and not duration_row.get(f"meeting_duration_{duration_col_type}"):
                 entry["missing_duration"] = True
         meeting_defaults = [
             {"meeting_service_type": t, **flags}
@@ -1566,7 +1571,8 @@ def _build_meeting_booking_link(
         if c.get("duration_mode") == "manual":
             duration_minutes = c.get("duration_minutes") or 60
         else:
-            duration_minutes = override.get("duration_minutes") or duration_row.get(f"meeting_duration_{service_type}") or 60
+            duration_col_type = "gefen" if service_type == "takuma" else service_type
+            duration_minutes = override.get("duration_minutes") or duration_row.get(f"meeting_duration_{duration_col_type}") or 60
 
         roles = c.get("participant_roles") or []
         stage_scope = c.get("stage_scope")
@@ -1768,6 +1774,9 @@ def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[st
             rows = db.table(table_name).select("school_id, advisor_id").in_("school_id", school_ids).execute().data or []
             for r in rows:
                 advisor_map.setdefault(r["school_id"], {}).setdefault(service_type, []).append(r["advisor_id"])
+        # "takuma" reuses the school's גפן advisor list — see identical comment above.
+        for school_id, by_type in advisor_map.items():
+            by_type["takuma"] = by_type.get("gefen", [])
 
     try:
         notes_map = _fetch_school_notes_map(db, task["id"], school_ids)

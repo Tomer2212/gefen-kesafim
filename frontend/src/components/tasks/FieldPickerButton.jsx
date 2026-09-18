@@ -24,6 +24,13 @@ const FIELD_CATEGORIES = [
     fields: ["service_type", "client_status", "order_method", "requested_price", "contract_sent", "contract_received", "receipts_sent"],
   },
   {
+    // advisor_gefen/current/district — no advisor_takuma field: "תקומה" reuses the school's
+    // גפן advisor list everywhere else in the app, so filtering by "יועץ מלווה [גפן]" already
+    // finds schools where that person is the תקומה advisor too.
+    title: "יועץ מלווה",
+    fields: ["advisor_gefen", "advisor_current", "advisor_district"],
+  },
+  {
     title: "פיננסי",
     fields: [
       "order_amount_gefen", "hours_ordered", "rate", "payment_received", "payment_requests_sent",
@@ -86,33 +93,30 @@ export default function FieldPickerButton({ value, fieldOptions, goalOptions, co
     setOpen(true);
   }
 
-  // Wide panel (mirrors DashboardPage's "עמודות להצגה" picker) — sized to show every category
-  // side-by-side without scrolling wherever the viewport allows. Column count is computed from
-  // the panel's own pixel width (not Tailwind's sm:/md: classes, which key off the *viewport*
-  // width — inside a modal the trigger button can sit in a narrow browser window where those
-  // breakpoints never fire even though the portaled panel itself has room for 3 columns).
-  // Vertical position/height is clamped to the viewport too: if the button sits low on the
-  // screen, the panel opens *above* it instead of overflowing past the bottom edge with no way
-  // to scroll it into view (it's position:fixed, so the page itself can't be scrolled to reveal it).
+  // Tall side panel (opens beside the field, not below it) — mirrors DashboardPage's "עמודות
+  // להצגה" picker's categorized layout, but anchored to the right of the trigger button instead
+  // of stacking below/above it, so its height isn't squeezed into whatever sliver of viewport
+  // happens to be left under a field that sits deep inside a tall scrollable modal. Height
+  // spans at least the surrounding dialog's own height (found via the nearest role="dialog"
+  // ancestor) so every category is visible with minimal internal scrolling. Falls back to
+  // opening to the *left* of the button when there isn't enough room on the right (e.g. a
+  // narrow viewport, or a field sitting near the screen's right edge).
   useEffect(() => {
     if (!open) return;
     const rect = buttonRef.current?.getBoundingClientRect();
     if (!rect) return;
     const margin = 8;
-    const width = Math.min(920, window.innerWidth - margin * 2);
-    const right = Math.max(margin, Math.min(window.innerWidth - rect.right, window.innerWidth - width - margin));
-    const spaceBelow = window.innerHeight - rect.bottom - margin;
-    const spaceAbove = rect.top - margin;
-    let top, maxHeight;
-    if (spaceBelow >= 240 || spaceBelow >= spaceAbove) {
-      top = rect.bottom + 6;
-      maxHeight = Math.max(160, window.innerHeight - top - margin);
-    } else {
-      maxHeight = Math.max(160, spaceAbove);
-      top = Math.max(margin, rect.top - 6 - maxHeight);
-    }
-    const columns = width >= 640 ? 3 : width >= 420 ? 2 : 1;
-    setPos({ top, right, width, maxHeight, columns });
+    const gap = 8;
+    const dialogRect = buttonRef.current.closest('[role="dialog"]')?.getBoundingClientRect();
+    const width = Math.min(630, window.innerWidth - margin * 2);
+    const spaceRight = window.innerWidth - rect.right - margin;
+    const spaceLeft = rect.left - margin;
+    let left = spaceRight >= width || spaceRight >= spaceLeft ? rect.right + gap : rect.left - gap - width;
+    left = Math.max(margin, Math.min(left, window.innerWidth - width - margin));
+    const maxHeight = Math.min(dialogRect?.height || 560, window.innerHeight - margin * 2);
+    const top = Math.max(margin, Math.min(dialogRect?.top ?? rect.top, window.innerHeight - maxHeight - margin));
+    const columns = width >= 600 ? 3 : width >= 420 ? 2 : 1;
+    setPos({ top, left, width, maxHeight, columns });
   }, [open]);
 
   useEffect(() => {
@@ -159,7 +163,7 @@ export default function FieldPickerButton({ value, fieldOptions, goalOptions, co
           ref={panelRef}
           dir="rtl"
           className="fixed z-[80] flex flex-col border border-slate-200 rounded-xl bg-white shadow-xl"
-          style={{ top: pos.top, right: pos.right, width: pos.width, maxWidth: "95vw", maxHeight: pos.maxHeight }}
+          style={{ top: pos.top, left: pos.left, width: pos.width, maxWidth: "95vw", maxHeight: pos.maxHeight }}
         >
           <div className="p-2 border-b border-slate-100 flex-shrink-0">
             <input

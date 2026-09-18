@@ -77,6 +77,7 @@ const SERVICE_TYPE_LABEL = {
   current:       "שוטף",
   gefen_current: "גפן+שוטף",
   district:      "מחוז",
+  takuma:        "תקומה",
 };
 
 // "סטטוס לקוח" / "אמצעי הזמנה" — year-scoped (school_year_admin_data), shown read-only on

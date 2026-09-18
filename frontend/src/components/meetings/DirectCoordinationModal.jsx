@@ -1,14 +1,16 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import axios from "axios";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
 import { buildSchoolContacts, resolveMeetingCoordinator } from "./schoolContacts";
 import { DirectCoordinationResolutionModal } from "./DirectCoordinationResolutionModal";
 import AdvisorAccessGrantModal from "./AdvisorAccessGrantModal";
+import DirectStyleDateInput from "../tasks/DirectStyleDateInput";
 
 const SERVICE_TYPE_OPTIONS = [
   { value: "gefen", label: "גפן" },
   { value: "current", label: "שוטף" },
   { value: "district", label: "מחוז" },
+  { value: "takuma", label: "תקומה" },
 ];
 
 const DURATION_OPTIONS = Array.from({ length: (180 - 30) / 15 + 1 }, (_, i) => 30 + i * 15);
@@ -19,42 +21,41 @@ function formatDuration(minutes) {
   return Number.isInteger(hours) ? `${hours} שעות` : `${Math.floor(hours)}:${String(minutes % 60).padStart(2, "0")} שעות`;
 }
 
-// Displayed/typed as DD/MM/YY (2-digit year, e.g. "26" -> 2026) — auto-inserts the slashes as
-// the user types digits, so there's no native <input type="date"> locale-dependent format.
-function maskDateInput(raw) {
-  const digits = raw.replace(/\D/g, "").slice(0, 6);
-  if (digits.length > 4) return `${digits.slice(0, 2)}/${digits.slice(2, 4)}/${digits.slice(4)}`;
-  if (digits.length > 2) return `${digits.slice(0, 2)}/${digits.slice(2)}`;
-  return digits;
-}
-
-function parseDateDDMMYY(text) {
-  const m = /^(\d{2})\/(\d{2})\/(\d{2})$/.exec(text || "");
-  if (!m) return null;
-  const day = parseInt(m[1], 10), month = parseInt(m[2], 10), year = 2000 + parseInt(m[3], 10);
-  if (month < 1 || month > 12) return null;
-  const daysInMonth = new Date(year, month, 0).getDate();
-  if (day < 1 || day > daysInMonth) return null;
-  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
-}
-
 let rangeIdCounter = 0;
 function newRange() {
   rangeIdCounter += 1;
   return {
     localId: rangeIdCounter,
     serviceType: "",
-    startDateText: "",
-    endDateText: "",
+    startDate: "",
+    endDate: "",
     duration: 60,
     participantKeys: [],
+    advisorMode: "default",
+    advisorId: "",
   };
+}
+
+// Same mapping as MeetingRow.jsx's typedAdvisorsForServiceType — "takuma" reuses the school's
+// גפן advisor list (no typed advisor table of its own).
+function typedAdvisorIdsForServiceType(serviceType, school) {
+  let list;
+  if (serviceType === "gefen") list = school?.advisors_gefen;
+  else if (serviceType === "current") list = school?.advisors_current;
+  else if (serviceType === "district") list = school?.advisors_district;
+  else if (serviceType === "takuma") list = school?.advisors_gefen;
+  else list = [];
+  return (list || []).map(a => a.id);
+}
+
+function resolveRangeAdvisorIds(r, school) {
+  if (r.advisorMode === "manual") return r.advisorId ? [r.advisorId] : [];
+  return typedAdvisorIdsForServiceType(r.serviceType, school);
 }
 
 export function DirectCoordinationModal({ school: initialSchool, advisors, onClose, onSent }) {
   const { ref, handleKeyDown } = useFocusTrap(onClose);
   const [school, setSchool] = useState(initialSchool);
-  const [advisorIds, setAdvisorIds] = useState([]);
   const [ranges, setRanges] = useState([newRange()]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
@@ -64,20 +65,10 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
 
   const contacts = buildSchoolContacts(school);
 
-  useEffect(() => {
-    let cancelled = false;
-    axios.get(`/schools/${school.id}/advisors`)
-      .then(res => {
-        if (cancelled) return;
-        const first = (res.data || [])[0];
-        if (first) setAdvisorIds([first.id]);
-      })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, [school.id]);
-
-  function toggleAdvisor(id) {
-    setAdvisorIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+  function allResolvedAdvisorIds() {
+    const ids = new Set();
+    for (const r of ranges) for (const id of resolveRangeAdvisorIds(r, school)) ids.add(id);
+    return [...ids];
   }
 
   function updateRange(localId, patch) {
@@ -97,13 +88,11 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
   }
 
   function validate() {
-    if (advisorIds.length === 0) return "יש לבחור לפחות יועץ אחד";
     for (const r of ranges) {
-      if (!r.serviceType) return "יש לבחור סוג פגישה (גפן/שוטף/מחוז) לכל טווח";
-      const startISO = parseDateDDMMYY(r.startDateText);
-      const endISO = parseDateDDMMYY(r.endDateText);
-      if (!startISO || !endISO) return "יש למלא תאריך תקין בפורמט DD/MM/YY לכל פגישה";
-      if (startISO > endISO) return "תאריך ההתחלה מאוחר מתאריך הסיום באחד הטווחים";
+      if (!r.serviceType) return "יש לבחור סוג פגישה (גפן/שוטף/מחוז/תקומה) לכל טווח";
+      if (resolveRangeAdvisorIds(r, school).length === 0) return "יש לבחור יועץ מבצע לכל פגישה";
+      if (!r.startDate || !r.endDate) return "יש למלא תאריך תקין לכל פגישה";
+      if (r.startDate > r.endDate) return "תאריך ההתחלה מאוחר מתאריך הסיום באחד הטווחים";
       if (r.participantKeys.length === 0) return "יש לבחור לפחות משתתף אחד לכל פגישה";
     }
     return "";
@@ -123,12 +112,13 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
   }
 
   function schedulingWindow() {
-    const starts = ranges.map(r => parseDateDDMMYY(r.startDateText)).filter(Boolean);
-    const ends = ranges.map(r => parseDateDDMMYY(r.endDateText)).filter(Boolean);
+    const starts = ranges.map(r => r.startDate).filter(Boolean);
+    const ends = ranges.map(r => r.endDate).filter(Boolean);
     return { startDate: starts.sort()[0], endDate: ends.sort().slice(-1)[0] };
   }
 
   async function checkAdvisorAccess() {
+    const advisorIds = allResolvedAdvisorIds();
     if (advisorIds.length === 0) return true;
     try {
       const res = await axios.get(`/schools/${school.id}/advisor-access`, { params: { advisor_ids: advisorIds.join(",") } });
@@ -158,12 +148,12 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
     setSubmitting(true);
     try {
       const body = {
-        advisor_ids: advisorIds,
         ranges: ranges.map(r => ({
-          start_date: parseDateDDMMYY(r.startDateText),
-          end_date: parseDateDDMMYY(r.endDateText),
+          start_date: r.startDate,
+          end_date: r.endDate,
           meeting_service_type: r.serviceType,
           duration_minutes: r.duration,
+          advisor_ids: resolveRangeAdvisorIds(r, school),
           participants: r.participantKeys.map(key => {
             const c = contacts.find(c => c.key === key);
             return { key: c.key, name: c.name, email: c.email || null };
@@ -201,7 +191,7 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
         className="glass-card rounded-2xl p-6 w-full max-w-2xl max-h-[85vh] overflow-y-auto flex flex-col gap-4">
 
         <h2 id="direct-coord-title" className="font-bold text-slate-900 text-lg">
-          תיאום עצמי — {school.name}
+          קביעת פגישה ע"י בית הספר - {school.name}
         </h2>
 
         {sentInfo ? (
@@ -221,22 +211,6 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
           </div>
         ) : (
           <>
-            <fieldset className="flex flex-col gap-2">
-              <legend className="text-sm font-semibold text-slate-700 mb-1">יועצים מבצעים</legend>
-              <div className="flex flex-wrap gap-2">
-                {advisors.map(a => (
-                  <label key={a.id} className="flex items-center gap-1.5 text-sm border border-slate-200 rounded-lg px-2.5 py-1.5 cursor-pointer hover:bg-slate-50">
-                    <input type="checkbox" checked={advisorIds.includes(a.id)} onChange={() => toggleAdvisor(a.id)}
-                      className="w-3.5 h-3.5 rounded accent-blue-600" />
-                    <span>{a.full_name || a.email}</span>
-                  </label>
-                ))}
-              </div>
-              <p className="text-xs text-slate-400">
-                אם נבחרו כמה יועצים, יוצגו למתאם/ת רק זמנים שבהם כולם פנויים.
-              </p>
-            </fieldset>
-
             <div className="flex flex-col gap-4">
               {ranges.map((r, idx) => (
                 <div key={r.localId} className="border border-slate-200 rounded-xl p-4 flex flex-col gap-3 bg-white/60">
@@ -258,7 +232,7 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
                           className={`text-sm px-4 py-1.5 rounded-lg border transition-colors ${
                             r.serviceType === opt.value
                               ? "bg-blue-600 border-blue-600 text-white font-semibold"
-                              : "border-slate-200 text-slate-600 hover:bg-slate-50"
+                              : "border-black text-slate-600 hover:bg-slate-50"
                           }`}>
                           {opt.label}
                         </button>
@@ -269,27 +243,41 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
                   <div className="grid grid-cols-2 gap-3">
                     <div className="flex flex-col gap-1">
                       <label htmlFor={`dc-start-${r.localId}`} className="text-xs font-medium text-slate-500">מתאריך</label>
-                      <input id={`dc-start-${r.localId}`} type="text" inputMode="numeric" placeholder="DD/MM/YY" maxLength={8}
-                        value={r.startDateText}
-                        onChange={e => updateRange(r.localId, { startDateText: maskDateInput(e.target.value) })}
-                        className="text-sm border border-slate-200 rounded-lg px-2.5 py-1.5" />
+                      <DirectStyleDateInput id={`dc-start-${r.localId}`} value={r.startDate}
+                        onChange={v => updateRange(r.localId, { startDate: v })} />
                     </div>
                     <div className="flex flex-col gap-1">
                       <label htmlFor={`dc-end-${r.localId}`} className="text-xs font-medium text-slate-500">עד תאריך</label>
-                      <input id={`dc-end-${r.localId}`} type="text" inputMode="numeric" placeholder="DD/MM/YY" maxLength={8}
-                        value={r.endDateText}
-                        onChange={e => updateRange(r.localId, { endDateText: maskDateInput(e.target.value) })}
-                        className="text-sm border border-slate-200 rounded-lg px-2.5 py-1.5" />
+                      <DirectStyleDateInput id={`dc-end-${r.localId}`} value={r.endDate}
+                        onChange={v => updateRange(r.localId, { endDate: v })} />
                     </div>
                   </div>
 
-                  <div className="flex flex-col gap-1">
-                    <label htmlFor={`dc-duration-${r.localId}`} className="text-xs font-medium text-slate-500">משך הפגישה</label>
-                    <select id={`dc-duration-${r.localId}`} value={r.duration}
-                      onChange={e => updateRange(r.localId, { duration: Number(e.target.value) })}
-                      className="text-sm border border-slate-200 rounded-lg px-2.5 py-1.5 w-40">
-                      {DURATION_OPTIONS.map(d => <option key={d} value={d}>{formatDuration(d)}</option>)}
-                    </select>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="flex flex-col gap-1">
+                      <label htmlFor={`dc-advisor-${r.localId}`} className="text-xs font-medium text-slate-500">יועץ מבצע</label>
+                      <select id={`dc-advisor-${r.localId}`}
+                        value={r.advisorMode === "manual" ? (r.advisorId || "") : "__default__"}
+                        onChange={e => {
+                          const v = e.target.value;
+                          if (v === "__default__") updateRange(r.localId, { advisorMode: "default", advisorId: "" });
+                          else updateRange(r.localId, { advisorMode: "manual", advisorId: v });
+                        }}
+                        className="text-sm border border-black rounded-lg px-2.5 py-1.5 w-full">
+                        <option value="__default__">
+                          {r.serviceType ? `יועץ מלווה [${SERVICE_TYPE_OPTIONS.find(o => o.value === r.serviceType)?.label}]` : "יועץ מלווה"}
+                        </option>
+                        {advisors.map(a => <option key={a.id} value={a.id}>{a.full_name || a.email}</option>)}
+                      </select>
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <label htmlFor={`dc-duration-${r.localId}`} className="text-xs font-medium text-slate-500">משך הפגישה</label>
+                      <select id={`dc-duration-${r.localId}`} value={r.duration}
+                        onChange={e => updateRange(r.localId, { duration: Number(e.target.value) })}
+                        className="text-sm border border-black rounded-lg px-2.5 py-1.5 w-full">
+                        {DURATION_OPTIONS.map(d => <option key={d} value={d}>{formatDuration(d)}</option>)}
+                      </select>
+                    </div>
                   </div>
 
                   <fieldset className="flex flex-col gap-1.5">
@@ -299,7 +287,7 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
                     ) : (
                       <div className="flex flex-wrap gap-2">
                         {contacts.map(c => (
-                          <label key={c.key} className="flex items-center gap-1.5 text-sm border border-slate-200 rounded-lg px-2.5 py-1.5 cursor-pointer hover:bg-slate-50">
+                          <label key={c.key} className="flex items-center gap-1.5 text-sm border border-black rounded-lg px-2.5 py-1.5 cursor-pointer hover:bg-slate-50">
                             <input type="checkbox" checked={r.participantKeys.includes(c.key)}
                               onChange={() => toggleParticipant(r.localId, c.key)}
                               className="w-3.5 h-3.5 rounded accent-blue-600" />

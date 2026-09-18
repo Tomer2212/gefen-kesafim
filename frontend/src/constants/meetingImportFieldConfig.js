@@ -74,6 +74,7 @@ const _TYPE_SYNONYMS = [
 ];
 const _SERVICE_TYPE_SYNONYMS = [
   [["מחוז", "district"], "district"],
+  [["תקומה", "takuma"], "takuma"],
   [["גפנ", 'גפ"נ', "גפ״נ", "מכתב בקרה", "gefen"], "gefen"],
   [["שוטפ", "סגירת שנה", "current"], "current"],
 ];
@@ -86,7 +87,7 @@ export function normalizeImportMeetingType(raw) {
 
 export function normalizeImportServiceType(raw) {
   const t = String(raw || "").trim();
-  if (["gefen", "current", "gefen_current", "district"].includes(t)) return t;
+  if (["gefen", "current", "gefen_current", "district", "takuma"].includes(t)) return t;
   const d = definalize(t.toLowerCase());
   const hasGefen = d.includes("גפנ") || d.includes('גפ"נ') || d.includes("gefen");
   const hasCurrent = d.includes("שוטפ") || d.includes("current");

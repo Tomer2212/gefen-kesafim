@@ -394,13 +394,13 @@ class DirectCoordinationParticipantIn(BaseModel):
 class DirectCoordinationRangeIn(BaseModel):
     start_date: str
     end_date: str
-    meeting_service_type: str  # "gefen" | "current"
+    meeting_service_type: str  # "gefen" | "current" | "district" | "takuma"
     duration_minutes: int      # 30..180, step 15
+    advisor_ids: list[str] = []  # this specific meeting's performing advisor(s) — see send_direct_coordination_request
     participants: list[DirectCoordinationParticipantIn]
 
 
 class DirectCoordinationIn(BaseModel):
-    advisor_ids: list[str]
     ranges: list[DirectCoordinationRangeIn]
 
 
@@ -3395,6 +3395,8 @@ def _build_reminder_email_html(recipient_name: str, when_lamed: str, when_bet: s
         body_line = f'רצינו להזכיר לך על הפגישה השוטפת על התוכנה הכספית שמתוכננת {when_lamed}, בתאריך <b>{date_fmt}</b>{time_clause}{advisor_clause}.'
     elif meeting_service_type == "district":
         body_line = f'רצינו להזכיר לך על הפגישה שמתוכננת {when_lamed}, בתאריך <b>{date_fmt}</b>{time_clause}{advisor_clause} בנושא המחוז.'
+    elif meeting_service_type == "takuma":
+        body_line = f'רצינו להזכיר לך על הפגישה שמתוכננת {when_lamed}, בתאריך <b>{date_fmt}</b>{time_clause}{advisor_clause} בנושא תקומה.'
     else:
         body_line = f'רצינו להזכיר לך על הפגישה שמתוכננת {when_lamed}, בתאריך <b>{date_fmt}</b>{time_clause}{advisor_clause} על תקציב הגפ"ן.'
     opt_out_html = _opt_out_footer_html(opt_out_link)
@@ -7441,7 +7443,7 @@ def remap_import_values(body: RemapImportValuesIn, user: Annotated[dict, Depends
     return {"updated": updated}
 
 
-_DIRECT_COORDINATION_SERVICE_TYPES = {"gefen": "גפן", "current": "שוטף", "district": "מחוז"}
+_DIRECT_COORDINATION_SERVICE_TYPES = {"gefen": "גפן", "current": "שוטף", "district": "מחוז", "takuma": "תקומה"}
 _DIRECT_COORDINATION_DURATIONS = set(range(30, 181, 15))
 
 
@@ -7456,8 +7458,6 @@ def send_direct_coordination_request(
     (booking_token_logic.py / booking_logic.py / meeting_booking_router.py) but always mints
     a fresh token (no reuse) since this is a one-off targeted action, not a recurring batch."""
     _require_manager(user)
-    if not body.advisor_ids:
-        raise HTTPException(status_code=400, detail="יש לבחור לפחות יועץ אחד")
     if not body.ranges:
         raise HTTPException(status_code=400, detail="יש להוסיף לפחות טווח תאריכים אחד")
 
@@ -7486,26 +7486,32 @@ def send_direct_coordination_request(
             detail="לא ניתן לשלוח — בית הספר ביקש הסרה מרשימת התפוצה, עד שסטטוס הלקוח שלו יהפוך ל'פעיל'",
         )
 
-    advisor_rows = (
-        db.table("profiles").select("id, full_name, email")
-        .eq("org_id", user["org_id"]).in_("id", body.advisor_ids).execute().data or []
-    )
-    if len(advisor_rows) != len(set(body.advisor_ids)):
-        raise HTTPException(status_code=400, detail="אחד או יותר מהיועצים שנבחרו אינם תקינים")
-    advisor_names_map = {a["id"]: (a.get("full_name") or a.get("email") or "") for a in advisor_rows}
-    advisor_names = [advisor_names_map[aid] for aid in body.advisor_ids]
-
     type_counts: dict[str, int] = {}
+    advisor_ids_union: list[str] = []
     for r in body.ranges:
         if r.start_date > r.end_date:
             raise HTTPException(status_code=400, detail="טווח תאריכים לא תקין: תאריך ההתחלה מאוחר מתאריך הסיום")
         if r.meeting_service_type not in _DIRECT_COORDINATION_SERVICE_TYPES:
-            raise HTTPException(status_code=400, detail="יש לבחור סוג פגישה (גפן/שוטף/מחוז) לכל טווח")
+            raise HTTPException(status_code=400, detail="יש לבחור סוג פגישה (גפן/שוטף/מחוז/תקומה) לכל טווח")
         if r.duration_minutes not in _DIRECT_COORDINATION_DURATIONS:
             raise HTTPException(status_code=400, detail="משך פגישה לא תקין")
         if not r.participants:
             raise HTTPException(status_code=400, detail="יש לבחור לפחות משתתף אחד לכל טווח/פגישה")
+        if not r.advisor_ids:
+            raise HTTPException(status_code=400, detail="יש לבחור יועץ מבצע לכל פגישה")
         type_counts[r.meeting_service_type] = type_counts.get(r.meeting_service_type, 0) + 1
+        for aid in r.advisor_ids:
+            if aid not in advisor_ids_union:
+                advisor_ids_union.append(aid)
+
+    advisor_rows = (
+        db.table("profiles").select("id, full_name, email")
+        .eq("org_id", user["org_id"]).in_("id", advisor_ids_union).execute().data or []
+    )
+    if len(advisor_rows) != len(set(advisor_ids_union)):
+        raise HTTPException(status_code=400, detail="אחד או יותר מהיועצים שנבחרו אינם תקינים")
+    advisor_names_map = {a["id"]: (a.get("full_name") or a.get("email") or "") for a in advisor_rows}
+    advisor_names = [advisor_names_map[aid] for aid in advisor_ids_union]
 
     type_seen: dict[str, int] = {}
     ranges_data = []
@@ -7520,13 +7526,14 @@ def send_direct_coordination_request(
             "service_type": r.meeting_service_type,
             "duration_minutes": r.duration_minutes,
             "label": label,
+            "advisor_ids": r.advisor_ids,
             "participants": [p.model_dump() for p in r.participants],
         })
 
     import booking_logic
     import booking_token_logic
 
-    token_row = booking_token_logic.create_direct_booking_token(db, user["org_id"], school_id, body.advisor_ids, ranges_data)
+    token_row = booking_token_logic.create_direct_booking_token(db, user["org_id"], school_id, advisor_ids_union, ranges_data)
     booking_url = f"{os.getenv('APP_URL', '')}/book/{token_row['token']}"
     opt_out_link = None
     if coordinator.get("email"):
@@ -7541,7 +7548,7 @@ def send_direct_coordination_request(
     )
     subject = f"בקשה לתיאום פגישה - {school['name']}"
     try:
-        booking_logic.send_booking_request_email(user["org_id"], body.advisor_ids[0], coordinator["email"], subject, html)
+        booking_logic.send_booking_request_email(user["org_id"], advisor_ids_union[0], coordinator["email"], subject, html)
     except Exception as exc:
         logger.error("send_direct_coordination_request: email send failed for school %s: %s", school_id, exc, exc_info=True)
         raise HTTPException(status_code=502, detail="שליחת המייל נכשלה, נסה שוב")

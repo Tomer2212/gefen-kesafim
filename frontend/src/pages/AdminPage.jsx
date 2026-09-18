@@ -277,6 +277,7 @@ const SERVICE_TYPE_OPTIONS = [
   { value: "current", label: "שוטף" },
   { value: "gefen_current", label: "גפן+שוטף" },
   { value: "district", label: "מחוז" },
+  { value: "takuma", label: "תקומה" },
 ];
 
 // The 3 per-service-type "יועץ מלווה [גפן/שוטף/מחוז]" lists (school_advisors_gefen/current/
@@ -309,6 +310,7 @@ function activeServiceTypes(serviceType) {
   if (serviceType === "current") return ["current"];
   if (serviceType === "district") return ["district"];
   if (serviceType === "gefen_current") return ["gefen", "current"];
+  if (serviceType === "takuma") return ["gefen"];
   return [];
 }
 
@@ -735,7 +737,7 @@ const IMPORT_FIELD_CONFIG = [
   { key: "finance_contact_phone", label: "טלפון אחראי/ת כספים",  required: false },
   { key: "finance_contact_email", label: "מייל אחראי/ת כספים",    required: false },
   { key: "meeting_coordinator",   label: "מתאם פגישות",           required: true, ranked: 3, hint: "מנהל/ת / מנהלנ/ית / אחראי/ת כספים — או שם/מייל/טלפון של איש קשר. עד 3 עמודות לפי סדר עדיפות (נופל לעמודה הבאה רק כשהתא ריק / שגיאה / 0)" },
-  { key: "service_type",          label: "סוג שירות",             required: true, hint: "גפן / שוטף / גפן+שוטף / מחוז" },
+  { key: "service_type",          label: "סוג שירות",             required: true, hint: "גפן / שוטף / גפן+שוטף / מחוז / תקומה" },
   { key: "client_status",         label: "סטטוס לקוח",            required: true, hint: "פעיל / לא פעיל / בתהליך / לקוח עבר" },
   { key: "advisor_gefen",         label: "יועץ מלווה — גפן",      required: true, hint: "שם מלא / אימייל / טלפון — אחד או כמה, מופרדים בפסיק (ניתן להשאיר תא ריק בשורה שלא נדרש לה)" },
   { key: "advisor_current",       label: "יועץ מלווה — שוטף",     required: true, hint: "שם מלא / אימייל / טלפון — אחד או כמה, מופרדים בפסיק (ניתן להשאיר תא ריק בשורה שלא נדרש לה)" },

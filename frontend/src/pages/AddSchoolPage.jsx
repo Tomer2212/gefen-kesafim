@@ -112,6 +112,7 @@ const SERVICE_TYPE_OPTIONS = [
   { value: "current", label: "שוטף" },
   { value: "gefen_current", label: "גפן+שוטף" },
   { value: "district", label: "מחוז" },
+  { value: "takuma", label: "תקומה" },
 ];
 
 const FUNDING_METHOD_OPTIONS = [
@@ -133,6 +134,7 @@ function activeServiceTypes(serviceType) {
   if (serviceType === "current") return ["current"];
   if (serviceType === "district") return ["district"];
   if (serviceType === "gefen_current") return ["gefen", "current"];
+  if (serviceType === "takuma") return ["gefen"];
   return [];
 }
 

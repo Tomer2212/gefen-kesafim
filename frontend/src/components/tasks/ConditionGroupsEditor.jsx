@@ -26,7 +26,7 @@ const EMPTY_MEETING_CONDITION = {
   // "שוטף" is school-wide and never stage-dependent, so it's never asked there.
   stage_scope: null,
 };
-const MEETING_TYPE_PILLS = [{ value: "gefen", label: "גפן" }, { value: "current", label: "שוטף" }, { value: "district", label: "מחוז" }];
+const MEETING_TYPE_PILLS = [{ value: "gefen", label: "גפן" }, { value: "current", label: "שוטף" }, { value: "district", label: "מחוז" }, { value: "takuma", label: "תקומה" }];
 const PARTICIPANT_ROLE_OPTIONS = [
   { value: "principal", label: "מנהל/ת" }, { value: "secretary", label: "מנהלנ/ית" }, { value: "finance_contact", label: "אחראי/ת כספים" },
 ];
@@ -52,7 +52,7 @@ export function formatDuration(minutes) {
 
 // (DirectStyleDateInput now lives in its own file — see ./DirectStyleDateInput.jsx — reused by
 // PersonTaskCreateWizard.jsx's "תאריך יעד" field.)
-const MEETING_SERVICE_TYPE_LABELS = { gefen: "גפן", current: "שוטף", gefen_current: "גפן+שוטף", district: "מחוז" };
+const MEETING_SERVICE_TYPE_LABELS = { gefen: "גפן", current: "שוטף", gefen_current: "גפן+שוטף", district: "מחוז", takuma: "תקומה" };
 export function isMeetingRequirementComplete(cond) {
   return !!(
     cond.meeting_service_type && cond.date_from && cond.date_to && (cond.participant_roles || []).length > 0 &&
@@ -127,6 +127,100 @@ export function MultiSelectChips({ options, selected, onChange, heightClassName 
           </button>
         );
       })}
+    </div>
+  );
+}
+
+// select-type fields whose option list can be long (currently just the three typed-advisor
+// fields — an org can have many advisors, unlike the short fixed lists every other select field
+// uses MultiSelectChips for) get the searchable-dropdown treatment below instead of an
+// always-visible wall of chip buttons.
+const SEARCHABLE_SELECT_FIELDS = new Set(["advisor_gefen", "advisor_current", "advisor_district"]);
+
+// Searchable dropdown multi-select — same pattern as DashboardPage.jsx's "סינון מתקדם" advisor
+// filters (CheckboxFilterField there), except the trigger itself shows the picked names side by
+// side as removable chips (not a "N נבחרו" summary) — clicking the trigger's empty space opens
+// the panel with a live text search, a checkbox per option, and confirm/clear actions; clicking
+// a chip's own × removes just that one, immediately, without opening the panel. Works with a
+// plain array of raw values (not {value,label} objects) to match cond.value's existing shape.
+function SearchableMultiSelect({ options, selected, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState(selected || []);
+  const [query, setQuery] = useState("");
+  const containerRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) { setDraft(selected || []); setQuery(""); }
+  }, [selected, open]);
+
+  useEffect(() => {
+    if (!open) return;
+    function handleOutside(e) {
+      if (containerRef.current && !containerRef.current.contains(e.target)) setOpen(false);
+    }
+    document.addEventListener("mousedown", handleOutside);
+    return () => document.removeEventListener("mousedown", handleOutside);
+  }, [open]);
+
+  function toggle(value) {
+    setDraft(prev => prev.includes(value) ? prev.filter(v => v !== value) : [...prev, value]);
+  }
+  function confirm() { onChange(draft); setOpen(false); }
+  function clear() { setDraft([]); }
+
+  const labelByValue = Object.fromEntries((options || []).map(o => [o.value, o.label]));
+  const filteredOptions = (options || []).filter(o =>
+    !query.trim() || o.label.toLowerCase().includes(query.toLowerCase())
+  );
+
+  return (
+    <div ref={containerRef} className="relative mt-0.5">
+      <div
+        role="button" tabIndex={0}
+        onClick={() => { if (open) { setOpen(false); } else { setDraft(selected || []); setOpen(true); } }}
+        onKeyDown={e => {
+          if (e.key !== "Enter" && e.key !== " ") return;
+          e.preventDefault();
+          if (open) { setOpen(false); } else { setDraft(selected || []); setOpen(true); }
+        }}
+        aria-expanded={open} aria-haspopup="listbox"
+        className="w-full min-h-[30px] flex flex-wrap items-center gap-1 text-xs border border-black rounded-lg px-2 py-1 bg-white text-right cursor-pointer"
+      >
+        {selected?.length > 0 ? selected.map(v => (
+          <span key={v} className="inline-flex items-center gap-0.5 text-xs font-medium px-1.5 py-0.5 rounded-full"
+            style={{ background: "rgba(0,112,243,0.08)", color: "#1d4ed8" }}>
+            {labelByValue[v] || v}
+            <button type="button" onClick={e => { e.stopPropagation(); onChange(selected.filter(x => x !== v)); }}
+              className="hover:text-red-500 leading-none" aria-label={`הסר ${labelByValue[v] || v}`}>×</button>
+          </span>
+        )) : <span className="text-slate-400">בחר...</span>}
+      </div>
+      {open && (
+        <div className="absolute z-40 right-0 left-0 top-full mt-1 border border-slate-200 rounded-xl bg-white shadow-xl">
+          <div className="p-2 border-b border-slate-100">
+            <input type="text" autoFocus value={query} onChange={e => setQuery(e.target.value)}
+              placeholder="חיפוש..." aria-label="חיפוש יועץ"
+              className="w-full text-xs border border-slate-200 rounded-lg px-3 py-1.5 outline-none focus:border-blue-400 bg-white" />
+          </div>
+          <div className="overflow-y-auto" style={{ maxHeight: 180 }} role="listbox" aria-multiselectable="true">
+            {filteredOptions.length === 0 ? (
+              <p className="text-xs text-slate-400 px-4 py-3 text-center">לא נמצאו תוצאות</p>
+            ) : (
+              filteredOptions.map(opt => (
+                <label key={opt.value} className="flex items-center gap-2.5 px-3 py-2 hover:bg-blue-50 cursor-pointer">
+                  <input type="checkbox" checked={draft.includes(opt.value)} onChange={() => toggle(opt.value)}
+                    className="w-3.5 h-3.5 rounded accent-blue-600 flex-shrink-0" />
+                  <span className="text-xs text-slate-700">{opt.label}</span>
+                </label>
+              ))
+            )}
+          </div>
+          <div className="p-2 border-t border-slate-100 flex items-center gap-2">
+            <button type="button" onClick={confirm} className="btn-blue text-xs px-4 py-1.5 rounded-lg">אישור</button>
+            <button type="button" onClick={clear} className="text-xs text-slate-400 hover:text-slate-600 transition-colors px-2 py-1.5">נקה סינון</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -640,6 +734,15 @@ export default function ConditionGroupsEditor({
                       <label className="text-xs text-black col-span-1">
                         {valueFieldLabel}
                         {(() => {
+                          if (opt?.options && SEARCHABLE_SELECT_FIELDS.has(cond.field)) {
+                            return (
+                              <SearchableMultiSelect
+                                options={opt.options}
+                                selected={toValueArray(cond.value)}
+                                onChange={v => updateCondition(gi, ci, { value: v })}
+                              />
+                            );
+                          }
                           if (opt?.options) {
                             return (
                               <MultiSelectChips

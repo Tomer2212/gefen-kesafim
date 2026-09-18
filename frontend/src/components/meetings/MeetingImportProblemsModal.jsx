@@ -256,6 +256,7 @@ function QuickAddSchoolForm({ row, orgUsers, academicYear, onCreated, onCancel }
             <option value="current">שוטף</option>
             <option value="gefen_current">גפן+שוטף</option>
             <option value="district">מחוז</option>
+            <option value="takuma">תקומה</option>
           </select>
         </div>
         {["gefen", "current", "district"].map(div => (
