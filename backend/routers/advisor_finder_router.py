@@ -61,8 +61,12 @@ def _all_slots_for_day(day_iso: str, window: dict, busy_blocks: list[dict]) -> l
     return slots
 
 
+_DOMAIN_LEVEL_RANK = {"beginner": 1, "advanced": 2, "expert": 3}
+
+
 class AdvisorFinderSearchIn(BaseModel):
     control_domains: list[str]
+    control_domain_levels: dict[str, str] = {}
     duration_minutes: int
     date_from: str
     date_to: str
@@ -79,11 +83,26 @@ def search_advisors(body: AdvisorFinderSearchIn, user: Annotated[dict, Depends(g
     excluded_ids = set(org.get("advisor_finder_excluded_ids") or [])
     excluded_roles = set(org.get("advisor_finder_excluded_roles") or [])
     domains = set(body.control_domains)
+    required_rank = {
+        d: _DOMAIN_LEVEL_RANK.get(body.control_domain_levels.get(d), 1)
+        for d in domains
+    }
 
-    profiles = db.table("profiles").select("id, full_name, role, control_domains").eq("org_id", user["org_id"]).execute().data or []
+    def _matches(p: dict) -> bool:
+        advisor_domains = set(p.get("control_domains") or [])
+        advisor_levels = p.get("control_domain_levels") or {}
+        for d in domains:
+            if d not in advisor_domains:
+                continue
+            advisor_rank = _DOMAIN_LEVEL_RANK.get(advisor_levels.get(d), 1)
+            if advisor_rank >= required_rank[d]:
+                return True
+        return False
+
+    profiles = db.table("profiles").select("id, full_name, role, control_domains, control_domain_levels").eq("org_id", user["org_id"]).execute().data or []
     candidates = [
         p for p in profiles
-        if p["id"] not in excluded_ids and p.get("role") not in excluded_roles and domains.intersection(p.get("control_domains") or [])
+        if p["id"] not in excluded_ids and p.get("role") not in excluded_roles and _matches(p)
     ]
     if not candidates:
         return {"advisors": []}

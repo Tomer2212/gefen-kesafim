@@ -1,16 +1,10 @@
 import { useState } from "react";
 import axios from "axios";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
-import { buildSchoolContacts, resolveMeetingCoordinator } from "./schoolContacts";
+import { buildSchoolContacts } from "./schoolContacts";
+import { COORDINATOR_ROLE_FIELDS, SLOT_LABELS, resolveMeetingCoordinatorForSlot } from "./meetingCoordinatorSlots";
 
-const COORDINATOR_ROLE_FIELDS = {
-  principal: { name: "principal_name", phone: "principal_phone", email: "principal_email" },
-  principal_chativa: { name: "principal_chativa_name", phone: "principal_chativa_phone", email: "principal_chativa_email" },
-  secretary: { name: "secretary_name", phone: "secretary_phone", email: "secretary_email" },
-  finance_contact: { name: "finance_contact_name", phone: "finance_contact_phone", email: "finance_contact_email" },
-};
-
-// buildSchoolContacts uses "finance" as its participant key, while the meeting_coordinator
+// buildSchoolContacts uses "finance" as its participant key, while the meeting-coordinator
 // ref convention (mirrored from schools_router.py) uses "finance_contact" — deliberately
 // separate key spaces, see schoolContacts.js.
 const PARTICIPANT_KEY_FIELDS = {
@@ -20,57 +14,53 @@ const PARTICIPANT_KEY_FIELDS = {
   finance: COORDINATOR_ROLE_FIELDS.finance_contact,
 };
 
-function coordinatorRoleOptions(school) {
+function coordinatorRoleOptionsForSlot(school) {
   const options = [{ value: "principal", label: "מנהל/ת" }];
-  if (school.stage === "sheshshnati" && school.principal_same_person !== true) {
-    options.push({ value: "principal_chativa", label: 'מנהל/ת חט"ב' });
-  }
+  if (school.stage === "sheshshnati") options.push({ value: "principal_chativa", label: 'מנהל/ת חט"ב' });
   options.push({ value: "secretary", label: "מנהלנ/ית" });
+  if (school.stage === "sheshshnati") options.push({ value: "secretary_chativa", label: 'מנהלנ/ית חט"ב' });
   options.push({ value: "finance_contact", label: "אחראי/ת כספים" });
+  if (school.stage === "sheshshnati") options.push({ value: "finance_contact_chativa", label: 'אחראי/ת כספים חט"ב' });
   return options;
 }
 
-export function DirectCoordinationResolutionModal({ school, participantRoleKeysNeeded, onSchoolUpdate, onProceed, onClose }) {
+export function DirectCoordinationResolutionModal({ school, neededSlots, participantRoleKeysNeeded, onSchoolUpdate, onProceed, onClose }) {
   const { ref, handleKeyDown } = useFocusTrap(onClose);
   const [savingKey, setSavingKey] = useState(null);
   const [saveError, setSaveError] = useState(null);
-  const [coordDraft, setCoordDraft] = useState(null);
+  const [slotDrafts, setSlotDrafts] = useState({});
   const [participantDrafts, setParticipantDrafts] = useState({});
 
-  const roleOptions = coordinatorRoleOptions(school);
-  const coordinator = resolveMeetingCoordinator(school);
-  const coordinatorOk = !!(coordinator && coordinator.email);
+  const roleOptions = coordinatorRoleOptionsForSlot(school);
+  const badSlots = neededSlots.filter(slot => {
+    const c = resolveMeetingCoordinatorForSlot(school, slot);
+    return !c || !c.email;
+  });
 
   const contacts = buildSchoolContacts(school);
   const contactsByKey = Object.fromEntries(contacts.map(c => [c.key, c]));
   const badParticipantKeys = participantRoleKeysNeeded.filter(k => !contactsByKey[k]?.email);
-  const allResolved = coordinatorOk && badParticipantKeys.length === 0;
+  const allResolved = badSlots.length === 0 && badParticipantKeys.length === 0;
 
-  function coordinatorDraftValue() {
-    if (coordDraft) return coordDraft;
-    const named = contacts.find(c => ["principal", "principal_chativa", "secretary", "finance"].includes(c.key) && c.name);
-    const mapKey = k => (k === "finance" ? "finance_contact" : k);
-    const preferredRole = school.meeting_coordinator || (named ? mapKey(named.key) : "principal");
-    const fields = COORDINATOR_ROLE_FIELDS[preferredRole] || COORDINATOR_ROLE_FIELDS.principal;
-    return {
-      role: COORDINATOR_ROLE_FIELDS[preferredRole] ? preferredRole : "principal",
-      name: school[fields.name] || "",
-      phone: school[fields.phone] || "",
-      email: school[fields.email] || "",
-    };
-  }
-  function updateCoordDraft(patch) {
-    setCoordDraft({ ...coordinatorDraftValue(), ...patch });
-  }
-  function selectCoordRole(role) {
+  function slotDraftValue(slot) {
+    if (slotDrafts[slot]) return slotDrafts[slot];
+    const existingRef = school.meeting_coordinators?.[slot];
+    const role = COORDINATOR_ROLE_FIELDS[existingRef] ? existingRef : "principal";
     const fields = COORDINATOR_ROLE_FIELDS[role];
-    setCoordDraft({ role, name: school[fields.name] || "", phone: school[fields.phone] || "", email: school[fields.email] || "" });
+    return { role, name: school[fields.name] || "", phone: school[fields.phone] || "", email: school[fields.email] || "" };
   }
-  async function saveCoordinator() {
-    const draft = coordinatorDraftValue();
+  function updateSlotDraft(slot, patch) {
+    setSlotDrafts(prev => ({ ...prev, [slot]: { ...slotDraftValue(slot), ...patch } }));
+  }
+  function selectSlotRole(slot, role) {
+    const fields = COORDINATOR_ROLE_FIELDS[role];
+    setSlotDrafts(prev => ({ ...prev, [slot]: { role, name: school[fields.name] || "", phone: school[fields.phone] || "", email: school[fields.email] || "" } }));
+  }
+  async function saveSlot(slot) {
+    const draft = slotDraftValue(slot);
     if (!draft.name?.trim() || !draft.email?.trim()) return;
     const fields = COORDINATOR_ROLE_FIELDS[draft.role];
-    setSavingKey("coordinator");
+    setSavingKey(`slot:${slot}`);
     setSaveError(null);
     try {
       const patch = {
@@ -78,11 +68,11 @@ export function DirectCoordinationResolutionModal({ school, participantRoleKeysN
         [fields.name]: draft.name.trim(),
         [fields.phone]: draft.phone?.trim() || null,
         [fields.email]: draft.email.trim(),
-        meeting_coordinator: draft.role,
+        meeting_coordinators: { ...(school.meeting_coordinators || {}), [slot]: draft.role },
       };
       await axios.put(`/schools/${school.id}`, patch);
       onSchoolUpdate(patch);
-      setCoordDraft(null);
+      setSlotDrafts(prev => { const next = { ...prev }; delete next[slot]; return next; });
     } catch {
       setSaveError("שמירת אחראי/ת תיאום הפגישות נכשלה — נסה שוב.");
     } finally {
@@ -135,39 +125,43 @@ export function DirectCoordinationResolutionModal({ school, participantRoleKeysN
         <h2 id="dc-resolution-title" className="font-bold text-slate-900 text-lg">חסרות הגדרות להשלמת השליחה</h2>
         <p className="text-sm text-slate-600">לבית הספר חסרים כמה פרטים לפני שאפשר לשלוח את הבקשה — ניתן להשלים אותם כאן ישירות.</p>
 
-        {!coordinatorOk && (() => {
+        {neededSlots.map(slot => {
+          const c = resolveMeetingCoordinatorForSlot(school, slot);
+          const ok = !!(c && c.email);
+          if (ok) {
+            return (
+              <div key={slot} className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 flex items-center gap-2">
+                <span aria-hidden="true" className="text-emerald-600 text-xs font-bold">✓</span>
+                <span className="text-xs text-emerald-800">אחראי/ת תיאום פגישות ({SLOT_LABELS[slot] || slot}): {c.name} — הוגדר/ה</span>
+              </div>
+            );
+          }
           cardCounter += 1;
           const n = cardCounter;
-          const draft = coordinatorDraftValue();
-          const saving = savingKey === "coordinator";
+          const draft = slotDraftValue(slot);
+          const saving = savingKey === `slot:${slot}`;
           return (
-            <div className="bg-white rounded-lg border border-amber-200 p-3 space-y-2">
-              <p className="text-xs text-slate-700"><b>בעיה {n}:</b> לא הוגדר/ה אחראי/ת תיאום פגישות עם כתובת מייל תקינה — יש להגדיר כעת:</p>
+            <div key={slot} className="bg-white rounded-lg border border-amber-200 p-3 space-y-2">
+              <p className="text-xs text-slate-700"><b>בעיה {n}:</b> לא הוגדר/ה אחראי/ת תיאום פגישות עם כתובת מייל תקינה עבור <b>{SLOT_LABELS[slot] || slot}</b> — יש להגדיר כעת:</p>
               <div className="flex items-center gap-1.5 flex-wrap">
-                <select value={draft.role} onChange={e => selectCoordRole(e.target.value)}
+                <select value={draft.role} onChange={e => selectSlotRole(slot, e.target.value)}
                   className="text-xs border border-amber-300 rounded-lg px-2 py-1.5 bg-white">
                   {roleOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                 </select>
-                <input placeholder="שם" value={draft.name} onChange={e => updateCoordDraft({ name: e.target.value })}
+                <input placeholder="שם" value={draft.name} onChange={e => updateSlotDraft(slot, { name: e.target.value })}
                   className="text-xs border border-amber-300 rounded-lg px-2 py-1.5 w-28" />
-                <input placeholder="טלפון" value={draft.phone} onChange={e => updateCoordDraft({ phone: e.target.value })}
+                <input placeholder="טלפון" value={draft.phone} onChange={e => updateSlotDraft(slot, { phone: e.target.value })}
                   className="text-xs border border-amber-300 rounded-lg px-2 py-1.5 w-24" />
-                <input placeholder="מייל" value={draft.email} onChange={e => updateCoordDraft({ email: e.target.value })}
+                <input placeholder="מייל" value={draft.email} onChange={e => updateSlotDraft(slot, { email: e.target.value })}
                   className="text-xs border border-amber-300 rounded-lg px-2 py-1.5 w-36" />
-                <button type="button" onClick={saveCoordinator} disabled={saving || !draft.name?.trim() || !draft.email?.trim()}
+                <button type="button" onClick={() => saveSlot(slot)} disabled={saving || !draft.name?.trim() || !draft.email?.trim()}
                   className="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">
                   {saving ? "שומר..." : "שמור"}
                 </button>
               </div>
             </div>
           );
-        })()}
-        {coordinatorOk && (
-          <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 flex items-center gap-2">
-            <span aria-hidden="true" className="text-emerald-600 text-xs font-bold">✓</span>
-            <span className="text-xs text-emerald-800">אחראי/ת תיאום פגישות: {coordinator.name} — הוגדר/ה</span>
-          </div>
-        )}
+        })}
 
         {participantRoleKeysNeeded.length > 0 && (() => {
           cardCounter += 1;

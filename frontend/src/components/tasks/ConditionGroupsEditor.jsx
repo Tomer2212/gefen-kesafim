@@ -40,8 +40,13 @@ const STAGE_SCOPE_PILLS = [
   { value: "both", label: "שניהם (פגישה אחת)" },
   { value: "separate", label: "שתי פגישות נפרדות" },
 ];
+// Generalized (meeting-coordinator redesign): secretary/finance_contact now split by division
+// on a six-year school too (each via its own *_same_person flag), same as principal already
+// did — so the חטיבה pills must show whenever ANY splittable role is selected, not principal
+// only, or a manager could never express "only the תיכון secretary" for that participant.
 function needsStageScope(cond) {
-  return cond.meeting_service_type && cond.meeting_service_type !== "current" && (cond.participant_roles || []).includes("principal");
+  return cond.meeting_service_type && cond.meeting_service_type !== "current"
+    && (cond.participant_roles || []).some(r => ["principal", "secretary", "finance_contact"].includes(r));
 }
 export const DURATION_OPTIONS = Array.from({ length: (180 - 30) / 15 + 1 }, (_, i) => 30 + i * 15);
 export function formatDuration(minutes) {
@@ -454,7 +459,7 @@ export default function ConditionGroupsEditor({
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-3">
+                    <div className="grid grid-cols-3 gap-3">
                       <div className="flex flex-col gap-1 relative group">
                         <label htmlFor={`mtg-advisor-${gi}-${ci}`} className="text-xs font-medium text-black">יועץ מבצע</label>
                         <select id={`mtg-advisor-${gi}-${ci}`}
@@ -492,6 +497,14 @@ export default function ConditionGroupsEditor({
                         <div className="pointer-events-none absolute -top-7 right-0 opacity-0 group-hover:opacity-100 transition-opacity bg-amber-400 text-amber-950 text-[11px] font-medium px-2 py-1 rounded-md shadow-lg whitespace-nowrap z-10">
                           בהתאם להקצאה בכרטיס בית הספר
                         </div>
+                      </div>
+                      <div className="flex flex-col gap-1">
+                        <label htmlFor={`mtg-location-${gi}-${ci}`} className="text-xs font-medium text-black">מיקום הפגישה</label>
+                        <select id={`mtg-location-${gi}-${ci}`} value={cond.meeting_type || "remote"}
+                          onChange={e => updateCondition(gi, ci, { meeting_type: e.target.value })}
+                          className="text-sm border border-black rounded-lg px-2.5 py-1.5 w-full">
+                          {MEETING_TYPE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                        </select>
                       </div>
                     </div>
 

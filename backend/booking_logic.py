@@ -181,6 +181,7 @@ def build_booking_request_email_html(recipient_name: str, school_name: str, advi
 
 
 _SERVICE_TYPE_LABEL_HE = {"gefen": "גפן", "current": "שוטף"}
+_MEETING_TYPE_LABEL_HE = {"remote": "מרחוק", "physical": "פיזי"}
 
 
 def _format_range_date(iso: str) -> str:
@@ -206,10 +207,12 @@ def format_ranges_html(ranges: list[dict]) -> str:
         type_label = r.get("label") or _SERVICE_TYPE_LABEL_HE.get(r.get("service_type"), "")
         duration_label = _format_duration_he(r.get("duration_minutes"))
         participants_label = ", ".join(p.get("name", "") for p in (r.get("participants") or []) if p.get("name"))
+        location_label = _MEETING_TYPE_LABEL_HE.get(r.get("meeting_type"), "מרחוק")
         range_rows += f"""
       <li style="margin-bottom: 10px;">
         <b>{type_label}</b> — {_format_range_date(r["start_date"])} עד {_format_range_date(r["end_date"])}
         {f' · משך: {duration_label}' if duration_label else ""}
+        <br/><span style="color: #64748b; font-size: 12px;">מיקום הפגישה: {location_label}</span>
         {f'<br/><span style="color: #64748b; font-size: 12px;">משתתפים: {participants_label}</span>' if participants_label else ""}
       </li>"""
     return f'<ul style="margin: 0 0 20px 0; padding-inline-start: 20px; color: #334155;">{range_rows}\n      </ul>'
@@ -223,9 +226,11 @@ def format_ranges_text(ranges: list[dict]) -> str:
         type_label = r.get("label") or _SERVICE_TYPE_LABEL_HE.get(r.get("service_type"), "")
         duration_label = _format_duration_he(r.get("duration_minutes"))
         participants_label = ", ".join(p.get("name", "") for p in (r.get("participants") or []) if p.get("name"))
+        location_label = _MEETING_TYPE_LABEL_HE.get(r.get("meeting_type"), "מרחוק")
         line = f"• {type_label} — {_format_range_date(r['start_date'])} עד {_format_range_date(r['end_date'])}"
         if duration_label:
             line += f" · משך: {duration_label}"
+        line += f"\n  מיקום הפגישה: {location_label}"
         if participants_label:
             line += f"\n  משתתפים: {participants_label}"
         lines.append(line)

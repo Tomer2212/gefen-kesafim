@@ -41,46 +41,74 @@ _ROLE_CONTACT_FIELDS = {
     "principal": ("principal_name", "principal_email", "principal_phone"),
     "principal_chativa": ("principal_chativa_name", "principal_chativa_email", "principal_chativa_phone"),
     "secretary": ("secretary_name", "secretary_email", "secretary_phone"),
+    "secretary_chativa": ("secretary_chativa_name", "secretary_chativa_email", "secretary_chativa_phone"),
     "finance_contact": ("finance_contact_name", "finance_contact_email", "finance_contact_phone"),
+    "finance_contact_chativa": ("finance_contact_chativa_name", "finance_contact_chativa_email", "finance_contact_chativa_phone"),
 }
 _PARTICIPANT_ROLE_LABELS = {
     "principal": "מנהל/ת", "principal_chativa": 'מנהל/ת חט"ב',
-    "secretary": "מנהלנ/ית", "finance_contact": "אחראי/ת כספים",
+    "secretary": "מנהלנ/ית", "secretary_chativa": 'מנהלנ/ית חט"ב',
+    "finance_contact": "אחראי/ת כספים", "finance_contact_chativa": 'אחראי/ת כספים חט"ב',
 }
 _MEETING_TYPE_LABELS = {"gefen": "גפן", "current": "שוטף", "district": "מחוז", "takuma": "תקומה"}
 _TYPED_ADVISOR_TABLES = {"gefen": "school_advisors_gefen", "current": "school_advisors_current", "district": "school_advisors_district"}
 
 
-def _principal_slots_for_school(school: dict, stage_scope: str | None) -> list[str]:
-    """Round 8 — which of ["principal", "principal_chativa"] a "מנהל/ת" participant actually
-    resolves to for this school, given the meeting requirement's chosen stage_scope
-    ('tichon'/'chativa'/'both', same convention as the existing meetings.stage_scope feature —
-    see StageScopeModal.jsx). Six-year schools (stage == "sheshshnati") with
-    principal_same_person=True collapse to a single slot regardless of stage_scope — there's
-    only one real person to invite either way. Non-six-year schools always just ["principal"]."""
-    if school.get("stage") != "sheshshnati" or school.get("principal_same_person"):
-        return ["principal"]
+_SAME_PERSON_FIELD = {
+    "principal": "principal_same_person",
+    "secretary": "secretary_same_person",
+    "finance_contact": "finance_same_person",
+}
+_CHATIVA_ROLE = {
+    "principal": "principal_chativa",
+    "secretary": "secretary_chativa",
+    "finance_contact": "finance_contact_chativa",
+}
+_TICHON_LABEL = {"principal": 'מנהל/ת חט"ע', "secretary": 'מנהלנ/ית חט"ע', "finance_contact": 'אחראי/ת כספים חט"ע'}
+
+
+def _role_slots_for_school(school: dict, role: str, stage_scope: str | None) -> list[str]:
+    """Which of [role, role+'_chativa'] a participant role actually resolves to for this
+    school, given the meeting requirement's chosen stage_scope ('tichon'/'chativa'/'both', same
+    convention as the existing meetings.stage_scope feature — see StageScopeModal.jsx).
+    Generalizes the original principal-only version (round 8) to also cover secretary/
+    finance_contact — each splits independently via its own school.<role>_same_person flag, so
+    a six-year school with (say) a shared principal but separate secretaries invites correctly
+    either way. A role with no chativa counterpart, or a school where that role's
+    *_same_person flag is true, collapses to a single slot regardless of stage_scope — there's
+    only one real person to invite either way."""
+    chativa_role = _CHATIVA_ROLE.get(role)
+    same_person_field = _SAME_PERSON_FIELD.get(role)
+    if not chativa_role or school.get("stage") != "sheshshnati" or school.get(same_person_field):
+        return [role]
     scope = stage_scope or "both"
     slots = []
     # "separate" (round 16 — two independent meetings, one per principal) still needs both
-    # principals' contact details resolved/checked, exactly like "both" (one merged meeting) —
-    # the two scopes only differ in how _build_meeting_booking_link groups the resolved
-    # participants into one range vs two, not in who needs a valid contact.
+    # slots' contact details resolved/checked, exactly like "both" (one merged meeting) — the
+    # two scopes only differ in how _build_meeting_ranges groups the resolved participants into
+    # one range vs two, not in who needs a valid contact.
     if scope in ("tichon", "both", "separate"):
-        slots.append("principal")
+        slots.append(role)
     if scope in ("chativa", "both", "separate"):
-        slots.append("principal_chativa")
+        slots.append(chativa_role)
     return slots
 
 
+def _principal_slots_for_school(school: dict, stage_scope: str | None) -> list[str]:
+    return _role_slots_for_school(school, "principal", stage_scope)
+
+
 def _principal_role_label(school: dict, slot: str) -> str:
-    """The display label for a principal slot in THIS school's context — six-year schools (with
-    a real second principal) get the חט"ע/חט"ב-qualified labels; everyone else just "מנהל/ת"."""
-    if slot == "principal_chativa":
-        return 'מנהל/ת חט"ב'
-    if school.get("stage") == "sheshshnati" and not school.get("principal_same_person"):
-        return 'מנהל/ת חט"ע'
-    return "מנהל/ת"
+    """The display label for a role slot (principal/secretary/finance_contact, base or
+    _chativa) in THIS school's context — six-year schools with a real second contact for that
+    role get the חט"ע/חט"ב-qualified labels; everyone else just the plain role label."""
+    if slot.endswith("_chativa"):
+        base_role = slot[: -len("_chativa")]
+        return _PARTICIPANT_ROLE_LABELS.get(f"{base_role}_chativa", 'מנהל/ת חט"ב')
+    same_person_field = _SAME_PERSON_FIELD.get(slot)
+    if school.get("stage") == "sheshshnati" and same_person_field and not school.get(same_person_field):
+        return _TICHON_LABEL.get(slot, _PARTICIPANT_ROLE_LABELS.get(slot, slot))
+    return _PARTICIPANT_ROLE_LABELS.get(slot, slot)
 
 
 def _build_school_contacts(school: dict, roles: list[str], stage_scope: str | None = None) -> list[dict]:
@@ -91,13 +119,14 @@ def _build_school_contacts(school: dict, roles: list[str], stage_scope: str | No
     tasks-domain role names (principal/secretary/finance_contact) instead of the
     meetings-domain ones (principal/secretary/finance) to stay consistent with the rest of
     this file — deliberately does NOT include extra_contacts (the participant-role picker only
-    offers the 3 fixed roles, unlike the single-school "תיאום ישיר" modal). Round 8: "principal"
-    expands to 1-2 concrete slots via _principal_slots_for_school before resolution, so a
-    six-year school's "מנהל/ת" participant correctly becomes the tichon and/or chativa
-    principal depending on stage_scope — every other role is unaffected."""
+    offers the 3 fixed roles, unlike the single-school "תיאום ישיר" modal). Round 8
+    (generalized): principal/secretary/finance_contact each expand to 1-2 concrete slots via
+    _role_slots_for_school before resolution, so a six-year school's participant correctly
+    becomes the tichon and/or chativa contact depending on stage_scope and that role's own
+    *_same_person flag — any other role is unaffected."""
     contacts = []
     for role in roles:
-        slots = _principal_slots_for_school(school, stage_scope) if role == "principal" else [role]
+        slots = _role_slots_for_school(school, role, stage_scope) if role in _CHATIVA_ROLE else [role]
         for slot in slots:
             fields = _ROLE_CONTACT_FIELDS.get(slot)
             if not fields:
@@ -122,7 +151,14 @@ def _resolve_recipient(school: dict, recipient_role: str) -> dict:
     (itself one of the other role refs, as configured in "פרטי בית הספר") rather than naming
     a fixed field — same value schools_router surfaces as meeting_coordinator_contact."""
     if recipient_role == "meeting_coordinator":
-        ref = school.get("meeting_coordinator")
+        # General-purpose single-recipient fallback (no specific meeting/slot context available
+        # here — used for non-meeting tasks and as the pre-creation "is ANY coordinator
+        # configured at all" check). Prefers the new per-slot map (any populated slot) over the
+        # deprecated single `meeting_coordinator` field. _queue_messages_for_schools' meeting-task
+        # path resolves per-range slots precisely instead of using this fallback — see
+        # _group_ranges_by_coordinator.
+        coordinators = school.get("meeting_coordinators") or {}
+        ref = next((v for v in coordinators.values() if v), None) or school.get("meeting_coordinator")
         return _resolve_recipient(school, ref) if ref else {"name": None, "email": None, "phone": None}
     if recipient_role in _ROLE_CONTACT_FIELDS:
         name_f, email_f, phone_f = _ROLE_CONTACT_FIELDS[recipient_role]
@@ -225,8 +261,8 @@ class TaskCreateIn(BaseModel):
     # regardless of whether the audience came from criteria or manual_school_ids.
     meeting_overrides: dict | None = None  # round-6 "קבע אחר לפגישה זו בלבד" —
     # {school_id: {meeting_service_type: {"advisor_ids":[...], "duration_minutes": int}}},
-    # consulted by _build_meeting_booking_link ahead of the school's own card defaults but
-    # never written back to the school itself (see _build_meeting_booking_link's docstring).
+    # consulted by _build_meeting_ranges ahead of the school's own card defaults but
+    # never written back to the school itself (see _build_meeting_ranges's docstring).
 
 
 class TaskPatchIn(BaseModel):
@@ -598,6 +634,21 @@ def _check_contact_problems(
     schools = db.table("schools").select("*").in_("id", school_ids).execute().data or [] if school_ids else []
     schools_by_id = {s["id"]: s for s in schools}
 
+    # Needed only so TaskContactResolutionModal's "fix it here" save can write the picked role
+    # into EVERY slot currently applicable to the school (see meeting_coordinators below) — this
+    # endpoint has no per-meeting-requirement context (unlike _check_meeting_problems), so
+    # "which slot" isn't answerable here; setting all of them keeps the fix consistent with how
+    # _resolve_recipient's meeting_coordinator fallback reads "any populated slot".
+    service_type_by_school = {}
+    if recipient_role == "meeting_coordinator" and school_ids:
+        try:
+            service_type_by_school = {
+                sid: fields.get("service_type")
+                for sid, fields in resolve_inherited_year_admin(db, school_ids, academic_year).items()
+            }
+        except Exception as exc:
+            logger.warning("_check_contact_problems: service_type lookup failed (non-fatal): %s", exc)
+
     resolved_by_school = {}
     entries_by_school = {}
     for m in matched:
@@ -613,6 +664,10 @@ def _check_contact_problems(
         }
         if not entry["has_contact"]:
             entry.update(_missing_contact_detail(school))
+        if recipient_role == "meeting_coordinator":
+            entry["stage"] = school.get("stage")
+            entry["service_type"] = service_type_by_school.get(m["school_id"])
+            entry["meeting_coordinators"] = school.get("meeting_coordinators") or {}
         resolved_by_school[m["school_id"]] = res["recipient"].get("email")
         entries_by_school[m["school_id"]] = entry
 
@@ -754,14 +809,46 @@ class MeetingsCheckIn(BaseModel):
     academic_year: str = DEFAULT_ACADEMIC_YEAR
 
 
-def _coordinator_problem(school: dict, channel: str) -> dict | None:
-    """The 'who receives the scheduling email itself' check for a meeting task — always
-    recipient_role='meeting_coordinator'/is_meeting_task=True, unlike /contacts/check's
-    general-purpose role param. Returns None when resolved."""
+def _slot_coordinator_ok(school: dict, slot: str, needs_phone: bool) -> bool:
+    c = _schools_router._resolve_meeting_coordinator_for_slot(school, slot)
+    if not c:
+        return False
+    return bool(c.get("phone")) if needs_phone else bool(c.get("email"))
+
+
+def _coordinator_problem(school: dict, channel: str, meeting_requirements: list | None = None) -> dict | None:
+    """The 'who receives the scheduling email itself' check for a meeting task. When
+    meeting_requirements is given, checks EVERY requirement's actual coordination slot(s)
+    (_coordinator_slot_candidates — same resolution _group_ranges_by_coordinator uses at send
+    time), so a school that passes this pre-check is guaranteed not to hit a 'missing
+    coordinator' skip later. The returned dict's `needed_slots` lists every slot still missing a
+    contact, across every requirement (not just the first) — TaskMeetingResolutionModal's fix-it
+    save writes the manager's chosen contact into all of them at once, so one save actually
+    resolves the whole coordinator problem instead of leaving other slots still broken. Falls
+    back to the generic meeting_coordinator cascade (any coordinator-ish contact at all) only
+    when no requirements are available to check against."""
+    needs_phone = channel == "whatsapp_twilio"
+    if meeting_requirements:
+        needed_slots: list[str] = []
+        for req in meeting_requirements:
+            if req.meeting_service_type not in _MEETING_TYPE_LABELS:
+                continue
+            candidates = _coordinator_slot_candidates(school, req.meeting_service_type, req.stage_scope)
+            if not any(_slot_coordinator_ok(school, s, needs_phone) for s in candidates):
+                for s in candidates:
+                    if s not in needed_slots:
+                        needed_slots.append(s)
+        if not needed_slots:
+            return None
+        detail = _missing_contact_detail(school)
+        detail["needed_slots"] = needed_slots
+        return detail
     res = _resolve_recipient_with_cascade(school, "meeting_coordinator", True, channel)
     if res["resolved_via"] is not None:
         return None
-    return _missing_contact_detail(school)
+    detail = _missing_contact_detail(school)
+    detail["needed_slots"] = []
+    return detail
 
 
 def _check_meeting_problems(
@@ -824,18 +911,19 @@ def _check_meeting_problems(
         if not school:
             continue
 
-        coordinator = _coordinator_problem(school, channel)
+        coordinator = _coordinator_problem(school, channel, meeting_requirements)
         coordinator_emails[school["id"]] = _resolve_recipient_with_cascade(
             school, "meeting_coordinator", True, channel,
         )["recipient"].get("email")
 
-        # Round 8: "principal" expands to 1-2 concrete slots (tichon/chativa) per this
-        # school's stage_scope-aware resolution — every other role stays a flat 1:1 pass-through.
+        # Round 8 (generalized): principal/secretary/finance_contact each expand to 1-2
+        # concrete slots (tichon/chativa) per this school's stage_scope-aware resolution and
+        # their own *_same_person flag — any other role stays a flat 1:1 pass-through.
         participant_roles_needed: set[str] = set()
         for req in meeting_requirements:
             for role in req.participant_roles:
-                if role == "principal":
-                    participant_roles_needed.update(_principal_slots_for_school(school, req.stage_scope))
+                if role in _CHATIVA_ROLE:
+                    participant_roles_needed.update(_role_slots_for_school(school, role, req.stage_scope))
                 else:
                     participant_roles_needed.add(role)
         bad_roles = []
@@ -851,7 +939,7 @@ def _check_meeting_problems(
         if bad_roles:
             participants = {
                 "roles": bad_roles,
-                "role_labels": {role: _principal_role_label(school, role) if role.startswith("principal") else _PARTICIPANT_ROLE_LABELS.get(role, role) for role in bad_roles},
+                "role_labels": {role: _principal_role_label(school, role) for role in bad_roles},
                 "contacts": {
                     role: {"name": school.get(_ROLE_CONTACT_FIELDS[role][0]),
                            "email": school.get(_ROLE_CONTACT_FIELDS[role][1]),
@@ -898,6 +986,7 @@ def _check_meeting_problems(
             entries_by_school[school["id"]] = {
                 "school_id": school["id"], "school_name": school["name"],
                 "symbol": school.get("symbol"), "authority": school.get("authority"),
+                "stage": school.get("stage"), "meeting_coordinators": school.get("meeting_coordinators") or {},
                 "coordinator": coordinator, "participants": participants, "meeting_defaults": meeting_defaults,
                 "advisor_access": advisor_access, "opted_out": None,
             }
@@ -1396,7 +1485,7 @@ def _render_template(template: str, school: dict, booking_link: str | None = Non
     plain text (like {recipient_name}/{school_name}) so it's always substituted directly here,
     regardless of keep_tokens — just the raw comma-joined advisor name(s) ("עם" belongs in the
     template text itself, e.g. "מבוקש לתאם עם {advisor_names} את"). Effectively always non-empty
-    for meeting tasks in practice — _build_meeting_booking_link refuses to build a booking link at
+    for meeting tasks in practice — _build_meeting_ranges refuses to build a booking link at
     all when no advisor resolves for any range, so ranges_data never reaches this function empty."""
     text = (template or "").replace("{school_name}", school.get("name") or "")
     if "{recipient_name}" in text:
@@ -1488,7 +1577,7 @@ def _first_meeting_condition(criteria: dict) -> dict | None:
 
 def _build_booking_link(db, org_id: str, task: dict, school_id: str) -> str | None:
     """Generic single-link fallback — only used when a task references {booking_link} without
-    being a structured meeting-scheduling task (round-5's _build_meeting_booking_link handles
+    being a structured meeting-scheduling task (round-5's _build_meeting_ranges handles
     those; see its call site in _queue_messages_for_schools). Reuses the existing
     unique-scheduling-link machinery instead of building a new one."""
     advisors = db.table("advisor_schools").select("advisor_id").eq("school_id", school_id).execute().data or []
@@ -1517,10 +1606,50 @@ def _meeting_conditions_from_success_criteria(task: dict) -> list[dict]:
     return [c for c in (groups[0].get("conditions") or []) if c.get("type") == "meeting"]
 
 
-def _build_meeting_booking_link(
-    db, org_id: str, school: dict, meeting_conditions: list[dict],
+def _coordinator_slot_candidates(school: dict, service_type: str, stage_scope: str | None) -> list[str]:
+    """Candidate coordination slots for one meeting range, in preference order — mirrors
+    schools_router.py's per-range slot resolution in send_direct_coordination_request. A range
+    whose stage_scope spans both divisions ("both"/unset — a single merged meeting) has no one
+    well-defined slot; try the תיכון coordinator first, then חט"ב, since one merged meeting can
+    only go to a single recipient either way."""
+    base = "gefen" if service_type == "takuma" else service_type
+    if base == "district" or school.get("stage") != "sheshshnati":
+        return [base]
+    if stage_scope == "chativa":
+        return [f"{base}_beinayim"]
+    if stage_scope == "tichon":
+        return [f"{base}_tichon"]
+    return [f"{base}_tichon", f"{base}_beinayim"]
+
+
+def _resolve_range_coordinator(school: dict, r: dict) -> dict | None:
+    for slot in _coordinator_slot_candidates(school, r["service_type"], r.get("stage_scope")):
+        c = _schools_router._resolve_meeting_coordinator_for_slot(school, slot)
+        if c and c.get("email"):
+            return c
+    return None
+
+
+def _group_ranges_by_coordinator(school: dict, ranges_data: list[dict]) -> list[dict] | None:
+    """Groups a school's meeting ranges by distinct resolved coordinator email, so
+    _queue_messages_for_schools can send one message per distinct coordinator instead of
+    assuming a single school-wide recipient — mirrors send_direct_coordination_request's
+    grouping for the "תיאום ישיר" flow. Returns None if ANY range's coordinator can't be
+    resolved (caller treats the whole school as a missing-contact case, same as before)."""
+    groups: dict[str, dict] = {}
+    for r in ranges_data:
+        c = _resolve_range_coordinator(school, r)
+        if not c:
+            return None
+        g = groups.setdefault(c["email"], {"coordinator": c, "ranges": []})
+        g["ranges"].append(r)
+    return list(groups.values())
+
+
+def _build_meeting_ranges(
+    school: dict, meeting_conditions: list[dict],
     advisor_map: dict[str, list[str]], duration_row: dict, school_overrides: dict | None = None,
-) -> tuple[str | None, str | None, list[dict] | None]:
+) -> list[dict] | None:
     """Structured, per-meeting-requirement booking link for 'קביעת פגישות' tasks (round 5) —
     mirrors schools_router.send_direct_coordination_request's ranges_data construction
     (label/key building, participants fixed up front), but resolved per-school from each
@@ -1533,20 +1662,16 @@ def _build_meeting_booking_link(
     per-school "קבע אחר לפגישה זו בלבד" overrides (org_tasks.meeting_overrides[school_id]),
     which never get written back to the school's own card. Resolution priority per field:
     condition-level "manual" value (shared by every school) > this school's override > the
-    school's own card default. Returns (None, None) (falls back to no link in the message) if
-    nothing usable could be resolved — should not normally happen since POST /tasks/meetings/
-    check runs first and lets the manager fix/override/skip every gap before creation; the
-    60-minute duration fallback below is a defensive last resort only, not a real UX path.
-    Round 7: also returns the minted token's id (for TaskPanel's send-status tracking — see
-    _queue_messages_for_schools' booking_token_id column) and attaches each range's own
-    resolved advisor_ids (round-7 bug fix — the token-level advisor list used to be one flat
-    union shared across every range, so a school booking one meeting type ended up inviting
-    every advisor from every OTHER meeting type too; meeting_booking_router.py now prefers a
-    range's own advisor_ids over the token-level union when present).
-    Round 9: also returns ranges_data itself (previously built here and then discarded once the
-    token was minted) so the caller can render the same rich per-meeting HTML email that
-    "תיאום ישיר" already sends, via booking_logic.build_direct_coordination_email_html — instead
-    of duplicating that template."""
+    school's own card default. Returns None (falls back to no link in the message) if nothing
+    usable could be resolved — should not normally happen since POST /tasks/meetings/check runs
+    first and lets the manager fix/override/skip every gap before creation; the 60-minute
+    duration fallback below is a defensive last resort only, not a real UX path. Each range
+    carries its own resolved advisor_ids (round-7 bug fix — the token-level advisor list used to
+    be one flat union shared across every range, so a school booking one meeting type ended up
+    inviting every advisor from every OTHER meeting type too; meeting_booking_router.py prefers a
+    range's own advisor_ids over the token-level union when present). Token minting is a separate
+    step (_mint_meeting_booking_link) so the caller can group ranges by resolved coordinator
+    (_group_ranges_by_coordinator) and mint one token per group instead of always one per school."""
     school_overrides = school_overrides or {}
     valid_conditions = [c for c in meeting_conditions if c.get("meeting_service_type") in _MEETING_TYPE_LABELS]
     type_counts: dict[str, int] = {}
@@ -1600,6 +1725,7 @@ def _build_meeting_booking_link(
                 "start_date": start_date, "end_date": end_date,
                 "service_type": service_type, "duration_minutes": duration_minutes,
                 "label": label, "participants": participants, "advisor_ids": advisor_ids,
+                "meeting_type": c.get("meeting_type") or "remote",
                 # Round 17 — tags this range with which principal slot it's for (or the
                 # condition's original stage_scope when not splitting), so the booked `meetings`
                 # row can carry it too — without this, two ranges from the same "separate"
@@ -1612,10 +1738,17 @@ def _build_meeting_booking_link(
                     advisor_ids_union.append(aid)
 
     if not ranges_data or not advisor_ids_union:
-        return None, None, None
+        return None
+    return ranges_data
 
-    token_row = booking_token_logic.create_direct_booking_token(db, org_id, school["id"], advisor_ids_union, ranges_data)
-    return f"{os.getenv('APP_URL', '')}/book/{token_row['token']}", token_row["id"], ranges_data
+
+def _mint_meeting_booking_link(db, org_id: str, school_id: str, ranges_data: list[dict]) -> tuple[str, str]:
+    """Mints a booking token covering exactly the given ranges (a subset of a school's full
+    range list when split across multiple coordinators — see _group_ranges_by_coordinator) and
+    returns (booking_link, booking_token_id)."""
+    advisor_ids_union = list(dict.fromkeys(aid for r in ranges_data for aid in r.get("advisor_ids") or []))
+    token_row = booking_token_logic.create_direct_booking_token(db, org_id, school_id, advisor_ids_union, ranges_data)
+    return f"{os.getenv('APP_URL', '')}/book/{token_row['token']}", token_row["id"]
 
 
 def _broadcast_skip_active(note_row: dict | None, today: date) -> bool:
@@ -1807,47 +1940,15 @@ def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[st
         if _broadcast_skip_active(notes_map.get(school["id"]), _today):
             skipped_broadcast.append({"id": school["id"], "name": school.get("name")})
             continue
-        recipient = resolved_recipients[school["id"]]
-        if _channel_missing_contact(channel, recipient):
-            missing.append(school["id"])
-            try:
-                db.table("org_task_school_notes").upsert(
-                    {"task_id": task["id"], "school_id": school["id"], "skip_reason": "missing_contact"},
-                    on_conflict="task_id,school_id",
-                ).execute()
-            except Exception as exc:
-                logger.warning("_queue_messages_for_schools: failed to persist skip_reason (non-fatal): %s", exc)
-            continue
-        recipient_email = (recipient.get("email") or "").strip().lower()
-        excluded_emails = {e.lower() for e in (notes_map.get(school["id"], {}).get("excluded_emails") or [])}
-        if recipient_email and school["id"] in opted_out_map:
-            missing.append(school["id"])
-            try:
-                db.table("org_task_school_notes").upsert(
-                    {"task_id": task["id"], "school_id": school["id"], "skip_reason": "opted_out"},
-                    on_conflict="task_id,school_id",
-                ).execute()
-            except Exception as exc:
-                logger.warning("_queue_messages_for_schools: failed to persist skip_reason (non-fatal): %s", exc)
-            continue
-        if recipient_email and recipient_email in excluded_emails:
-            missing.append(school["id"])
-            continue
-
-        opt_out_link = None
-        if client_status_map.get(school["id"]) != "active" and recipient_email:
-            opt_out_link = f"{APP_URL}/tasks/opt-out?email={recipient_email}&token={task_logic.make_optout_token(recipient_email)}"
 
         ranges_data = None
-        if not needs_booking_link:
-            booking_link, booking_token_id = None, None
-        elif meeting_conditions:
-            booking_link, booking_token_id, ranges_data = _build_meeting_booking_link(
-                db, org_id, school, meeting_conditions,
+        if needs_booking_link and meeting_conditions:
+            ranges_data = _build_meeting_ranges(
+                school, meeting_conditions,
                 advisor_map.get(school["id"], {}), duration_map.get(school["id"], {}),
                 meeting_overrides.get(school["id"]),
             )
-            if booking_link is None:
+            if ranges_data is None:
                 # Defensive hardening (round 6) — POST /tasks/meetings/check + the resolution
                 # modal's blocking gate should make this unreachable in practice, but a school
                 # must never receive a message with a dead {booking_link} placeholder.
@@ -1860,69 +1961,144 @@ def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[st
                 except Exception as exc:
                     logger.warning("_queue_messages_for_schools: failed to persist skip_reason (non-fatal): %s", exc)
                 continue
-        else:
-            booking_link, booking_token_id = _build_booking_link(db, org_id, task, school["id"]), None
 
-        # Round 12: the manager's typed body_template is now always what's actually sent — a new
-        # {meetings_list} placeholder is substituted with the same per-range date/duration/
-        # participants block "תיאום ישיר" already renders (booking_logic.format_ranges_html/
-        # format_ranges_text), instead of silently discarding body_template in favor of a fixed
-        # HTML template (round 9's behavior). Email channels (Resend/Outlook) get the free text
-        # wrapped in the branded HTML card via _wrap_email_html (which also fixes a pre-existing
-        # bug where plain-text bodies were sent as literal unescaped HTML, so \n never rendered).
-        # WhatsApp doesn't render HTML, so it keeps the plain-text path with plain bullets.
-        advisor_names_value = ""
-        if ranges_data:
-            advisor_ids_for_names = list({aid for r in ranges_data for aid in (r.get("advisor_ids") or [])})
-            if advisor_ids_for_names:
+        # Build this school's list of (recipient, ranges subset) "sends". A meeting-coordinator
+        # recipient on a meeting task with multiple ranges can resolve to MULTIPLE distinct
+        # coordinators (e.g. a six-year school with separate תיכון/ביניים contacts) — exactly
+        # the scenario the multi-coordinator redesign exists to support, mirroring
+        # send_direct_coordination_request's grouping. Every other recipient_role, and
+        # meeting-coordinator tasks where every range shares one coordinator, still produce
+        # exactly one send, same as before.
+        if recipient_role == "meeting_coordinator" and ranges_data is not None:
+            groups = _group_ranges_by_coordinator(school, ranges_data)
+            if groups is None:
+                missing.append(school["id"])
                 try:
-                    prof_rows = db.table("profiles").select("id, full_name").in_("id", advisor_ids_for_names).execute().data or []
-                    names = [p["full_name"] for p in prof_rows if p.get("full_name")]
-                    if names:
-                        advisor_names_value = ", ".join(names)
+                    db.table("org_task_school_notes").upsert(
+                        {"task_id": task["id"], "school_id": school["id"], "skip_reason": "missing_contact"},
+                        on_conflict="task_id,school_id",
+                    ).execute()
                 except Exception as exc:
-                    logger.warning("_queue_messages_for_schools: advisor-name lookup failed (non-fatal): %s", exc)
-
-        if channel == "whatsapp_twilio":
-            meetings_list_text = format_ranges_text(ranges_data) if ranges_data else None
-            body = _render_template(body_template, school, booking_link, opt_out_link,
-                                     meetings_list=meetings_list_text, recipient_name=recipient.get("name"),
-                                     advisor_names=advisor_names_value)
+                    logger.warning("_queue_messages_for_schools: failed to persist skip_reason (non-fatal): %s", exc)
+                continue
+            sends = [{"recipient": g["coordinator"], "ranges_data": g["ranges"], "own_opt_out_check": len(groups) > 1} for g in groups]
         else:
-            meetings_list_html = format_ranges_html(ranges_data) if ranges_data else None
-            rendered = _render_template(body_template, school, opt_out_link=opt_out_link,
-                                         recipient_name=recipient.get("name"), advisor_names=advisor_names_value,
-                                         keep_tokens=True)
-            body = _wrap_email_html(rendered, booking_link, meetings_list_html, branded=(channel != "email_outlook"))
+            recipient = resolved_recipients[school["id"]]
+            if _channel_missing_contact(channel, recipient):
+                missing.append(school["id"])
+                try:
+                    db.table("org_task_school_notes").upsert(
+                        {"task_id": task["id"], "school_id": school["id"], "skip_reason": "missing_contact"},
+                        on_conflict="task_id,school_id",
+                    ).execute()
+                except Exception as exc:
+                    logger.warning("_queue_messages_for_schools: failed to persist skip_reason (non-fatal): %s", exc)
+                continue
+            sends = [{"recipient": recipient, "ranges_data": ranges_data, "own_opt_out_check": False}]
 
-        row = {
-            "task_id": task["id"],
-            "school_id": school["id"],
-            "recipient_name": recipient.get("name"),
-            "recipient_email": recipient.get("email"),
-            "recipient_phone": recipient.get("phone"),
-            "recipient_role": recipient_role,
-            "channel": channel,
-            "subject": _render_template(message_config.get("subject") or "", school),
-            "body": body,
-            "attachment_keys": message_config.get("attachment_keys") or [],
-            "status": "pending",
-            "booking_token_id": booking_token_id,
-        }
-        if scheduled_at:
-            row["scheduled_at"] = scheduled_at.isoformat()
-        elif channel != "email_outlook":
-            status, error = _send_message_now(
-                db, org_id, school["id"], channel, row["subject"], row["body"],
-                row.get("recipient_email"), row.get("recipient_phone"), row.get("attachment_keys"),
-                created_by=task.get("created_by"),
-            )
-            row["status"] = status
-            if status == "sent":
-                row["sent_at"] = datetime.now(timezone.utc).isoformat()
+        for send in sends:
+            recipient = send["recipient"]
+            send_ranges = send["ranges_data"]
+            recipient_email = (recipient.get("email") or "").strip().lower()
+            excluded_emails = {e.lower() for e in (notes_map.get(school["id"], {}).get("excluded_emails") or [])}
+
+            # Multi-coordinator sends weren't covered by the batched opted_out_map computed once
+            # above (that map only knows about resolved_recipients' single email per school) —
+            # check this send's own email individually. Rare path (only six-year schools with
+            # genuinely split coordinators), so the extra per-send query is acceptable.
+            is_opted_out = school["id"] in opted_out_map
+            if send["own_opt_out_check"] and recipient_email:
+                try:
+                    is_opted_out = school["id"] in task_logic.opted_out_recipients(db, academic_year, {school["id"]: recipient_email})
+                except Exception as exc:
+                    logger.warning("_queue_messages_for_schools: per-send opt-out lookup failed (non-fatal): %s", exc)
+                    is_opted_out = False
+
+            if recipient_email and is_opted_out:
+                missing.append(school["id"])
+                try:
+                    db.table("org_task_school_notes").upsert(
+                        {"task_id": task["id"], "school_id": school["id"], "skip_reason": "opted_out"},
+                        on_conflict="task_id,school_id",
+                    ).execute()
+                except Exception as exc:
+                    logger.warning("_queue_messages_for_schools: failed to persist skip_reason (non-fatal): %s", exc)
+                continue
+            if recipient_email and recipient_email in excluded_emails:
+                missing.append(school["id"])
+                continue
+
+            opt_out_link = None
+            if client_status_map.get(school["id"]) != "active" and recipient_email:
+                opt_out_link = f"{APP_URL}/tasks/opt-out?email={recipient_email}&token={task_logic.make_optout_token(recipient_email)}"
+
+            booking_link, booking_token_id = None, None
+            if send_ranges:
+                booking_link, booking_token_id = _mint_meeting_booking_link(db, org_id, school["id"], send_ranges)
+            elif needs_booking_link and not meeting_conditions:
+                booking_link, booking_token_id = _build_booking_link(db, org_id, task, school["id"]), None
+
+            # Round 12: the manager's typed body_template is now always what's actually sent — a
+            # new {meetings_list} placeholder is substituted with the same per-range date/
+            # duration/participants block "תיאום ישיר" already renders (booking_logic.
+            # format_ranges_html/format_ranges_text), instead of silently discarding
+            # body_template in favor of a fixed HTML template (round 9's behavior). Email
+            # channels (Resend/Outlook) get the free text wrapped in the branded HTML card via
+            # _wrap_email_html (which also fixes a pre-existing bug where plain-text bodies were
+            # sent as literal unescaped HTML, so \n never rendered). WhatsApp doesn't render
+            # HTML, so it keeps the plain-text path with plain bullets.
+            advisor_names_value = ""
+            if send_ranges:
+                advisor_ids_for_names = list({aid for r in send_ranges for aid in (r.get("advisor_ids") or [])})
+                if advisor_ids_for_names:
+                    try:
+                        prof_rows = db.table("profiles").select("id, full_name").in_("id", advisor_ids_for_names).execute().data or []
+                        names = [p["full_name"] for p in prof_rows if p.get("full_name")]
+                        if names:
+                            advisor_names_value = ", ".join(names)
+                    except Exception as exc:
+                        logger.warning("_queue_messages_for_schools: advisor-name lookup failed (non-fatal): %s", exc)
+
+            if channel == "whatsapp_twilio":
+                meetings_list_text = format_ranges_text(send_ranges) if send_ranges else None
+                body = _render_template(body_template, school, booking_link, opt_out_link,
+                                         meetings_list=meetings_list_text, recipient_name=recipient.get("name"),
+                                         advisor_names=advisor_names_value)
             else:
-                row["error"] = error
-        queue_rows.append(row)
+                meetings_list_html = format_ranges_html(send_ranges) if send_ranges else None
+                rendered = _render_template(body_template, school, opt_out_link=opt_out_link,
+                                             recipient_name=recipient.get("name"), advisor_names=advisor_names_value,
+                                             keep_tokens=True)
+                body = _wrap_email_html(rendered, booking_link, meetings_list_html, branded=(channel != "email_outlook"))
+
+            row = {
+                "task_id": task["id"],
+                "school_id": school["id"],
+                "recipient_name": recipient.get("name"),
+                "recipient_email": recipient.get("email"),
+                "recipient_phone": recipient.get("phone"),
+                "recipient_role": recipient_role,
+                "channel": channel,
+                "subject": _render_template(message_config.get("subject") or "", school),
+                "body": body,
+                "attachment_keys": message_config.get("attachment_keys") or [],
+                "status": "pending",
+                "booking_token_id": booking_token_id,
+            }
+            if scheduled_at:
+                row["scheduled_at"] = scheduled_at.isoformat()
+            elif channel != "email_outlook":
+                status, error = _send_message_now(
+                    db, org_id, school["id"], channel, row["subject"], row["body"],
+                    row.get("recipient_email"), row.get("recipient_phone"), row.get("attachment_keys"),
+                    created_by=task.get("created_by"),
+                )
+                row["status"] = status
+                if status == "sent":
+                    row["sent_at"] = datetime.now(timezone.utc).isoformat()
+                else:
+                    row["error"] = error
+            queue_rows.append(row)
 
     if queue_rows:
         db.table("org_task_messages").insert(queue_rows).execute()
@@ -2048,7 +2224,11 @@ def put_school_contact_info(task_id: str, school_id: str, body: ContactInfoIn, u
     school = school_rows[0]
 
     recipient_role = (task.get("message_config") or {}).get("recipient_role")
-    resolved_role = school.get("meeting_coordinator") if recipient_role == "meeting_coordinator" else recipient_role
+    if recipient_role == "meeting_coordinator":
+        coordinators = school.get("meeting_coordinators") or {}
+        resolved_role = next((v for v in coordinators.values() if v), None) or school.get("meeting_coordinator")
+    else:
+        resolved_role = recipient_role
     if resolved_role not in _ROLE_CONTACT_FIELDS:
         raise HTTPException(status_code=422, detail="לא ניתן לקבוע לאיזה איש קשר לשייך את הפרטים — יש להגדיר קודם 'אחראי/ת לתיאום פגישות' בפרטי בית הספר")
 

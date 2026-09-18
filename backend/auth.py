@@ -75,7 +75,7 @@ def _get_profile(user_id: str) -> dict:
             db = get_admin_client()
             profile = (
                 db.table("profiles")
-                .select("role, full_name, gender, birth_date, avatar_storage_key, org_id, status, is_superadmin, onboarding_dismissed, notification_preferences, work_phone, control_domains")
+                .select("role, full_name, gender, birth_date, avatar_storage_key, org_id, status, is_superadmin, onboarding_dismissed, notification_preferences, work_phone, control_domains, control_domain_levels")
                 .eq("id", user_id)
                 .single()
                 .execute()
@@ -94,6 +94,7 @@ def _get_profile(user_id: str) -> dict:
                 "notification_preferences": d.get("notification_preferences") or {"meeting_reminder": True, "meeting_reminder_minutes": 10},
                 "work_phone": d.get("work_phone"),
                 "control_domains": d.get("control_domains") or [],
+                "control_domain_levels": d.get("control_domain_levels") or {},
                 "_cached_at": time.monotonic(),
             }
             _profile_cache[user_id] = result
@@ -111,7 +112,7 @@ def _get_profile(user_id: str) -> dict:
                 fresh = _profile_cache.get(user_id)
                 if fresh:
                     return fresh
-                return {"role": "advisor", "full_name": "", "gender": None, "birth_date": None, "avatar_storage_key": None, "org_id": None, "status": "active", "is_superadmin": False, "onboarding_dismissed": {}, "notification_preferences": {"meeting_reminder": True, "meeting_reminder_minutes": 10}, "work_phone": None, "control_domains": [], "_cached_at": time.monotonic()}
+                return {"role": "advisor", "full_name": "", "gender": None, "birth_date": None, "avatar_storage_key": None, "org_id": None, "status": "active", "is_superadmin": False, "onboarding_dismissed": {}, "notification_preferences": {"meeting_reminder": True, "meeting_reminder_minutes": 10}, "work_phone": None, "control_domains": [], "control_domain_levels": {}, "_cached_at": time.monotonic()}
 
 
 def invalidate_profile_cache(user_id: str) -> None:
@@ -168,4 +169,5 @@ def get_current_user(
         "notification_preferences": profile["notification_preferences"],
         "work_phone": profile.get("work_phone"),
         "control_domains": profile.get("control_domains") or [],
+        "control_domain_levels": profile.get("control_domain_levels") or {},
     }
