@@ -2,11 +2,20 @@ import { useEffect, useState } from "react";
 import axios from "axios";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
 import { RECIPIENT_ROLE_OPTIONS } from "./taskShared";
+import { slotsForSchool } from "../meetings/meetingCoordinatorSlots";
 
 const ROLE_OPTIONS = [
   { value: "principal", label: "מנהל/ת" },
   { value: "secretary", label: "מנהלנ/ית" },
   { value: "finance_contact", label: "אחראי/ת כספים" },
+];
+
+// Only offered for meeting_coordinator fixes on six-year schools — mirrors the school-card's
+// secretary/finance chativa split.
+const CHATIVA_ROLE_OPTIONS = [
+  { value: "principal_chativa", label: 'מנהל/ת חט"ב' },
+  { value: "secretary_chativa", label: 'מנהלנ/ית חט"ב' },
+  { value: "finance_contact_chativa", label: 'אחראי/ת כספים חט"ב' },
 ];
 
 // Round-2 redesign, simplified after the manager found it too text-heavy and generic — shown
@@ -64,13 +73,21 @@ export default function TaskContactResolutionModal({
   // opted_out_recipients on the backend).
   const optedOut = (result?.schools || []).filter(s => s.opted_out);
 
+  function roleOptionsFor(school) {
+    if (recipientRole === "meeting_coordinator" && school.stage === "sheshshnati") {
+      return [ROLE_OPTIONS[0], CHATIVA_ROLE_OPTIONS[0], ROLE_OPTIONS[1], CHATIVA_ROLE_OPTIONS[1], ROLE_OPTIONS[2], CHATIVA_ROLE_OPTIONS[2]];
+    }
+    return ROLE_OPTIONS;
+  }
+
   function draftFor(school) {
     if (drafts[school.school_id]) return drafts[school.school_id];
     // Default to a role that already has a name on file (most common case — just missing the
     // channel-specific field), otherwise the school's own meeting_coordinator pointer, otherwise
     // the first role in the list.
     const withName = (school.contacts || []).find(c => c.name);
-    const preferred = withName?.role || school.meeting_coordinator || ROLE_OPTIONS[0].value;
+    const anySlotRole = Object.values(school.meeting_coordinators || {}).find(Boolean);
+    const preferred = withName?.role || anySlotRole || school.meeting_coordinator || ROLE_OPTIONS[0].value;
     const existing = (school.contacts || []).find(c => c.role === preferred);
     return { role: preferred, name: existing?.name || "", phone: existing?.phone || "", email: existing?.email || "" };
   }
@@ -95,7 +112,17 @@ export default function TaskContactResolutionModal({
         [fields.phone]: draft.phone?.trim() || null,
         [fields.email]: draft.email?.trim() || null,
       };
-      if (recipientRole === "meeting_coordinator") body.meeting_coordinator = draft.role;
+      if (recipientRole === "meeting_coordinator") {
+        // No per-meeting-type context here (unlike the dedicated meeting-scheduling flow) — set
+        // the picked role as coordinator for EVERY slot currently applicable to this school, so
+        // "fixing" it here stays consistent with how the general fallback reads "any populated
+        // slot" (see tasks_router.py _resolve_recipient).
+        const slots = slotsForSchool({ stage: school.stage }, school.service_type);
+        const coordinators = { ...(school.meeting_coordinators || {}) };
+        for (const slot of slots) coordinators[slot] = draft.role;
+        body.meeting_coordinator = draft.role;
+        body.meeting_coordinators = coordinators;
+      }
       await axios.put(`/schools/${school.school_id}`, body);
       setResolvedIds(prev => new Set(prev).add(school.school_id));
     } catch {
@@ -209,7 +236,7 @@ export default function TaskContactResolutionModal({
                           onChange={e => selectRole(school, e.target.value)}
                           className="text-xs border border-amber-300 rounded-lg px-2 py-1.5 bg-white"
                         >
-                          {ROLE_OPTIONS.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
+                          {roleOptionsFor(school).map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
                         </select>
                         <label className="sr-only" htmlFor={`${school.school_id}-name`}>שם</label>
                         <input id={`${school.school_id}-name`} placeholder="שם" value={draft.name} onChange={e => updateDraft(school, { name: e.target.value })}

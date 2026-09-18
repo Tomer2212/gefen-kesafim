@@ -3,6 +3,7 @@ import axios from "axios";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
 import { MEETING_SERVICE_TYPE_LABELS, formatDateDMY } from "./taskShared";
 import { DURATION_OPTIONS, formatDuration } from "./ConditionGroupsEditor";
+import { SLOT_LABELS } from "../meetings/meetingCoordinatorSlots";
 
 // Fallback labels only — round 8: the backend sends a per-school school.participants.role_labels
 // map (aware of stage/principal_same_person, e.g. "מנהל/ת חט\"ע" vs "מנהל/ת חט\"ב"), which is
@@ -18,6 +19,14 @@ const COORDINATOR_ROLE_OPTIONS = [
   { value: "principal", label: "מנהל/ת" },
   { value: "secretary", label: "מנהלנ/ית" },
   { value: "finance_contact", label: "אחראי/ת כספים" },
+];
+const COORDINATOR_ROLE_OPTIONS_SHESHSHNATI = [
+  { value: "principal", label: "מנהל/ת" },
+  { value: "principal_chativa", label: 'מנהל/ת חט"ב' },
+  { value: "secretary", label: "מנהלנ/ית" },
+  { value: "secretary_chativa", label: 'מנהלנ/ית חט"ב' },
+  { value: "finance_contact", label: "אחראי/ת כספים" },
+  { value: "finance_contact_chativa", label: 'אחראי/ת כספים חט"ב' },
 ];
 
 // Round 6 — replaces both round 5's split TaskMeetingResolutionModal (advisor/participant-name
@@ -206,6 +215,9 @@ export default function TaskMeetingResolutionModal({
   }
 
   // --- Coordinator card ---
+  function coordinatorRoleOptions(school) {
+    return school.stage === "sheshshnati" ? COORDINATOR_ROLE_OPTIONS_SHESHSHNATI : COORDINATOR_ROLE_OPTIONS;
+  }
   function coordinatorDraft(school) {
     const key = `coord:${school.school_id}`;
     if (drafts[key]) return drafts[key];
@@ -232,12 +244,20 @@ export default function TaskMeetingResolutionModal({
     setSavingKey(key);
     setSaveError(null);
     try {
+      // needed_slots (from the backend's per-requirement check) is exactly the set of
+      // coordination slots this school is currently missing — write the chosen contact into
+      // ALL of them at once, so one save actually resolves the whole coordinator problem
+      // instead of leaving other meeting-type/division slots still unresolved.
+      const neededSlots = school.coordinator?.needed_slots || [];
+      const coordinators = { ...(school.meeting_coordinators || {}) };
+      for (const slot of neededSlots) coordinators[slot] = draft.role;
       await axios.put(`/schools/${school.school_id}`, {
         name: school.school_name,
         [`${draft.role}_name`]: draft.name.trim(),
         [`${draft.role}_phone`]: draft.phone?.trim() || null,
         [`${draft.role}_email`]: draft.email?.trim() || null,
         meeting_coordinator: draft.role,
+        meeting_coordinators: coordinators,
       });
       markResolved(key);
       // Cross-resolve the other direction: if this same role was also flagged as a missing
@@ -498,20 +518,23 @@ export default function TaskMeetingResolutionModal({
                             return (
                               <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 flex items-center gap-2">
                                 <span aria-hidden="true" className="text-emerald-600 text-xs font-bold">✓</span>
-                                <span className="text-xs text-emerald-800"><b>בעיה {n}:</b> {COORDINATOR_ROLE_OPTIONS.find(r => r.value === draft.role)?.label} ({draft.name}) — הוגדר/ה כאחראי/ת תיאום פגישות</span>
+                                <span className="text-xs text-emerald-800"><b>בעיה {n}:</b> {coordinatorRoleOptions(school).find(r => r.value === draft.role)?.label} ({draft.name}) — הוגדר/ה כאחראי/ת תיאום פגישות</span>
                               </div>
                             );
                           }
                           return (
                             <div className="bg-white rounded-lg border border-amber-100 p-3 space-y-2">
                               <p className="text-xs text-slate-700">
-                                <b>בעיה {n}:</b> נבחרה התקשרות ב{needsPhone ? "וואטסאפ" : "מייל"} אך לבית הספר אין אחראי/ת תיאום פגישות עם {needsPhone ? "טלפון" : "מייל"} תקין — הגדר/י כעת:
+                                <b>בעיה {n}:</b> נבחרה התקשרות ב{needsPhone ? "וואטסאפ" : "מייל"} אך לבית הספר אין אחראי/ת תיאום פגישות עם {needsPhone ? "טלפון" : "מייל"} תקין
+                                {school.coordinator?.needed_slots?.length > 0 && (
+                                  <> עבור: <b>{school.coordinator.needed_slots.map(s => SLOT_LABELS[s] || s).join(", ")}</b></>
+                                )} — הגדר/י כעת:
                               </p>
                               <div className="flex items-center gap-1.5 flex-wrap">
                                 <label className="sr-only" htmlFor={`${key}-role`}>תפקיד</label>
                                 <select id={`${key}-role`} value={draft.role} onChange={e => selectCoordinatorRole(school, e.target.value)}
                                   className="text-xs border border-amber-300 rounded-lg px-2 py-1.5 bg-white">
-                                  {COORDINATOR_ROLE_OPTIONS.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
+                                  {coordinatorRoleOptions(school).map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
                                 </select>
                                 <label className="sr-only" htmlFor={`${key}-name`}>שם</label>
                                 <input id={`${key}-name`} placeholder="שם" value={draft.name} onChange={e => updateCoordinatorDraft(school, { name: e.target.value })}

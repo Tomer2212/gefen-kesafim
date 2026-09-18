@@ -1084,8 +1084,11 @@ def recompute_task_status_and_cache(db, org_id: str, task: dict) -> dict | None:
 
 _CONTACT_NAME_FIELDS = {
     "principal": "principal_name",
+    "principal_chativa": "principal_chativa_name",
     "secretary": "secretary_name",
+    "secretary_chativa": "secretary_chativa_name",
     "finance_contact": "finance_contact_name",
+    "finance_contact_chativa": "finance_contact_chativa_name",
 }
 
 
@@ -1102,7 +1105,7 @@ def find_schools_by_contact_name(org_id: str, name: str) -> list[dict]:
             filters = ",".join(f"{field}.ilike.%{name}%" for field in _CONTACT_NAME_FIELDS.values())
             rows = (
                 db.table("schools")
-                .select("id, name, principal_name, secretary_name, finance_contact_name")
+                .select("id, name, " + ", ".join(_CONTACT_NAME_FIELDS.values()))
                 .eq("org_id", org_id)
                 .eq("status", "active")
                 .or_(filters)

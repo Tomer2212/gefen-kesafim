@@ -608,6 +608,7 @@ export default function ProfilePage() {
                         <div className="flex flex-col gap-2">
                           <MultiSelectChips
                             neutral
+                            checkIcon
                             options={DOMAIN_OPTIONS}
                             selected={domainsDraft}
                             onChange={setDomainsDraft}

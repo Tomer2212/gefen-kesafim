@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import axios from "axios";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import HourMinuteInput from "./HourMinuteInput";
+import { SLOT_LABELS } from "./meetings/meetingCoordinatorSlots";
 
 // Interactive resolution modal for the school Excel import. Mirrors the UX of
 // MeetingImportProblemsModal: one card per problematic row, every problem must be
@@ -13,6 +14,19 @@ const COORDINATOR_ROLE_OPTIONS = [
   { value: "secretary", label: "מנהלנ/ית" },
   { value: "finance_contact", label: "אחראי/ת כספים" },
 ];
+const COORDINATOR_ROLE_OPTIONS_SHESHSHNATI = [
+  { value: "principal", label: "מנהל/ת" },
+  { value: "principal_chativa", label: 'מנהל/ת חט"ב' },
+  { value: "secretary", label: "מנהלנ/ית" },
+  { value: "secretary_chativa", label: 'מנהלנ/ית חט"ב' },
+  { value: "finance_contact", label: "אחראי/ת כספים" },
+  { value: "finance_contact_chativa", label: 'אחראי/ת כספים חט"ב' },
+];
+const COORDINATOR_NAME_FIELD = {
+  principal: "principal_name", principal_chativa: "principal_chativa_name",
+  secretary: "secretary_name", secretary_chativa: "secretary_chativa_name",
+  finance_contact: "finance_contact_name", finance_contact_chativa: "finance_contact_chativa_name",
+};
 const FINANCE_SOFTWARE_OPTIONS = [
   { value: "kesafim2000", label: "כספים 2000" },
   { value: "payscool", label: "פייסקול" },
@@ -70,7 +84,7 @@ function InviteAdvisorForm({ onInvited, onCancel }) {
   );
 }
 
-export function SchoolImportProblemsModal({ rows, users, requiredTypesFor, onCommit, onClose }) {
+export function SchoolImportProblemsModal({ rows, users, requiredTypesFor, autoConfirmDuplicates, onCommit, onClose }) {
   const { ref, handleKeyDown } = useFocusTrap(onClose);
   const [sessionUsers, setSessionUsers] = useState([]);
   const [excluded, setExcluded] = useState(new Set());
@@ -84,20 +98,31 @@ export function SchoolImportProblemsModal({ rows, users, requiredTypesFor, onCom
   const problemRows = rows.filter(r => r.problems.length > 0);
   const okCount = rows.length - problemRows.length;
 
+  // One draft {role, name} per missing coordination slot — a row can need more than one
+  // (e.g. a six-year school with both גפן-תיכון and שוטף-חט"ב still unresolved).
+  function coordinatorRoleOptions(row) {
+    return row.school?.stage === "sheshshnati" ? COORDINATOR_ROLE_OPTIONS_SHESHSHNATI : COORDINATOR_ROLE_OPTIONS;
+  }
+  function defaultCoordDraft(row, slot) {
+    // If the slot's raw cell held a plain name (not an email/phone) that we could not match
+    // to a contact role, prefill it as the name so the user only picks a role.
+    const rawCoord = String(row.coordinatorRawBySlot?.[slot] || "").trim();
+    const namePrefill = rawCoord && !rawCoord.includes("@") && !/^[\d\s\-()+.]+$/.test(rawCoord) ? rawCoord : "";
+    return { role: "", name: namePrefill };
+  }
   function defaultRes(row) {
-    // If the coordinator cell held a plain name (not an email / phone) that we could
-    // not match to a contact role, prefill it as the name so the user only picks a role.
-    const rawCoord = String(row.coordinatorRaw || "").trim();
-    const coordNamePrefill = row.coordinatorName
-      || (rawCoord && !rawCoord.includes("@") && !/^[\d\s\-()+.]+$/.test(rawCoord) ? rawCoord : "");
     return {
       name: row.name || "", symbol: row.symbol || "",
-      coordRole: row.coordinator || "", coordName: coordNamePrefill,
+      coordDrafts: {},  // slot -> {role, name}, only for slots in row.requiredSlots missing a coordinator
       financeSoftware: undefined, // undefined = not chosen; "" = leave empty; canonical = chosen
       fields: {},  // field key -> resolved value (select string / number|null / minutes|null / array)
       drafts: {},  // field key -> working value before "אישור"
       picks: {}, adds: { gefen: [], current: [], district: [] },
-      confirmUpdateDuplicate: false, // school_not_found-style: must explicitly confirm "update the existing school" before this row can proceed
+      // school_not_found-style: must explicitly confirm "update the existing school" before
+      // this row can proceed — pre-confirmed in "ייבוא כבתי ספר לא פעילים" mode, where a
+      // symbol match can only be an existing reference school (an active-client match is
+      // filtered out entirely before rows ever reach this modal — see confirmImport).
+      confirmUpdateDuplicate: !!autoConfirmDuplicates,
     };
   }
   const getRes = (row) => res[row.rowIndex] || defaultRes(row);
@@ -108,6 +133,15 @@ export function SchoolImportProblemsModal({ rows, users, requiredTypesFor, onCom
     });
   }
   const setPick = (row, k, v) => patchRes(row, { picks: { ...getRes(row).picks, [k]: v } });
+  function getCoordDraft(row, slot) {
+    return getRes(row).coordDrafts[slot] || defaultCoordDraft(row, slot);
+  }
+  function updateCoordDraft(row, slot, patch) {
+    patchRes(row, { coordDrafts: { ...getRes(row).coordDrafts, [slot]: { ...getCoordDraft(row, slot), ...patch } } });
+  }
+  function missingCoordSlots(row) {
+    return (row.requiredSlots || []).filter(slot => !row.coordinators?.[slot]);
+  }
   const addAdvisor = (row, t, id) => {
     if (!id) return;
     const cur = getRes(row);
@@ -156,7 +190,10 @@ export function SchoolImportProblemsModal({ rows, users, requiredTypesFor, onCom
     const items = [];
     if ((!row.name || !row.symbol) && !(r.name.trim() && r.symbol.trim())) items.push("identity");
     if (row.duplicateSymbol && !r.confirmUpdateDuplicate) items.push("duplicate_symbol");
-    if ((!row.coordinator || !row.coordinatorName) && !(r.coordRole && r.coordName.trim())) items.push("coordinator");
+    for (const slot of missingCoordSlots(row)) {
+      const d = r.coordDrafts[slot];
+      if (!(d && d.role && d.name.trim())) items.push(`coordinator:${slot}`);
+    }
     if (row.financeSoftwareIssue && r.financeSoftware === undefined) items.push("finance_software");
     for (const fi of (row.fieldIssues || [])) {
       if (r.fields[fi.field] === undefined) items.push(`field:${fi.field}`);
@@ -213,16 +250,25 @@ export function SchoolImportProblemsModal({ rows, users, requiredTypesFor, onCom
             if (val === undefined) continue;
             (fi.target === "yearAdmin" ? yearAdmin : school)[fi.field] = val;
           }
-          const needCoord = !row.coordinator || !row.coordinatorName;
+          // Fill in any still-missing slots from this row's drafts, writing the manually-typed
+          // name into the corresponding contact field too (a slot resolved automatically from
+          // the file already has its name field populated — only manual drafts need this).
+          const coordinators = { ...(row.coordinators || {}) };
+          for (const slot of missingCoordSlots(row)) {
+            const d = r.coordDrafts[slot];
+            if (d?.role && d.name?.trim()) {
+              coordinators[slot] = d.role;
+              const nameField = COORDINATOR_NAME_FIELD[d.role];
+              if (nameField) school[nameField] = d.name.trim();
+            }
+          }
+          school.meeting_coordinators = coordinators;
+          school.meeting_coordinator = Object.values(coordinators).find(Boolean) || null;
           return {
             ...row,
             final: {
               school,
               yearAdmin,
-              coordinator: {
-                role: needCoord ? r.coordRole : row.coordinator,
-                name: needCoord ? r.coordName.trim() : row.coordinatorName,
-              },
               advisorIdsByType: {
                 gefen: finalIds(row, "gefen"),
                 current: finalIds(row, "current"),
@@ -280,7 +326,6 @@ export function SchoolImportProblemsModal({ rows, users, requiredTypesFor, onCom
             const isRowClear = isExcluded || rowUnresolved(row).length === 0;
             const r = getRes(row);
             const needIdentity = !row.name || !row.symbol;
-            const needCoord = !row.coordinator || !row.coordinatorName;
             const needFinance = !!row.financeSoftwareIssue;
             const financeSelectValue = r.financeSoftware === undefined ? "" : r.financeSoftware === "" ? EMPTY : r.financeSoftware;
             return (
@@ -343,29 +388,32 @@ export function SchoolImportProblemsModal({ rows, users, requiredTypesFor, onCom
                       </div>
                     )}
 
-                    {needCoord && (
-                      <div className="bg-white rounded-lg border border-amber-100 p-2.5 space-y-1.5">
-                        <p className="text-xs text-slate-700">
-                          <b>מתאם/ת פגישות לא זוהה</b>
-                          {row.coordinatorRaw ? <span className="text-slate-400"> — בקובץ: "{row.coordinatorRaw}"</span> : null}
-                        </p>
-                        <div className="grid grid-cols-2 gap-2">
-                          <div>
-                            <label htmlFor={`imp-coordrole-${row.rowIndex}`} className="text-[11px] text-slate-500 block mb-0.5">תפקיד</label>
-                            <select id={`imp-coordrole-${row.rowIndex}`} value={r.coordRole} onChange={e => patchRes(row, { coordRole: e.target.value })}
-                              className="text-xs border border-slate-300 rounded-lg px-2 py-1.5 w-full bg-white">
-                              <option value="">בחר תפקיד...</option>
-                              {COORDINATOR_ROLE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                            </select>
-                          </div>
-                          <div>
-                            <label htmlFor={`imp-coordname-${row.rowIndex}`} className="text-[11px] text-slate-500 block mb-0.5">שם מלא</label>
-                            <input id={`imp-coordname-${row.rowIndex}`} value={r.coordName} onChange={e => patchRes(row, { coordName: e.target.value })}
-                              className="text-xs border border-slate-300 rounded-lg px-2 py-1.5 w-full" />
+                    {missingCoordSlots(row).map(slot => {
+                      const draft = getCoordDraft(row, slot);
+                      return (
+                        <div key={slot} className="bg-white rounded-lg border border-amber-100 p-2.5 space-y-1.5">
+                          <p className="text-xs text-slate-700">
+                            <b>מתאם/ת פגישות ({SLOT_LABELS[slot] || slot}) לא זוהה</b>
+                            {row.coordinatorRawBySlot?.[slot] ? <span className="text-slate-400"> — בקובץ: "{row.coordinatorRawBySlot[slot]}"</span> : null}
+                          </p>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <label htmlFor={`imp-coordrole-${row.rowIndex}-${slot}`} className="text-[11px] text-slate-500 block mb-0.5">תפקיד</label>
+                              <select id={`imp-coordrole-${row.rowIndex}-${slot}`} value={draft.role} onChange={e => updateCoordDraft(row, slot, { role: e.target.value })}
+                                className="text-xs border border-slate-300 rounded-lg px-2 py-1.5 w-full bg-white">
+                                <option value="">בחר תפקיד...</option>
+                                {coordinatorRoleOptions(row).map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                              </select>
+                            </div>
+                            <div>
+                              <label htmlFor={`imp-coordname-${row.rowIndex}-${slot}`} className="text-[11px] text-slate-500 block mb-0.5">שם מלא</label>
+                              <input id={`imp-coordname-${row.rowIndex}-${slot}`} value={draft.name} onChange={e => updateCoordDraft(row, slot, { name: e.target.value })}
+                                className="text-xs border border-slate-300 rounded-lg px-2 py-1.5 w-full" />
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    )}
+                      );
+                    })}
 
                     {needFinance && (
                       <div className={`rounded-lg border p-2.5 space-y-1.5 ${r.financeSoftware === undefined ? "bg-white border-amber-100" : "bg-emerald-50 border-emerald-200"}`}>

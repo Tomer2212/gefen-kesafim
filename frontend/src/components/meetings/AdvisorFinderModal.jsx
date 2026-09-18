@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import axios from "axios";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
 import { MultiSelectChips } from "../MultiSelectChips";
-import { DOMAIN_OPTIONS } from "../../constants/domains";
+import { DOMAIN_OPTIONS, DOMAIN_LEVEL_OPTIONS } from "../../constants/domains";
 import { SchoolPickerModal } from "./SchoolPickerCell";
 import AdvisorFinderSettingsModal from "./AdvisorFinderSettingsModal";
 import { DatePickerPopover } from "./DatePickerPopover";
@@ -59,6 +59,7 @@ function todayDDMMYY() {
 export function AdvisorFinderModal({ onClose, schools, users, onBook }) {
   const { ref, handleKeyDown } = useFocusTrap(onClose);
   const [domains, setDomains] = useState([]);
+  const [domainLevels, setDomainLevels] = useState({});
   const [duration, setDuration] = useState(60);
   const [fromText, setFromText] = useState(todayDDMMYY);
   const [toText, setToText] = useState("");
@@ -75,6 +76,15 @@ export function AdvisorFinderModal({ onClose, schools, users, onBook }) {
   const toAnchorRef = useRef(null);
 
   const allDates = results ? [...new Set(results.flatMap(a => a.days.map(d => d.date)))].sort() : [];
+
+  function handleDomainsChange(newDomains) {
+    setDomains(newDomains);
+    setDomainLevels(prev => {
+      const next = {};
+      for (const d of newDomains) next[d] = prev[d] || "beginner";
+      return next;
+    });
+  }
 
   function refreshExclusionCount() {
     axios.get("/schools/advisor-finder/settings")
@@ -105,6 +115,7 @@ export function AdvisorFinderModal({ onClose, schools, users, onBook }) {
     try {
       const res = await axios.post("/schools/advisor-finder/search", {
         control_domains: domains,
+        control_domain_levels: domainLevels,
         duration_minutes: duration,
         date_from: dateFrom,
         date_to: dateTo,
@@ -142,10 +153,18 @@ export function AdvisorFinderModal({ onClose, schools, users, onBook }) {
         <div className="flex flex-wrap items-start justify-center gap-4">
           <div className="flex flex-col gap-1">
             <span className="text-xs font-semibold text-slate-500">תחומי ידע</span>
-            <MultiSelectChips options={DOMAIN_OPTIONS} selected={domains} onChange={setDomains} placeholder="בחר תחומי ידע"
+            <MultiSelectChips options={DOMAIN_OPTIONS} selected={domains} onChange={handleDomainsChange} placeholder="בחר תחומי ידע"
               className="w-40"
               boxClassName="w-40 text-sm border border-slate-200 rounded-lg pl-6 pr-2.5 py-1.5 outline-none focus:border-blue-400 bg-white flex flex-wrap items-center gap-1.5 cursor-pointer"
-              showChevron />
+              showChevron checkIcon
+              levels levelOptions={DOMAIN_LEVEL_OPTIONS}
+              levelValues={domainLevels}
+              onLevelChange={(d, lvl) => setDomainLevels(prev => {
+                const next = { ...prev };
+                if (lvl) next[d] = lvl;
+                else delete next[d];
+                return next;
+              })} />
           </div>
           <div className="flex flex-col gap-1">
             <label htmlFor="af-duration" className="text-xs font-semibold text-slate-500">משך זמן נחוץ</label>

@@ -8,6 +8,7 @@ import { AdvisorSearch } from "../components/AdvisorSearch";
 import HourMinuteInput from "../components/HourMinuteInput";
 import { DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { SLOT_LABELS, slotsForSchool } from "../components/meetings/meetingCoordinatorSlots";
 
 // ── Shared visual language with SchoolPage.jsx's "פרטי בית הספר" tab ──
 const SECTION_TITLE_CLS = "text-[23px] font-bold text-black flex items-center gap-2";
@@ -56,14 +57,16 @@ const FINANCE_SOFTWARE_OPTIONS = [
   { value: "schoolcash", label: "סקולקאש" },
 ];
 
-const PRINCIPAL_TICHON_ROW  = { label: "מנהל/ת חט\"ע", nameField: "principal_name",         phoneField: "principal_phone",         emailField: "principal_email",         dayOffField: "principal_day_off",         coordValue: "principal" };
-const PRINCIPAL_SINGLE_ROW  = { label: "מנהל/ת",       nameField: "principal_name",         phoneField: "principal_phone",         emailField: "principal_email",         dayOffField: "principal_day_off",         coordValue: "principal" };
-const PRINCIPAL_CHATIVA_ROW = { label: "מנהל/ת חט\"ב", nameField: "principal_chativa_name", phoneField: "principal_chativa_phone", emailField: "principal_chativa_email", dayOffField: "principal_chativa_day_off", coordValue: "principal_chativa" };
+const PRINCIPAL_TICHON_ROW  = { label: "מנהל/ת חט\"ע", nameField: "principal_name",         phoneField: "principal_phone",         emailField: "principal_email",         dayOffField: "principal_day_off",         coordValue: "principal", slotRoleKey: "principal" };
+const PRINCIPAL_SINGLE_ROW  = { label: "מנהל/ת",       nameField: "principal_name",         phoneField: "principal_phone",         emailField: "principal_email",         dayOffField: "principal_day_off",         coordValue: "principal", slotRoleKey: "principal" };
+const PRINCIPAL_CHATIVA_ROW = { label: "מנהל/ת חט\"ב", nameField: "principal_chativa_name", phoneField: "principal_chativa_phone", emailField: "principal_chativa_email", dayOffField: "principal_chativa_day_off", coordValue: "principal_chativa", slotRoleKey: "principal_chativa" };
 
-const CONTACT_ROWS = [
-  { label: "מנהלנ/ית",      nameField: "secretary_name",       phoneField: "secretary_phone",       emailField: "secretary_email",       dayOffField: "secretary_day_off",       coordValue: "secretary" },
-  { label: "אחראי/ת כספים", nameField: "finance_contact_name", phoneField: "finance_contact_phone", emailField: "finance_contact_email", dayOffField: "finance_contact_day_off", coordValue: "finance_contact" },
-];
+const SECRETARY_ROW          = { label: "מנהלנ/ית",       nameField: "secretary_name",       phoneField: "secretary_phone",       emailField: "secretary_email",       dayOffField: "secretary_day_off",       coordValue: "secretary", slotRoleKey: "secretary" };
+const SECRETARY_CHATIVA_ROW  = { label: "מנהלנ/ית חט\"ב", nameField: "secretary_chativa_name", phoneField: "secretary_chativa_phone", emailField: "secretary_chativa_email", dayOffField: "secretary_chativa_day_off", coordValue: "secretary_chativa", slotRoleKey: "secretary_chativa" };
+const FINANCE_ROW            = { label: "אחראי/ת כספים",       nameField: "finance_contact_name",       phoneField: "finance_contact_phone",       emailField: "finance_contact_email",       dayOffField: "finance_contact_day_off",       coordValue: "finance_contact", slotRoleKey: "finance_contact" };
+const FINANCE_CHATIVA_ROW    = { label: "אחראי/ת כספים חט\"ב", nameField: "finance_contact_chativa_name", phoneField: "finance_contact_chativa_phone", emailField: "finance_contact_chativa_email", dayOffField: "finance_contact_chativa_day_off", coordValue: "finance_contact_chativa", slotRoleKey: "finance_contact_chativa" };
+
+const CONTACT_ROWS = [SECRETARY_ROW, FINANCE_ROW];
 
 const WEEKDAY_OPTIONS = [
   { value: "sun", label: "א" },
@@ -165,8 +168,13 @@ const EMPTY_FORM = {
   restrict_access_to: [], extra_contacts: [],
   principal_day_off: [], secretary_day_off: [], finance_contact_day_off: [],
   meeting_coordinator: null,
+  meeting_coordinators: {},
   principal_chativa_name: "", principal_chativa_phone: "", principal_chativa_email: "",
   principal_chativa_day_off: [], principal_same_person: true,
+  secretary_chativa_name: "", secretary_chativa_phone: "", secretary_chativa_email: "",
+  secretary_chativa_day_off: [], secretary_same_person: true,
+  finance_contact_chativa_name: "", finance_contact_chativa_phone: "", finance_contact_chativa_email: "",
+  finance_contact_chativa_day_off: [], finance_same_person: true,
   education_authority: "", sector: "", supervision: "",
   grade_levels: [], study_days: [], student_count: "",
 };
@@ -443,27 +451,54 @@ export default function AddSchoolPage() {
     if (schoolForm.finance_contact_phone && validateSecretaryPhone(schoolForm.finance_contact_phone)) return;
     if (schoolStage === "sheshshnati" && !schoolForm.principal_same_person
         && schoolForm.principal_chativa_phone && validateSecretaryPhone(schoolForm.principal_chativa_phone)) return;
+    if (schoolStage === "sheshshnati" && !schoolForm.secretary_same_person
+        && schoolForm.secretary_chativa_phone && validateSecretaryPhone(schoolForm.secretary_chativa_phone)) return;
+    if (schoolStage === "sheshshnati" && !schoolForm.finance_same_person
+        && schoolForm.finance_contact_chativa_phone && validateSecretaryPhone(schoolForm.finance_contact_chativa_phone)) return;
     if (schoolForm.school_phone       && validateSchoolPhone(schoolForm.school_phone))          return;
-    if (!schoolForm.meeting_coordinator) return;
+    const requiredSlots = slotsForSchool({ ...schoolForm, stage: schoolStage }, yearAdminForm.service_type);
+    if (requiredSlots.some(slot => !schoolForm.meeting_coordinators?.[slot])) return;
 
     setSaving(true);
     try {
-      // "אותו מנהל/ת לשתי החטיבות" — the חט"ב fields are hidden in the UI, so keep them
-      // in sync with the חט"ע ones rather than sending stale/blank data.
-      const chativaSync = (schoolStage === "sheshshnati" && schoolForm.principal_same_person)
-        ? {
-            principal_chativa_name: schoolForm.principal_name,
-            principal_chativa_phone: schoolForm.principal_phone,
-            principal_chativa_email: schoolForm.principal_email,
-            principal_chativa_day_off: schoolForm.principal_day_off,
-          }
-        : {};
+      // "אותו X לשתי החטיבות" — the חט"ב fields are hidden in the UI, so keep them in sync
+      // with the חט"ע ones rather than sending stale/blank data.
+      const chativaSync = {
+        ...((schoolStage === "sheshshnati" && schoolForm.principal_same_person)
+          ? {
+              principal_chativa_name: schoolForm.principal_name,
+              principal_chativa_phone: schoolForm.principal_phone,
+              principal_chativa_email: schoolForm.principal_email,
+              principal_chativa_day_off: schoolForm.principal_day_off,
+            }
+          : {}),
+        ...((schoolStage === "sheshshnati" && schoolForm.secretary_same_person)
+          ? {
+              secretary_chativa_name: schoolForm.secretary_name,
+              secretary_chativa_phone: schoolForm.secretary_phone,
+              secretary_chativa_email: schoolForm.secretary_email,
+              secretary_chativa_day_off: schoolForm.secretary_day_off,
+            }
+          : {}),
+        ...((schoolStage === "sheshshnati" && schoolForm.finance_same_person)
+          ? {
+              finance_contact_chativa_name: schoolForm.finance_contact_name,
+              finance_contact_chativa_phone: schoolForm.finance_contact_phone,
+              finance_contact_chativa_email: schoolForm.finance_contact_email,
+              finance_contact_chativa_day_off: schoolForm.finance_contact_day_off,
+            }
+          : {}),
+      };
+      // Legacy single-value mirror — schools_router.py's create_school still requires the old
+      // `meeting_coordinator` field until every surface is off it; any one assigned slot
+      // satisfies that check. Safe to drop once retired there.
+      const legacyCoordinatorSync = { meeting_coordinator: Object.values(schoolForm.meeting_coordinators || {}).find(Boolean) || null };
       const studentCountValue = schoolForm.student_count === "" || schoolForm.student_count == null
         ? null
         : parseInt(schoolForm.student_count, 10);
       let res;
       try {
-        res = await axios.post("/schools/", { ...schoolForm, ...chativaSync, stage: schoolStage, student_count: studentCountValue });
+        res = await axios.post("/schools/", { ...schoolForm, ...chativaSync, ...legacyCoordinatorSync, stage: schoolStage, student_count: studentCountValue });
       } catch (err) {
         const detail = err?.response?.data?.detail;
         if (err?.response?.status === 409 && detail?.code === "duplicate_symbol") {
@@ -717,35 +752,65 @@ export default function AddSchoolPage() {
               <div className={SECTION_HEADER_CLS}>
                 {sectionTitle(Phone, "אנשי קשר", "bg-indigo-50 text-indigo-600")}
               </div>
+              {(() => {
+                const activeSlots = slotsForSchool({ ...schoolForm, stage: schoolStage }, yearAdminForm.service_type);
+                const contactRows = [
+                  schoolStage === "sheshshnati" ? PRINCIPAL_TICHON_ROW : PRINCIPAL_SINGLE_ROW,
+                  ...(schoolStage === "sheshshnati" && !schoolForm.principal_same_person ? [PRINCIPAL_CHATIVA_ROW] : []),
+                  SECRETARY_ROW,
+                  ...(schoolStage === "sheshshnati" && !schoolForm.secretary_same_person ? [SECRETARY_CHATIVA_ROW] : []),
+                  FINANCE_ROW,
+                  ...(schoolStage === "sheshshnati" && !schoolForm.finance_same_person ? [FINANCE_CHATIVA_ROW] : []),
+                ];
+                const missingSlots = activeSlots.filter(slot => !schoolForm.meeting_coordinators?.[slot]);
+                const colCount = 5 + activeSlots.length;
+                return (
+                <>
               <table className="w-full text-sm border border-slate-200 border-collapse font-sans">
                 <thead>
-                  <tr className="bg-slate-100 divide-x divide-slate-200">
-                    <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700 whitespace-nowrap w-28"></th>
-                    <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700">שם</th>
-                    <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700">טלפון</th>
-                    <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700">מייל</th>
-                    <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700">יום חופשי</th>
-                    <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700">מתאם פגישות</th>
-                  </tr>
+                  {activeSlots.length > 1 ? (
+                    <>
+                      <tr className="bg-slate-100 divide-x divide-slate-200">
+                        <th rowSpan={2} scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700 whitespace-nowrap w-28 align-bottom"></th>
+                        <th rowSpan={2} scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700 align-bottom">שם</th>
+                        <th rowSpan={2} scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700 align-bottom">טלפון</th>
+                        <th rowSpan={2} scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700 align-bottom">מייל</th>
+                        <th rowSpan={2} scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700 align-bottom">יום חופשי</th>
+                        <th colSpan={activeSlots.length} scope="colgroup" className="text-center py-2 px-2 text-xs font-semibold text-gray-700 border-b border-slate-200">מתאם פגישות</th>
+                      </tr>
+                      <tr className="bg-slate-100 divide-x divide-slate-200">
+                        {activeSlots.map(slot => (
+                          <th key={slot} scope="col" className="text-center py-2 px-2 text-xs font-semibold text-gray-700 whitespace-nowrap">{SLOT_LABELS[slot]}</th>
+                        ))}
+                      </tr>
+                    </>
+                  ) : (
+                    <tr className="bg-slate-100 divide-x divide-slate-200">
+                      <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700 whitespace-nowrap w-28"></th>
+                      <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700">שם</th>
+                      <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700">טלפון</th>
+                      <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700">מייל</th>
+                      <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700">יום חופשי</th>
+                      {activeSlots.map(slot => (
+                        <th key={slot} scope="col" className="text-center py-3 px-2 text-xs font-semibold text-gray-700 whitespace-nowrap">{SLOT_LABELS[slot]}</th>
+                      ))}
+                    </tr>
+                  )}
                 </thead>
                 <tbody className="divide-y divide-slate-200">
-                  {[
-                    schoolStage === "sheshshnati" ? PRINCIPAL_TICHON_ROW : PRINCIPAL_SINGLE_ROW,
-                    ...(schoolStage === "sheshshnati" && !schoolForm.principal_same_person ? [PRINCIPAL_CHATIVA_ROW] : []),
-                    ...CONTACT_ROWS,
-                  ].map(row => (
-                    <tr key={row.nameField} className="divide-x divide-slate-200">
+                  {contactRows.map(row => (
+                    <tr key={row.nameField + row.slotRoleKey} className="divide-x divide-slate-200">
                       <td className="py-3 pr-1 text-sm font-normal text-gray-900 align-top">{row.label}</td>
                       <td className="py-3 px-2">
-                        <label htmlFor={`cname-${row.nameField}`} className="sr-only">{row.label} שם</label>
-                        <input id={`cname-${row.nameField}`} className="input-field text-sm" autoComplete="off"
+                        <label htmlFor={`cname-${row.slotRoleKey}`} className="sr-only">{row.label} שם</label>
+                        <input id={`cname-${row.slotRoleKey}`} className="input-field text-sm" autoComplete="off"
                           value={schoolForm[row.nameField]}
                           onChange={e => setSchoolForm(p => ({ ...p, [row.nameField]: e.target.value }))}
                           placeholder="שם..." />
                       </td>
                       <td className="py-3 px-2">
-                        <label htmlFor={`cphone-${row.phoneField}`} className="sr-only">{row.label} טלפון</label>
-                        <input id={`cphone-${row.phoneField}`}
+                        <label htmlFor={`cphone-${row.slotRoleKey}`} className="sr-only">{row.label} טלפון</label>
+                        <input id={`cphone-${row.slotRoleKey}`}
                           className={`input-field text-sm ${schoolForm[row.phoneField] && validateSecretaryPhone(schoolForm[row.phoneField]) ? "border-red-400" : ""}`}
                           autoComplete="off" value={schoolForm[row.phoneField]}
                           onChange={e => setSchoolForm(p => ({ ...p, [row.phoneField]: e.target.value.replace(/\D/g, "").slice(0, 10) }))}
@@ -755,8 +820,8 @@ export default function AddSchoolPage() {
                         )}
                       </td>
                       <td className="py-3 px-2">
-                        <label htmlFor={`cemail-${row.emailField}`} className="sr-only">{row.label} מייל</label>
-                        <input id={`cemail-${row.emailField}`} className="input-field text-sm" autoComplete="off"
+                        <label htmlFor={`cemail-${row.slotRoleKey}`} className="sr-only">{row.label} מייל</label>
+                        <input id={`cemail-${row.slotRoleKey}`} className="input-field text-sm" autoComplete="off"
                           value={schoolForm[row.emailField]}
                           onChange={e => setSchoolForm(p => ({ ...p, [row.emailField]: e.target.value }))}
                           placeholder="מייל..." dir="ltr" type="email" />
@@ -766,27 +831,46 @@ export default function AddSchoolPage() {
                           selected={schoolForm[row.dayOffField] || []}
                           onChange={v => setSchoolForm(p => ({ ...p, [row.dayOffField]: v }))} />
                       </td>
-                      <td className="py-3 px-2 text-center">
-                        <label htmlFor={`add-coord-${row.coordValue}`} className="sr-only">{row.label} אחראי/ת לתיאום פגישות</label>
-                        <input id={`add-coord-${row.coordValue}`} type="radio" name="add-meeting-coordinator"
-                          className="w-4 h-4 accent-blue-600"
-                          checked={schoolForm.meeting_coordinator === row.coordValue}
-                          disabled={!schoolForm[row.nameField]}
-                          onChange={() => setSchoolForm(p => ({ ...p, meeting_coordinator: row.coordValue }))} />
-                      </td>
+                      {activeSlots.map(slot => (
+                        <td key={slot} className="py-3 px-2 text-center">
+                          <label htmlFor={`add-coord-${slot}-${row.slotRoleKey}`} className="sr-only">{row.label} — אחראי/ת לתיאום פגישות {SLOT_LABELS[slot]}</label>
+                          <input id={`add-coord-${slot}-${row.slotRoleKey}`} type="checkbox"
+                            className="w-4 h-4 accent-blue-600"
+                            checked={schoolForm.meeting_coordinators?.[slot] === row.slotRoleKey}
+                            disabled={!schoolForm[row.nameField]}
+                            onChange={e => setSchoolForm(p => ({
+                              ...p,
+                              meeting_coordinators: { ...p.meeting_coordinators, [slot]: e.target.checked ? row.slotRoleKey : null },
+                            }))} />
+                        </td>
+                      ))}
                     </tr>
                   ))}
 
                   {schoolStage === "sheshshnati" && (
                     <tr className="divide-x divide-slate-200">
                       <td></td>
-                      <td colSpan={5} className="py-3 px-2">
-                        <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
-                          <input type="checkbox" className="w-3.5 h-3.5 rounded accent-blue-600"
-                            checked={!!schoolForm.principal_same_person}
-                            onChange={e => setSchoolForm(p => ({ ...p, principal_same_person: e.target.checked }))} />
-                          אותו מנהל/ת לשתי החטיבות
-                        </label>
+                      <td colSpan={4 + activeSlots.length} className="py-3 px-2">
+                        <div className="flex flex-col gap-1.5">
+                          <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
+                            <input type="checkbox" className="w-3.5 h-3.5 rounded accent-blue-600"
+                              checked={!!schoolForm.principal_same_person}
+                              onChange={e => setSchoolForm(p => ({ ...p, principal_same_person: e.target.checked }))} />
+                            אותו מנהל/ת לשתי החטיבות
+                          </label>
+                          <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
+                            <input type="checkbox" className="w-3.5 h-3.5 rounded accent-blue-600"
+                              checked={!!schoolForm.secretary_same_person}
+                              onChange={e => setSchoolForm(p => ({ ...p, secretary_same_person: e.target.checked }))} />
+                            אות/ה מנהלנ/ית לשתי החטיבות
+                          </label>
+                          <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
+                            <input type="checkbox" className="w-3.5 h-3.5 rounded accent-blue-600"
+                              checked={!!schoolForm.finance_same_person}
+                              onChange={e => setSchoolForm(p => ({ ...p, finance_same_person: e.target.checked }))} />
+                            אות/ה אחראי/ת כספים לשתי החטיבות
+                          </label>
+                        </div>
                       </td>
                     </tr>
                   )}
@@ -825,7 +909,18 @@ export default function AddSchoolPage() {
                                 const j = Number(coord.split(":")[1]);
                                 if (j > i) coord = `extra:${j - 1}`;
                               }
-                              return { ...p, extra_contacts: (p.extra_contacts || []).filter((_, j) => j !== i), meeting_coordinator: coord };
+                              const remapRef = ref => {
+                                if (ref === `extra:${i}`) return null;
+                                if (typeof ref === "string" && ref.startsWith("extra:")) {
+                                  const j = Number(ref.split(":")[1]);
+                                  if (j > i) return `extra:${j - 1}`;
+                                }
+                                return ref;
+                              };
+                              const coordinators = Object.fromEntries(
+                                Object.entries(p.meeting_coordinators || {}).map(([slot, ref]) => [slot, remapRef(ref)])
+                              );
+                              return { ...p, extra_contacts: (p.extra_contacts || []).filter((_, j) => j !== i), meeting_coordinator: coord, meeting_coordinators: coordinators };
                             })}
                             className="text-slate-400 hover:text-red-500 flex-shrink-0 mr-1 text-base leading-none"
                             aria-label="הסר שורת איש קשר">✕</button>
@@ -836,20 +931,25 @@ export default function AddSchoolPage() {
                           selected={ec.day_off || []}
                           onChange={v => setSchoolForm(p => { const ec2 = [...(p.extra_contacts || [])]; ec2[i] = { ...ec2[i], day_off: v }; return { ...p, extra_contacts: ec2 }; })} />
                       </td>
-                      <td className="py-3 px-2 text-center">
-                        <label htmlFor={`add-coord-extra-${i}`} className="sr-only">איש קשר נוסף {i + 1} אחראי/ת לתיאום פגישות</label>
-                        <input id={`add-coord-extra-${i}`} type="radio" name="add-meeting-coordinator"
-                          className="w-4 h-4 accent-blue-600"
-                          checked={schoolForm.meeting_coordinator === `extra:${i}`}
-                          disabled={!ec.name}
-                          onChange={() => setSchoolForm(p => ({ ...p, meeting_coordinator: `extra:${i}` }))} />
-                      </td>
+                      {activeSlots.map(slot => (
+                        <td key={slot} className="py-3 px-2 text-center">
+                          <label htmlFor={`add-coord-${slot}-extra-${i}`} className="sr-only">איש קשר נוסף {i + 1} — אחראי/ת לתיאום פגישות {SLOT_LABELS[slot]}</label>
+                          <input id={`add-coord-${slot}-extra-${i}`} type="checkbox"
+                            className="w-4 h-4 accent-blue-600"
+                            checked={schoolForm.meeting_coordinators?.[slot] === `extra:${i}`}
+                            disabled={!ec.name}
+                            onChange={e => setSchoolForm(p => ({
+                              ...p,
+                              meeting_coordinators: { ...p.meeting_coordinators, [slot]: e.target.checked ? `extra:${i}` : null },
+                            }))} />
+                        </td>
+                      ))}
                     </tr>
                   ))}
 
                   {(schoolForm.extra_contacts || []).length < 3 && (
                     <tr>
-                      <td colSpan={6} className="pt-3 pb-1">
+                      <td colSpan={colCount} className="pt-3 pb-1">
                         <button type="button"
                           onClick={() => setSchoolForm(p => ({ ...p, extra_contacts: [...(p.extra_contacts || []), { role: "", name: "", phone: "", email: "" }] }))}
                           className={`${OUTLINE_BTN_CLS} inline-flex items-center gap-1`}>
@@ -860,9 +960,12 @@ export default function AddSchoolPage() {
                   )}
                 </tbody>
               </table>
-              {triedSave && !schoolForm.meeting_coordinator && (
-                <p className="text-xs text-red-500 mt-1.5" role="alert">יש לבחור אחראי/ת לתיאום פגישות</p>
+              {triedSave && missingSlots.length > 0 && (
+                <p className="text-xs text-red-500 mt-1.5" role="alert">יש לבחור אחראי/ת לתיאום פגישות עבור: {missingSlots.map(s => SLOT_LABELS[s]).join(", ")}</p>
               )}
+                </>
+                );
+              })()}
             </div>
 
             {/* ליווי — mirrors SchoolPage.jsx's ליווי section (school_year_admin_data fields) */}

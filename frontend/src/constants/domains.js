@@ -5,3 +5,11 @@ export const DOMAIN_OPTIONS = [
   { value: "payscool", label: "פייסקול" },
   { value: "schoolcash", label: "סקולקאש" },
 ];
+
+// Per-domain proficiency level (profiles.control_domain_levels: {domain: level}).
+export const DOMAIN_LEVEL_OPTIONS = [
+  { value: "beginner", label: "מתחיל" },
+  { value: "advanced", label: "מתקדם" },
+  { value: "expert", label: "מומחה" },
+];
+export const DOMAIN_LEVEL_RANK = { beginner: 1, advanced: 2, expert: 3 };

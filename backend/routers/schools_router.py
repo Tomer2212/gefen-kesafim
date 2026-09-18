@@ -213,12 +213,23 @@ class SchoolIn(BaseModel):
     principal_day_off: list[str] | None = None
     secretary_day_off: list[str] | None = None
     finance_contact_day_off: list[str] | None = None
-    meeting_coordinator: str | None = None
+    meeting_coordinator: str | None = None  # deprecated — retained for backfill/rollback only, use meeting_coordinators
+    meeting_coordinators: dict[str, str] | None = None
     principal_chativa_name: str | None = None
     principal_chativa_phone: str | None = None
     principal_chativa_email: str | None = None
     principal_chativa_day_off: list[str] | None = None
     principal_same_person: bool | None = None
+    secretary_chativa_name: str | None = None
+    secretary_chativa_phone: str | None = None
+    secretary_chativa_email: str | None = None
+    secretary_chativa_day_off: list[str] | None = None
+    secretary_same_person: bool | None = None
+    finance_contact_chativa_name: str | None = None
+    finance_contact_chativa_phone: str | None = None
+    finance_contact_chativa_email: str | None = None
+    finance_contact_chativa_day_off: list[str] | None = None
+    finance_same_person: bool | None = None
     education_authority: str | None = None
     sector: str | None = None
     supervision: str | None = None
@@ -394,10 +405,12 @@ class DirectCoordinationParticipantIn(BaseModel):
 class DirectCoordinationRangeIn(BaseModel):
     start_date: str
     end_date: str
-    meeting_service_type: str  # "gefen" | "current" | "district" | "takuma"
+    meeting_service_type: str  # "gefen" | "current" | "gefen_current" | "district" | "takuma"
     duration_minutes: int      # 30..180, step 15
     advisor_ids: list[str] = []  # this specific meeting's performing advisor(s) — see send_direct_coordination_request
     participants: list[DirectCoordinationParticipantIn]
+    stage_scope: str | None = None  # six-year schools only, gefen/current ranges only: "tichon" | "chativa"
+    meeting_type: str = "remote"  # "remote" | "physical" — where the meeting will take place
 
 
 class DirectCoordinationIn(BaseModel):
@@ -409,6 +422,7 @@ class UserInviteIn(BaseModel):
     full_name: str | None = None
     role: str = "advisor"
     control_domains: list[str] = []
+    control_domain_levels: dict[str, str] = {}
     work_phone: str | None = None
 
 
@@ -524,6 +538,106 @@ def _resolve_meeting_coordinator(school: dict) -> dict | None:
             "email": ec.get("email"),
         }
     return None
+
+
+# ---------------------------------------------------------------------------
+# Multi-slot meeting coordinators (replaces the single `meeting_coordinator`
+# field above). A "slot" is a (service type, division) pair, e.g.
+# "gefen_tichon" or "district". See CLAUDE.md plan for the full model.
+# ---------------------------------------------------------------------------
+
+_SLOT_LABELS = {
+    "gefen": "גפן",
+    "gefen_tichon": "גפן - תיכון",
+    "gefen_beinayim": 'גפן - חט"ב',
+    "current": "שוטף",
+    "current_tichon": "שוטף - תיכון",
+    "current_beinayim": 'שוטף - חט"ב',
+    "district": "מחוז",
+}
+
+_COORDINATOR_REF_FIELDS = {
+    "principal": ("principal_name", "principal_phone", "principal_email", "מנהל/ת"),
+    "principal_chativa": ("principal_chativa_name", "principal_chativa_phone", "principal_chativa_email", 'מנהל/ת חט"ב'),
+    "secretary": ("secretary_name", "secretary_phone", "secretary_email", "מנהלנ/ית"),
+    "secretary_chativa": ("secretary_chativa_name", "secretary_chativa_phone", "secretary_chativa_email", 'מנהלנ/ית חט"ב'),
+    "finance_contact": ("finance_contact_name", "finance_contact_phone", "finance_contact_email", "אחראי/ת כספים"),
+    "finance_contact_chativa": ("finance_contact_chativa_name", "finance_contact_chativa_phone", "finance_contact_chativa_email", 'אחראי/ת כספים חט"ב'),
+}
+
+
+def _slots_for_school(school: dict, service_type: str | None) -> list[str]:
+    """Decomposes a school's (service_type, stage) into the set of meeting-coordination
+    slots that apply to it. `takuma` merges into `gefen`. `district` never splits by
+    division. `gefen`/`current` split into _tichon/_beinayim only for six-year
+    (stage == 'sheshshnati') schools."""
+    base_types: list[str] = []
+    if service_type in ("gefen", "gefen_current", "takuma"):
+        base_types.append("gefen")
+    if service_type in ("current", "gefen_current"):
+        base_types.append("current")
+    if service_type == "district":
+        base_types.append("district")
+    is_six_year = school.get("stage") == "sheshshnati"
+    slots: list[str] = []
+    for t in base_types:
+        if t == "district" or not is_six_year:
+            slots.append(t)
+        else:
+            slots.extend([f"{t}_tichon", f"{t}_beinayim"])
+    return slots
+
+
+def _resolve_coordinator_ref(school: dict, ref: str | None) -> dict | None:
+    """Resolves a single ref string (fixed role incl. *_chativa, or 'extra:<i>') into a
+    contact dict. Non-fatal: returns None for unset/dangling refs."""
+    if not ref:
+        return None
+    fields = _COORDINATOR_REF_FIELDS.get(ref)
+    if fields:
+        name_f, phone_f, email_f, label = fields
+        name = school.get(name_f)
+        if not name:
+            return None
+        return {
+            "role": ref,
+            "role_label": label,
+            "name": name,
+            "phone": school.get(phone_f),
+            "email": school.get(email_f),
+        }
+    if ref.startswith("extra:"):
+        try:
+            idx = int(ref.split(":", 1)[1])
+        except ValueError:
+            return None
+        extras = school.get("extra_contacts") or []
+        if idx < 0 or idx >= len(extras) or not extras[idx].get("name"):
+            return None
+        ec = extras[idx]
+        return {
+            "role": ref,
+            "role_label": ec.get("role") or "איש קשר נוסף",
+            "name": ec.get("name"),
+            "phone": ec.get("phone"),
+            "email": ec.get("email"),
+        }
+    return None
+
+
+def _resolve_meeting_coordinator_for_slot(school: dict, slot: str) -> dict | None:
+    """Resolves the contact assigned to ONE coordination slot (e.g. 'current_tichon')."""
+    refs = school.get("meeting_coordinators") or {}
+    return _resolve_coordinator_ref(school, refs.get(slot))
+
+
+def _resolve_all_meeting_coordinators(school: dict, service_type: str | None) -> dict:
+    """Bulk resolver — {slot: contact_dict_or_None} for every slot applicable to this
+    school given its current service_type/stage."""
+    return {
+        slot: _resolve_meeting_coordinator_for_slot(school, slot)
+        for slot in _slots_for_school(school, service_type)
+    }
 
 
 @router.get("/")
@@ -795,6 +909,7 @@ def list_schools(
         school["order_amount_gefen"] = _year_row.get("order_amount_gefen")
         school["control_letters"] = control_letters_by_school.get(school["id"], [])
         school["meeting_coordinator_contact"] = _resolve_meeting_coordinator(school)
+        school["meeting_coordinators_resolved"] = _resolve_all_meeting_coordinators(school, school["service_type"])
         for service_type in ("gefen", "current", "district"):
             advisor_ids = typed_advisors_by_school[service_type].get(school["id"], [])
             school[f"advisors_{service_type}"] = [profiles_map[aid] for aid in advisor_ids if aid in profiles_map]
@@ -824,7 +939,13 @@ def create_school(
     db = get_admin_client()
     if not _check_permission(db, user, "can_add_school"):
         raise HTTPException(status_code=403, detail="אין הרשאה להוסיף בתי ספר")
-    if not body.meeting_coordinator:
+    # service_type isn't known at this point (set via a separate school_year_admin_data call
+    # right after creation), so full per-slot coverage can't be checked here — the frontend
+    # already validates full slot coverage client-side before ever sending this request. This
+    # is just a defensive minimum: at least one coordinator must be set (old single-value field,
+    # for any caller not yet migrated, or the new per-slot map).
+    has_any_coordinator = bool(body.meeting_coordinator) or bool(body.meeting_coordinators and any(body.meeting_coordinators.values()))
+    if not has_any_coordinator:
         raise HTTPException(status_code=400, detail="יש להגדיר אחראי/ת לתיאום פגישות")
     existing = _find_existing_school_by_symbol(db, user["org_id"], body.symbol)
     if existing:
@@ -893,7 +1014,7 @@ def update_school(
         )
         if not assigned.data:
             raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
-    # Fetch current restrict_access_to before update (for diff → notifications)
+    # Fetch current restrict_access_to before update (for diff → notifications).
     old_school = db.table("schools").select("name, restrict_access_to").eq("id", school_id).eq("org_id", user["org_id"]).execute()
     old_restrict = set(old_school.data[0].get("restrict_access_to") or []) if old_school.data else set()
     school_name = old_school.data[0]["name"] if old_school.data else "בית ספר"
@@ -3379,26 +3500,31 @@ def _opt_out_footer_html(opt_out_link: str | None) -> str:
            f'<a href="{opt_out_link}" style="color: #94a3b8;">להסרה מרשימת התפוצה</a></p>'
 
 
+_REMINDER_LOCATION_LABEL_HE = {"remote": "מרחוק", "physical": "באופן פיזי בבית הספר"}
+
+
 def _build_reminder_email_html(recipient_name: str, when_lamed: str, when_bet: str, meeting_date: str,
                                 start_time: str | None, advisor_name: str, meeting_service_type: str = "gefen",
-                                opt_out_link: str | None = None) -> str:
+                                meeting_type: str | None = None, opt_out_link: str | None = None) -> str:
     from datetime import date
     first_name = (recipient_name or "").strip().split(" ")[0]
     greeting = f"היי {first_name}," if first_name else "היי,"
     date_fmt = date.fromisoformat(meeting_date).strftime("%d/%m/%y")
     advisor_clause = f" עם {advisor_name}" if advisor_name else ""
     time_clause = f", בשעה {start_time}" if start_time else ""
+    loc_label = _REMINDER_LOCATION_LABEL_HE.get(meeting_type, _REMINDER_LOCATION_LABEL_HE["remote"])
+    location_clause = f", שתתקיים {loc_label}"
     # Round 16 — this used to hardcode "על תקציב הגפ\"ן" regardless of the meeting's actual
     # type, so a שוטף/מחוז reminder said the wrong thing. Now reflects meeting_service_type;
     # "gefen" keeps the exact original wording (no visible change for existing recipients).
     if meeting_service_type == "current":
-        body_line = f'רצינו להזכיר לך על הפגישה השוטפת על התוכנה הכספית שמתוכננת {when_lamed}, בתאריך <b>{date_fmt}</b>{time_clause}{advisor_clause}.'
+        body_line = f'רצינו להזכיר לך על הפגישה השוטפת על התוכנה הכספית שמתוכננת {when_lamed}, בתאריך <b>{date_fmt}</b>{time_clause}{advisor_clause}{location_clause}.'
     elif meeting_service_type == "district":
-        body_line = f'רצינו להזכיר לך על הפגישה שמתוכננת {when_lamed}, בתאריך <b>{date_fmt}</b>{time_clause}{advisor_clause} בנושא המחוז.'
+        body_line = f'רצינו להזכיר לך על הפגישה שמתוכננת {when_lamed}, בתאריך <b>{date_fmt}</b>{time_clause}{advisor_clause}{location_clause} בנושא המחוז.'
     elif meeting_service_type == "takuma":
-        body_line = f'רצינו להזכיר לך על הפגישה שמתוכננת {when_lamed}, בתאריך <b>{date_fmt}</b>{time_clause}{advisor_clause} בנושא תקומה.'
+        body_line = f'רצינו להזכיר לך על הפגישה שמתוכננת {when_lamed}, בתאריך <b>{date_fmt}</b>{time_clause}{advisor_clause}{location_clause} בנושא תקומה.'
     else:
-        body_line = f'רצינו להזכיר לך על הפגישה שמתוכננת {when_lamed}, בתאריך <b>{date_fmt}</b>{time_clause}{advisor_clause} על תקציב הגפ"ן.'
+        body_line = f'רצינו להזכיר לך על הפגישה שמתוכננת {when_lamed}, בתאריך <b>{date_fmt}</b>{time_clause}{advisor_clause}{location_clause} על תקציב הגפ"ן.'
     opt_out_html = _opt_out_footer_html(opt_out_link)
     return f"""
 <html>
@@ -3519,7 +3645,7 @@ def send_due_reminders(request: Request):
             db = get_admin_client()
             res = (
                 db.table("meetings")
-                .select("id, school_id, meeting_date, start_time, end_time, status, participants, advisor_ids, meeting_service_type, reminder_enabled")
+                .select("id, school_id, meeting_date, start_time, end_time, status, participants, advisor_ids, meeting_service_type, meeting_type, reminder_enabled")
                 .eq("status", "scheduled")
                 .in_("meeting_date", due_dates)
                 .execute()
@@ -3713,6 +3839,7 @@ def send_due_reminders(request: Request):
                         start_time=m.get("start_time"),
                         advisor_name=advisor_name,
                         meeting_service_type=meeting_service_type,
+                        meeting_type=m.get("meeting_type"),
                         opt_out_link=opt_out_link,
                     )
                     status, error = "sent", None
@@ -4060,6 +4187,13 @@ def get_school(
             logger.warning("get_school profiles enrichment failed (non-fatal): %s", exc)
 
     school_data["meeting_coordinator_contact"] = _resolve_meeting_coordinator(school_data)
+    try:
+        _resolved_year_admin = resolve_inherited_year_admin(db, [school_id], DEFAULT_ACADEMIC_YEAR).get(school_id, {})
+        _service_type_for_coord = _resolved_year_admin.get("service_type")
+    except Exception as exc:
+        logger.warning("get_school service_type lookup for coordinators failed (non-fatal): %s", exc)
+        _service_type_for_coord = None
+    school_data["meeting_coordinators_resolved"] = _resolve_all_meeting_coordinators(school_data, _service_type_for_coord)
 
     # Per-service-type advisor lists ("יועץ מלווה [גפן/שוטף/מחוז]") — needed by every role (not
     # just manager+) since meetings-tab default-advisor logic reads these regardless of who's
@@ -4186,15 +4320,19 @@ class MyProfileIn(BaseModel):
     birth_date: str | None = None  # 'YYYY-MM-DD' or None (cleared)
     work_phone: str | None = None
     control_domains: list[str] | None = None
+    control_domain_levels: dict[str, str] | None = None
 
 
 # Which self-service profile field is gated by which permission key.
 _SELF_EDIT_PERMISSION = {
     "work_phone": "can_edit_own_work_phone",
     "control_domains": "can_edit_own_knowledge_areas",
+    "control_domain_levels": "can_edit_own_knowledge_areas",
 }
 _VALID_CONTROL_DOMAINS = {"gefen", "kesafim2000", "payscool", "schoolcash"}
-_PROFILE_FIELD_LABELS = {"work_phone": "טלפון עבודה", "control_domains": "תחומי ידע"}
+_VALID_DOMAIN_LEVELS = {"beginner", "advanced", "expert"}
+_DOMAIN_LEVEL_RANK = {"beginner": 1, "advanced": 2, "expert": 3}
+_PROFILE_FIELD_LABELS = {"work_phone": "טלפון עבודה", "control_domains": "תחומי ידע", "control_domain_levels": "רמת ידע"}
 
 
 def _validate_birth_date(value: str | None) -> str | None:
@@ -4229,6 +4367,14 @@ def _validate_control_domains(domains: list[str] | None) -> list[str]:
     return out
 
 
+def _validate_control_domain_levels(levels: dict[str, str] | None) -> dict[str, str]:
+    levels = levels or {}
+    bad = [v for v in levels.values() if v not in _VALID_DOMAIN_LEVELS]
+    if bad:
+        raise HTTPException(status_code=400, detail="רמת ידע לא חוקית")
+    return dict(levels)
+
+
 @router.patch("/users/me/profile")
 def update_my_profile(
     body: MyProfileIn,
@@ -4260,6 +4406,8 @@ def update_my_profile(
         gated_values["work_phone"] = _validate_work_phone(body.work_phone)
     if "control_domains" in sent:
         gated_values["control_domains"] = _validate_control_domains(body.control_domains)
+    if "control_domain_levels" in sent:
+        gated_values["control_domain_levels"] = _validate_control_domain_levels(body.control_domain_levels)
 
     if gated_values:
         db = get_admin_client()
@@ -4285,7 +4433,7 @@ def update_my_profile(
         pending_fields = list(pending.keys())
         # Snapshot current values so approvers see from→to, mirroring the school-card flow.
         try:
-            cur_row = db.table("profiles").select("work_phone, control_domains").eq("id", user["id"]).execute()
+            cur_row = db.table("profiles").select("work_phone, control_domains, control_domain_levels").eq("id", user["id"]).execute()
             cur = cur_row.data[0] if cur_row.data else {}
         except Exception:
             cur = {}
@@ -4398,6 +4546,8 @@ def review_profile_update_request(
             changes["work_phone"] = _validate_work_phone(changes["work_phone"])
         if "control_domains" in changes:
             changes["control_domains"] = _validate_control_domains(changes["control_domains"])
+        if "control_domain_levels" in changes:
+            changes["control_domain_levels"] = _validate_control_domain_levels(changes["control_domain_levels"])
         if changes:
             db = get_admin_client()
             db.table("profiles").update(changes).eq("id", target_user_id).execute()
@@ -4590,6 +4740,7 @@ def invite_user(
                 "org_id": user["org_id"],
                 "status": "pending",
                 "control_domains": body.control_domains,
+                "control_domain_levels": _validate_control_domain_levels(body.control_domain_levels),
                 "work_phone": work_phone,
             }).execute()
             return {"ok": True, "user_id": user_id}
@@ -4820,6 +4971,7 @@ def update_role(
 class UserProfileUpdateIn(BaseModel):
     full_name: str | None = None
     control_domains: list[str] | None = None
+    control_domain_levels: dict[str, str] | None = None
     work_phone: str | None = None
     birth_date: str | None = None  # 'YYYY-MM-DD' or None (cleared)
 
@@ -4834,6 +4986,8 @@ def update_user_profile(
     provided = body.model_dump(exclude_unset=True)
     if "work_phone" in provided:
         provided["work_phone"] = _validate_work_phone(provided["work_phone"])
+    if "control_domain_levels" in provided:
+        provided["control_domain_levels"] = _validate_control_domain_levels(provided["control_domain_levels"])
     # birth_date is nullable-clearable: keep it even when None, and validate the format.
     birth_date_cleared = "birth_date" in provided and provided.get("birth_date") in (None, "")
     if "birth_date" in provided:
@@ -7443,7 +7597,9 @@ def remap_import_values(body: RemapImportValuesIn, user: Annotated[dict, Depends
     return {"updated": updated}
 
 
-_DIRECT_COORDINATION_SERVICE_TYPES = {"gefen": "גפן", "current": "שוטף", "district": "מחוז", "takuma": "תקומה"}
+_DIRECT_COORDINATION_SERVICE_TYPES = {
+    "gefen": "גפן", "current": "שוטף", "gefen_current": "גפן+שוטף", "district": "מחוז", "takuma": "תקומה",
+}
 _DIRECT_COORDINATION_DURATIONS = set(range(30, 181, 15))
 
 
@@ -7468,41 +7624,81 @@ def send_direct_coordination_request(
         raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
     school = school_res.data[0]
 
-    coordinator = _resolve_meeting_coordinator(school)
-    if not coordinator or not coordinator.get("email"):
-        raise HTTPException(status_code=400, detail="יש להגדיר אחראי/ת לתיאום פגישות עם כתובת מייל בפרטי בית הספר לפני שליחה")
-
     import task_logic  # local import — task_logic imports from this module at module level
-    try:
-        opted_out_map = task_logic.opted_out_recipients(
-            db, DEFAULT_ACADEMIC_YEAR, {school_id: coordinator.get("email")},
-        )
-    except Exception as exc:
-        logger.warning("send_direct_coordination_request: opt-out lookup failed (non-fatal): %s", exc)
-        opted_out_map = {}
-    if school_id in opted_out_map:
-        raise HTTPException(
-            status_code=400,
-            detail="לא ניתן לשלוח — בית הספר ביקש הסרה מרשימת התפוצה, עד שסטטוס הלקוח שלו יהפוך ל'פעיל'",
-        )
+
+    def _resolve_slot(base: str, stage_scope: str | None) -> str | None:
+        if base == "district" or school.get("stage") != "sheshshnati":
+            return base
+        if stage_scope == "chativa":
+            return f"{base}_beinayim"
+        if stage_scope == "tichon":
+            return f"{base}_tichon"
+        return None
 
     type_counts: dict[str, int] = {}
     advisor_ids_union: list[str] = []
+    range_slots: list[str] = []
     for r in body.ranges:
         if r.start_date > r.end_date:
             raise HTTPException(status_code=400, detail="טווח תאריכים לא תקין: תאריך ההתחלה מאוחר מתאריך הסיום")
         if r.meeting_service_type not in _DIRECT_COORDINATION_SERVICE_TYPES:
-            raise HTTPException(status_code=400, detail="יש לבחור סוג פגישה (גפן/שוטף/מחוז/תקומה) לכל טווח")
+            raise HTTPException(status_code=400, detail="יש לבחור סוג פגישה (גפן/שוטף/גפן+שוטף/מחוז/תקומה) לכל טווח")
         if r.duration_minutes not in _DIRECT_COORDINATION_DURATIONS:
             raise HTTPException(status_code=400, detail="משך פגישה לא תקין")
         if not r.participants:
             raise HTTPException(status_code=400, detail="יש לבחור לפחות משתתף אחד לכל טווח/פגישה")
         if not r.advisor_ids:
             raise HTTPException(status_code=400, detail="יש לבחור יועץ מבצע לכל פגישה")
+
+        # Each range is one concrete meeting request, so it resolves to exactly ONE coordination
+        # slot: takuma merges into gefen, district never splits by division, gefen/current split
+        # into tichon/beinayim for six-year schools per stage_scope. gefen_current (a combined
+        # meeting, only ever sent by a frontend that already verified the two coordinators match —
+        # see DirectCoordinationModal's isGefenCurrentEligible) canonically resolves to the
+        # "current" slot; we still re-verify both coordinators match here server-side.
+        base = "gefen" if r.meeting_service_type == "takuma" else "current" if r.meeting_service_type == "gefen_current" else r.meeting_service_type
+        slot = _resolve_slot(base, r.stage_scope)
+        if slot is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"יש לבחור חטיבה (תיכון/חט\"ב) עבור טווח מסוג {_DIRECT_COORDINATION_SERVICE_TYPES[r.meeting_service_type]} — בית ספר שש-שנתי",
+            )
+        if r.meeting_service_type == "gefen_current":
+            gefen_slot = _resolve_slot("gefen", r.stage_scope)
+            gefen_coord = _resolve_meeting_coordinator_for_slot(school, gefen_slot)
+            current_coord = _resolve_meeting_coordinator_for_slot(school, slot)
+            if (
+                not gefen_coord or not gefen_coord.get("email")
+                or not current_coord or not current_coord.get("email")
+                or gefen_coord["email"] != current_coord["email"]
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="פגישה מסוג גפן+שוטף דורשת אותו/ה אחראי/ת תיאום לגפן ולשוטף",
+                )
+        range_slots.append(slot)
         type_counts[r.meeting_service_type] = type_counts.get(r.meeting_service_type, 0) + 1
         for aid in r.advisor_ids:
             if aid not in advisor_ids_union:
                 advisor_ids_union.append(aid)
+
+    # Resolve the coordinator for each range's slot. A request can legitimately span multiple
+    # slots with different coordinators (e.g. a six-year school with separate תיכון/ביניים
+    # contacts) — exactly the scenario this feature exists to support — so we don't require a
+    # single coordinator for the whole request; ranges are grouped by resolved coordinator email
+    # below and one email is sent per group.
+    missing_slot_labels = []
+    range_coordinators: list[dict | None] = []
+    for slot in range_slots:
+        c = _resolve_meeting_coordinator_for_slot(school, slot)
+        if not c or not c.get("email"):
+            missing_slot_labels.append(_SLOT_LABELS.get(slot, slot))
+        range_coordinators.append(c)
+    if missing_slot_labels:
+        raise HTTPException(
+            status_code=400,
+            detail=f"יש להגדיר אחראי/ת לתיאום פגישות עם כתובת מייל עבור: {', '.join(missing_slot_labels)}",
+        )
 
     advisor_rows = (
         db.table("profiles").select("id, full_name, email")
@@ -7511,7 +7707,6 @@ def send_direct_coordination_request(
     if len(advisor_rows) != len(set(advisor_ids_union)):
         raise HTTPException(status_code=400, detail="אחד או יותר מהיועצים שנבחרו אינם תקינים")
     advisor_names_map = {a["id"]: (a.get("full_name") or a.get("email") or "") for a in advisor_rows}
-    advisor_names = [advisor_names_map[aid] for aid in advisor_ids_union]
 
     type_seen: dict[str, int] = {}
     ranges_data = []
@@ -7528,32 +7723,58 @@ def send_direct_coordination_request(
             "label": label,
             "advisor_ids": r.advisor_ids,
             "participants": [p.model_dump() for p in r.participants],
+            "meeting_type": r.meeting_type,
         })
+
+    # Group ranges by distinct resolved coordinator email — one email (and one booking token)
+    # per distinct coordinator, each covering only that coordinator's own ranges.
+    groups: dict[str, dict] = {}
+    for i, c in enumerate(range_coordinators):
+        g = groups.setdefault(c["email"], {"coordinator": c, "indices": []})
+        g["indices"].append(i)
 
     import booking_logic
     import booking_token_logic
 
-    token_row = booking_token_logic.create_direct_booking_token(db, user["org_id"], school_id, advisor_ids_union, ranges_data)
-    booking_url = f"{os.getenv('APP_URL', '')}/book/{token_row['token']}"
-    opt_out_link = None
-    if coordinator.get("email"):
+    booking_urls = []
+    for email, g in groups.items():
+        coordinator = g["coordinator"]
+        group_ranges = [ranges_data[i] for i in g["indices"]]
+        group_advisor_ids = list(dict.fromkeys(aid for i in g["indices"] for aid in body.ranges[i].advisor_ids))
+
+        try:
+            opted_out_map = task_logic.opted_out_recipients(db, DEFAULT_ACADEMIC_YEAR, {school_id: email})
+        except Exception as exc:
+            logger.warning("send_direct_coordination_request: opt-out lookup failed (non-fatal): %s", exc)
+            opted_out_map = {}
+        if school_id in opted_out_map:
+            raise HTTPException(
+                status_code=400,
+                detail="לא ניתן לשלוח — בית הספר ביקש הסרה מרשימת התפוצה, עד שסטטוס הלקוח שלו יהפוך ל'פעיל'",
+            )
+
+        token_row = booking_token_logic.create_direct_booking_token(db, user["org_id"], school_id, group_advisor_ids, group_ranges)
+        booking_url = f"{os.getenv('APP_URL', '')}/book/{token_row['token']}"
+        opt_out_link = None
         client_status = resolve_inherited_year_admin(
             db, [school_id], DEFAULT_ACADEMIC_YEAR
         ).get(school_id, {}).get("client_status")
         if client_status != "active":
-            email_lower = coordinator["email"].strip().lower()
+            email_lower = email.strip().lower()
             opt_out_link = f"{os.getenv('APP_URL', '')}/tasks/opt-out?email={email_lower}&token={task_logic.make_optout_token(email_lower)}"
-    html = booking_logic.build_direct_coordination_email_html(
-        coordinator["name"], school["name"], advisor_names, ranges_data, booking_url, opt_out_link,
-    )
-    subject = f"בקשה לתיאום פגישה - {school['name']}"
-    try:
-        booking_logic.send_booking_request_email(user["org_id"], advisor_ids_union[0], coordinator["email"], subject, html)
-    except Exception as exc:
-        logger.error("send_direct_coordination_request: email send failed for school %s: %s", school_id, exc, exc_info=True)
-        raise HTTPException(status_code=502, detail="שליחת המייל נכשלה, נסה שוב")
+        group_advisor_names = [advisor_names_map[aid] for aid in group_advisor_ids]
+        html = booking_logic.build_direct_coordination_email_html(
+            coordinator["name"], school["name"], group_advisor_names, group_ranges, booking_url, opt_out_link,
+        )
+        subject = f"בקשה לתיאום פגישה - {school['name']}"
+        try:
+            booking_logic.send_booking_request_email(user["org_id"], group_advisor_ids[0], email, subject, html)
+        except Exception as exc:
+            logger.error("send_direct_coordination_request: email send failed for school %s: %s", school_id, exc, exc_info=True)
+            raise HTTPException(status_code=502, detail="שליחת המייל נכשלה, נסה שוב")
+        booking_urls.append(booking_url)
 
-    return {"ok": True, "booking_url": booking_url}
+    return {"ok": True, "booking_urls": booking_urls}
 
 
 @router.put("/{school_id}/meetings/{meeting_id}")

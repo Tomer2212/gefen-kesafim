@@ -1,16 +1,28 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import axios from "axios";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
-import { buildSchoolContacts, resolveMeetingCoordinator } from "./schoolContacts";
+import { buildSchoolContacts } from "./schoolContacts";
+import { resolveMeetingCoordinatorForSlot, slotForMeetingServiceType } from "./meetingCoordinatorSlots";
 import { DirectCoordinationResolutionModal } from "./DirectCoordinationResolutionModal";
 import AdvisorAccessGrantModal from "./AdvisorAccessGrantModal";
 import DirectStyleDateInput from "../tasks/DirectStyleDateInput";
+import { DEFAULT_ACADEMIC_YEAR } from "../../constants/academicYears";
+import { MEETING_TYPE_OPTIONS } from "./constants";
 
 const SERVICE_TYPE_OPTIONS = [
   { value: "gefen", label: "גפן" },
   { value: "current", label: "שוטף" },
   { value: "district", label: "מחוז" },
   { value: "takuma", label: "תקומה" },
+];
+
+// "גפן+שוטף" — a single combined meeting, only offered (see isGefenCurrentEligible below) when
+// the school's גפן and שוטף advisors AND coordination contacts already match, so bundling them
+// into one meeting/one coordinator email is actually correct rather than silently merging two
+// distinct people's schedules.
+const GEFEN_CURRENT_OPTION = { value: "gefen_current", label: "גפן+שוטף" };
+const ALL_SERVICE_TYPE_OPTIONS = [
+  SERVICE_TYPE_OPTIONS[0], SERVICE_TYPE_OPTIONS[1], GEFEN_CURRENT_OPTION, SERVICE_TYPE_OPTIONS[2], SERVICE_TYPE_OPTIONS[3],
 ];
 
 const DURATION_OPTIONS = Array.from({ length: (180 - 30) / 15 + 1 }, (_, i) => 30 + i * 15);
@@ -27,23 +39,27 @@ function newRange() {
   return {
     localId: rangeIdCounter,
     serviceType: "",
+    stageScope: "",
     startDate: "",
     endDate: "",
     duration: 60,
     participantKeys: [],
     advisorMode: "default",
     advisorId: "",
+    meetingType: "remote",
   };
 }
 
 // Same mapping as MeetingRow.jsx's typedAdvisorsForServiceType — "takuma" reuses the school's
-// גפן advisor list (no typed advisor table of its own).
+// גפן advisor list (no typed advisor table of its own). gefen_current is only ever offered when
+// the two lists already match (see isGefenCurrentEligible), so either one is the same set.
 function typedAdvisorIdsForServiceType(serviceType, school) {
   let list;
   if (serviceType === "gefen") list = school?.advisors_gefen;
   else if (serviceType === "current") list = school?.advisors_current;
   else if (serviceType === "district") list = school?.advisors_district;
   else if (serviceType === "takuma") list = school?.advisors_gefen;
+  else if (serviceType === "gefen_current") list = school?.advisors_gefen;
   else list = [];
   return (list || []).map(a => a.id);
 }
@@ -51,6 +67,27 @@ function typedAdvisorIdsForServiceType(serviceType, school) {
 function resolveRangeAdvisorIds(r, school) {
   if (r.advisorMode === "manual") return r.advisorId ? [r.advisorId] : [];
   return typedAdvisorIdsForServiceType(r.serviceType, school);
+}
+
+// Whether "גפן+שוטף" may be offered as a single combined meeting for this school: both the
+// typed advisor lists and the resolved coordination contact must match between גפן and שוטף for
+// every stage scope the school actually has (both תיכון/חט"ב for a six-year school, otherwise
+// the single school-wide slot) — checked scope-independently since the button is shown before
+// the user picks a stage.
+function isGefenCurrentEligible(school) {
+  if (!school) return false;
+  const gefenIds = typedAdvisorIdsForServiceType("gefen", school);
+  const currentIds = typedAdvisorIdsForServiceType("current", school);
+  if (gefenIds.length === 0) return false;
+  const sameAdvisors = gefenIds.length === currentIds.length && gefenIds.every(id => currentIds.includes(id));
+  if (!sameAdvisors) return false;
+
+  const stageScopes = school.stage === "sheshshnati" ? ["tichon", "chativa"] : [null];
+  return stageScopes.every(scope => {
+    const gefenCoord = resolveMeetingCoordinatorForSlot(school, slotForMeetingServiceType(school, "gefen", scope));
+    const currentCoord = resolveMeetingCoordinatorForSlot(school, slotForMeetingServiceType(school, "current", scope));
+    return !!gefenCoord?.email && !!currentCoord?.email && gefenCoord.email === currentCoord.email;
+  });
 }
 
 export function DirectCoordinationModal({ school: initialSchool, advisors, onClose, onSent }) {
@@ -62,8 +99,27 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
   const [sentInfo, setSentInfo] = useState(null); // { bookingUrl }
   const [showResolution, setShowResolution] = useState(false);
   const [advisorAccessModal, setAdvisorAccessModal] = useState(null); // {advisorId, advisorName, startDate, endDate}
+  const [yearAdminData, setYearAdminData] = useState(null);
 
   const contacts = buildSchoolContacts(school);
+  const gefenCurrentEligible = isGefenCurrentEligible(school);
+
+  // Only needed to compute the "גפן+שוטף" default duration (sum of the school's own per-type
+  // meeting durations) — school_year_admin_data isn't included on the school object the modal
+  // receives from GET /schools/.
+  useEffect(() => {
+    let cancelled = false;
+    axios.get(`/schools/${school.id}/year-admin-data`, { params: { academic_year: DEFAULT_ACADEMIC_YEAR } })
+      .then(res => { if (!cancelled) setYearAdminData(res.data || null); })
+      .catch(() => { if (!cancelled) setYearAdminData(null); });
+    return () => { cancelled = true; };
+  }, [school.id]);
+
+  function gefenCurrentDefaultDuration() {
+    const g = yearAdminData?.meeting_duration_gefen ?? 60;
+    const c = yearAdminData?.meeting_duration_current ?? 60;
+    return g + c;
+  }
 
   function allResolvedAdvisorIds() {
     const ids = new Set();
@@ -94,8 +150,22 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
       if (!r.startDate || !r.endDate) return "יש למלא תאריך תקין לכל פגישה";
       if (r.startDate > r.endDate) return "תאריך ההתחלה מאוחר מתאריך הסיום באחד הטווחים";
       if (r.participantKeys.length === 0) return "יש לבחור לפחות משתתף אחד לכל פגישה";
+      if (slotForMeetingServiceType(school, r.serviceType, r.stageScope) === null) {
+        return 'יש לבחור חטיבה (תיכון/חט"ב) לכל פגישה מסוג גפן/שוטף/תקומה בבית ספר שש-שנתי';
+      }
     }
     return "";
+  }
+
+  // The set of distinct coordination slots this request touches — used both to detect
+  // problems (hasProblems) and to drive the per-slot resolution modal.
+  function neededCoordinatorSlots() {
+    const slots = new Set();
+    for (const r of ranges) {
+      const slot = slotForMeetingServiceType(school, r.serviceType, r.stageScope);
+      if (slot) slots.add(slot);
+    }
+    return [...slots];
   }
 
   function participantRoleKeysNeeded() {
@@ -105,8 +175,11 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
   }
 
   function hasProblems() {
-    const coordinator = resolveMeetingCoordinator(school);
-    if (!coordinator || !coordinator.email) return true;
+    const slotsUnresolved = neededCoordinatorSlots().some(slot => {
+      const c = resolveMeetingCoordinatorForSlot(school, slot);
+      return !c || !c.email;
+    });
+    if (slotsUnresolved) return true;
     const contactsByKey = Object.fromEntries(contacts.map(c => [c.key, c]));
     return participantRoleKeysNeeded().some(k => !contactsByKey[k]?.email);
   }
@@ -158,10 +231,12 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
             const c = contacts.find(c => c.key === key);
             return { key: c.key, name: c.name, email: c.email || null };
           }),
+          stage_scope: r.stageScope || null,
+          meeting_type: r.meetingType || "remote",
         })),
       };
       const res = await axios.post(`/schools/${school.id}/meetings/direct-coordination`, body);
-      setSentInfo({ bookingUrl: res.data.booking_url });
+      setSentInfo({ bookingUrls: res.data.booking_urls || [] });
       onSent?.();
     } catch (err) {
       setError(err?.response?.data?.detail || "שליחת הבקשה נכשלה, נסה שוב");
@@ -197,13 +272,21 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
         {sentInfo ? (
           <div className="flex flex-col gap-3">
             <p role="status" className="text-sm text-green-700 bg-green-50 border border-green-200 rounded-lg px-4 py-3">
-              הבקשה נשלחה למתאם/ת הפגישות בהצלחה.
+              {sentInfo.bookingUrls.length > 1
+                ? `הבקשה נשלחה בהצלחה — ${sentInfo.bookingUrls.length} מיילים נשלחו, מתאם/ת נפרד/ת לכל חטיבה/סוג פגישה.`
+                : "הבקשה נשלחה למתאם/ת הפגישות בהצלחה."}
             </p>
-            <div className="flex flex-col gap-1">
-              <label htmlFor="direct-coord-link" className="text-xs font-medium text-slate-500">קישור לגיבוי (למקרה שהמייל לא הגיע)</label>
-              <input id="direct-coord-link" type="text" readOnly value={sentInfo.bookingUrl}
-                onFocus={e => e.target.select()}
-                className="w-full text-xs border border-slate-200 rounded-lg px-3 py-2 bg-slate-50 text-slate-600" />
+            <div className="flex flex-col gap-2">
+              {sentInfo.bookingUrls.map((url, i) => (
+                <div key={url} className="flex flex-col gap-1">
+                  <label htmlFor={`direct-coord-link-${i}`} className="text-xs font-medium text-slate-500">
+                    {sentInfo.bookingUrls.length > 1 ? `קישור לגיבוי ${i + 1} (למקרה שהמייל לא הגיע)` : "קישור לגיבוי (למקרה שהמייל לא הגיע)"}
+                  </label>
+                  <input id={`direct-coord-link-${i}`} type="text" readOnly value={url}
+                    onFocus={e => e.target.select()}
+                    className="w-full text-xs border border-slate-200 rounded-lg px-3 py-2 bg-slate-50 text-slate-600" />
+                </div>
+              ))}
             </div>
             <div className="flex justify-end">
               <button type="button" onClick={onClose} className="btn-blue text-sm px-4 py-1.5">סגירה</button>
@@ -225,10 +308,13 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
                   <fieldset className="flex flex-col gap-1.5">
                     <legend className="text-xs font-medium text-slate-500">סוג פגישה</legend>
                     <div className="flex gap-2">
-                      {SERVICE_TYPE_OPTIONS.map(opt => (
+                      {ALL_SERVICE_TYPE_OPTIONS.filter(opt => opt.value !== "gefen_current" || gefenCurrentEligible).map(opt => (
                         <button key={opt.value} type="button"
                           aria-pressed={r.serviceType === opt.value}
-                          onClick={() => updateRange(r.localId, { serviceType: opt.value })}
+                          onClick={() => updateRange(r.localId, {
+                            serviceType: opt.value,
+                            ...(opt.value === "gefen_current" ? { duration: gefenCurrentDefaultDuration() } : {}),
+                          })}
                           className={`text-sm px-4 py-1.5 rounded-lg border transition-colors ${
                             r.serviceType === opt.value
                               ? "bg-blue-600 border-blue-600 text-white font-semibold"
@@ -239,6 +325,26 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
                       ))}
                     </div>
                   </fieldset>
+
+                  {school.stage === "sheshshnati" && ["gefen", "current", "gefen_current", "takuma"].includes(r.serviceType) && (
+                    <fieldset className="flex flex-col gap-1.5">
+                      <legend className="text-xs font-medium text-slate-500">חטיבה (בית ספר שש-שנתי)</legend>
+                      <div className="flex gap-2">
+                        {[{ value: "tichon", label: "תיכון" }, { value: "chativa", label: 'חט"ב' }].map(opt => (
+                          <button key={opt.value} type="button"
+                            aria-pressed={r.stageScope === opt.value}
+                            onClick={() => updateRange(r.localId, { stageScope: opt.value })}
+                            className={`text-sm px-4 py-1.5 rounded-lg border transition-colors ${
+                              r.stageScope === opt.value
+                                ? "bg-blue-600 border-blue-600 text-white font-semibold"
+                                : "border-black text-slate-600 hover:bg-slate-50"
+                            }`}>
+                            {opt.label}
+                          </button>
+                        ))}
+                      </div>
+                    </fieldset>
+                  )}
 
                   <div className="grid grid-cols-2 gap-3">
                     <div className="flex flex-col gap-1">
@@ -253,7 +359,7 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-3 gap-3">
                     <div className="flex flex-col gap-1">
                       <label htmlFor={`dc-advisor-${r.localId}`} className="text-xs font-medium text-slate-500">יועץ מבצע</label>
                       <select id={`dc-advisor-${r.localId}`}
@@ -265,7 +371,7 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
                         }}
                         className="text-sm border border-black rounded-lg px-2.5 py-1.5 w-full">
                         <option value="__default__">
-                          {r.serviceType ? `יועץ מלווה [${SERVICE_TYPE_OPTIONS.find(o => o.value === r.serviceType)?.label}]` : "יועץ מלווה"}
+                          {r.serviceType ? `יועץ מלווה [${ALL_SERVICE_TYPE_OPTIONS.find(o => o.value === r.serviceType)?.label}]` : "יועץ מלווה"}
                         </option>
                         {advisors.map(a => <option key={a.id} value={a.id}>{a.full_name || a.email}</option>)}
                       </select>
@@ -276,6 +382,14 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
                         onChange={e => updateRange(r.localId, { duration: Number(e.target.value) })}
                         className="text-sm border border-black rounded-lg px-2.5 py-1.5 w-full">
                         {DURATION_OPTIONS.map(d => <option key={d} value={d}>{formatDuration(d)}</option>)}
+                      </select>
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <label htmlFor={`dc-location-${r.localId}`} className="text-xs font-medium text-slate-500">מיקום הפגישה</label>
+                      <select id={`dc-location-${r.localId}`} value={r.meetingType || "remote"}
+                        onChange={e => updateRange(r.localId, { meetingType: e.target.value })}
+                        className="text-sm border border-black rounded-lg px-2.5 py-1.5 w-full">
+                        {MEETING_TYPE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                       </select>
                     </div>
                   </div>
@@ -322,6 +436,7 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
       {showResolution && (
         <DirectCoordinationResolutionModal
           school={school}
+          neededSlots={neededCoordinatorSlots()}
           participantRoleKeysNeeded={participantRoleKeysNeeded()}
           onSchoolUpdate={patch => setSchool(prev => ({ ...prev, ...patch }))}
           onClose={() => setShowResolution(false)}

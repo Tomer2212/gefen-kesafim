@@ -432,8 +432,9 @@ def _book_range_slot(db, token_row: dict, range_key: str, body: dict) -> dict:
         # _find_existing_meeting and task_logic.py's success-check can tell a "separate"
         # condition's two sibling ranges apart instead of treating either one as satisfying both.
         "stage_scope": range_row.get("stage_scope"),
-        # Same default as every other meeting-creation path.
-        "meeting_type": "remote",
+        # Chosen by the manager when building the meeting request (defaults to "remote"
+        # for older tokens minted before this field existed).
+        "meeting_type": range_row.get("meeting_type") or "remote",
     }
     try:
         res = db.table("meetings").insert(meeting_data).execute()
