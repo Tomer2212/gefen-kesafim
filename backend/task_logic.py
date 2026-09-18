@@ -121,7 +121,7 @@ YEAR_ADMIN_FIELDS = {
 # school_year_admin_data.order_method values (FUNDING_METHOD_OPTIONS there) — these three used
 # to be stale/incomplete here (missing "district"/"in_progress"/"former", and order_method had
 # entirely fabricated values that don't exist anywhere else in the codebase).
-SERVICE_TYPE_OPTIONS = ["gefen", "current", "gefen_current", "district"]
+SERVICE_TYPE_OPTIONS = ["gefen", "current", "gefen_current", "district", "takuma"]
 CLIENT_STATUS_OPTIONS = ["active", "inactive", "in_progress", "former"]
 ORDER_METHOD_OPTIONS = ["private", "authority", "district"]
 
@@ -131,7 +131,7 @@ ORDER_METHOD_OPTIONS = ["private", "authority", "district"]
 STAGE_LABELS = {"yesodi": "יסודי", "beinayim": "חטיבת ביניים", "tikkon": "תיכון", "sheshshnati": "שש שנתי", "other": "אחר"}
 FINANCE_SOFTWARE_LABELS = {"kesafim2000": "כספים 2000", "payscool": "פייסקול", "schoolcash": "סקולקאש"}
 MEETING_COORDINATOR_LABELS = {"principal": "מנהל/ת", "secretary": "מנהלנ/ית", "finance_contact": "אחראי/ת כספים"}
-SERVICE_TYPE_LABELS = {"gefen": "גפן", "current": "שוטף", "gefen_current": "גפן+שוטף", "district": "מחוז"}
+SERVICE_TYPE_LABELS = {"gefen": "גפן", "current": "שוטף", "gefen_current": "גפן+שוטף", "district": "מחוז", "takuma": "תקומה"}
 CLIENT_STATUS_LABELS = {"active": "פעיל", "inactive": "לא פעיל", "in_progress": "בתהליך", "former": "לקוח עבר"}
 ORDER_METHOD_LABELS = {"private": "פרטי", "authority": "רשות", "district": "מחוז"}
 BOOL_LABELS = {"yes": "כן", "no": "לא"}
@@ -210,7 +210,7 @@ FIELD_LABELS = {
 # Matches meetings.meeting_service_type (see frontend/src/components/meetings/constants.js
 # MEETING_SERVICE_TYPE_OPTIONS) — the meetings-area "סוג" column, NOT meeting_type
 # (physical/remote), which is a different, unrelated field ("אופן" the meeting happens).
-MEETING_SERVICE_TYPE_OPTIONS = ["gefen", "current", "gefen_current", "district"]
+MEETING_SERVICE_TYPE_OPTIONS = ["gefen", "current", "gefen_current", "district", "takuma"]
 NUMBER_OPS = {"eq", "ne", "gt", "gte", "lt", "lte"}
 
 
@@ -534,6 +534,17 @@ def _compare(ftype: str | None, op: str, actual, target) -> bool:
         }[op]
     if op == "contains":
         return str(target or "").strip().lower() in str(actual or "").lower()
+    if isinstance(target, (list, tuple)) and isinstance(actual, list):
+        # Both sides are lists — e.g. advisor_gefen/current/district, where `actual` is the
+        # school's own list of assigned advisor ids and `target` is the multi-select chips'
+        # list of chosen advisor ids. Must be checked before the scalar-actual branch below,
+        # which would otherwise stringify the whole `actual` list into one bogus value that can
+        # never match any single chosen id. "Any overlap" = a match (OR semantics, same as the
+        # scalar-actual branch below).
+        actual_set = {str(a or "").strip() for a in actual}
+        target_set = {str(t or "").strip() for t in target}
+        is_member = bool(actual_set & target_set)
+        return not is_member if op == "ne" else is_member
     if isinstance(target, (list, tuple)):
         # Multi-select "one of" condition (select-type fields in ConditionGroupsEditor no
         # longer offer a single-value dropdown — the value is always a list of accepted raw

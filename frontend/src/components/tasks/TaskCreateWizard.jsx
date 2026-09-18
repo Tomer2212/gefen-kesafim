@@ -50,30 +50,56 @@ const PHASE_TITLES = {
   review: "סיכום ואישור",
 };
 
+// Default audience-filter pair every field-filter group starts with — mirrors
+// PersonTaskCreateWizard.jsx's ADVISOR_DEFAULT_CONDITIONS, except here only client_status is
+// mandatory (passed via ConditionGroupsEditor's nonRemovableFields): service_type is just a
+// convenience pre-fill most tasks end up wanting, left fully removable.
+const SCHOOL_DEFAULT_CONDITIONS = [
+  { type: "field", field: "client_status", op: "eq", value: "active" },
+  { type: "field", field: "service_type", op: "eq", value: "" },
+];
+
 // The audience preview is a quick sanity-check list, not something anyone scrolls through — so
 // it renders at most this many rows and then a "…ועוד N" line, keeping a wide (unfiltered)
 // match from re-rendering thousands of <li>s on every debounced filter change. The true total
 // is always shown separately from preview.count.
 const PREVIEW_SCHOOL_LIMIT = 200;
 
+// Same table shape/styling as PersonTaskCreateWizard.jsx's "יועץ מלווה" preview table — a
+// single "בית ספר" column here since a general school-audience preview has no per-row advisor
+// to show. The hard PREVIEW_SCHOOL_LIMIT cap (not true virtualization) is what actually keeps
+// this safe for large orgs: at most 200 <tr> ever mount regardless of how many schools matched,
+// so there's no DOM-size blowup to virtualize away — same proven approach already used here and
+// in the advisor table.
 function SchoolPreviewList({ schools }) {
   const shown = schools.slice(0, PREVIEW_SCHOOL_LIMIT);
   const extra = schools.length - shown.length;
   return (
-    <ul className="mt-2 max-h-40 overflow-auto space-y-1 border-t border-slate-200 pt-2">
-      {shown.map(s => (
-        <li key={s.school_id} className="text-xs text-slate-600 flex items-center gap-2">
-          <span className="font-medium text-slate-800">{s.school_name}</span>
-          {s.symbol && <bdi className="text-slate-400">({s.symbol})</bdi>}
-          {s.authority && <span className="text-slate-400">— {s.authority}</span>}
-        </li>
-      ))}
-      {extra > 0 && (
-        <li className="text-xs text-slate-400 italic pt-1">
-          …ועוד {extra} בתי ספר (הרשימה נחתכה לתצוגה; המספר המלא מוצג למעלה)
-        </li>
-      )}
-    </ul>
+    <div className="mt-2 border border-slate-200 rounded-xl max-h-56 overflow-y-auto">
+      <table className="w-full text-xs">
+        <thead className="sticky top-0 bg-slate-50">
+          <tr>
+            <th scope="col" className="text-right px-2.5 py-1.5 font-semibold text-slate-600">בית ספר</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-100">
+          {shown.map(s => (
+            <tr key={s.school_id}>
+              <td className="px-2.5 py-1.5 text-slate-800">
+                {[s.school_name, s.authority, s.symbol].filter(Boolean).join(" - ")}
+              </td>
+            </tr>
+          ))}
+          {extra > 0 && (
+            <tr>
+              <td className="px-2.5 py-1.5 text-slate-400 italic">
+                …ועוד {extra} בתי ספר (הרשימה נחתכה לתצוגה; המספר המלא מוצג למעלה)
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
@@ -102,11 +128,13 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
   // field-filter conditions live in `groups` below, meeting track's in `fieldGroups` — kept
   // separate since the meeting track also has meetingRequirementGroups; manual selection
   // (manualSchoolIds) is shared as-is since there's only ever one "which schools" answer).
-  // fieldGroups is pre-filled with "סטטוס לקוח = פעיל" since the vast majority of
-  // meeting-scheduling tasks target active clients; the manager can still change/remove it.
+  // fieldGroups is pre-filled with "סטטוס לקוח = פעיל" + "סוג שירות" (see
+  // SCHOOL_DEFAULT_CONDITIONS) since the vast majority of meeting-scheduling tasks target
+  // active clients and specify a service type; client_status is mandatory (non-removable),
+  // service_type is just a convenience default the manager can still change/remove.
   const [audienceMode, setAudienceMode] = useState("filter"); // "filter" | "manual"
   const [fieldGroups, setFieldGroups] = useState([
-    { conditions: [{ type: "field", field: "client_status", op: "eq", value: "active" }] },
+    { conditions: SCHOOL_DEFAULT_CONDITIONS.map(c => ({ ...c })) },
   ]);
   const [manualSchoolIds, setManualSchoolIds] = useState([]);
   const [showSchoolPicker, setShowSchoolPicker] = useState(false);
@@ -120,9 +148,10 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
   const [meetingReqAttempted, setMeetingReqAttempted] = useState(false);
 
   // General-path audience + success state — same default pre-fill as the meeting track's
-  // fieldGroups (see above): most tasks target active clients, still fully editable/removable.
+  // fieldGroups (see above): client_status is mandatory, service_type is a removable convenience
+  // default.
   const [groups, setGroups] = useState([
-    { conditions: [{ type: "field", field: "client_status", op: "eq", value: "active" }] },
+    { conditions: SCHOOL_DEFAULT_CONDITIONS.map(c => ({ ...c })) },
   ]);
   const [audiences, setAudiences] = useState([]);
   const [selectedAudienceId, setSelectedAudienceId] = useState("");
@@ -173,7 +202,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
   // Preview + creation flow
   const [preview, setPreview] = useState(null); // {count, schools}
   const [previewLoading, setPreviewLoading] = useState(false);
-  const [showPreviewList, setShowPreviewList] = useState(false);
+  const [showPreviewList, setShowPreviewList] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [switchingChannel, setSwitchingChannel] = useState(false);
   const [checkingContacts, setCheckingContacts] = useState(false);
@@ -349,69 +378,66 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
   // opened it, so we stash setTargetGroups/emptyGroups in audienceModalTarget when opening it.
   function renderAudiencePicker(currentGroups, setTargetGroups, emptyGroups) {
     const hasSelection = currentGroups.some(g => g.conditions.some(c => c.type === "meeting" || !!c.field));
-    const pillBase = "text-xs px-3 py-1.5 rounded-full font-medium whitespace-nowrap disabled:opacity-40";
+    const pillBase = "text-xs px-3 py-1.5 rounded-full font-medium whitespace-nowrap disabled:opacity-40 inline-flex items-center gap-1";
     return (
-      <div className="border border-slate-200 rounded-lg p-2.5">
-        <div className="flex items-center justify-between gap-2 flex-wrap">
-          <span className="text-xs font-medium text-slate-600">קהל שמור</span>
-          <div className="flex items-center gap-2 flex-wrap">
-            <button
-              type="button"
-              onClick={() => { setAudienceModalTarget({ setTargetGroups, emptyGroups }); setShowSavedAudiencesModal(true); }}
-              disabled={audiences.length === 0}
-              className={`${pillBase} bg-slate-100 text-slate-700 hover:bg-slate-200 disabled:hover:bg-slate-100`}
-            >
-              {`טען קהל שמור${audiences.length ? ` (${audiences.length})` : ""}...`}
-            </button>
-            <button
-              type="button"
-              onClick={() => { setTargetGroups(emptyGroups); setSelectedAudienceId(""); setEditingAudienceId(null); setShowSaveAudience(false); }}
-              disabled={!hasSelection}
-              className={`${pillBase} bg-slate-100 text-slate-500 hover:bg-slate-200 disabled:hover:bg-slate-100`}
-            >
-              נקה בחירה
-            </button>
-            {showSaveAudience ? (
-              <div className="flex items-center gap-1.5">
-                <label htmlFor="new-audience-name" className="sr-only">שם הקהל</label>
-                <input
-                  id="new-audience-name"
-                  autoFocus
-                  value={newAudienceName}
-                  onChange={e => setNewAudienceName(e.target.value)}
-                  onKeyDown={e => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      editingAudienceId ? handleUpdateAudience(currentGroups) : handleSaveAudience(currentGroups);
-                    }
-                  }}
-                  placeholder="שם הקהל לשמירה"
-                  className="text-xs border border-slate-200 rounded-lg px-2 py-1.5"
-                />
-                <button
-                  onClick={() => editingAudienceId ? handleUpdateAudience(currentGroups) : handleSaveAudience(currentGroups)}
-                  disabled={savingAudience || !newAudienceName.trim()}
-                  className={`${pillBase} bg-blue-600 text-white hover:bg-blue-700 disabled:hover:bg-blue-600`}
-                >
-                  {savingAudience ? "שומר..." : editingAudienceId ? "עדכן קהל" : "שמור"}
-                </button>
-                <button
-                  onClick={() => { setShowSaveAudience(false); setAudienceSaveError(null); setEditingAudienceId(null); }}
-                  className="text-xs text-slate-500 hover:underline whitespace-nowrap"
-                >
-                  ביטול
-                </button>
-              </div>
-            ) : (
+      <div className="border border-slate-200 rounded-lg p-2.5 w-fit">
+        <div className="flex items-center gap-2 flex-wrap">
+          {showSaveAudience ? (
+            <div className="flex items-center gap-1.5">
+              <label htmlFor="new-audience-name" className="sr-only">שם הקהל</label>
+              <input
+                id="new-audience-name"
+                autoFocus
+                value={newAudienceName}
+                onChange={e => setNewAudienceName(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    editingAudienceId ? handleUpdateAudience(currentGroups) : handleSaveAudience(currentGroups);
+                  }
+                }}
+                placeholder="שם הקהל לשמירה"
+                className="text-xs border border-slate-200 rounded-lg px-2 py-1.5"
+              />
               <button
-                onClick={() => setShowSaveAudience(true)}
-                disabled={!hasSelection}
-                className={`${pillBase} bg-blue-50 text-blue-700 hover:bg-blue-100 disabled:hover:bg-blue-50`}
+                onClick={() => editingAudienceId ? handleUpdateAudience(currentGroups) : handleSaveAudience(currentGroups)}
+                disabled={savingAudience || !newAudienceName.trim()}
+                className={`${pillBase} bg-blue-600 text-white hover:bg-blue-700 disabled:hover:bg-blue-600`}
               >
-                + שמור כקהל...
+                {savingAudience ? "שומר..." : editingAudienceId ? "עדכן קהל" : "שמור"}
               </button>
-            )}
-          </div>
+              <button
+                onClick={() => { setShowSaveAudience(false); setAudienceSaveError(null); setEditingAudienceId(null); }}
+                className="text-xs text-slate-500 hover:underline whitespace-nowrap"
+              >
+                ביטול
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => setShowSaveAudience(true)}
+              disabled={!hasSelection}
+              className={`${pillBase} bg-emerald-50 text-emerald-700 hover:bg-emerald-100 disabled:hover:bg-emerald-50`}
+            >
+              <span aria-hidden="true">💾</span> שמור סינון
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => { setAudienceModalTarget({ setTargetGroups, emptyGroups }); setShowSavedAudiencesModal(true); }}
+            disabled={audiences.length === 0}
+            className={`${pillBase} bg-blue-50 text-blue-700 hover:bg-blue-100 disabled:hover:bg-blue-50`}
+          >
+            <span aria-hidden="true">📂</span> {`טען סינון${audiences.length ? ` (${audiences.length})` : ""}...`}
+          </button>
+          <button
+            type="button"
+            onClick={() => { setTargetGroups(emptyGroups); setSelectedAudienceId(""); setEditingAudienceId(null); setShowSaveAudience(false); }}
+            disabled={!hasSelection}
+            className={`${pillBase} bg-slate-100 text-slate-500 hover:bg-slate-200 disabled:hover:bg-slate-100`}
+          >
+            נקה בחירה
+          </button>
         </div>
         {showSaveAudience && audienceSaveError && (
           <p role="alert" className="text-xs text-red-600 mt-1.5">{audienceSaveError}</p>
@@ -640,10 +666,10 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
         aria-modal="true"
         aria-labelledby="task-wizard-title"
         onKeyDown={handleKeyDown}
-        className="glass-card rounded-2xl w-full max-w-2xl mx-4 max-h-[90vh] flex flex-col"
+        className="bg-white shadow-2xl rounded-2xl w-full max-w-2xl mx-4 max-h-[90vh] flex flex-col"
       >
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
-          <h2 id="task-wizard-title" className="font-bold text-black">
+          <h2 id="task-wizard-title" className="font-bold text-slate-800">
             {PHASE_TITLES[phase]} — שלב {step} מתוך {PHASES.length}
           </h2>
           <button onClick={onClose} aria-label="סגור" className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400">
@@ -657,49 +683,55 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
           {phase === "meeting_audience" && (
             <div className="space-y-4">
               <div>
-                <span className="block text-sm font-medium text-slate-700 mb-1.5">שנת לימודים</span>
-                <AcademicYearSelector value={academicYear} onChange={setAcademicYear} />
+                <span className="block text-[1.2rem] font-semibold text-black mb-1">שנת לימודים</span>
+                <AcademicYearSelector value={academicYear} onChange={setAcademicYear} borderClassName="border-black" />
               </div>
               <div>
-                <label htmlFor="task-name" className="block text-sm font-medium text-slate-700 mb-1.5">שם המשימה</label>
+                <label htmlFor="task-name" className="block text-[1.2rem] font-semibold text-black mb-1">
+                  שם המשימה <span role="alert" className="text-red-600 font-normal text-xs">(שדה חובה)</span>
+                </label>
                 <input
                   id="task-name"
                   value={name}
                   onChange={e => setName(e.target.value)}
                   placeholder='למשל: "קביעת פגישות גפן — רבעון 1"'
-                  className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 outline-none focus:border-blue-400"
+                  className="w-full text-sm border border-black rounded-lg px-3 py-2 outline-none focus:border-blue-400"
                 />
-                {!nameSet && <p role="alert" className="text-xs text-red-600 mt-1">יש למלא שם למשימה — שדה חובה.</p>}
               </div>
 
-              <div className="flex items-center gap-2 border border-slate-200 rounded-lg p-1 w-fit">
-                <button
-                  type="button"
-                  onClick={() => setAudienceMode("filter")}
-                  className={`text-xs px-3 py-1.5 rounded-md font-medium ${audienceMode === "filter" ? "bg-blue-600 text-white" : "text-slate-600 hover:bg-slate-50"}`}
-                >
-                  סינון לפי שדות
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setAudienceMode("manual")}
-                  className={`text-xs px-3 py-1.5 rounded-md font-medium ${audienceMode === "manual" ? "bg-blue-600 text-white" : "text-slate-600 hover:bg-slate-50"}`}
-                >
-                  בחירה ידנית
-                </button>
+              <div className="pt-8">
+                <p className="text-[1.2rem] font-semibold text-black mb-2">אילו בתי ספר ייכללו במשימה? (נא לסנן)</p>
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <div className="flex items-center gap-2 border border-black rounded-lg p-1 w-fit">
+                    <button
+                      type="button"
+                      onClick={() => setAudienceMode("filter")}
+                      className={`text-xs px-3 py-1.5 rounded-md font-medium ${audienceMode === "filter" ? "bg-blue-600 text-white" : "text-slate-600 hover:bg-slate-50"}`}
+                    >
+                      סינון לפי שדות
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAudienceMode("manual")}
+                      className={`text-xs px-3 py-1.5 rounded-md font-medium ${audienceMode === "manual" ? "bg-blue-600 text-white" : "text-slate-600 hover:bg-slate-50"}`}
+                    >
+                      בחירה ידנית
+                    </button>
+                  </div>
+                  {audienceMode === "filter" && renderAudiencePicker(fieldGroups, setFieldGroups, [newConditionGroup(["field"])])}
+                </div>
               </div>
 
               {audienceMode === "filter" ? (
-                <>
-                  {renderAudiencePicker(fieldGroups, setFieldGroups, [newConditionGroup(["field"])])}
-                  <ConditionGroupsEditor
-                    groups={fieldGroups} setGroups={setFieldGroups} fieldOptions={fieldOptions} meetingTypes={meetingTypes}
-                    allSchools={allSchools} allowedTypes={["field"]}
-                    goalOptions={goalOptions} divisionOptions={divisionOptions} budgetNameOptions={budgetNameOptions}
-                    controlLetterFields={controlLetterFields} goalValueOptions={goalValueOptions}
-                    goalValueContext="audience"
-                  />
-                </>
+                <ConditionGroupsEditor
+                  groups={fieldGroups} setGroups={setFieldGroups} fieldOptions={fieldOptions} meetingTypes={meetingTypes}
+                  allSchools={allSchools} allowedTypes={["field"]}
+                  goalOptions={goalOptions} divisionOptions={divisionOptions} budgetNameOptions={budgetNameOptions}
+                  controlLetterFields={controlLetterFields} goalValueOptions={goalValueOptions}
+                  goalValueContext="audience"
+                  defaultGroupConditions={SCHOOL_DEFAULT_CONDITIONS}
+                  nonRemovableFields={["client_status"]}
+                />
               ) : (
                 <div>
                   <button
@@ -720,7 +752,10 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
               )}
 
               {/* Moved right below the audience-defining UI (instead of below "פגישות") so the
-                  match count is visible without scrolling every time a filter field changes. */}
+                  match count is visible without scrolling every time a filter field changes.
+                  Same immediate table + separate תזמון button as PersonTaskCreateWizard.jsx's
+                  "יועץ מלווה" preview — list shown by default, with a collapse toggle to its
+                  left (large orgs can have long match lists). */}
               <div role="status" className="text-sm bg-slate-50 rounded-lg px-3 py-2">
                 <div className="flex items-center justify-between gap-2">
                   <span>
@@ -728,26 +763,27 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
                       ? <>נמצאו <b>{preview.count}</b> בתי ספר תואמים.</>
                       : "הגדר קריטריון סינון או בחר בתי ספר כדי לראות תצוגה מקדימה."}
                   </span>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <button type="button" onClick={() => setShowScheduleModal(true)}
-                      className="text-xs text-blue-700 hover:underline whitespace-nowrap">
-                      {scheduledFor ? `תזמון: ${new Date(scheduledFor).toLocaleString("he-IL")}` : "תזמון (אופציונלי)"}
+                  {preview?.count > 0 && (
+                    <button type="button" onClick={() => setShowPreviewList(v => !v)} className="text-xs text-blue-700 hover:underline whitespace-nowrap shrink-0">
+                      {showPreviewList ? "סגור רשימה" : "הצג רשימה"}
                     </button>
-                    {preview?.count > 0 && (
-                      <button type="button" onClick={() => setShowPreviewList(v => !v)} className="text-xs text-blue-700 hover:underline whitespace-nowrap">
-                        {showPreviewList ? "הסתר רשימה" : "הצג רשימה"}
-                      </button>
-                    )}
-                  </div>
+                  )}
                 </div>
                 {showPreviewList && preview?.schools?.length > 0 && (
                   <SchoolPreviewList schools={preview.schools} />
                 )}
               </div>
 
+              <div className="pt-1">
+                <button type="button" onClick={() => setShowScheduleModal(true)}
+                  className="text-xs px-3 py-1.5 rounded-lg font-medium bg-slate-100 text-slate-700 hover:bg-slate-200">
+                  {scheduledFor ? `תזמון: ${new Date(scheduledFor).toLocaleString("he-IL")}` : <>תזמון סינון <span aria-hidden="true">🕐</span></>}
+                </button>
+              </div>
+
               <div className="border-t border-slate-100 pt-4">
-                <span className="text-sm font-semibold text-slate-700 block mb-2">
-                  פגישות
+                <span className="text-[1.2rem] font-semibold text-black block mb-2">
+                  אילו פגישות יש לקבוע?
                 </span>
                 <ConditionGroupsEditor
                   groups={meetingRequirementGroups}
@@ -768,48 +804,54 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
           {phase === "audience" && (
             <div className="space-y-4">
               <div>
-                <span className="block text-sm font-medium text-slate-700 mb-1.5">שנת לימודים</span>
-                <AcademicYearSelector value={academicYear} onChange={setAcademicYear} />
+                <span className="block text-[1.2rem] font-semibold text-black mb-1">שנת לימודים</span>
+                <AcademicYearSelector value={academicYear} onChange={setAcademicYear} borderClassName="border-black" />
               </div>
               <div>
-                <label htmlFor="task-name" className="block text-sm font-medium text-slate-700 mb-1.5">שם המשימה</label>
+                <label htmlFor="task-name" className="block text-[1.2rem] font-semibold text-black mb-1">
+                  שם המשימה <span role="alert" className="text-red-600 font-normal text-xs">(שדה חובה)</span>
+                </label>
                 <input
                   id="task-name"
                   value={name}
                   onChange={e => setName(e.target.value)}
                   placeholder='למשל: "עדכון לקראת סוף שנה"'
-                  className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 outline-none focus:border-blue-400"
+                  className="w-full text-sm border border-black rounded-lg px-3 py-2 outline-none focus:border-blue-400"
                 />
-                {!nameSet && <p role="alert" className="text-xs text-red-600 mt-1">יש למלא שם למשימה — שדה חובה.</p>}
               </div>
 
-              <div className="flex items-center gap-2 border border-slate-200 rounded-lg p-1 w-fit">
-                <button
-                  type="button"
-                  onClick={() => setAudienceMode("filter")}
-                  className={`text-xs px-3 py-1.5 rounded-md font-medium ${audienceMode === "filter" ? "bg-blue-600 text-white" : "text-slate-600 hover:bg-slate-50"}`}
-                >
-                  סינון לפי שדות
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setAudienceMode("manual")}
-                  className={`text-xs px-3 py-1.5 rounded-md font-medium ${audienceMode === "manual" ? "bg-blue-600 text-white" : "text-slate-600 hover:bg-slate-50"}`}
-                >
-                  בחירה ידנית
-                </button>
+              <div className="pt-8">
+                <p className="text-[1.2rem] font-semibold text-black mb-2">אילו בתי ספר ייכללו במשימה? (נא לסנן)</p>
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <div className="flex items-center gap-2 border border-black rounded-lg p-1 w-fit">
+                    <button
+                      type="button"
+                      onClick={() => setAudienceMode("filter")}
+                      className={`text-xs px-3 py-1.5 rounded-md font-medium ${audienceMode === "filter" ? "bg-blue-600 text-white" : "text-slate-600 hover:bg-slate-50"}`}
+                    >
+                      סינון לפי שדות
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAudienceMode("manual")}
+                      className={`text-xs px-3 py-1.5 rounded-md font-medium ${audienceMode === "manual" ? "bg-blue-600 text-white" : "text-slate-600 hover:bg-slate-50"}`}
+                    >
+                      בחירה ידנית
+                    </button>
+                  </div>
+                  {audienceMode === "filter" && renderAudiencePicker(groups, setGroups, [newConditionGroup()])}
+                </div>
               </div>
 
               {audienceMode === "filter" ? (
-                <>
-                  {renderAudiencePicker(groups, setGroups, [newConditionGroup()])}
-                  <ConditionGroupsEditor
-                    groups={groups} setGroups={setGroups} fieldOptions={fieldOptions} meetingTypes={meetingTypes} allSchools={allSchools}
-                    goalOptions={goalOptions} divisionOptions={divisionOptions} budgetNameOptions={budgetNameOptions}
-                    controlLetterFields={controlLetterFields} goalValueOptions={goalValueOptions}
-                    goalValueContext="audience"
-                  />
-                </>
+                <ConditionGroupsEditor
+                  groups={groups} setGroups={setGroups} fieldOptions={fieldOptions} meetingTypes={meetingTypes} allSchools={allSchools}
+                  goalOptions={goalOptions} divisionOptions={divisionOptions} budgetNameOptions={budgetNameOptions}
+                  controlLetterFields={controlLetterFields} goalValueOptions={goalValueOptions}
+                  goalValueContext="audience"
+                  defaultGroupConditions={SCHOOL_DEFAULT_CONDITIONS}
+                  nonRemovableFields={["client_status"]}
+                />
               ) : (
                 <div>
                   <button
@@ -836,21 +878,22 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
                       ? <>נמצאו <b>{preview.count}</b> בתי ספר תואמים.</>
                       : "הגדר קריטריון סינון או בחר בתי ספר כדי לראות תצוגה מקדימה."}
                   </span>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <button type="button" onClick={() => setShowScheduleModal(true)}
-                      className="text-xs text-blue-700 hover:underline whitespace-nowrap">
-                      {scheduledFor ? `תזמון: ${new Date(scheduledFor).toLocaleString("he-IL")}` : "תזמון (אופציונלי)"}
+                  {preview?.count > 0 && (
+                    <button type="button" onClick={() => setShowPreviewList(v => !v)} className="text-xs text-blue-700 hover:underline whitespace-nowrap shrink-0">
+                      {showPreviewList ? "סגור רשימה" : "הצג רשימה"}
                     </button>
-                    {preview?.count > 0 && (
-                      <button type="button" onClick={() => setShowPreviewList(v => !v)} className="text-xs text-blue-700 hover:underline whitespace-nowrap">
-                        {showPreviewList ? "הסתר רשימה" : "הצג רשימה"}
-                      </button>
-                    )}
-                  </div>
+                  )}
                 </div>
                 {showPreviewList && preview?.schools?.length > 0 && (
                   <SchoolPreviewList schools={preview.schools} />
                 )}
+              </div>
+
+              <div className="pt-1">
+                <button type="button" onClick={() => setShowScheduleModal(true)}
+                  className="text-xs px-3 py-1.5 rounded-lg font-medium bg-slate-100 text-slate-700 hover:bg-slate-200">
+                  {scheduledFor ? `תזמון: ${new Date(scheduledFor).toLocaleString("he-IL")}` : <>תזמון סינון <span aria-hidden="true">🕐</span></>}
+                </button>
               </div>
             </div>
           )}

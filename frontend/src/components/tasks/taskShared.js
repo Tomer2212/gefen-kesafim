@@ -3,7 +3,7 @@
 
 // Matches meetings-area MEETING_SERVICE_TYPE_OPTIONS (the "סוג" column) — NOT the
 // unrelated meeting_type (physical/remote) field.
-export const MEETING_SERVICE_TYPE_LABELS = { gefen: "גפן", current: "שוטף", gefen_current: "גפן+שוטף", district: "מחוז" };
+export const MEETING_SERVICE_TYPE_LABELS = { gefen: "גפן", current: "שוטף", gefen_current: "גפן+שוטף", district: "מחוז", takuma: "תקומה" };
 
 // Mirrors backend/task_logic.py's FIELD_LABELS — kept in sync by hand.
 export const FIELD_LABELS = {

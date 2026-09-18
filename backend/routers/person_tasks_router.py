@@ -101,6 +101,7 @@ def _enrich_profile_names(db, ids: set[str]) -> dict:
 _SERVICE_TYPE_TO_DIVISIONS = {
     "gefen": ["gefen"], "current": ["current"],
     "gefen_current": ["gefen", "current"], "district": ["district"],
+    "takuma": ["gefen"],
 }
 _DIVISION_LABELS = {"gefen": "גפן", "current": "שוטף", "district": "מחוז"}
 

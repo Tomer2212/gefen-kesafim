@@ -1,4 +1,5 @@
-import { useState, useRef } from "react";
+import { useEffect, useLayoutEffect, useState, useRef } from "react";
+import { createPortal } from "react-dom";
 
 const ROLE_LABELS = { owner: "בעלים", manager: "מנהל", advisor: "יועץ" };
 const ROLE_SORT_ORDER = { owner: 0, manager: 1, advisor: 2 };
@@ -11,10 +12,19 @@ function sortByRole(arr) { return [...arr].sort((a, b) => (ROLE_SORT_ORDER[a.rol
 // the two "ליווי" fields look and behave identically.
 // `compact`: matches the smaller/plain field style used in "פרטי מוסד" (SchoolPage ליווי grid)
 // instead of the default glassy .input-field look used elsewhere (AdminPage, DashboardPage, ...).
+//
+// The dropdown is rendered via a portal into <body> with `position: fixed`, positioned from
+// the trigger's bounding rect — same reasoning as MultiSelectChips.jsx / DatePickerPopover.jsx:
+// a plain `position: absolute` dropdown gets silently clipped/covered by any ancestor
+// `.glass-card` (backdrop-filter creates a new stacking context, so a sibling card painted
+// later can cover it regardless of z-index).
 export function AdvisorSearch({ schoolId, selectedIds, users, loadingUsers, onChange, onRetry, invalid, compact = false }) {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState(null);
   const containerRef = useRef(null);
+  const triggerRef = useRef(null);
+  const dropdownRef = useRef(null);
 
   const ids = selectedIds || [];
   const selectedUsers = ids.map(id => users.find(u => u.id === id)).filter(Boolean);
@@ -35,13 +45,37 @@ export function AdvisorSearch({ schoolId, selectedIds, users, loadingUsers, onCh
   const chipStyle = compact ? {} : { background: "rgba(0,112,243,0.08)", color: "#1d4ed8" };
   const checkedBoxCls = compact ? "bg-slate-500 border-slate-500" : "bg-blue-500 border-blue-500";
 
+  useLayoutEffect(() => {
+    if (!open || !triggerRef.current) return;
+    const rect = triggerRef.current.getBoundingClientRect();
+    setPos({ top: rect.bottom + 4, left: rect.left, width: rect.width });
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    function handler(e) {
+      if (triggerRef.current?.contains(e.target)) return;
+      if (dropdownRef.current?.contains(e.target)) return;
+      setOpen(false);
+    }
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e) => {
+      if (dropdownRef.current?.contains(e.target)) return;
+      setOpen(false);
+    };
+    window.addEventListener("scroll", handler, { capture: true, passive: true });
+    return () => window.removeEventListener("scroll", handler, { capture: true });
+  }, [open]);
+
   return (
-    <div
-      ref={containerRef}
-      className="relative"
-      onBlur={e => { if (!containerRef.current?.contains(e.relatedTarget)) setOpen(false); }}
-    >
+    <div ref={containerRef} className="relative">
       <div
+        ref={triggerRef}
         className={boxCls}
         role="button"
         tabIndex={0}
@@ -65,13 +99,15 @@ export function AdvisorSearch({ schoolId, selectedIds, users, loadingUsers, onCh
           </span>
         ))}
       </div>
-      {open && (
-        <div className="absolute z-20 right-0 left-0 mt-1 border border-slate-200 rounded-xl bg-white shadow-lg">
+      {open && pos && createPortal(
+        <div ref={dropdownRef} className="fixed z-[9999] border border-slate-200 rounded-xl bg-white shadow-lg"
+          style={{ top: pos.top, left: pos.left, width: Math.max(pos.width, 220) }}>
           <div className="p-2 border-b border-slate-100">
             <label htmlFor={`advisor-search-${schoolId}`} className="sr-only">חיפוש יועץ</label>
             <input
               id={`advisor-search-${schoolId}`}
               type="search"
+              autoFocus
               className="input-field text-sm"
               placeholder="חפש יועץ..."
               value={query}
@@ -112,7 +148,8 @@ export function AdvisorSearch({ schoolId, selectedIds, users, loadingUsers, onCh
               className="btn-blue text-xs px-3 py-1.5"
             >אישור</button>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

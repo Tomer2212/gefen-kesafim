@@ -161,6 +161,7 @@ const SERVICE_TYPE_OPTIONS = [
   { value: "current", label: "שוטף" },
   { value: "gefen_current", label: "גפן+שוטף" },
   { value: "district", label: "מחוז" },
+  { value: "takuma", label: "תקומה" },
 ];
 
 const FUNDING_METHOD_OPTIONS = [
@@ -177,12 +178,14 @@ const TYPED_SERVICE_TYPES = [
 ];
 
 // Which of the 3 typed advisor lists are mandatory, given the school's own "סוג שירות" value —
-// gefen_current requires both גפן and שוטף advisors to be set.
+// gefen_current requires both גפן and שוטף advisors to be set. takuma reuses the גפן list (no
+// dedicated typed advisor table of its own).
 function activeServiceTypes(serviceType) {
   if (serviceType === "gefen") return ["gefen"];
   if (serviceType === "current") return ["current"];
   if (serviceType === "district") return ["district"];
   if (serviceType === "gefen_current") return ["gefen", "current"];
+  if (serviceType === "takuma") return ["gefen"];
   return [];
 }
 

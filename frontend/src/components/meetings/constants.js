@@ -30,6 +30,7 @@ export const MEETING_SERVICE_TYPE_OPTIONS = [
   { value: "current",       label: "שוטף" },
   { value: "gefen_current", label: "גפן+שוטף" },
   { value: "district",      label: "מחוז" },
+  { value: "takuma",        label: "תקומה" },
 ];
 
 // Default for a new meeting's "סוג" field: copy the school's own service_type as-is. All four
@@ -49,6 +50,7 @@ export function resolveDefaultAdvisorIds(serviceType, { gefenAdvisors = [], curr
   else if (serviceType === "current") list = currentAdvisors;
   else if (serviceType === "district") list = districtAdvisors;
   else if (serviceType === "gefen_current") list = [...gefenAdvisors, ...currentAdvisors];
+  else if (serviceType === "takuma") list = gefenAdvisors;
   else list = [];
   return [...new Set(list.map(a => a.id))];
 }
@@ -63,6 +65,7 @@ export const MEETING_SERVICE_TYPE_BREAKDOWN = [
   { key: "current",       label: "שוטף" },
   { key: "gefen_current", label: "גפן+שוטף" },
   { key: "district",      label: "מחוז" },
+  { key: "takuma",        label: "תקומה" },
   { key: "none",          label: "ללא סוג" },
 ];
 
@@ -75,6 +78,7 @@ export const MEETING_SERVICE_TYPE_BREAKDOWN_COL_ORDER = [
   { key: "current",       label: "שוטף" },
   { key: "district",      label: "מחוז" },
   { key: "gefen_current", label: "גפן+שוטף" },
+  { key: "takuma",        label: "תקומה" },
   { key: "none",          label: "ללא סוג" },
 ];
 

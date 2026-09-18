@@ -45,6 +45,7 @@ function typedAdvisorsForServiceType(serviceType, typedAdvisors) {
   else if (serviceType === "current") list = typedAdvisors.current || [];
   else if (serviceType === "district") list = typedAdvisors.district || [];
   else if (serviceType === "gefen_current") list = [...(typedAdvisors.gefen || []), ...(typedAdvisors.current || [])];
+  else if (serviceType === "takuma") list = typedAdvisors.gefen || [];
   else list = [];
   const seen = new Set();
   return list.filter(p => (seen.has(p.id) ? false : (seen.add(p.id), true)));

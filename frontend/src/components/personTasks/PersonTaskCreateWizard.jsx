@@ -27,6 +27,7 @@ function defaultAdvisorFieldGroups() {
 // happens server-side against live data.
 const SERVICE_TYPE_TO_DIVISIONS = {
   gefen: ["gefen"], current: ["current"], district: ["district"], gefen_current: ["gefen", "current"],
+  takuma: ["gefen"],
 };
 const ADVISOR_DIVISION_OPTIONS = [
   { value: "gefen", label: "גפן" }, { value: "current", label: "שוטף" }, { value: "district", label: "מחוז" },
@@ -498,7 +499,7 @@ export default function PersonTaskCreateWizard({ onClose, onCreated, initialAcad
               <div className="pt-1">
                 <button type="button" onClick={() => setShowScheduleModal(true)}
                   className="text-xs px-3 py-1.5 rounded-lg font-medium bg-slate-100 text-slate-700 hover:bg-slate-200">
-                  {scheduledFor ? `תזמון: ${new Date(scheduledFor).toLocaleString("he-IL")}` : "תזמון (אופציונלי)"}
+                  {scheduledFor ? `תזמון: ${new Date(scheduledFor).toLocaleString("he-IL")}` : <>תזמון סינון <span aria-hidden="true">🕐</span></>}
                 </button>
               </div>
             </>

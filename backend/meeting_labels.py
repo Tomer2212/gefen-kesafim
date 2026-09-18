@@ -16,7 +16,7 @@ Pattern itself follows ``zihuy_core.normalize_budget_name`` / ``BUDGET_NAME_MAP`
 
 MEETING_STATUS_VALUES = ["scheduled", "completed", "cancelled", "postponed", "other"]
 MEETING_TYPE_VALUES = ["physical", "remote"]
-MEETING_SERVICE_TYPE_VALUES = ["gefen", "current", "gefen_current", "district"]
+MEETING_SERVICE_TYPE_VALUES = ["gefen", "current", "gefen_current", "district", "takuma"]
 
 MEETING_STATUS_LABELS = {
     "scheduled": "נקבעה",
@@ -31,6 +31,7 @@ MEETING_SERVICE_TYPE_LABELS = {
     "current": "שוטף",
     "gefen_current": "גפן+שוטף",
     "district": "מחוז",
+    "takuma": "תקומה",
 }
 
 # Hebrew final-form letters -> their regular form, so substring matching isn't defeated by
@@ -61,6 +62,7 @@ _TYPE_MAP = [
 # normalize_meeting_service_type() before this table is consulted.
 _SERVICE_TYPE_MAP = [
     (["מחוז", "district"], "district"),
+    (["תקומה", "takuma"], "takuma"),
     (["גפנ", 'גפ"נ', "גפ״נ", "מכתב בקרה", "gefen"], "gefen"),
     (["שוטפ", "סגירת שנה", "current"], "current"),
 ]

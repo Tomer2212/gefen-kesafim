@@ -4,7 +4,7 @@
 // ColumnFilterButton.jsx/ColumnPickerButton.jsx work unchanged for this table too.
 export const URGENCY_LABELS = { 1: "נמוכה", 2: "בינונית", 3: "גבוהה", 4: "דחופה" };
 
-const SERVICE_TYPE_LABELS = { gefen: "גפן", current: "שוטף", district: "מחוז", gefen_current: "גפן+שוטף" };
+const SERVICE_TYPE_LABELS = { gefen: "גפן", current: "שוטף", district: "מחוז", gefen_current: "גפן+שוטף", takuma: "תקומה" };
 
 // "אחראי ביצוע" column value for schools-mode tasks — the routing division isn't a fixed
 // property of the task anymore (target_division was replaced by target_criteria in the
