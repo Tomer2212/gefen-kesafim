@@ -28,6 +28,17 @@ def get_academic_year_date_range(academic_year: str) -> tuple[date, date]:
     return date(start_year, 9, 1), date(start_year + 1, 8, 31)
 
 
+def get_academic_year_for_calendar_year(year: int) -> str | None:
+    """Reverse lookup: which known academic year's 'שנת לימודים' column value (the
+    Gregorian year most of the academic year falls in, i.e. start + 1) equals `year`.
+    Used to map a תכנון file's declared year to a Hebrew academic-year label.
+    Returns None when `year` doesn't match any known academic year."""
+    for academic_year, start in _ACADEMIC_YEAR_START_GREGORIAN.items():
+        if start + 1 == year:
+            return academic_year
+    return None
+
+
 def get_academic_year_for_date(d: date) -> str | None:
     """Reverse lookup: which known academic year (if any) contains date `d`.
 
