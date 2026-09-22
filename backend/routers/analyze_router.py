@@ -4,6 +4,7 @@ import shutil
 import tempfile
 import traceback
 import uuid
+from datetime import date
 from pathlib import Path
 from typing import Annotated
 
@@ -16,7 +17,12 @@ import pandas as pd
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 
-from academic_years import DEFAULT_ACADEMIC_YEAR
+from academic_years import (
+    DEFAULT_ACADEMIC_YEAR,
+    get_academic_year_for_calendar_year,
+    get_academic_year_for_date,
+    get_academic_year_date_range,
+)
 from auth import get_current_user
 from supabase_client import get_admin_client
 from logic.excel_exporter import export
@@ -236,14 +242,59 @@ async def upload(
     run_dir = Path(tempfile.mkdtemp(prefix=f"gefen_{run_id}_"))
 
     saved: list[Path] = []
-    for uf in files:
-        dest = run_dir / uf.filename
+    for i, uf in enumerate(files):
+        # Each file gets its own numbered subdirectory (not a flat run_dir) so that two
+        # uploaded files sharing an identical original filename never silently overwrite
+        # one another on disk — Path.name still returns the original filename downstream.
+        dest = run_dir / str(i) / uf.filename
+        dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(await uf.read())
         saved.append(dest)
 
     _update_run(run_id, {"status": "processing"})
     background_tasks.add_task(_process, run_id, saved, run_dir, user["id"], school_id, gefen_account_id, update_log_id, academic_year)
     return {"run_id": run_id}
+
+
+@router.post("/detect-file-year")
+async def detect_file_year(
+    file: UploadFile = File(...),
+    file_role: str = Form(...),
+    _user: dict = Depends(get_current_user),
+):
+    """Lightweight, single-file academic-year detection — no check is run and nothing
+    is saved. Used by the year-mismatch modal's "החלף קובץ" action to preview a
+    replacement file's detected year before the user commits to re-running the check."""
+    tmp_dir = Path(tempfile.mkdtemp(prefix="gefen_detect_"))
+    try:
+        dest = tmp_dir / (file.filename or "upload")
+        dest.write_bytes(await file.read())
+        if file_role == "tikhnun":
+            found_years = _read_tikhnun_school_years(dest)
+            mapped_years = {get_academic_year_for_calendar_year(y) for y in found_years}
+            mapped_years.discard(None)
+            if not mapped_years:
+                return {"status": "unrecognized", "detected_academic_year": None}
+            return {"status": "recognized", "detected_academic_year": sorted(mapped_years)[0]}
+        if file_role == "gefen":
+            dates = _read_gefen_invoice_dates([dest])
+            result = _classify_file_year(dates)
+            if result["status"] == "recognized":
+                return {"status": "recognized", "detected_academic_year": result["academic_year"]}
+            return {"status": result["status"], "detected_academic_year": None}
+        if file_role in ("kesafim2000", "payscool", "schoolcash"):
+            if file_role == "kesafim2000" and _kesafim_is_unreadable_binary(dest):
+                return {"status": "unreadable_raw_file", "detected_academic_year": None}
+            if not _finance_budget_scoped([dest], file_role):
+                return {"status": "unscoped_budget", "detected_academic_year": None}
+            dates = _read_finance_invoice_dates([dest], file_role)
+            result = _classify_file_year(dates)
+            if result["status"] == "recognized":
+                return {"status": "recognized", "detected_academic_year": result["academic_year"]}
+            return {"status": result["status"], "detected_academic_year": None}
+        raise HTTPException(status_code=400, detail="file_role לא מוכר")
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 @router.post("/save-for-account")
@@ -284,6 +335,10 @@ async def add_file_to_check(
     run_dir = Path(tempfile.mkdtemp(prefix=f"gefen_{run_id}_"))
     all_paths: list[Path] = []
 
+    # Shared counter across both loops below (restored originals + newly uploaded) — each
+    # file gets its own numbered subdirectory so identical original filenames never
+    # silently overwrite one another on disk. Path.name still returns the original name.
+    file_idx = 0
     for sp in stored_paths:
         # New format: {"path": "run_id/file_00.xlsx", "name": "original_name.xlsx"}
         # Legacy format: plain string path (ASCII filenames only from before the dict format)
@@ -293,17 +348,21 @@ async def add_file_to_check(
         else:
             storage_key = sp
             fname = Path(sp).name
-        dest = run_dir / fname
+        dest = run_dir / str(file_idx) / fname
+        dest.parent.mkdir(parents=True, exist_ok=True)
         try:
             dest.write_bytes(db.storage.from_("check-files").download(storage_key))
             all_paths.append(dest)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"שגיאה בהורדת הקובץ המקורי: {fname}")
+        file_idx += 1
 
     for uf in files:
-        dest = run_dir / uf.filename
+        dest = run_dir / str(file_idx) / uf.filename
+        dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(await uf.read())
         all_paths.append(dest)
+        file_idx += 1
 
     _update_run(run_id, {"status": "processing"})
     background_tasks.add_task(
@@ -2670,6 +2729,19 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
                         })
                         return
 
+        # ── Verify tikhnun/gefen/finance file(s) belong to the active academic year ──
+        expected_year = academic_year or DEFAULT_ACADEMIC_YEAR
+        file_year_issues = _collect_file_year_issues(tikhnun_paths, gefen_paths, finance_paths, finance_type, expected_year)
+        if file_year_issues:
+            _update_run(run_id, {
+                "status": "error",
+                "error_code": "year_issues",
+                "error": "שים לב: חלק מהקבצים שהועלו אינם תואמים את שנת הלימודים שנבחרה במערכת.",
+                "file_year_issues": file_year_issues,
+                "expected_academic_year": expected_year,
+            })
+            return
+
         # ── Tikhnun-only run (no gefen doch) ─────────────────────────────────
         if not gefen_paths and tikhnun_paths:
             if len(tikhnun_paths) == 2:
@@ -2902,10 +2974,7 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
         logger.error("Run %s encoding error:\n%s", run_id, tb)
         _update_run(run_id, {
             "status": "error",
-            "user_message": (
-                "המערכת לא הצליחה לעבד את קובץ כספים2000. "
-                "במידה והקובץ אינו הקובץ הגולמי כפי שהורד מהמערכת, יש לנסות מחדש עם הקובץ הגולמי."
-            ),
+            "user_message": _KESAFIM_UNREADABLE_MESSAGE,
             "error": str(exc),
         })
     except ValueError as exc:
@@ -3066,6 +3135,311 @@ def _read_tikhnun_institution_symbols(path: Path) -> set[str]:
     except Exception as exc:
         logger.warning("Could not read institution symbols from tikhnun file %s: %s", path, exc)
         return set()
+
+
+def _read_tikhnun_school_years(path: Path) -> set[int]:
+    """Lightweight peek at the "שנת לימודים" column of the הכל sheet in a tikhnun
+    planning file, across all data rows. The column is located by matching its header
+    text in row 1 (not a fixed index — its position may change between file versions).
+    Does not call into logic/tikhnun_processor.py. Returns an empty set if the sheet/
+    column can't be identified or has no values."""
+    try:
+        wb = openpyxl.load_workbook(str(path), read_only=True)
+        try:
+            hakol_ws = None
+            year_col = None
+            for sh in wb.sheetnames:
+                rows_peek = list(wb[sh].iter_rows(min_row=1, max_row=1, values_only=True))
+                if not rows_peek:
+                    continue
+                header = rows_peek[0]
+                if len(header) > 14 and header[10] == "השתתפות רשות/ בעלות" and header[14] == "תאריך אחרון לאישור רשות":
+                    hakol_ws = sh
+                    for idx, val in enumerate(header):
+                        if val and str(val).strip() == "שנת לימודים":
+                            year_col = idx
+                            break
+                    break
+            if not hakol_ws or year_col is None:
+                return set()
+            years: set[int] = set()
+            for i, row in enumerate(wb[hakol_ws].iter_rows(values_only=True)):
+                if i == 0:
+                    continue  # skip header row
+                if len(row) > year_col and row[year_col] is not None:
+                    try:
+                        years.add(int(float(row[year_col])))
+                    except (ValueError, TypeError):
+                        pass
+            return years
+        finally:
+            wb.close()
+    except Exception as exc:
+        logger.warning("Could not read school year from tikhnun file %s: %s", path, exc)
+        return set()
+
+
+# Minimum number of dated invoice rows before the 60%-majority rule is trusted to name
+# a single academic year for a gefen "דיווח ביצוע" file. Below this, the file is treated
+# as "empty" for this check (too few data points to classify reliably).
+_GEFEN_YEAR_MIN_DATED_ROWS = 5
+# Share of dated rows that must fall in one academic year for the file to be considered
+# "belonging" to it — the Ministry of Education occasionally back/forward-dates a small
+# number of invoices outside the official school-year range, so this isn't 100%.
+_GEFEN_YEAR_MAJORITY_THRESHOLD = 0.6
+
+
+def _dates_from_series(series: pd.Series) -> list[date]:
+    """Extracts and normalizes real dates out of a pandas Series of raw invoice-date
+    values (via the existing _normalize_date), skipping blanks/unparseable values."""
+    dates: list[date] = []
+    for val in series:
+        if pd.isna(val):
+            continue
+        normalized = _normalize_date(str(val))
+        m = re.match(r"^(\d{2})/(\d{2})/(\d{4})$", normalized)
+        if not m:
+            continue
+        d, mo, y = m.groups()
+        try:
+            dates.append(date(int(y), int(mo), int(d)))
+        except ValueError:
+            pass
+    return dates
+
+
+def _read_gefen_invoice_dates(paths: list[Path]) -> list[date]:
+    """Reads the "תאריך חשבונית" column across one or more gefen "דיווח ביצוע" files,
+    via the existing load_gefen() loader (already used elsewhere in this module — this
+    is not a logic/ file). A failure reading one file is logged and skipped rather than
+    raised — the normal processing further down will surface a real error if the file
+    is genuinely broken."""
+    dates: list[date] = []
+    for p in paths:
+        try:
+            df, _ = load_gefen(str(p))
+        except Exception as exc:
+            logger.warning("Could not load gefen file %s for year check: %s", p, exc)
+            continue
+        if "תאריך חשבונית" not in df.columns:
+            continue
+        dates.extend(_dates_from_series(df["תאריך חשבונית"]))
+    return dates
+
+
+# Finance-software loaders return the invoice-date column under different names:
+# kesafim2000's load_kesafim() hasn't been Hebrew-renamed at this point (that rename
+# happens later in _process, via _KESAFIM_RENAME) — payscool/schoolcash already carry
+# the Hebrew header as their real column name straight out of their loaders.
+_FINANCE_DATE_COLUMN = {
+    "kesafim2000": "invoice_date",
+    "payscool": "תאריך חשבונית",
+    "schoolcash": "תאריך חשבונית",
+}
+
+
+def _read_finance_invoice_dates(paths: list[Path], finance_type: str) -> list[date]:
+    """Reads the invoice-date column across one or more finance-software files
+    (kesafim2000/payscool/schoolcash), via the existing load_kesafim/load_payscool/
+    load_schoolcash loaders (already imported in this module — not a logic/ edit).
+    A failure reading one file is logged and skipped rather than raised — same
+    fail-open pattern as _read_gefen_invoice_dates/_read_tikhnun_school_years."""
+    date_col = _FINANCE_DATE_COLUMN.get(finance_type)
+    if not date_col:
+        return []
+    dates: list[date] = []
+    for p in paths:
+        try:
+            if finance_type == "kesafim2000":
+                df = load_kesafim(str(p))
+            elif finance_type == "schoolcash":
+                df = load_schoolcash(str(p))
+            else:
+                df, _cancelled = load_payscool(str(p))
+        except Exception as exc:
+            logger.warning("Could not load %s file %s for year check: %s", finance_type, p, exc)
+            continue
+        if date_col not in df.columns:
+            continue
+        dates.extend(_dates_from_series(df[date_col]))
+    return dates
+
+
+def _classify_file_year(dates: list[date]) -> dict:
+    """Classifies a list of invoice dates into a single academic year using a
+    majority-share rule (see _GEFEN_YEAR_MAJORITY_THRESHOLD), after requiring at least
+    _GEFEN_YEAR_MIN_DATED_ROWS dated rows to trust the result at all.
+    Returns {"status": "empty"} | {"status": "unrecognized"} | {"status": "recognized", "academic_year": ...}."""
+    if len(dates) < _GEFEN_YEAR_MIN_DATED_ROWS:
+        return {"status": "empty"}
+    counts: dict[str, int] = {}
+    for d in dates:
+        year = get_academic_year_for_date(d)
+        if year:
+            counts[year] = counts.get(year, 0) + 1
+    if not counts:
+        return {"status": "unrecognized"}
+    best_year, best_count = max(counts.items(), key=lambda kv: kv[1])
+    if best_count / len(dates) >= _GEFEN_YEAR_MAJORITY_THRESHOLD:
+        return {"status": "recognized", "academic_year": best_year}
+    return {"status": "unrecognized"}
+
+
+def _is_empty_file_suspicious(academic_year: str) -> bool:
+    """A "דיווח ביצוע"/finance file with no (or too few) dated invoice rows is expected
+    early in an academic year — it only becomes suspicious from May 31 of the year the
+    academic year ends in onward. This also naturally always fires for a past/closed
+    academic year, since "today" is already well past its own May 31."""
+    start, _ = get_academic_year_date_range(academic_year)
+    cutoff = date(start.year + 1, 5, 31)
+    return date.today() >= cutoff
+
+
+def _tikhnun_year_entry(t_path: Path, expected_year: str) -> dict:
+    found_years = _read_tikhnun_school_years(t_path)
+    mapped_years = {get_academic_year_for_calendar_year(y) for y in found_years}
+    mapped_years.discard(None)
+    if not mapped_years:
+        return {"file_role": "tikhnun", "filenames": [t_path.name], "status": "unrecognized", "detected_academic_year": None}
+    detected = expected_year if expected_year in mapped_years else sorted(mapped_years)[0]
+    return {"file_role": "tikhnun", "filenames": [t_path.name], "status": "recognized", "detected_academic_year": detected}
+
+
+def _dated_file_entry(file_role: str, filenames: list[str], dates: list[date]) -> dict:
+    result = _classify_file_year(dates)
+    if result["status"] == "recognized":
+        return {"file_role": file_role, "filenames": filenames, "status": "recognized", "detected_academic_year": result["academic_year"]}
+    return {"file_role": file_role, "filenames": filenames, "status": result["status"], "detected_academic_year": None}
+
+
+_KESAFIM_UNREADABLE_MESSAGE = (
+    "המערכת לא הצליחה לעבד את קובץ כספים2000. "
+    "במידה והקובץ אינו הקובץ הגולמי כפי שהורד מהמערכת, יש לנסות מחדש עם הקובץ הגולמי."
+)
+
+
+def _entry_has_issue(entry: dict, expected_year: str) -> bool:
+    if entry["status"] in ("unscoped_budget", "unreadable_raw_file"):
+        return True
+    if entry["status"] == "unrecognized":
+        return True
+    if entry["status"] == "recognized":
+        return entry["detected_academic_year"] != expected_year
+    # "empty" — only a problem once suspicious for the expected year
+    return _is_empty_file_suspicious(expected_year)
+
+
+# The 8 canonical budget names the app recognizes (mirrors zihuy_core.BUDGET_NAME_MAP's
+# normalized targets). A finance file whose declared "סוג תקציב" doesn't normalize to
+# one of these is a "כללי" (general/unfiltered) export — normalize_budget_name() falls
+# back to returning the raw text unchanged when nothing matches, so membership in this
+# set (not mere truthiness) is what actually tells "recognized" apart from "unfiltered".
+_KNOWN_BUDGET_NAMES = {
+    "גפן חירום", "גפן", "תנופה", "תקומה", "דוקאטי",
+    "חינוך לסובלנות", "קולות קוראים", 'פל"ג',
+}
+
+
+def _kesafim_is_unreadable_binary(path: Path) -> bool:
+    """True when the file identifies as kesafim2000 but is actually a genuine binary
+    .xlsx export (not the classic TSV/iso-8859-8 export load_kesafim() expects) —
+    detected by the exact UnicodeDecodeError the real reconciliation pipeline hits
+    later on such a file (see the dedicated `except UnicodeDecodeError` handler in
+    _process). Surfacing this immediately in the pre-check modal, with the identical
+    message, avoids a confusing detour through a misleading "empty file" warning."""
+    try:
+        with open(str(path), "r", encoding="iso-8859-8") as f:
+            f.read()
+        return False
+    except UnicodeDecodeError:
+        return True
+    except Exception:
+        return False
+
+
+def _kesafim_budget_scoped(path: Path) -> bool:
+    """Checks the "סוג תקציב" value declared on the FIRST "קוד גפן" block header row
+    (this is a whole-file/export-level property, not per-block — verified against a
+    real 15-block sample where every block declared the same value) against the known
+    budget names. Fail-open (True) on any read error or if no block is found at all —
+    a genuinely broken file is the normal pipeline's problem to report, not this check's."""
+    try:
+        from zihuy_core import normalize_budget_name
+        with open(str(path), "r", encoding="iso-8859-8") as f:
+            for line in f:
+                parts = line.rstrip("\r\n").split("\t")
+                if parts[0] == "קוד גפן":
+                    raw = parts[4].strip() if len(parts) > 4 else ""
+                    return normalize_budget_name(raw) in _KNOWN_BUDGET_NAMES
+    except Exception as exc:
+        logger.warning("Could not check budget scoping for kesafim file %s: %s", path, exc)
+    return True
+
+
+def _payscool_budget_scoped(path: Path) -> bool:
+    """Locates the same sheet load_payscool() would pick (first sheet whose row 4
+    contains "סעיף" anywhere), then checks that its first three columns are EXACTLY
+    "סעיף"/"שם ספק"/"ח.פ" in that order — the signature of PaySchool's "לפי סוג תקציב"
+    report. A generic "פירוט הוצאות" export contains the same header cells but in a
+    different order/layout (verified against real samples), so it still passes the
+    existing loader's loose header-presence check but fails this stricter one."""
+    try:
+        wb = openpyxl.load_workbook(str(path), read_only=True)
+        try:
+            for sh in wb.sheetnames:
+                rows = list(wb[sh].iter_rows(min_row=4, max_row=4, values_only=True))
+                if not rows:
+                    continue
+                row4 = rows[0]
+                cellset = {str(v).strip() for v in row4 if v is not None}
+                if "סעיף" not in cellset:
+                    continue
+                first3 = [str(v).strip() if v is not None else "" for v in row4[:3]]
+                return first3 == ["סעיף", "שם ספק", "ח.פ"]
+        finally:
+            wb.close()
+    except Exception as exc:
+        logger.warning("Could not check budget scoping for payscool file %s: %s", path, exc)
+    return True
+
+
+def _finance_budget_scoped(paths: list[Path], finance_type: str) -> bool:
+    if finance_type == "kesafim2000":
+        return all(_kesafim_budget_scoped(p) for p in paths)
+    if finance_type == "payscool":
+        return all(_payscool_budget_scoped(p) for p in paths)
+    return True  # schoolcash — not checked yet
+
+
+def _collect_file_year_issues(
+    tikhnun_paths: list[Path],
+    gefen_paths: list[Path],
+    finance_paths: list[Path],
+    finance_type: str | None,
+    expected_year: str,
+) -> list[dict]:
+    """Builds one entry per uploaded tikhnun/gefen/finance file (or file group) —
+    unconditionally, whether it matches expected_year or not. If at least one entry is
+    actually a problem, returns the FULL list (so the frontend can show every uploaded
+    file's status together, not just the offenders — the user needs the whole picture
+    to know what to fix). If everything matches, returns an empty list and the check
+    proceeds normally. Finance files are grouped into a single entry (multiple
+    kesafim2000/schoolcash files already get merged into one logical ledger elsewhere
+    in the app), unlike tikhnun/gefen where each file is its own division."""
+    entries: list[dict] = [_tikhnun_year_entry(p, expected_year) for p in tikhnun_paths]
+    entries += [_dated_file_entry("gefen", [p.name], _read_gefen_invoice_dates([p])) for p in gefen_paths]
+    if finance_paths and finance_type:
+        filenames = [p.name for p in finance_paths]
+        if finance_type == "kesafim2000" and any(_kesafim_is_unreadable_binary(p) for p in finance_paths):
+            entries.append({"file_role": finance_type, "filenames": filenames, "status": "unreadable_raw_file", "detected_academic_year": None})
+        elif not _finance_budget_scoped(finance_paths, finance_type):
+            entries.append({"file_role": finance_type, "filenames": filenames, "status": "unscoped_budget", "detected_academic_year": None})
+        else:
+            entries.append(_dated_file_entry(finance_type, filenames, _read_finance_invoice_dates(finance_paths, finance_type)))
+
+    if any(_entry_has_issue(e, expected_year) for e in entries):
+        return entries
+    return []
 
 
 def _classify_files(paths: list[Path]) -> tuple[list[Path], list[Path], str | None, list[Path]]:

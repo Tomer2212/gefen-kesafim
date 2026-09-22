@@ -9,6 +9,7 @@ import LoadingScreen from "../components/LoadingScreen";
 import ResultsView from "../components/ResultsView";
 import ClassifyModal from "../components/ClassifyModal";
 import { SchoolSymbolMismatchModal } from "../components/SchoolSymbolMismatchModal";
+import { YearMismatchModal } from "../components/YearMismatchModal";
 import { NotesThread } from "../components/SchoolNotesModal";
 import { FilesThread } from "../components/SchoolFilesSection";
 import { GoalsTab } from "../components/GoalsTab";
@@ -1460,7 +1461,7 @@ function StageMismatchModal({ detectedDivision, schoolStage, onConfirm, onCancel
 }
 
 // ─── ChecksTab ────────────────────────────────────────────────────────────────
-function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsError, logsLoading, onReloadLogs, activeSubTab, setActiveSubTab, academicYear }) {
+function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsError, logsLoading, onReloadLogs, activeSubTab, setActiveSubTab, academicYear, setAcademicYear }) {
   const isSheshsSnati = schoolStage === "sheshshnati";
   const [view, setView] = useState("table");
   const [activeResult, setActiveResult] = useState(null);
@@ -1491,6 +1492,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
   const [divisionMismatch, setDivisionMismatch] = useState(null); // { runId, result, detectedDivision }
   const [stageMismatch, setStageMismatch]       = useState(null); // { runId, result, detectedDivision, savedLogId }
   const [symbolMismatch, setSymbolMismatch] = useState(false);
+  const [yearMismatch, setYearMismatch] = useState(null); // { detectedYear, expectedYear, files, selectedAccountId }
   const [selectedHistBudget, setSelectedHistBudget] = useState(null);
   const [renameTarget, setRenameTarget] = useState(null); // { log }
   const [renameValue, setRenameValue] = useState("");
@@ -1623,7 +1625,15 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
     setColOrder(next);
   }
 
-  async function startCheck(files, selectedAccountId) {
+  async function detectFileYear(file, fileRole) {
+    const form = new FormData();
+    form.append("file", file);
+    form.append("file_role", fileRole);
+    const { data } = await axios.post("/analyze/detect-file-year", form);
+    return data;
+  }
+
+  async function startCheck(files, selectedAccountId, yearOverride) {
     const now = new Date().toISOString();
     setPendingRun({ date: now, status: "loading", runId: null, result: null, error: "" });
     setShowNewCheckModal(false);
@@ -1632,7 +1642,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
       files.forEach(f => form.append("files", f));
       form.append("school_id", schoolId);
       if (selectedAccountId) form.append("gefen_account_id", selectedAccountId);
-      form.append("academic_year", academicYear);
+      form.append("academic_year", yearOverride || academicYear);
       const { data } = await axios.post("/analyze/upload", form);
       const runId = data.run_id;
       setPendingRun(prev => ({ ...prev, runId }));
@@ -1652,7 +1662,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
               }
             }
             setPendingRun(prev => ({ ...prev, status: "done", result: r }));
-            onReloadLogs();
+            onReloadLogs(yearOverride);
             if (isSheshsSnati) {
               const detected = r.summary?.division;
               const expected = activeSubTab;
@@ -1671,6 +1681,19 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
             if (r.error_code === "symbol_mismatch") {
               setPendingRun(null);
               setSymbolMismatch(true);
+            } else if (r.error_code === "year_issues") {
+              setPendingRun(null);
+              setYearMismatch({
+                issues: (r.file_year_issues || []).map(iss => ({
+                  fileRole: iss.file_role,
+                  filenames: iss.filenames,
+                  status: iss.status,
+                  detectedAcademicYear: iss.detected_academic_year,
+                })),
+                initialYear: r.expected_academic_year,
+                files,
+                selectedAccountId,
+              });
             } else {
               setPendingRun(prev => ({ ...prev, status: "error", error: r.user_message || r.error || "הבדיקה נכשלה" }));
             }
@@ -2477,6 +2500,22 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
         <SchoolSymbolMismatchModal
           schoolName={schoolName}
           onClose={() => setSymbolMismatch(false)}
+        />
+      )}
+
+      {yearMismatch && (
+        <YearMismatchModal
+          issues={yearMismatch.issues}
+          files={yearMismatch.files}
+          initialYear={yearMismatch.initialYear}
+          detectFileYear={detectFileYear}
+          onRun={(resolvedFiles, selectedYear) => {
+            const { selectedAccountId } = yearMismatch;
+            setAcademicYear(selectedYear);
+            setYearMismatch(null);
+            startCheck(resolvedFiles, selectedAccountId, selectedYear);
+          }}
+          onCancel={() => setYearMismatch(null)}
         />
       )}
     </div>
@@ -3430,10 +3469,10 @@ export default function SchoolPage() {
     }
   }
 
-  async function reloadLogs() {
+  async function reloadLogs(yearOverride) {
     setLogsLoading(true);
     try {
-      const res = await axios.get(`/schools/${schoolId}/logs`, { params: { academic_year: academicYear } });
+      const res = await axios.get(`/schools/${schoolId}/logs`, { params: { academic_year: yearOverride || academicYear } });
       setLogs(res.data || []);
       setLogsError("");
     } catch {
@@ -4909,6 +4948,7 @@ export default function SchoolPage() {
               activeSubTab={activeSubTab}
               setActiveSubTab={setActiveSubTab}
               academicYear={academicYear}
+              setAcademicYear={setAcademicYear}
             />
           )}
 
