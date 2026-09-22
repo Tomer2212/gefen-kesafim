@@ -968,7 +968,7 @@ async def retry_finance(
 
 def _save_check_log(run_id: str, user_id: str, school_id: str, gefen_account_id: str | None, update_log_id: str | None = None, run_data: dict | None = None, academic_year: str | None = None) -> None:
     run = run_data if run_data is not None else (_get_run(run_id) or {})
-    if run.get("status") not in ("done", "saving") or run.get("tikhnun_only"):
+    if run.get("status") not in ("done", "saving"):
         return
     summary = run.get("summary", {})
     try:
@@ -977,6 +977,7 @@ def _save_check_log(run_id: str, user_id: str, school_id: str, gefen_account_id:
 
         summary_to_save = {**summary}
         summary_to_save["gefen_only"] = run.get("gefen_only", False)
+        summary_to_save["tikhnun_only"] = run.get("tikhnun_only", False)
         summary_to_save["finance_type"] = run.get("finance_type")
         summary_to_save["run_id"] = run_id
         summary_to_save["stored_file_paths"] = run.get("stored_file_paths")
@@ -2764,6 +2765,7 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
                     "tikhnun": tikkon_result or beinayim_result,
                     "tikhnun_tikkon": tikkon_result,
                     "tikhnun_beinayim": beinayim_result,
+                    "tikhnun_filenames": [p.name for p in tikhnun_paths],
                     "stored_file_paths": stored_file_paths or None,
                     "_school_ctx": {"user_id": user_id, "school_id": school_id, "gefen_account_id": gefen_account_id, "update_log_id": update_log_id, "academic_year": academic_year},
                 }
@@ -2776,9 +2778,12 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
                     "status": "done",
                     "tikhnun_only": True,
                     "tikhnun": tikhnun_result_only,
+                    "tikhnun_filenames": [p.name for p in tikhnun_paths],
                     "stored_file_paths": stored_file_paths or None,
                     "_school_ctx": {"user_id": user_id, "school_id": school_id, "gefen_account_id": gefen_account_id, "update_log_id": update_log_id, "academic_year": academic_year},
                 }
+            if school_id and not _any_tikhnun_pending(run_data):
+                _save_check_log(run_id, user_id, school_id, gefen_account_id, update_log_id, run_data=run_data, academic_year=academic_year)
             _update_run(run_id, run_data)
             return
 

@@ -2826,8 +2826,17 @@ def review_update_request(
 
 
 @router.get("/notifications")
-def get_notifications(user: Annotated[dict, Depends(get_current_user)]):
-    """Return all notifications for the current user from the unified notifications table."""
+def get_notifications(
+    user: Annotated[dict, Depends(get_current_user)],
+    limit: int = 25,
+    offset: int = 0,
+):
+    """Return a page of notifications for the current user from the unified notifications
+    table, plus a total unread count and any pending goal-auto-update popups — both
+    independent of the requested page so they stay correct regardless of how far the
+    caller has paginated."""
+    limit = max(1, min(limit, 100))
+    offset = max(0, offset)
     for attempt in range(2):
         try:
             db = get_admin_client()
@@ -2836,10 +2845,12 @@ def get_notifications(user: Annotated[dict, Depends(get_current_user)]):
                 .select("*")
                 .eq("recipient_id", user["id"])
                 .order("created_at", desc=True)
-                .limit(50)
+                .range(offset, offset + limit)
                 .execute()
             )
             items = rows.data or []
+            has_more = len(items) > limit
+            items = items[:limit]
             # Enrich update_request_submitted notifications with the current request status
             # so the frontend can show the correct reviewed state on remount (non-fatal)
             try:
@@ -2871,12 +2882,44 @@ def get_notifications(user: Annotated[dict, Depends(get_current_user)]):
             except Exception as enrich_exc:
                 logger.warning("request status enrichment failed (non-fatal): %s", enrich_exc)
             # goal_auto_updated is delivered ONLY as an ephemeral bottom-left popup
-            # (GoalUpdatePopup) — it must not appear in the bell list or count. Split it off
-            # into its own key; the frontend fires the popup and acks via mark-read.
-            goal_updates = [n for n in items if n.get("type") == "goal_auto_updated" and not n.get("read_at")]
+            # (GoalUpdatePopup) — it must not appear in the bell list or count. It is fetched
+            # as its own query below (independent of the page window) so a pending popup is
+            # never missed just because it falls outside the currently loaded page.
             items = [n for n in items if n.get("type") != "goal_auto_updated"]
-            count = sum(1 for r in items if not r.get("read_at"))
-            return {"count": count, "items": items, "goal_auto_updates": goal_updates}
+
+            # Total unread count, decoupled from the current page so it stays accurate
+            # no matter how many pages have been loaded (non-fatal: falls back to 0).
+            count = 0
+            try:
+                count_res = (
+                    db.table("notifications")
+                    .select("id", count="exact", head=True)
+                    .eq("recipient_id", user["id"])
+                    .neq("type", "goal_auto_updated")
+                    .is_("read_at", "null")
+                    .execute()
+                )
+                count = count_res.count or 0
+            except Exception as count_exc:
+                logger.warning("unread count query failed (non-fatal): %s", count_exc)
+
+            goal_updates = []
+            try:
+                goal_res = (
+                    db.table("notifications")
+                    .select("*")
+                    .eq("recipient_id", user["id"])
+                    .eq("type", "goal_auto_updated")
+                    .is_("read_at", "null")
+                    .order("created_at", desc=True)
+                    .limit(20)
+                    .execute()
+                )
+                goal_updates = goal_res.data or []
+            except Exception as goal_exc:
+                logger.warning("goal_auto_updates query failed (non-fatal): %s", goal_exc)
+
+            return {"count": count, "items": items, "goal_auto_updates": goal_updates, "has_more": has_more}
         except Exception as exc:
             if attempt == 0:
                 logger.warning("get_notifications attempt 1 failed: %s — resetting and retrying", exc)
@@ -2884,7 +2927,7 @@ def get_notifications(user: Annotated[dict, Depends(get_current_user)]):
                 time.sleep(0.3)
             else:
                 logger.warning("get_notifications failed after 2 attempts: %s", exc)
-                return {"count": 0, "items": [], "goal_auto_updates": []}  # silent fallback — not critical
+                return {"count": 0, "items": [], "goal_auto_updates": [], "has_more": False}  # silent fallback — not critical
 
 
 @router.patch("/notifications/read-all")
