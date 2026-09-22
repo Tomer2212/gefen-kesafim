@@ -6,6 +6,10 @@ import Sidebar from "../components/Sidebar";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useTasks } from "../context/TasksContext";
 import { useMeetingReminders } from "../context/MeetingRemindersContext";
+import { useRowVirtualizer } from "../hooks/useRowVirtualizer";
+
+const NOTIF_PAGE_SIZE = 25;
+const NOTIF_SCROLL_THRESHOLD = 300;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -862,23 +866,73 @@ function RecycleBinInfoModal({ schoolName, onClose }) {
 export default function NotificationsPage() {
   const [items, setItems]           = useState([]);
   const [loading, setLoading]       = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore]       = useState(false);
+  const [unreadCount, setUnreadCount] = useState(0);
   const [role, setRole]             = useState("advisor");
   const [expandedId, setExpandedId] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
   const [markingAll, setMarkingAll] = useState(false);
   const [recycleInfoSchoolName, setRecycleInfoSchoolName] = useState(null);
   const headerRef = useRef(null);
+  const listScrollRef = useRef(null);
+  // Tracks how many rows have been consumed from the DB-side range window (offset+limit
+  // per page). This must NOT be derived from items.length: the backend excludes
+  // goal_auto_updated rows from the returned page after slicing the window, so the
+  // number of items actually appended to the list can be less than NOTIF_PAGE_SIZE even
+  // though that many rows were consumed — using items.length as the next offset would
+  // re-request an already-consumed row range and produce duplicate ids/keys.
+  const offsetRef = useRef(0);
 
   async function load() {
+    offsetRef.current = 0;
     try {
-      const res = await axios.get("/schools/notifications");
+      const res = await axios.get("/schools/notifications", { params: { limit: NOTIF_PAGE_SIZE, offset: 0 } });
+      offsetRef.current = NOTIF_PAGE_SIZE;
       setItems(res.data.items || []);
+      setHasMore(!!res.data.has_more);
+      setUnreadCount(res.data.count || 0);
     } catch {
       // silent
     } finally {
       setLoading(false);
     }
   }
+
+  const loadingMoreRef = useRef(false);
+
+  const loadMore = useCallback(async () => {
+    if (loadingMoreRef.current) return;
+    loadingMoreRef.current = true;
+    setLoadingMore(true);
+    try {
+      const res = await axios.get("/schools/notifications", {
+        params: { limit: NOTIF_PAGE_SIZE, offset: offsetRef.current },
+      });
+      offsetRef.current += NOTIF_PAGE_SIZE;
+      setItems(prev => {
+        // Defensive de-dupe: a notification created between page loads can shift the
+        // offset-based DB window and cause an id to appear on two consecutive pages.
+        const seen = new Set(prev.map(n => n.id));
+        const fresh = (res.data.items || []).filter(n => !seen.has(n.id));
+        return [...prev, ...fresh];
+      });
+      setHasMore(!!res.data.has_more);
+    } catch {
+      // silent
+    } finally {
+      loadingMoreRef.current = false;
+      setLoadingMore(false);
+    }
+  }, []);
+
+  const handleListScroll = useCallback(() => {
+    const el = listScrollRef.current;
+    if (!el || !hasMore || loadingMore) return;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < NOTIF_SCROLL_THRESHOLD) {
+      loadMore();
+    }
+  }, [hasMore, loadingMore, loadMore]);
 
   useEffect(() => {
     (async () => {
@@ -898,7 +952,13 @@ export default function NotificationsPage() {
 
   const handleRead = useCallback((id) => {
     axios.patch(`/schools/notifications/${id}/read`).catch(() => {});
-    setItems(prev => prev.map(n => n.id === id ? { ...n, read_at: new Date().toISOString() } : n));
+    setItems(prev => {
+      const target = prev.find(n => n.id === id);
+      if (target && !target.read_at) {
+        setUnreadCount(c => Math.max(0, c - 1));
+      }
+      return prev.map(n => n.id === id ? { ...n, read_at: new Date().toISOString() } : n);
+    });
   }, []);
 
   async function handleMarkAll() {
@@ -907,12 +967,17 @@ export default function NotificationsPage() {
       await axios.patch("/schools/notifications/read-all");
       const now = new Date().toISOString();
       setItems(prev => prev.map(n => ({ ...n, read_at: n.read_at || now })));
+      setUnreadCount(0);
     } finally {
       setMarkingAll(false);
     }
   }
 
-  const unreadCount = items.filter(n => !n.read_at).length;
+  const rowVirtualizer = useRowVirtualizer(items, {
+    estimateSize: 90,
+    getItemKey: n => n.id,
+    scrollRef: listScrollRef,
+  });
 
   return (
     <div dir="rtl" className="bg-scene min-h-screen">
@@ -973,22 +1038,45 @@ export default function NotificationsPage() {
             </div>
           )}
 
-          {/* Notifications list */}
+          {/* Notifications list — virtualized, loads more pages as the user scrolls near the bottom */}
           {!loading && items.length > 0 && (
-            <div className="flex flex-col gap-2" role="list" aria-label="רשימת התראות">
-              {items.map(notif => (
-                <div key={notif.id} role="listitem">
-                  <NotificationRow
-                    notif={notif}
-                    isExpanded={expandedId === notif.id}
-                    onToggle={handleToggle}
-                    onRead={handleRead}
-                    onReload={load}
-                    onDeleteApproved={setRecycleInfoSchoolName}
-                    role={role}
-                  />
+            <div
+              ref={listScrollRef}
+              onScroll={handleListScroll}
+              className="overflow-auto max-h-[70vh] min-h-[160px]"
+              role="list"
+              aria-label="רשימת התראות"
+            >
+              {rowVirtualizer.padTop > 0 && <div style={{ height: rowVirtualizer.padTop }} aria-hidden="true" />}
+              {rowVirtualizer.items.map(vi => {
+                const notif = items[vi.index];
+                if (!notif) return null;
+                return (
+                  <div
+                    key={notif.id}
+                    data-index={vi.index}
+                    ref={rowVirtualizer.virtualizer.measureElement}
+                    role="listitem"
+                    className="pb-2"
+                  >
+                    <NotificationRow
+                      notif={notif}
+                      isExpanded={expandedId === notif.id}
+                      onToggle={handleToggle}
+                      onRead={handleRead}
+                      onReload={load}
+                      onDeleteApproved={setRecycleInfoSchoolName}
+                      role={role}
+                    />
+                  </div>
+                );
+              })}
+              {rowVirtualizer.padBottom > 0 && <div style={{ height: rowVirtualizer.padBottom }} aria-hidden="true" />}
+              {loadingMore && (
+                <div role="status" aria-label="טוען עוד התראות" className="flex justify-center py-4">
+                  <div aria-hidden="true" className="spinner w-6 h-6" />
                 </div>
-              ))}
+              )}
             </div>
           )}
         </div>

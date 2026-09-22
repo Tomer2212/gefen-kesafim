@@ -1032,6 +1032,7 @@ function logToResult(log) {
   return {
     status: "done",
     gefen_only: s.gefen_only ?? false,
+    tikhnun_only: s.tikhnun_only ?? false,
     finance_type: s.finance_type ?? null,
     tikhnun: s.tikhnun_result ?? null,
     tikhnun_tikkon: s.tikhnun_tikkon_result ?? null,
