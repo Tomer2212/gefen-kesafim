@@ -170,6 +170,45 @@ function ScheduleTooltip({ children, anchorRef }) {
   );
 }
 
+// Same reasoning as ScheduleTooltip/DatePickerPopover above: a plain `position: absolute`
+// dropdown gets silently clipped by the table's scroll container (`overflow-auto` in
+// MeetingsTable.jsx), so this renders into <body> via a portal with `position: fixed`,
+// positioned from the anchor button's bounding rect.
+function ActionsMenu({ anchorRef, onClose, children }) {
+  const [pos, setPos] = useState(null);
+  const menuRef = useRef(null);
+
+  useLayoutEffect(() => {
+    if (!anchorRef?.current) { setPos(null); return; }
+    const rect = anchorRef.current.getBoundingClientRect();
+    setPos({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
+  }, [anchorRef]);
+
+  useEffect(() => {
+    function h(e) {
+      if (!menuRef.current?.contains(e.target) && !anchorRef?.current?.contains(e.target)) onClose();
+    }
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, [onClose, anchorRef]);
+
+  useEffect(() => {
+    const hide = () => onClose();
+    window.addEventListener("scroll", hide, { capture: true, passive: true });
+    return () => window.removeEventListener("scroll", hide, { capture: true });
+  }, [onClose]);
+
+  if (!pos) return null;
+  return createPortal(
+    <div ref={menuRef} dir="rtl"
+      className="fixed z-[9999] bg-white border border-slate-200 rounded-xl shadow-lg py-1 min-w-[200px]"
+      style={{ top: pos.top, right: pos.right }}>
+      {children}
+    </div>,
+    document.body,
+  );
+}
+
 function isMeetingEligibleForStatusReminder(meeting) {
   if (meeting.status !== "scheduled") return false;
   if (!meeting.meeting_date || meeting.meeting_date > TODAY) return false;
@@ -348,12 +387,6 @@ function MeetingRowImpl({
       .catch(() => { if (!cancelled) setReminderStatus(null); });
     return () => { cancelled = true; };
   }, [meeting.id, meeting.reminder_enabled, meeting.meeting_service_type, meeting.participants]);
-
-  useEffect(() => {
-    function h(e) { if (!actionsMenuRef.current?.contains(e.target)) setShowActionsMenu(false); }
-    if (showActionsMenu) document.addEventListener("mousedown", h);
-    return () => document.removeEventListener("mousedown", h);
-  }, [showActionsMenu]);
 
   function set(field, val) {
     setDraft(p => ({ ...p, [field]: val }));
@@ -848,7 +881,7 @@ function MeetingRowImpl({
                 </svg>
               </button>
               {showActionsMenu && (
-                <div className="absolute left-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg py-1 z-30 min-w-[200px]">
+                <ActionsMenu anchorRef={actionsMenuRef} onClose={() => setShowActionsMenu(false)}>
                   {onSendStatusReminder && isMeetingEligibleForStatusReminder(meeting) && (
                     <button type="button"
                       onMouseDown={e => { e.preventDefault(); onSendStatusReminder(meeting); setShowActionsMenu(false); }}
@@ -864,7 +897,7 @@ function MeetingRowImpl({
                       מחק
                     </button>
                   )}
-                </div>
+                </ActionsMenu>
               )}
             </div>
           </td>
