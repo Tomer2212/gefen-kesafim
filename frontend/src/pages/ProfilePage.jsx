@@ -6,6 +6,7 @@ import Sidebar from "../components/Sidebar";
 import PersonalMeetingsTab from "./PersonalMeetingsTab";
 import PersonalTasksSection from "../components/personTasks/PersonalTasksSection";
 import PersonalAttendanceTab from "./PersonalAttendanceTab";
+import ConnectionsTab from "./ConnectionsTab";
 import { MultiSelectChips } from "../components/MultiSelectChips";
 import { DOMAIN_OPTIONS } from "../constants/domains";
 import Avatar from "../components/Avatar";
@@ -25,6 +26,7 @@ const BASE_TABS = [
   { id: "meetings", label: "פגישות" },
   { id: "tasks", label: "משימות" },
   { id: "attendance", label: "שעון נוכחות" },
+  { id: "connections", label: "חיבורים" },
   { id: "personal", label: "פרטים אישיים" },
 ];
 const TAB_IDS = BASE_TABS.map(t => t.id);
@@ -383,7 +385,7 @@ export default function ProfilePage() {
           </div>
         </div>
 
-        <div className={`mx-auto px-6 pb-10 ${activeTab === "personal" ? "max-w-4xl" : "max-w-[100rem]"}`}>
+        <div className={`mx-auto px-6 pb-10 ${["personal", "connections"].includes(activeTab) ? "max-w-4xl" : "max-w-[100rem]"}`}>
           {loading ? (
             <div role="status" aria-label="טוען פרטים" className="flex items-center gap-3 text-slate-400 text-sm">
               <span aria-hidden="true" className="w-4 h-4 border-2 border-slate-200 border-t-slate-500 rounded-full inline-block animate-spin" />
@@ -400,6 +402,8 @@ export default function ProfilePage() {
               )}
 
               {activeTab === "tasks" && <PersonalTasksSection />}
+
+              {activeTab === "connections" && <ConnectionsTab />}
 
               {activeTab === "personal" && (
                 <section

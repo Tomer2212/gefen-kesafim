@@ -24,6 +24,7 @@ from routers.meeting_upload_router import router as meeting_upload_router
 from routers.performance_router import router as performance_router
 from routers.person_tasks_router import router as person_tasks_router
 from routers.schools_router import router as schools_router
+from routers.sessions_router import router as sessions_router
 from routers.signup_router import router as signup_router
 from routers.tasks_router import router as tasks_router
 from routers.voicenter_router import router as voicenter_router
@@ -156,6 +157,7 @@ app.include_router(performance_router, prefix="/performance")
 app.include_router(person_tasks_router, prefix="/person-tasks")
 app.include_router(schools_router, prefix="/schools")
 app.include_router(advisor_finder_router, prefix="/schools")
+app.include_router(sessions_router, prefix="/sessions")
 app.include_router(signup_router, prefix="/signup")
 app.include_router(tasks_router, prefix="/tasks")
 app.include_router(voicenter_router, prefix="/voicenter")

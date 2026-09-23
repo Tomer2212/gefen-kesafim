@@ -34,6 +34,7 @@ import AdminCollectionTab from "./AdminCollectionTab";
 import AdminPerformanceTab from "./AdminPerformanceTab";
 import AdminIntegrationsTab from "./AdminIntegrationsTab";
 import AdminMeetingsTab from "./AdminMeetingsTab";
+import AdminConnectionsTab from "./AdminConnectionsTab";
 import AdminAttendanceTab from "./AdminAttendanceTab";
 import AgentChatWidget from "../components/AgentChatWidget";
 import UserMeetingsConflictModal from "./UserMeetingsConflictModal";
@@ -2356,7 +2357,7 @@ export default function AdminPage() {
       }).catch(() => {});
     });
   }, []);
-  useEffect(() => { if ((activeTab === "users" || activeTab === "billing") && users.length === 0) loadUsers(); }, [activeTab]);
+  useEffect(() => { if ((activeTab === "users" || activeTab === "billing" || activeTab === "connections") && users.length === 0) loadUsers(); }, [activeTab]);
   useEffect(() => { if (activeTab === "permissions" && !permDefaults && !permLoading) loadPermDefaults(); }, [activeTab]);
   // Advisors must not access the admin area — redirect immediately once role is confirmed
   useEffect(() => { if (myRole === "advisor") navigate("/", { replace: true }); }, [myRole]);
@@ -3856,6 +3857,7 @@ export default function AdminPage() {
     { id: "meetings", label: "פגישות" },
     ...(showCallsTab ? [{ id: "calls", label: "שיחות" }] : []),
     ...(showPerformanceTab ? [{ id: "performance", label: "ביצועים" }] : []),
+    { id: "connections", label: "חיבורים" },
     ...(showAttendanceTab ? [{ id: "attendance", label: "שעון נוכחות" }] : []),
     ...(showCollectionTab ? [{ id: "collection", label: "גבייה" }] : []),
     { id: "permissions", label: "הרשאות" },
@@ -3863,24 +3865,63 @@ export default function AdminPage() {
     ...(showBillingTab ? [{ id: "billing", label: "חיובים" }] : []),
   ];
 
+  // Keeps the "פאנל ניהול" title's right edge exactly above the first (rightmost) tab,
+  // even though the tab row itself is centered as a group — its start position shifts with
+  // the tab count, viewport width, and the sidebar's own width, so this measures the real
+  // rendered gap directly instead of trying to predict it in CSS. ResizeObserver (not a
+  // window "resize" listener) so it also reacts to the sidebar collapsing/expanding, which
+  // changes this container's width without the window itself resizing.
+  const tabsHeaderRef = useRef(null);
+  const firstTabRef = useRef(null);
+  const [titleInset, setTitleInset] = useState(0);
+  useLayoutEffect(() => {
+    const container = tabsHeaderRef.current;
+    if (!container || !firstTabRef.current) return;
+    function measure() {
+      if (!container || !firstTabRef.current) return;
+      const containerRect = container.getBoundingClientRect();
+      const tabRect = firstTabRef.current.getBoundingClientRect();
+      setTitleInset(Math.max(0, containerRect.right - tabRect.right));
+    }
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(container);
+    return () => ro.disconnect();
+  }, [tabs.length]);
+
   return (
     <div dir="rtl" className="bg-scene min-h-screen">
       <Sidebar dark />
 
       <div style={{ marginRight: "var(--sidebar-w, 240px)", transition: "margin-right 0.25s cubic-bezier(0.4,0,0.2,1)" }}>
         {/* Header + tabs — always at a fixed width, independent of how wide the active
-            tab's own content area needs to be, so the tab bar never shifts position. */}
-        <div className="mx-auto max-w-4xl px-6 pt-10">
-          <div className="mb-8">
-            <h1 className="text-2xl font-bold text-slate-900">פאנל ניהול</h1>
-            <p className="text-slate-500 text-sm mt-1">ניהול בתי ספר, חטיבות ומשתמשים</p>
-          </div>
+            tab's own content area needs to be, so the tab bar never shifts position.
+            max-w-[100rem] (not max-w-4xl) so the row has room to fit without spilling past
+            the box asymmetrically — RTL flex fills right-to-left, so once the row is wider
+            than its container it overflows past the LEFT edge only, breaking the symmetric
+            margins around the sidebar. flex-wrap (not overflow-x-auto — an RTL scroll
+            container's scrollLeft:0 anchor is inconsistent across browsers, which just
+            moved the asymmetry to the other side instead of fixing it) makes the row wrap
+            onto a second line if it's ever too wide for the viewport, so every tab stays
+            visible. The tab row is centered as a group (justify-center); the title's
+            marginRight is measured live (titleInset, via ResizeObserver above) against the
+            first tab's actual rendered position, so "פ" of "פאנל ניהול" always lands exactly
+            above "ב" of "בתי ספר" — a CSS-only fit-content approach couldn't reliably
+            reproduce a centered flex-wrap row's own intrinsic width across browsers. */}
+        <div ref={tabsHeaderRef} className="mx-auto max-w-[100rem] px-6 pt-10">
+          <h1
+            className="text-2xl font-bold text-slate-900 mb-8"
+            style={{ marginRight: titleInset }}
+          >
+            פאנל ניהול
+          </h1>
 
           {/* Tabs */}
-          <div className="flex items-end border-b border-slate-200 mb-6 gap-1">
-            {tabs.map(t => (
+          <div className="flex flex-wrap justify-center items-end border-b border-slate-200 mb-6 gap-1">
+            {tabs.map((t, i) => (
               <button
                 key={t.id}
+                ref={i === 0 ? firstTabRef : null}
                 onClick={() => setActiveTab(t.id)}
                 className={`px-4 py-2.5 text-sm font-medium transition-all border-b-2 -mb-px whitespace-nowrap ${
                   activeTab === t.id
@@ -5201,6 +5242,10 @@ export default function AdminPage() {
           )}
 
           {/* Tasks Tab */}
+          {activeTab === "connections" && (
+            <AdminConnectionsTab users={users} loadingUsers={loadingUsers} loadUsers={loadUsers} />
+          )}
+
           {activeTab === "tasks" && (
             <AdminTasksTab />
           )}
