@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import { describeConnectionError } from "../lib/connectionError";
@@ -21,6 +21,17 @@ export default function LoginPage() {
   const [resetEmail, setResetEmail]   = useState("");
   const [resetError, setResetError]   = useState("");
   const [resetLoading, setResetLoading] = useState(false);
+
+  useEffect(() => {
+    try {
+      if (sessionStorage.getItem("gefen_device_revoked") === "1") {
+        sessionStorage.removeItem("gefen_device_revoked");
+        setError("החיבור שלך נותק מרחוק על ידי מנהל המערכת. יש להתחבר מחדש.");
+      }
+    } catch {
+      // sessionStorage unavailable — no-op
+    }
+  }, []);
 
   async function handleSubmit(e) {
     e.preventDefault();

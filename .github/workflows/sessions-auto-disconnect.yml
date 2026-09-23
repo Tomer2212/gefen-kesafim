@@ -1,0 +1,22 @@
+name: Auto-Disconnect Non-Primary Sessions
+
+on:
+  schedule:
+    # Hourly — the shortest org-configurable interval is 1 hour, so the endpoint
+    # itself decides (per org's next_run_at) whether there's actually anything to do.
+    - cron: '0 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call auto-disconnect endpoint
+        run: |
+          URL="${BACKEND_URL%/}"
+          curl -sf -X POST "${URL}/sessions/auto-disconnect" \
+            -H "X-Cron-Secret: ${CRON_SECRET}" \
+            --max-time 60
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}

@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 from typing import Annotated
 
 import jwt
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from supabase_client import get_admin_client, reset_admin_client
@@ -121,10 +121,63 @@ def invalidate_profile_cache(user_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Device-session revocation cache — lets an owner/manager remotely disconnect
+# a forgotten login (e.g. on a school's computer) in near real time, without
+# a DB round-trip on every single request. Short TTL since this check exists
+# specifically for a time-sensitive security action.
+# ---------------------------------------------------------------------------
+_device_revoked_cache: dict = {}
+_DEVICE_CACHE_TTL = 5  # seconds
+
+
+def _is_device_revoked(device_id: str, user_id: str) -> bool:
+    # Keyed by (device_id, user_id) — the same browser/device_id can belong to
+    # several different users over time (shared computer, account switching),
+    # each tracked as its own row; see user_sessions_device_user_unique.
+    cache_key = (device_id, user_id)
+    now = time.monotonic()
+    cached = _device_revoked_cache.get(cache_key)
+    if cached and (now - cached[1]) < _DEVICE_CACHE_TTL:
+        return cached[0]
+
+    try:
+        db = get_admin_client()
+        # NOTE: not .maybe_single() — the installed postgrest-py raises APIError
+        # ("Missing response") on a legitimate 0-row result instead of returning
+        # data=None, which happens for every device_id not yet registered.
+        res = (
+            db.table("user_sessions")
+            .select("revoked_at")
+            .eq("device_id", device_id)
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        rows = res.data or []
+        row = rows[0] if rows else None
+        # Row missing (not yet registered by /sessions/register) — don't block it.
+        revoked = bool(row and row.get("revoked_at"))
+    except Exception as exc:
+        # Fail-open: this is a supplemental check on top of JWT auth, not the
+        # primary access gate. A transient DB hiccup must not lock everyone out.
+        logger.warning("_is_device_revoked check failed for %s/%s: %s — allowing request", device_id, user_id, exc)
+        revoked = False
+
+    _device_revoked_cache[cache_key] = (revoked, now)
+    return revoked
+
+
+def invalidate_device_cache(device_id: str, user_id: str) -> None:
+    """Call immediately after revoking a session so the disconnect takes effect on this worker without waiting for the TTL."""
+    _device_revoked_cache.pop((device_id, user_id), None)
+
+
+# ---------------------------------------------------------------------------
 # FastAPI dependency
 # ---------------------------------------------------------------------------
 
 def get_current_user(
+    request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(_security)],
 ) -> dict:
     token = credentials.credentials
@@ -151,6 +204,10 @@ def get_current_user(
     except Exception as exc:
         logger.warning("JWT rejected — invalid (%s): %s", type(exc).__name__, exc)
         raise HTTPException(status_code=401, detail="Invalid token")
+
+    device_id = request.headers.get("X-Device-Id")
+    if device_id and _is_device_revoked(device_id, user_id):
+        raise HTTPException(status_code=401, detail="device_revoked")
 
     profile = _get_profile(user_id)
 

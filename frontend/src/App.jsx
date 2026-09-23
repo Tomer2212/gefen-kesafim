@@ -15,6 +15,7 @@ import GuideWindow from "./components/GuideWindow";
 import ChatWidget from "./components/ChatWidget";
 import axios from "axios";
 import { supabase } from "./lib/supabase";
+import { registerDeviceSession } from "./lib/deviceSession";
 import LoginPage from "./pages/LoginPage";
 import DashboardPage from "./pages/DashboardPage";
 import SchoolPage from "./pages/SchoolPage";
@@ -32,6 +33,7 @@ import SuperAdminPage from "./pages/SuperAdminPage";
 import UnsubscribePage from "./pages/UnsubscribePage";
 import TaskOptOutPage from "./pages/TaskOptOutPage";
 import ProfilePage from "./pages/ProfilePage";
+import ConnectionsLimitPage from "./pages/ConnectionsLimitPage";
 import AddSchoolPage from "./pages/AddSchoolPage";
 import MeetingUploadPage from "./pages/MeetingUploadPage";
 import MeetingBookingPage from "./pages/MeetingBookingPage";
@@ -103,6 +105,7 @@ const router = createBrowserRouter([
       { path: "/school/new", element: <AdminRoute><AddSchoolPage /></AdminRoute> },
       { path: "/notifications", element: <PrivateRoute><NotificationsPage /></PrivateRoute> },
       { path: "/profile", element: <PrivateRoute><ProfilePage /></PrivateRoute> },
+      { path: "/connections-limit", element: <PrivateRoute><ConnectionsLimitPage /></PrivateRoute> },
       { path: "/super-admin", element: <PrivateRoute><SuperAdminPage /></PrivateRoute> },
       { path: "/set-password", element: <SetPasswordPage /> },
       { path: "/unsubscribe", element: <UnsubscribePage /> },
@@ -129,6 +132,13 @@ export default function App() {
           keepAliveRef.current = setInterval(() => {
             axios.get("/health", { timeout: 5000 }).catch(() => {});
           }, 9 * 60 * 1000); // every 9 minutes — keeps Render dyno warm
+        }
+        if (_event === "SIGNED_IN" || _event === "INITIAL_SESSION") {
+          registerDeviceSession().then(({ ok, limitReached }) => {
+            if (!ok && limitReached && window.location.pathname !== "/connections-limit") {
+              window.location.href = "/connections-limit";
+            }
+          });
         }
       } else {
         clearInterval(keepAliveRef.current);

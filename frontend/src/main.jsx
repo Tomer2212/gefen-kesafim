@@ -3,6 +3,7 @@ import axios from "axios";
 import "./index.css";
 import App from "./App.jsx";
 import { supabase } from "./lib/supabase";
+import { getDeviceId } from "./lib/deviceSession";
 
 if (import.meta.env.VITE_API_URL) {
   axios.defaults.baseURL = import.meta.env.VITE_API_URL;
@@ -20,12 +21,13 @@ supabase.auth.onAuthStateChange((_event, session) => {
   _currentToken = session?.access_token ?? null;
 });
 
-// Attach Supabase JWT to every outgoing request (synchronous).
+// Attach Supabase JWT + this browser's device id to every outgoing request (synchronous).
 axios.interceptors.request.use((config) => {
   if (config._retried) return config;
   if (_currentToken) {
     config.headers.Authorization = `Bearer ${_currentToken}`;
   }
+  config.headers["X-Device-Id"] = getDeviceId();
   return config;
 });
 
@@ -39,6 +41,15 @@ axios.interceptors.response.use(
     if (err.response?.status === 401) {
       // Diagnostic: shows "Token expired" or "Invalid token" from backend
       console.warn('[Auth 401]', original?.url, err.response?.data?.detail);
+
+      if (err.response?.data?.detail === "device_revoked") {
+        // Disconnected remotely (אזור אישי / ניהול) — refreshing the Supabase token won't
+        // help, since the block is on this device id specifically. Sign out immediately.
+        try { sessionStorage.setItem("gefen_device_revoked", "1"); } catch { /* best-effort */ }
+        await supabase.auth.signOut();
+        window.location.href = "/login";
+        return Promise.reject(err);
+      }
 
       if (original._retried) {
         await supabase.auth.signOut();

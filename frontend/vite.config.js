@@ -17,6 +17,7 @@ export default defineConfig({
       "/person-tasks": { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/public": { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/schools": { target: "http://127.0.0.1:8000", changeOrigin: true },
+      "/sessions": { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/signup":  { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/tasks": { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/voicenter": { target: "http://127.0.0.1:8000", changeOrigin: true },
