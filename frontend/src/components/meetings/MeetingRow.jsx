@@ -184,6 +184,24 @@ function ActionsMenu({ anchorRef, onClose, children }) {
     setPos({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
   }, [anchorRef]);
 
+  // The menu is anchored to the button's right edge and grows leftward (its `min-w-[200px]`
+  // has no explicit right-side counterpart). When the button sits near the left edge of the
+  // screen (e.g. the trailing "..." column in a wide table), that growth pushes the menu's
+  // left edge off-screen and it renders partly clipped/hidden. Once the real width is known,
+  // pull the menu back in so its left edge never crosses a small margin from the viewport edge.
+  useLayoutEffect(() => {
+    if (!pos || !menuRef.current) return;
+    const margin = 8;
+    const width = menuRef.current.getBoundingClientRect().width;
+    const leftEdge = window.innerWidth - pos.right - width;
+    if (leftEdge < margin) {
+      const newRight = Math.max(0, window.innerWidth - width - margin);
+      if (Math.abs(newRight - pos.right) > 1) {
+        setPos(p => ({ ...p, right: newRight }));
+      }
+    }
+  }, [pos]);
+
   useEffect(() => {
     function h(e) {
       if (!menuRef.current?.contains(e.target) && !anchorRef?.current?.contains(e.target)) onClose();
