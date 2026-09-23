@@ -96,6 +96,24 @@ export function MultiSelectChips({ options, selected, onChange, placeholder = "×
     setPos({ top: rect.bottom + 4, left: rect.right - width, width });
   }, [open, levels]);
 
+  // Flip upward when a trigger near the bottom of the screen (e.g. the last rows of the
+  // AdminPage users table) would otherwise render the dropdown partly below the viewport.
+  // Runs after the dropdown is in the DOM so it can measure its real rendered height â€”
+  // an estimate would be wrong once `levels`/search/option-count change its content.
+  useLayoutEffect(() => {
+    if (!open || !pos || !triggerRef.current || !dropdownRef.current) return;
+    const rect = triggerRef.current.getBoundingClientRect();
+    const dropdownHeight = dropdownRef.current.getBoundingClientRect().height;
+    const spaceBelow = window.innerHeight - rect.bottom - 4;
+    const fitsAbove = rect.top - 4 - dropdownHeight >= 0;
+    const desiredTop = dropdownHeight > spaceBelow && fitsAbove
+      ? rect.top - 4 - dropdownHeight
+      : rect.bottom + 4;
+    if (Math.abs(desiredTop - pos.top) > 1) {
+      setPos(p => ({ ...p, top: desiredTop }));
+    }
+  }, [open, pos, visibleOptions.length, search]);
+
   useEffect(() => {
     if (open) setSearch("");
   }, [open]);

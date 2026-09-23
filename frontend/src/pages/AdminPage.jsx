@@ -70,6 +70,23 @@ function RoleSelect({ value, options, onChange, disabled, title, ariaLabel }) {
     setPos({ top: rect.bottom + 4, left: rect.left, width: rect.width * 1.3 });
   }, [open]);
 
+  // Flip upward when a trigger near the bottom of the screen (e.g. the last rows of the
+  // AdminPage users table) would otherwise render the dropdown partly below the viewport —
+  // same fix as MultiSelectChips.jsx's "levels" dropdown.
+  useLayoutEffect(() => {
+    if (!open || !pos || !triggerRef.current || !dropdownRef.current) return;
+    const rect = triggerRef.current.getBoundingClientRect();
+    const dropdownHeight = dropdownRef.current.getBoundingClientRect().height;
+    const spaceBelow = window.innerHeight - rect.bottom - 4;
+    const fitsAbove = rect.top - 4 - dropdownHeight >= 0;
+    const desiredTop = dropdownHeight > spaceBelow && fitsAbove
+      ? rect.top - 4 - dropdownHeight
+      : rect.bottom + 4;
+    if (Math.abs(desiredTop - pos.top) > 1) {
+      setPos(p => ({ ...p, top: desiredTop }));
+    }
+  }, [open, pos]);
+
   useEffect(() => {
     if (!open) return;
     function handler(e) {
@@ -148,6 +165,23 @@ function UserActionsMenu({ open, onToggle, onClose, showResend, resending, resen
     const rect = triggerRef.current.getBoundingClientRect();
     setPos({ top: rect.bottom + 4, left: rect.left });
   }, [open]);
+
+  // Flip upward when a trigger near the bottom of the screen (e.g. the last rows of the
+  // AdminPage users table) would otherwise render the menu partly below the viewport —
+  // same fix as RoleSelect above and MultiSelectChips.jsx's "levels" dropdown.
+  useLayoutEffect(() => {
+    if (!open || !pos || !triggerRef.current || !dropdownRef.current) return;
+    const rect = triggerRef.current.getBoundingClientRect();
+    const dropdownHeight = dropdownRef.current.getBoundingClientRect().height;
+    const spaceBelow = window.innerHeight - rect.bottom - 4;
+    const fitsAbove = rect.top - 4 - dropdownHeight >= 0;
+    const desiredTop = dropdownHeight > spaceBelow && fitsAbove
+      ? rect.top - 4 - dropdownHeight
+      : rect.bottom + 4;
+    if (Math.abs(desiredTop - pos.top) > 1) {
+      setPos(p => ({ ...p, top: desiredTop }));
+    }
+  }, [open, pos]);
 
   useEffect(() => {
     if (!open) return;
