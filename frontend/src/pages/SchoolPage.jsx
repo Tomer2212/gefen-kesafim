@@ -2564,10 +2564,21 @@ export default function SchoolPage() {
     if (meetingParam) {
       setActiveTab("meetings");
       setUploadComparisonMeetingId(meetingParam);
+      // Single-use deep-link param: clear it so it doesn't force the meetings tab
+      // again the next time this effect re-runs (e.g. after switching tabs).
+      setSearchParams(prev => {
+        const p = new URLSearchParams(prev);
+        p.delete("meeting");
+        return p;
+      }, { replace: true });
     } else if (["info", "meetings", "goals", "checks", "tasks", "calls", "closure", "control_letter"].includes(tabParam)) {
       setActiveTab(tabParam);
     }
-  }, []);
+    // Re-run on every "meeting"/"tab" query-param change, not just on mount — a global
+    // popup (e.g. GoalUpdatePopup) may navigate to this same school's page with a new
+    // ?tab= while it's already mounted, which doesn't remount the component.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams.get("meeting"), searchParams.get("tab")]);
   const [role, setRole] = useState("advisor");
   const [subscriptionStatus, setSubscriptionStatus] = useState(null);
   const [currentUser, setCurrentUser] = useState(null);
