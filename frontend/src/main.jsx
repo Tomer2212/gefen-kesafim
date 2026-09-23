@@ -3,7 +3,7 @@ import axios from "axios";
 import "./index.css";
 import App from "./App.jsx";
 import { supabase } from "./lib/supabase";
-import { getDeviceId } from "./lib/deviceSession";
+import { getDeviceId, clearDeviceId } from "./lib/deviceSession";
 
 if (import.meta.env.VITE_API_URL) {
   axios.defaults.baseURL = import.meta.env.VITE_API_URL;
@@ -45,7 +45,12 @@ axios.interceptors.response.use(
       if (err.response?.data?.detail === "device_revoked") {
         // Disconnected remotely (אזור אישי / ניהול) — refreshing the Supabase token won't
         // help, since the block is on this device id specifically. Sign out immediately.
+        // Clearing the device id is essential, not cosmetic: without it, this same
+        // (now-permanently-revoked) id keeps getting sent on every future request —
+        // including the next login's own registration attempt — locking this browser out
+        // forever instead of just ending this one session.
         try { sessionStorage.setItem("gefen_device_revoked", "1"); } catch { /* best-effort */ }
+        clearDeviceId();
         await supabase.auth.signOut();
         window.location.href = "/login";
         return Promise.reject(err);

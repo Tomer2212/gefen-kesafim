@@ -23,6 +23,19 @@ export function getDeviceId() {
   return id;
 }
 
+// Called after the backend rejects a request with "device_revoked" — the old id must not
+// be reused, or every future request (including the next registration attempt) keeps
+// getting blocked by the same revoked-device check, permanently locking this browser out
+// instead of just ending this one session. Clearing it lets the next login register as a
+// genuinely new connection.
+export function clearDeviceId() {
+  try {
+    localStorage.removeItem(DEVICE_ID_KEY);
+  } catch {
+    // best-effort only
+  }
+}
+
 export function getDeviceLabel() {
   const ua = navigator.userAgent || "";
   let browser = "דפדפן";
