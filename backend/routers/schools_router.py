@@ -4161,9 +4161,40 @@ def get_meeting_reminder_status(
                 return {"reminders": []}
 
 
+@router.get("/profile-update-requests")
+def list_profile_update_requests(user: Annotated[dict, Depends(get_current_user)]):
+    """The current user's own profile-update requests (for the 'pending approval' indicator)."""
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            rows = (
+                db.table("profile_update_requests")
+                .select("*")
+                .eq("requester_id", user["id"])
+                .order("created_at", desc=True)
+                .limit(50)
+                .execute()
+            )
+            return rows.data or []
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("list_profile_update_requests attempt 1 failed: %s — resetting", exc)
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.warning("list_profile_update_requests failed after 2 attempts: %s", exc)
+                return []
+
+
 # ---------------------------------------------------------------------------
 # Single school fetch (used when navigating via deeplink / notification)
 # ---------------------------------------------------------------------------
+# NOTE: this catch-all single-path-segment route MUST stay below every other
+# GET route with a literal first segment (e.g. /profile-update-requests,
+# /update-requests, /notifications, /users/me, ...) — FastAPI matches routes
+# in registration order, so a literal route registered after this one would
+# never be reached; the request would hit get_school(school_id="...") instead
+# and fail with a Postgres "invalid input syntax for type uuid" error.
 
 @router.get("/{school_id}")
 def get_school(
@@ -4513,31 +4544,6 @@ def update_my_profile(
             logger.warning("profile_update_request_submitted notification failed (non-fatal): %s", exc)
 
     return {"ok": True, "pending_fields": pending_fields}
-
-
-@router.get("/profile-update-requests")
-def list_profile_update_requests(user: Annotated[dict, Depends(get_current_user)]):
-    """The current user's own profile-update requests (for the 'pending approval' indicator)."""
-    for attempt in range(2):
-        try:
-            db = get_admin_client()
-            rows = (
-                db.table("profile_update_requests")
-                .select("*")
-                .eq("requester_id", user["id"])
-                .order("created_at", desc=True)
-                .limit(50)
-                .execute()
-            )
-            return rows.data or []
-        except Exception as exc:
-            if attempt == 0:
-                logger.warning("list_profile_update_requests attempt 1 failed: %s — resetting", exc)
-                reset_admin_client()
-                time.sleep(0.3)
-            else:
-                logger.warning("list_profile_update_requests failed after 2 attempts: %s", exc)
-                return []
 
 
 @router.patch("/profile-update-requests/{req_id}")
