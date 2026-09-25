@@ -981,6 +981,7 @@ def _save_check_log(run_id: str, user_id: str, school_id: str, gefen_account_id:
         summary_to_save["finance_type"] = run.get("finance_type")
         summary_to_save["run_id"] = run_id
         summary_to_save["stored_file_paths"] = run.get("stored_file_paths")
+        summary_to_save["stage_override"] = run.get("stage_override")
         summary_to_save["per_combo_results"] = run.get("per_combo_results")
 
         tikhnun = run.get("tikhnun")
@@ -1975,6 +1976,39 @@ def _get_school_stage(gefen_account_id: str | None) -> str | None:
         return None
 
 
+def _resolve_display_stage(school_id: str | None, gefen_account_id: str | None) -> str | None:
+    """Best-effort, DISPLAY-ONLY resolution of יסודי/חטיבת ביניים for the UI.
+
+    Does not affect reconciliation logic — used only to unify the "שלב" label
+    shown across the סקירה / תקציב קבוע areas. Priority: (1) the specific
+    gefen_account being checked, (2) any other non-tikkon gefen_account of the
+    same school, (3) the school's own general stage. Returns None (stay
+    ambiguous) when nothing definitive is found. Never raises.
+    """
+    try:
+        stage_code = _get_school_stage(gefen_account_id)
+        if stage_code not in ("yesodi", "beinayim") and school_id:
+            db = get_admin_client()
+            accs = (
+                db.table("gefen_accounts").select("division_type")
+                .eq("school_id", school_id)
+                .in_("division_type", ["yesodi", "beinayim"])
+                .limit(1).execute()
+            )
+            if accs.data:
+                stage_code = accs.data[0]["division_type"]
+        if stage_code not in ("yesodi", "beinayim") and school_id:
+            db = get_admin_client()
+            sch = db.table("schools").select("stage").eq("id", school_id).single().execute()
+            s = (sch.data or {}).get("stage")
+            if s in ("yesodi", "beinayim"):
+                stage_code = s
+        return {"yesodi": "יסודי", "beinayim": "חטיבת ביניים"}.get(stage_code)
+    except Exception as exc:
+        logger.warning("resolve_display_stage failed (non-fatal): %s", exc)
+        return None
+
+
 def _run_per_combo_reconciliation(
     df_gefen,
     finance_paths: list,
@@ -2709,6 +2743,9 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
         # Fetch division_type for authoritative stage resolution in per-combo reconciliation
         school_stage: str | None = _get_school_stage(gefen_account_id)
 
+        # Display-only: resolve יסודי/חטיבת ביניים for unified "שלב" labels in the UI
+        stage_override: str | None = _resolve_display_stage(school_id, gefen_account_id)
+
         gefen_paths, finance_paths, finance_type, tikhnun_paths = _classify_files(paths)
         finance_path = finance_paths[0] if finance_paths else None
 
@@ -2767,6 +2804,7 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
                     "tikhnun_beinayim": beinayim_result,
                     "tikhnun_filenames": [p.name for p in tikhnun_paths],
                     "stored_file_paths": stored_file_paths or None,
+                    "stage_override": stage_override,
                     "_school_ctx": {"user_id": user_id, "school_id": school_id, "gefen_account_id": gefen_account_id, "update_log_id": update_log_id, "academic_year": academic_year},
                 }
             else:
@@ -2780,6 +2818,7 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
                     "tikhnun": tikhnun_result_only,
                     "tikhnun_filenames": [p.name for p in tikhnun_paths],
                     "stored_file_paths": stored_file_paths or None,
+                    "stage_override": stage_override,
                     "_school_ctx": {"user_id": user_id, "school_id": school_id, "gefen_account_id": gefen_account_id, "update_log_id": update_log_id, "academic_year": academic_year},
                 }
             if school_id and not _any_tikhnun_pending(run_data):
@@ -2872,6 +2911,7 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
                 "tikhnun_filenames": [p.name for p in tikhnun_paths],
                 "stored_file_paths": stored_file_paths or None,
                 "excel_storage_key": excel_storage_key,
+                "stage_override": stage_override,
                 "summary": {
                     "gefen_rows": len(df_gefen),
                     "in_gefen_rejected": len(in_gefen_rejected),
@@ -2945,6 +2985,7 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
             "tikhnun_filenames": [p.name for p in tikhnun_paths],
             "stored_file_paths": stored_file_paths or None,
             "excel_storage_key": excel_storage_key,
+            "stage_override": stage_override,
             "summary": {
                 "gefen_rows": len(df_gefen),
                 "finance_rows_total": len(df_finance_raw),
