@@ -642,14 +642,15 @@ const COL_GROUPS = [
   { header: "אסמכתאות שנדחו", keys: ["rejected", "rejected_sum"] },
   { header: "ללא PDF",         keys: ["no_pdf", "no_pdf_sum"] },
   { header: "דיווח חסר",       keys: ["partial_count", "missing_report"] },
-  { header: "קיים בכספים, לא בגפן",   keys: ["fn_count", "fn_sum"] },
-  { header: "בגפן, לא בכספים",        keys: ["gn_count", "gn_sum"] },
+  { header: "דווחו בכספים, לא שויכו בגפן", keys: ["fn_count", "fn_sum"] },
+  { header: "שויכו בגפן, לא קיימות בכספים", keys: ["gn_count", "gn_sum"] },
 ];
 const COL_GROUP_MAP = Object.fromEntries(
   COL_GROUPS.flatMap(g => g.keys.map(k => [k, g]))
 );
 
 const DIV_LABEL = { tikkon: "תיכון", beinayim: "חטיבת ביניים" };
+const DIV_ABBR = { tikkon: 'חט"ע', beinayim: 'חט"ב' };
 
 function formatNum(val) {
   if (val == null || val === "") return "—";
@@ -670,9 +671,11 @@ function sumRowAmounts(rows) {
   return rows.reduce((s, r) => s + (parseFloat((r["סכום"] || "0").replace(/,/g, "")) || 0), 0);
 }
 
-function renderCheckLogCell(log, key) {
+function renderCheckLogCell(log, key, onAddFile, stageLabel) {
   const summary = log.summary || {};
   const t = summary.tikhnun_overview || {};
+  const tikhnunExists = !!(summary.tikhnun_result || summary.tikhnun_tikkon_result || summary.tikhnun_beinayim_result);
+  const dochUploaded = (log.gefen_file_names || []).length > 0;
   switch (key) {
     case "budget":             return t.budget != null ? formatNum(t.budget) : "—";
     case "planned":            return t.planned != null ? formatNum(t.planned) : "—";
@@ -682,20 +685,47 @@ function renderCheckLogCell(log, key) {
     case "sum_chayav":         return t.sum_chayav != null ? formatNum(t.sum_chayav) : "—";
     case "sum_divuach":        return t.sum_divuach != null ? formatNum(t.sum_divuach) : "—";
     case "pct_divuach":        return t.pct_divuach != null ? formatPct(t.pct_divuach, 0) : "—";
-    case "pct_tanuz":          return t.pct_tanuz != null ? formatPct(t.pct_tanuz, 2) : "—";
+    case "pct_tanuz": {
+      if (tikhnunExists && !dochUploaded) {
+        return <NotCheckedBadge
+          reason={missingDochCheckReason(null, stageLabel)}
+          onAddFile={onAddFile} anchorRight={false} />;
+      }
+      return t.pct_tanuz != null ? formatPct(t.pct_tanuz, 2) : "—";
+    }
     case "rejected": {
+      if (!dochUploaded) {
+        return <NotCheckedBadge
+          reason={missingDochCheckReason(null, stageLabel)}
+          onAddFile={onAddFile} anchorRight={false} />;
+      }
       const v = summary.in_gefen_rejected;
       return v != null ? v : "—";
     }
     case "rejected_sum": {
+      if (!dochUploaded) {
+        return <NotCheckedBadge
+          reason={missingDochCheckReason(null, stageLabel)}
+          onAddFile={onAddFile} anchorRight={false} />;
+      }
       const total = sumRowAmounts(summary.rows_gefen_rejected);
       return total != null ? formatNum(total) : "—";
     }
     case "no_pdf": {
+      if (!dochUploaded) {
+        return <NotCheckedBadge
+          reason={missingDochCheckReason(null, stageLabel)}
+          onAddFile={onAddFile} anchorRight={false} />;
+      }
       const v = summary.in_gefen_no_pdf;
       return v != null ? v : "—";
     }
     case "no_pdf_sum": {
+      if (!dochUploaded) {
+        return <NotCheckedBadge
+          reason={missingDochCheckReason(null, stageLabel)}
+          onAddFile={onAddFile} anchorRight={false} />;
+      }
       const total = sumRowAmounts(summary.rows_gefen_no_pdf);
       return total != null ? formatNum(total) : "—";
     }
@@ -704,11 +734,23 @@ function renderCheckLogCell(log, key) {
       const tikhnunTk   = summary.tikhnun_tikkon_result;
       const tikhnunBein = summary.tikhnun_beinayim_result;
       if (tikhnunTk || tikhnunBein) {
-        const c1 = Array.isArray(tikhnunTk?.partial_rows)   ? tikhnunTk.partial_rows.length   : 0;
-        const c2 = Array.isArray(tikhnunBein?.partial_rows) ? tikhnunBein.partial_rows.length : 0;
+        if (!tikhnunTk?.has_doch && !tikhnunBein?.has_doch) {
+          return <NotCheckedBadge
+            reason={missingDochCheckReason(null, stageLabel)}
+            onAddFile={onAddFile} anchorRight={false} />;
+        }
+        const c1 = tikhnunTk?.has_doch && Array.isArray(tikhnunTk.partial_rows)     ? tikhnunTk.partial_rows.length   : 0;
+        const c2 = tikhnunBein?.has_doch && Array.isArray(tikhnunBein.partial_rows) ? tikhnunBein.partial_rows.length : 0;
         return c1 + c2;
       }
-      if (tikhnun && !tikhnun.error) return Array.isArray(tikhnun.partial_rows) ? tikhnun.partial_rows.length : 0;
+      if (tikhnun && !tikhnun.error) {
+        if (!tikhnun.has_doch) {
+          return <NotCheckedBadge
+            reason={missingDochCheckReason(null, stageLabel)}
+            onAddFile={onAddFile} anchorRight={false} />;
+        }
+        return Array.isArray(tikhnun.partial_rows) ? tikhnun.partial_rows.length : 0;
+      }
       return "—";
     }
     case "missing_report": {
@@ -716,11 +758,23 @@ function renderCheckLogCell(log, key) {
       const tikhnunTk   = summary.tikhnun_tikkon_result;
       const tikhnunBein = summary.tikhnun_beinayim_result;
       if (tikhnunTk || tikhnunBein) {
-        const s1 = tikhnunTk?.sum_hefresh_partial   ?? 0;
-        const s2 = tikhnunBein?.sum_hefresh_partial ?? 0;
+        if (!tikhnunTk?.has_doch && !tikhnunBein?.has_doch) {
+          return <NotCheckedBadge
+            reason={missingDochCheckReason(null, stageLabel)}
+            onAddFile={onAddFile} anchorRight={false} />;
+        }
+        const s1 = tikhnunTk?.has_doch   ? (tikhnunTk.sum_hefresh_partial ?? 0)   : 0;
+        const s2 = tikhnunBein?.has_doch ? (tikhnunBein.sum_hefresh_partial ?? 0) : 0;
         return formatNum(s1 + s2);
       }
-      if (tikhnun && !tikhnun.error) return formatNum(tikhnun.sum_hefresh_partial ?? 0);
+      if (tikhnun && !tikhnun.error) {
+        if (!tikhnun.has_doch) {
+          return <NotCheckedBadge
+            reason={missingDochCheckReason(null, stageLabel)}
+            onAddFile={onAddFile} anchorRight={false} />;
+        }
+        return formatNum(tikhnun.sum_hefresh_partial ?? 0);
+      }
       return "—";
     }
     case "fn_count": {
@@ -781,7 +835,7 @@ function NotCheckedBadge({ reason, onAddFile, anchorRight = true }) {
           <div className="px-2 py-1 text-xs whitespace-nowrap">{reason}</div>
           {onAddFile && (
             <div className="px-2 py-1 text-xs border-t border-yellow-300 text-yellow-700 whitespace-nowrap">
-              לחץ על ה✕ להוספת קובץ
+              לחץ על ה-✕ להוספת קובץ ועדכון הבדיקה
             </div>
           )}
         </div>
@@ -790,7 +844,31 @@ function NotCheckedBadge({ reason, onAddFile, anchorRight = true }) {
   );
 }
 
-function renderCheckLogCellForBudget(log, key, budgetName, onAddFile) {
+// Shared "[budget name] [division abbreviation]" suffix for missing-file
+// reasons — omits whichever part isn't relevant (e.g. no budget selected, or
+// a single-division school where naming the division would be redundant).
+function missingFileSuffix(budgetName, stageLabel) {
+  const parts = [budgetName, stageLabel].filter(Boolean);
+  return parts.length ? ` ${parts.join(" ")}` : "";
+}
+
+function missingDochFileReason(budgetName, stageLabel) {
+  return `לא הועלה קובץ דיווח ביצוע${missingFileSuffix(budgetName, stageLabel)} — חלק מהבדיקות לא בוצעו.`;
+}
+
+function missingDochCheckReason(budgetName, stageLabel) {
+  return `הבדיקה לא בוצעה משום שלא הועלה קובץ דיווח ביצוע${missingFileSuffix(budgetName, stageLabel)}.`;
+}
+
+function missingKasafimFileReason(stageLabel) {
+  return `לא הועלה קובץ כספים${missingFileSuffix(null, stageLabel)} — חלק מהבדיקות לא בוצעו.`;
+}
+
+function missingKasafimCheckReason(stageLabel) {
+  return `הבדיקה לא בוצעה משום שלא הועלה קובץ כספים${missingFileSuffix(null, stageLabel)}.`;
+}
+
+function renderCheckLogCellForBudget(log, key, budgetName, onAddFile, stageLabel) {
   // Per-combo reconciliation cases — evaluated the same way whether or not a
   // budget is selected, so a missing finance file always renders as ✕, never "0".
   if (["fn_count", "fn_sum", "gn_count", "gn_sum"].includes(key)) {
@@ -804,7 +882,7 @@ function renderCheckLogCellForBudget(log, key, budgetName, onAddFile) {
         const reason = entries[0]?.not_checked_text
           || (budgetName
               ? `לא בוצעה בדיקה עבור תקציב ${budgetName} — לא נמצאו שורות דיווח תואמות`
-              : "לא בוצעה השוואת גפן-כספים — לא הועלה קובץ כספים");
+              : missingKasafimCheckReason(stageLabel));
         return <NotCheckedBadge reason={reason} onAddFile={onAddFile} anchorRight={false} />;
       }
       const checked = entries.filter(c => !c.not_checked);
@@ -828,14 +906,14 @@ function renderCheckLogCellForBudget(log, key, budgetName, onAddFile) {
     // "no finance file" case) — never show a misleading "0", flag as not checked.
     if (!log.finance_file_name) {
       return <NotCheckedBadge
-        reason="לא בוצעה השוואת גפן-כספים — לא הועלה קובץ כספים"
+        reason={missingKasafimCheckReason(stageLabel)}
         onAddFile={onAddFile} anchorRight={false} />;
     }
-    if (!budgetName) return renderCheckLogCell(log, key);
+    if (!budgetName) return renderCheckLogCell(log, key, onAddFile, stageLabel);
     return "—";
   }
 
-  if (!budgetName) return renderCheckLogCell(log, key);
+  if (!budgetName) return renderCheckLogCell(log, key, onAddFile, stageLabel);
 
   const budgets = log.summary?.tikhnun_result?.budgets;
   // No tikhnun/budgets for this check — cannot filter by budget, don't show misleading global totals
@@ -850,27 +928,59 @@ function renderCheckLogCellForBudget(log, key, budgetName, onAddFile) {
     case "sum_chayav":    return ov.sum_chayav != null ? formatNum(ov.sum_chayav) : "—";
     case "sum_divuach":   return ov.sum_divuach != null ? formatNum(ov.sum_divuach) : "—";
     case "pct_divuach":   return ov.pct_divuach != null ? formatPct(ov.pct_divuach, 0) : "—";
-    case "pct_tanuz":     return ov.pct_tanuz != null ? formatPct(ov.pct_tanuz, 2) : "—";
+    case "pct_tanuz": {
+      const tikhnun = log.summary?.tikhnun_result;
+      if (!tikhnun?.has_doch) {
+        return <NotCheckedBadge
+          reason={missingDochCheckReason(budgetName, stageLabel)}
+          onAddFile={onAddFile} anchorRight={false} />;
+      }
+      return ov.pct_tanuz != null ? formatPct(ov.pct_tanuz, 2) : "—";
+    }
     case "partial_count": {
       const tikhnun = log.summary?.tikhnun_result;
-      if (!tikhnun || !Array.isArray(tikhnun.partial_rows)) return "—";
+      if (!tikhnun) return "—";
+      if (!tikhnun.has_doch) {
+        return <NotCheckedBadge
+          reason={missingDochCheckReason(budgetName, stageLabel)}
+          onAddFile={onAddFile} anchorRight={false} />;
+      }
+      if (!Array.isArray(tikhnun.partial_rows)) return "—";
       return tikhnun.partial_rows.filter(r => r.budget === budgetName).length;
     }
     case "missing_report": {
       const tikhnun = log.summary?.tikhnun_result;
-      if (!tikhnun || !Array.isArray(tikhnun.partial_rows)) return "—";
+      if (!tikhnun) return "—";
+      if (!tikhnun.has_doch) {
+        return <NotCheckedBadge
+          reason={missingDochCheckReason(budgetName, stageLabel)}
+          onAddFile={onAddFile} anchorRight={false} />;
+      }
+      if (!Array.isArray(tikhnun.partial_rows)) return "—";
       const total = tikhnun.partial_rows
         .filter(r => r.budget === budgetName)
         .reduce((s, r) => s + (r.hefresh ?? 0), 0);
       return formatNum(total);
     }
     case "rejected": {
-      const perBudget = log.summary?.tikhnun_result?.per_budget_rejected;
+      const tikhnun = log.summary?.tikhnun_result;
+      if (!tikhnun?.has_doch) {
+        return <NotCheckedBadge
+          reason={missingDochCheckReason(budgetName, stageLabel)}
+          onAddFile={onAddFile} anchorRight={false} />;
+      }
+      const perBudget = tikhnun.per_budget_rejected;
       if (perBudget != null) return (perBudget[budgetName] ?? []).length;
       return <NotCheckedBadge reason="לא ניתן היה לחשב אסמכתאות שנדחו עבור בדיקה זו" anchorRight={false} />;
     }
     case "rejected_sum": {
-      const perBudget = log.summary?.tikhnun_result?.per_budget_rejected;
+      const tikhnun = log.summary?.tikhnun_result;
+      if (!tikhnun?.has_doch) {
+        return <NotCheckedBadge
+          reason={missingDochCheckReason(budgetName, stageLabel)}
+          onAddFile={onAddFile} anchorRight={false} />;
+      }
+      const perBudget = tikhnun.per_budget_rejected;
       if (perBudget != null) {
         const rows = perBudget[budgetName] ?? [];
         if (rows.length === 0) return "—";
@@ -880,12 +990,24 @@ function renderCheckLogCellForBudget(log, key, budgetName, onAddFile) {
       return <NotCheckedBadge reason="לא ניתן היה לחשב אסמכתאות שנדחו עבור בדיקה זו" anchorRight={false} />;
     }
     case "no_pdf": {
-      const perBudget = log.summary?.tikhnun_result?.per_budget_no_pdf;
+      const tikhnun = log.summary?.tikhnun_result;
+      if (!tikhnun?.has_doch) {
+        return <NotCheckedBadge
+          reason={missingDochCheckReason(budgetName, stageLabel)}
+          onAddFile={onAddFile} anchorRight={false} />;
+      }
+      const perBudget = tikhnun.per_budget_no_pdf;
       if (perBudget != null) return (perBudget[budgetName] ?? []).length;
       return <NotCheckedBadge reason="לא ניתן היה לחשב אסמכתאות ללא PDF עבור בדיקה זו" anchorRight={false} />;
     }
     case "no_pdf_sum": {
-      const perBudget = log.summary?.tikhnun_result?.per_budget_no_pdf;
+      const tikhnun = log.summary?.tikhnun_result;
+      if (!tikhnun?.has_doch) {
+        return <NotCheckedBadge
+          reason={missingDochCheckReason(budgetName, stageLabel)}
+          onAddFile={onAddFile} anchorRight={false} />;
+      }
+      const perBudget = tikhnun.per_budget_no_pdf;
       if (perBudget != null) {
         const rows = perBudget[budgetName] ?? [];
         if (rows.length === 0) return "—";
@@ -1009,6 +1131,7 @@ function getLogFileCols(log) {
 function getFileState(fc, budgetEntries, colKey) {
   if (colKey === "tikhnun") return fc.tikhnun ? "present" : "absent";
   if (colKey === "kasafim" && !fc.kasafim) return "not_checked";
+  if (colKey === "doch" && !fc.doch) return "not_checked";
   if (!budgetEntries) return fc[colKey] ? "present" : "absent";
   if (colKey === "doch") {
     if (budgetEntries.length > 0) return "present";
@@ -1020,8 +1143,9 @@ function getFileState(fc, budgetEntries, colKey) {
   return fc[colKey] ? "present" : "absent";
 }
 
-function getFileNotCheckedReason(colKey, budgetEntries, budgetName) {
-  if (colKey === "kasafim" && !budgetEntries) return "לא בוצעה השוואת גפן-כספים — לא הועלה קובץ כספים";
+function getFileNotCheckedReason(colKey, budgetEntries, budgetName, fc, stageLabel) {
+  if (colKey === "kasafim" && !budgetEntries) return missingKasafimFileReason(stageLabel);
+  if (colKey === "doch" && !fc?.doch) return missingDochFileReason(budgetName, stageLabel);
   if (colKey === "doch") return `לא זוהו שורות דיווח עבור תקציב ${budgetName}`;
   const ncEntry = budgetEntries?.find(c => c.not_checked);
   return ncEntry?.not_checked_text || `לא נמצאו נתוני כספים עבור תקציב ${budgetName}`;
@@ -1038,6 +1162,7 @@ function logToResult(log) {
     tikhnun_tikkon: s.tikhnun_tikkon_result ?? null,
     tikhnun_beinayim: s.tikhnun_beinayim_result ?? null,
     per_combo_results: s.per_combo_results ?? null,
+    stage_override: s.stage_override ?? null,
     summary: s,
     rows_finance_not_gefen: log.rows_finance_not_gefen ?? [],
     rows_gefen_not_finance: log.rows_gefen_not_finance ?? [],
@@ -1464,6 +1589,10 @@ function StageMismatchModal({ detectedDivision, schoolStage, onConfirm, onCancel
 // ─── ChecksTab ────────────────────────────────────────────────────────────────
 function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsError, logsLoading, onReloadLogs, activeSubTab, setActiveSubTab, academicYear, setAcademicYear }) {
   const isSheshsSnati = schoolStage === "sheshshnati";
+  // Only worth naming the division in "missing file" messages when the school
+  // actually has more than one (שש-שנתי) — a single-division school's checks
+  // tab is unambiguous without it.
+  const stageLabel = isSheshsSnati ? DIV_ABBR[activeSubTab] : null;
   const [view, setView] = useState("table");
   const [activeResult, setActiveResult] = useState(null);
   const { openCompare, patchCompare } = useCompareChecks();
@@ -1909,11 +2038,21 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
     return lastKey && unitBorderKeys.has(lastKey) ? " border-l border-black" : "";
   };
 
-  // Full label shown in column picker (includes group name for grouped columns)
-  const pickerLabel = col => {
-    const g = COL_GROUP_MAP[col.key];
-    return g ? `${g.header} — ${col.label}` : col.label;
-  };
+  // Column picker: a parent column with sub-columns (e.g. "נותר לתכנון" → קבוע/גמיש)
+  // collapses into ONE entry, keyed by the group header — checking/unchecking it
+  // shows/hides every sub-column together, so they can never be split apart.
+  const pickerItems = (() => {
+    const items = [];
+    const seenGroups = new Set();
+    for (const col of CHECK_MOVABLE_COLS) {
+      const group = COL_GROUP_MAP[col.key];
+      if (!group) { items.push({ key: col.key, label: col.label, keys: [col.key] }); continue; }
+      if (seenGroups.has(group.header)) continue;
+      seenGroups.add(group.header);
+      items.push({ key: group.header, label: group.header, keys: group.keys });
+    }
+    return items;
+  })();
 
   const thBase = "text-right px-3 py-2.5 text-slate-700 font-semibold whitespace-nowrap border border-black";
   const stickyHdr = { position: "sticky", background: "rgba(241,245,249,0.97)", zIndex: 10, backdropFilter: "blur(8px)" };
@@ -2022,21 +2161,28 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
                     aria-label="חיפוש עמודה"
                   />
                 </div>
-                {CHECK_MOVABLE_COLS.filter(col =>
-                  !colPickerQuery.trim() || pickerLabel(col).includes(colPickerQuery.trim())
-                ).map(col => (
-                  <label key={col.key} className="flex items-center gap-2.5 px-4 py-2 hover:bg-slate-50 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={colVisible[col.key]}
-                      onChange={() => setColVisible(prev => ({ ...prev, [col.key]: !prev[col.key] }))}
-                      className="w-3.5 h-3.5 rounded accent-blue-600 flex-shrink-0"
-                    />
-                    <span className="text-sm text-slate-700">{pickerLabel(col)}</span>
-                  </label>
-                ))}
-                {CHECK_MOVABLE_COLS.filter(col =>
-                  !colPickerQuery.trim() || pickerLabel(col).includes(colPickerQuery.trim())
+                {pickerItems.filter(item =>
+                  !colPickerQuery.trim() || item.label.includes(colPickerQuery.trim())
+                ).map(item => {
+                  const checked = item.keys.every(k => colVisible[k]);
+                  return (
+                    <label key={item.key} className="flex items-center gap-2.5 px-4 py-2 hover:bg-slate-50 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => setColVisible(prev => {
+                          const next = { ...prev };
+                          for (const k of item.keys) next[k] = !checked;
+                          return next;
+                        })}
+                        className="w-3.5 h-3.5 rounded accent-blue-600 flex-shrink-0"
+                      />
+                      <span className="text-sm text-slate-700">{item.label}</span>
+                    </label>
+                  );
+                })}
+                {pickerItems.filter(item =>
+                  !colPickerQuery.trim() || item.label.includes(colPickerQuery.trim())
                 ).length === 0 && (
                   <p className="text-xs text-slate-400 px-4 py-2">לא נמצאו עמודות</p>
                 )}
@@ -2186,14 +2332,14 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
                                 : <FileCheckCell
                                     log={pLog} colKey={k}
                                     state={getFileState(pFc, pBudgetEntries, k)}
-                                    notCheckedReason={getFileNotCheckedReason(k, pBudgetEntries, selectedHistBudget)}
+                                    notCheckedReason={getFileNotCheckedReason(k, pBudgetEntries, selectedHistBudget, pFc, stageLabel)}
                                     title={k === "tikhnun" ? "קובץ תכנון" : k === "doch" ? "קובץ דיווח גפן" : "קובץ כספים"}
                                   />}
                             </td>
                           ))}
                           {visibleColOrder.map(key => (
                             <td key={key} className="px-4 py-3 text-slate-600 whitespace-nowrap" style={colBorderStyle(key)}>
-                              {pLog ? renderCheckLogCellForBudget(pLog, key, selectedHistBudget) : <span className="text-slate-400">—</span>}
+                              {pLog ? renderCheckLogCellForBudget(pLog, key, selectedHistBudget, undefined, stageLabel) : <span className="text-slate-400">—</span>}
                             </td>
                           ))}
                         </>
@@ -2222,7 +2368,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
                     ? Object.values(perCombo).filter(c => c.budget === selectedHistBudget)
                     : null;
                   const fileState = (colKey) => getFileState(fc, budgetEntries, colKey);
-                  const fileNotCheckedReason = (colKey) => getFileNotCheckedReason(colKey, budgetEntries, selectedHistBudget);
+                  const fileNotCheckedReason = (colKey) => getFileNotCheckedReason(colKey, budgetEntries, selectedHistBudget, fc, stageLabel);
                   return (
                     <tr className="border-b border-slate-100 hover:bg-slate-50 transition-colors">
                       <td className="px-3 py-3 font-medium whitespace-nowrap" style={{ borderLeft: "1px solid black", position: "sticky", right: 0, zIndex: 5, background: "white", boxShadow: "-6px 0 6px -6px rgba(0,0,0,0.15)" }}>
@@ -2274,7 +2420,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
                         <td key={key}
                           className="px-4 py-3 text-slate-600 whitespace-nowrap"
                           style={colBorderStyle(key)}>
-                          {renderCheckLogCellForBudget(log, key, selectedHistBudget, () => setAddFileModal({ log }))}
+                          {renderCheckLogCellForBudget(log, key, selectedHistBudget, () => setAddFileModal({ log }), stageLabel)}
                         </td>
                       ))}
 

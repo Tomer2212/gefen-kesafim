@@ -61,17 +61,49 @@ const REJECTED_COLS = [
   { key: "סיבת הדחייה", label: "סיבת הדחייה" },
 ];
 
+const AMBIGUOUS_STAGE = "יסודי/חטיבת ביניים";
+
 const STAGE_LABELS = {
   tikkon:   "תיכון",
-  beinayim: "יסודי/חטיבה",
-  both:     "תיכון + יסודי/חטיבה",
+  beinayim: AMBIGUOUS_STAGE,
+  both:     `תיכון + ${AMBIGUOUS_STAGE}`,
 };
 
 const DIVISION_LABELS = {
   tikkon:   "חטיבה עליונה בלבד",
-  beinayim: "יסודי/חטיבה בלבד",
-  both:     "יסודי/חטיבה + חטיבה עליונה",
+  beinayim: `${AMBIGUOUS_STAGE} בלבד`,
+  both:     `${AMBIGUOUS_STAGE} + חטיבה עליונה`,
 };
+
+// Display-only: when the underlying value falls in the ambiguous יסודי/חטיבת-ביניים
+// bucket (raw "beinayim" division code, or the literal "חטיבת ביניים" the tikhnun
+// logic always emits for any non-תיכון plan), prefer a backend-resolved stage_override
+// so the same school shows the same label everywhere. Otherwise the value is left as-is
+// (e.g. תיכון / both), since those are already unambiguous.
+function resolveStageLabel(rawValue, stageOverride) {
+  if (rawValue === "beinayim") return stageOverride ?? STAGE_LABELS.beinayim;
+  if (rawValue === "חטיבת ביניים") return stageOverride ?? AMBIGUOUS_STAGE;
+  return rawValue;
+}
+
+function resolveDivisionLabel(rawValue, stageOverride) {
+  if (rawValue === "beinayim") return stageOverride ? `${stageOverride} בלבד` : DIVISION_LABELS.beinayim;
+  return DIVISION_LABELS[rawValue] ?? rawValue;
+}
+
+// Returns a copy of a tikhnun result object with school_stage / kvua_rows[].stage
+// resolved for display, so every consumer downstream (סקירה, תקציב קבוע, section
+// headers) already sees the unified label without each call site handling it.
+function withResolvedTikhnunStage(tikhnun, stageOverride) {
+  if (!tikhnun) return tikhnun;
+  return {
+    ...tikhnun,
+    school_stage: resolveStageLabel(tikhnun.school_stage, stageOverride),
+    kvua_rows: tikhnun.kvua_rows
+      ? tikhnun.kvua_rows.map(r => ({ ...r, stage: resolveStageLabel(r.stage, stageOverride) }))
+      : tikhnun.kvua_rows,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Tabs configuration
@@ -1428,12 +1460,12 @@ function NihulTab({ tikhnun }) {
 // Hashva (comparison) tab content
 // ---------------------------------------------------------------------------
 
-function GefenFileCard({ file }) {
+function GefenFileCard({ file, stageOverride }) {
   return (
     <div className="flex flex-col gap-2">
       <InfoGrid rows={[
         { label: "שם קובץ",        value: file.filename },
-        { label: "שלב",             value: STAGE_LABELS[file.division] ?? file.division },
+        { label: "שלב",             value: resolveStageLabel(file.division, stageOverride) },
         { label: "אסמכתאות שזוהו", value: file.rows },
       ]} />
       {file.was_deduplicated && <p className="text-xs text-amber-600">כפילות שורות זוהתה בקובץ זה ונוטרלה אוטומטית</p>}
@@ -1441,7 +1473,7 @@ function GefenFileCard({ file }) {
   );
 }
 
-function GefenFilesDetail({ gefen_files, gefen_rows, gefen_merge_note }) {
+function GefenFilesDetail({ gefen_files, gefen_rows, gefen_merge_note, stageOverride }) {
   const hasMerge = gefen_files.length === 2 && gefen_merge_note;
   const { overlap, file0_rows, file1_rows } = gefen_merge_note ?? {};
   let mergeNote = null;
@@ -1455,12 +1487,12 @@ function GefenFilesDetail({ gefen_files, gefen_rows, gefen_merge_note }) {
     <div>
       {gefen_files.length === 2 ? (
         <div className="flex items-start gap-0">
-          <div className="flex-1 px-2"><GefenFileCard file={gefen_files[0]} /></div>
+          <div className="flex-1 px-2"><GefenFileCard file={gefen_files[0]} stageOverride={stageOverride} /></div>
           <div className="w-px self-stretch bg-slate-100 mx-3" />
-          <div className="flex-1 px-2"><GefenFileCard file={gefen_files[1]} /></div>
+          <div className="flex-1 px-2"><GefenFileCard file={gefen_files[1]} stageOverride={stageOverride} /></div>
         </div>
       ) : (
-        <div className="px-2">{(gefen_files ?? []).map((f, i) => <GefenFileCard key={i} file={f} />)}</div>
+        <div className="px-2">{(gefen_files ?? []).map((f, i) => <GefenFileCard key={i} file={f} stageOverride={stageOverride} />)}</div>
       )}
       <div className="mt-4 pt-3 border-t border-slate-100 flex flex-col gap-1">
         {mergeNote && <p className="text-xs text-slate-500">{mergeNote}</p>}
@@ -1489,7 +1521,7 @@ function HashvaTab({ result }) {
         <GefenOnlyNotice title="קיים בתוכנת הכספים, לא משויך בגפן" index={1} />
         <GefenOnlyNotice title="משויך בגפן, לא קיים בתוכנת הכספים" index={2} />
         <SummaryBlock title="קבצי דיווח ביצוע" index={3}>
-          <GefenFilesDetail gefen_files={summary.gefen_files ?? []} gefen_rows={summary.gefen_rows} gefen_merge_note={summary.gefen_merge_note} />
+          <GefenFilesDetail gefen_files={summary.gefen_files ?? []} gefen_rows={summary.gefen_rows} gefen_merge_note={summary.gefen_merge_note} stageOverride={result.stage_override} />
         </SummaryBlock>
       </div>
     );
@@ -1497,7 +1529,7 @@ function HashvaTab({ result }) {
 
   const { division, finance_rows_total, finance_rows_checked, finance_file } = summary;
   const softwareLabel = finance_file?.software ?? "תוכנת הכספים";
-  const label    = DIVISION_LABELS[division] ?? division;
+  const label    = resolveDivisionLabel(division, result.stage_override);
   const filtered = finance_rows_total !== finance_rows_checked;
 
   // Build pill list: prefer tikhnun plan budgets, fall back to per_combo keys
@@ -1816,9 +1848,10 @@ export default function ResultsView({ result, runId, onNewRun, onTikhnunUpdate =
   const [yozmaMultiplierBeinayim, setYozmaMultiplierBeinayim] = useState("03");
   const [yozmaAutoSwitchBeinayim, setYozmaAutoSwitchBeinayim] = useState(false);
 
-  const tikhnun         = result.tikhnun;
-  const tikhnunTikkon   = result.tikhnun_tikkon;
-  const tikhnunBeinayim = result.tikhnun_beinayim;
+  const stageOverride   = result.stage_override;
+  const tikhnun         = withResolvedTikhnunStage(result.tikhnun, stageOverride);
+  const tikhnunTikkon   = withResolvedTikhnunStage(result.tikhnun_tikkon, stageOverride);
+  const tikhnunBeinayim = withResolvedTikhnunStage(result.tikhnun_beinayim, stageOverride);
   const isDualTikhnun   = !!(tikhnunTikkon || tikhnunBeinayim);
 
   const hasTikhnun      = isDualTikhnun || !!(tikhnun && !tikhnun.error);
@@ -1974,14 +2007,14 @@ export default function ResultsView({ result, runId, onNewRun, onTikhnunUpdate =
                     </SummaryBlock>
                   )}
                   <SummaryBlock title="קבצי דיווח ביצוע" index={3}>
-                    <GefenFilesDetail gefen_files={summary.gefen_files ?? []} gefen_rows={summary.gefen_rows} gefen_merge_note={summary.gefen_merge_note} />
+                    <GefenFilesDetail gefen_files={summary.gefen_files ?? []} gefen_rows={summary.gefen_rows} gefen_merge_note={summary.gefen_merge_note} stageOverride={stageOverride} />
                   </SummaryBlock>
                   <SummaryBlock title="קבצים מתוכנת הכספים" index={4}>
                     <div className="px-2 flex flex-col gap-2">
                       <InfoGrid rows={[
                         { label: "שם קובץ",          value: finance_file?.filename },
                         { label: "סוג תוכנה",         value: finance_file?.software },
-                        { label: "שלב",               value: STAGE_LABELS[division] ?? division },
+                        { label: "שלב",               value: resolveStageLabel(division, stageOverride) },
                         { label: "אסמכתאות שזוהו",   value: (finance_rows_total ?? 0) + (finance_file?.cancelled_rows ?? 0) },
                         { label: "אסמכתאות מבוטלות", value: finance_file?.cancelled_rows ?? null },
                       ]} />
@@ -2001,15 +2034,15 @@ export default function ResultsView({ result, runId, onNewRun, onTikhnunUpdate =
                     <div className="px-2 flex flex-col gap-2">
                       <InfoGrid rows={[
                         { label: "גפן",          value: (summary.gefen_files ?? []).length === 1
-                          ? `הועלה קובץ דיווח ביצוע עבור ${STAGE_LABELS[division] ?? division}`
-                          : `הועלו קבצי דיווח ביצוע עבור ${STAGE_LABELS[division] ?? division}` },
-                        { label: "תוכנת כספים", value: `הועלה קובץ ${finance_file?.software ?? "כספים"} עבור ${filtered ? STAGE_LABELS["both"] : (STAGE_LABELS[division] ?? division)}` },
+                          ? `הועלה קובץ דיווח ביצוע עבור ${resolveStageLabel(division, stageOverride)}`
+                          : `הועלו קבצי דיווח ביצוע עבור ${resolveStageLabel(division, stageOverride)}` },
+                        { label: "תוכנת כספים", value: `הועלה קובץ ${finance_file?.software ?? "כספים"} עבור ${filtered ? STAGE_LABELS["both"] : resolveStageLabel(division, stageOverride)}` },
                       ]} />
                       <div className="pt-3 border-t border-slate-100">
                         <p className="text-sm font-700 text-slate-700" style={{ fontWeight: 700 }}>
                           {filtered
-                            ? `לכן הבדיקה בוצעה עבור ${STAGE_LABELS[division] ?? division} בלבד.`
-                            : `לכן הבדיקה בוצעה עבור ${STAGE_LABELS[division] ?? division}.`}
+                            ? `לכן הבדיקה בוצעה עבור ${resolveStageLabel(division, stageOverride)} בלבד.`
+                            : `לכן הבדיקה בוצעה עבור ${resolveStageLabel(division, stageOverride)}.`}
                         </p>
                       </div>
                     </div>
@@ -2071,14 +2104,14 @@ export default function ResultsView({ result, runId, onNewRun, onTikhnunUpdate =
                     </SummaryBlock>
                   )}
                   <SummaryBlock title="קבצי דיווח ביצוע" index={3}>
-                    <GefenFilesDetail gefen_files={summary.gefen_files ?? []} gefen_rows={summary.gefen_rows} gefen_merge_note={summary.gefen_merge_note} />
+                    <GefenFilesDetail gefen_files={summary.gefen_files ?? []} gefen_rows={summary.gefen_rows} gefen_merge_note={summary.gefen_merge_note} stageOverride={stageOverride} />
                   </SummaryBlock>
                   <SummaryBlock title="קבצים מתוכנת הכספים" index={4}>
                     <div className="px-2 flex flex-col gap-2">
                       <InfoGrid rows={[
                         { label: "שם קובץ",          value: finance_file?.filename },
                         { label: "סוג תוכנה",         value: finance_file?.software },
-                        { label: "שלב",               value: STAGE_LABELS[division] ?? division },
+                        { label: "שלב",               value: resolveStageLabel(division, stageOverride) },
                         { label: "אסמכתאות שזוהו",   value: (finance_rows_total ?? 0) + (finance_file?.cancelled_rows ?? 0) },
                         { label: "אסמכתאות מבוטלות", value: finance_file?.cancelled_rows ?? null },
                       ]} />
@@ -2098,15 +2131,15 @@ export default function ResultsView({ result, runId, onNewRun, onTikhnunUpdate =
                     <div className="px-2 flex flex-col gap-2">
                       <InfoGrid rows={[
                         { label: "גפן",          value: (summary.gefen_files ?? []).length === 1
-                          ? `הועלה קובץ דיווח ביצוע עבור ${STAGE_LABELS[division] ?? division}`
-                          : `הועלו קבצי דיווח ביצוע עבור ${STAGE_LABELS[division] ?? division}` },
-                        { label: "תוכנת כספים", value: `הועלה קובץ ${finance_file?.software ?? "כספים"} עבור ${filtered ? STAGE_LABELS["both"] : (STAGE_LABELS[division] ?? division)}` },
+                          ? `הועלה קובץ דיווח ביצוע עבור ${resolveStageLabel(division, stageOverride)}`
+                          : `הועלו קבצי דיווח ביצוע עבור ${resolveStageLabel(division, stageOverride)}` },
+                        { label: "תוכנת כספים", value: `הועלה קובץ ${finance_file?.software ?? "כספים"} עבור ${filtered ? STAGE_LABELS["both"] : resolveStageLabel(division, stageOverride)}` },
                       ]} />
                       <div className="pt-3 border-t border-slate-100">
                         <p className="text-sm font-700 text-slate-700" style={{ fontWeight: 700 }}>
                           {filtered
-                            ? `לכן הבדיקה בוצעה עבור ${STAGE_LABELS[division] ?? division} בלבד.`
-                            : `לכן הבדיקה בוצעה עבור ${STAGE_LABELS[division] ?? division}.`}
+                            ? `לכן הבדיקה בוצעה עבור ${resolveStageLabel(division, stageOverride)} בלבד.`
+                            : `לכן הבדיקה בוצעה עבור ${resolveStageLabel(division, stageOverride)}.`}
                         </p>
                       </div>
                     </div>
