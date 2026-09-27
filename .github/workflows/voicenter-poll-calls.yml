@@ -12,10 +12,10 @@ jobs:
   trigger:
     runs-on: ubuntu-latest
     steps:
-      - name: Call voicenter process-new-calls endpoint
+      - name: Call calls process-new-calls endpoint
         run: |
           URL="${BACKEND_URL%/}"
-          curl -sf -X POST "${URL}/voicenter/process-new-calls" \
+          curl -sf -X POST "${URL}/calls/process-new-calls" \
             -H "X-Cron-Secret: ${CRON_SECRET}" \
             --max-time 120
         env:

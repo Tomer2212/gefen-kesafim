@@ -3084,7 +3084,7 @@ export default function SchoolPage() {
     try {
       const res = await axios.get(`/schools/${schoolId}/calls`, { params: { academic_year: academicYear } });
       setCalls(res.data?.calls || []);
-      setVoicenterEnabled(res.data?.voicenter_enabled !== false);
+      setVoicenterEnabled(res.data?.calls_enabled !== false);
     } catch {
       setCallsError("שגיאה בטעינת השיחות — נסה לרענן");
       setCalls([]);
@@ -5079,7 +5079,7 @@ export default function SchoolPage() {
                 <div className="glass-card rounded-2xl p-12 text-center">
                   <p className="text-3xl mb-3">📞</p>
                   <p className="font-semibold text-slate-700 mb-1">אינטגרציית השיחות אינה מוגדרת</p>
-                  <p className="text-slate-400 text-sm">ניתן להגדיר את האינטגרציה עם Voicenter באזור ניהול</p>
+                  <p className="text-slate-400 text-sm">ניתן להגדיר אינטגרציית שיחות (VOICENTER / EXM) באזור ניהול</p>
                 </div>
               ) : calls.length === 0 ? (
                 <div className="glass-card rounded-2xl p-12 text-center">

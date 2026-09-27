@@ -4,7 +4,7 @@ import axios from "axios";
 import { useGuide } from "../context/GuideContext";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 
-function VoicenterSettingsModal({ settings, loading, onSave, onClose }) {
+function VoicenterSettingsModal({ settings, loading, onSave, onDisconnect, onClose }) {
   const { ref, handleKeyDown } = useFocusTrap(onClose);
   const [enabled, setEnabled] = useState(true);
   const [bearerToken, setBearerToken] = useState("");
@@ -44,7 +44,7 @@ function VoicenterSettingsModal({ settings, loading, onSave, onClose }) {
   async function handleSaveCredentials() {
     setSaving(true);
     setSaveResult(null);
-    const ok = await onSave({ api_bearer_token: bearerToken });
+    const ok = await onSave({ provider: "voicenter", api_bearer_token: bearerToken });
     setSaving(false);
     setBearerToken("");
     if (ok) {
@@ -57,7 +57,7 @@ function VoicenterSettingsModal({ settings, loading, onSave, onClose }) {
 
   async function handleDisconnect() {
     setDisconnecting(true);
-    const ok = await onSave({ api_bearer_token: "", enabled: false });
+    const ok = await onDisconnect();
     setDisconnecting(false);
     setConfirmDisconnect(false);
     if (ok) onClose();
@@ -176,11 +176,10 @@ function VoicenterSettingsModal({ settings, loading, onSave, onClose }) {
                 חשוב: ה-API של Voicenter מקבל בקשות רק מכתובת IP מורשית מראש — יש לוודא מול Voicenter שכתובת ה-IP של השרת שלנו רשומה אצלם.
               </p>
 
-              {settings?.has_bearer_token && (
-                <div className="border-t border-slate-100 pt-4">
+              <div className="border-t border-slate-100 pt-4">
                   {confirmDisconnect ? (
                     <div className="flex items-center justify-between gap-2">
-                      <span className="text-xs text-slate-500">למחוק את הטוקן השמור ולכבות את החיבור?</span>
+                      <span className="text-xs text-slate-500">לנתק את Voicenter לגמרי? ניתן יהיה לחבר ספק שיחות אחר (למשל EXM) לאחר מכן.</span>
                       <div className="flex gap-2">
                         <button onClick={handleDisconnect} disabled={disconnecting}
                           className="px-3 py-1.5 rounded-lg text-xs font-medium bg-red-600 text-white hover:bg-red-700 transition-colors disabled:opacity-60">
@@ -198,8 +197,7 @@ function VoicenterSettingsModal({ settings, loading, onSave, onClose }) {
                       ניתוק חיבור Voicenter
                     </button>
                   )}
-                </div>
-              )}
+              </div>
             </div>
           )}
         </div>
@@ -207,6 +205,216 @@ function VoicenterSettingsModal({ settings, loading, onSave, onClose }) {
         <div className="flex justify-end gap-2 px-6 py-4 border-t border-slate-100">
           <button onClick={onClose} className="px-4 py-2 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-100 transition-colors">
             סגור
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ExmSettingsModal({ settings, loading, onSave, onDisconnect, onClose }) {
+  const { ref, handleKeyDown } = useFocusTrap(onClose);
+  const [enabled, setEnabled] = useState(true);
+  const [apiKey, setApiKey] = useState("");
+  const [showApiKey, setShowApiKey] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
+  const [saveResult, setSaveResult] = useState(null); // "success" | "error" | null
+  const prevLoadingRef = useRef(loading);
+
+  useEffect(() => {
+    if (prevLoadingRef.current && !loading && settings) {
+      setEnabled(settings.enabled);
+    }
+    prevLoadingRef.current = loading;
+  }, [loading, settings]);
+
+  async function handleToggleEnabled() {
+    const next = !enabled;
+    setEnabled(next);
+    setSaving(true);
+    await onSave({ provider: "exm", enabled: next });
+    setSaving(false);
+  }
+
+  async function handleSaveCredentials() {
+    setSaving(true);
+    setSaveResult(null);
+    const ok = await onSave({ provider: "exm", api_key: apiKey });
+    setSaving(false);
+    setApiKey("");
+    if (ok) {
+      setSaveResult("success");
+      setTimeout(() => { setSaveResult(null); onClose(); }, 1200);
+    } else {
+      setSaveResult("error");
+    }
+  }
+
+  async function handleDisconnect() {
+    setDisconnecting(true);
+    const ok = await onDisconnect();
+    setDisconnecting(false);
+    setConfirmDisconnect(false);
+    if (ok) onClose();
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" dir="rtl">
+      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="exm-modal-title"
+        onKeyDown={handleKeyDown}
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 max-h-[90vh] flex flex-col">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+          <h2 id="exm-modal-title" className="font-bold text-black">הגדרות EXM</h2>
+          <button onClick={onClose} aria-label="סגור" className="p-1.5 rounded-lg hover:bg-slate-100 transition-colors text-slate-400">
+            <svg aria-hidden="true" className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="overflow-y-auto flex-1 px-6 py-4">
+          {loading ? (
+            <div role="status" aria-label="טוען הגדרות" className="flex justify-center py-10">
+              <div aria-hidden="true" className="spinner w-7 h-7" />
+            </div>
+          ) : (
+            <div className="space-y-5">
+              <p className="text-xs text-slate-400">
+                המערכת שולפת שיחות ישירות מ-EXM בכל טעינה של טאב "שיחות" — שום פרט שיחה (מספרים, משך) לא נשמר אצלנו. המסלול שנרכש מ-EXM כולל נתוני שיחה יבשים בלבד (בלי סיכום/תמלול AI), ולכן אין צורך בהגדרת Webhook.
+              </p>
+
+              <div className="flex items-center justify-between border-t border-slate-100 pt-4">
+                <div>
+                  <label htmlFor="exm-enabled-toggle" className="text-sm font-medium text-slate-700">שליפת שיחות פעילה</label>
+                  <div className="text-xs text-slate-400 mt-0.5">כשכבוי, טאב "שיחות" לא ישלוף נתונים</div>
+                </div>
+                <button
+                  id="exm-enabled-toggle"
+                  role="switch"
+                  aria-checked={enabled}
+                  onClick={handleToggleEnabled}
+                  disabled={saving}
+                  className={`w-11 h-6 rounded-full transition-colors relative disabled:opacity-60 ${enabled ? "bg-green-500" : "bg-slate-300"}`}
+                >
+                  <span aria-hidden="true" className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-transform ${enabled ? "right-0.5" : "right-5"}`} />
+                </button>
+              </div>
+
+              <div className="border-t border-slate-100 pt-4">
+                <label htmlFor="exm-key-input" className="block text-sm font-medium text-slate-700 mb-1">
+                  מפתח API
+                </label>
+                <p className="text-xs text-slate-400 mb-2">
+                  {settings?.has_api_key ? "מפתח שמור במערכת כרגע." : "לא הוזן מפתח עדיין."} זהו מפתח ה-API שקיבלתם מ-EXM לצורך שליפת שיחות.
+                </p>
+                <div className="flex gap-2">
+                  <input
+                    id="exm-key-input"
+                    type={showApiKey ? "text" : "password"}
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                    placeholder="הדביקו כאן את המפתח..."
+                    className="flex-1 text-sm border border-slate-200 rounded-lg px-2.5 py-1.5 outline-none focus:border-blue-400 bg-white font-mono"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowApiKey((v) => !v)}
+                    aria-label={showApiKey ? "הסתר מפתח" : "הצג מפתח"}
+                    className="px-3 py-1.5 rounded-lg text-xs font-medium text-slate-500 hover:bg-slate-100 transition-colors"
+                  >
+                    {showApiKey ? "הסתר" : "הצג"}
+                  </button>
+                </div>
+              </div>
+
+              <button
+                onClick={handleSaveCredentials}
+                disabled={saving || !apiKey}
+                className="w-full px-3 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition-colors disabled:opacity-60"
+              >
+                {saving ? "שומר..." : "שמור מפתח"}
+              </button>
+
+              {saveResult === "success" && (
+                <p role="status" className="text-sm text-green-700 bg-green-50 border border-green-200 rounded-lg px-3 py-2 text-center">
+                  המפתח נשמר בהצלחה ✓
+                </p>
+              )}
+              {saveResult === "error" && (
+                <p role="alert" className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-center">
+                  שמירת המפתח נכשלה — נסו שוב
+                </p>
+              )}
+
+              <div className="border-t border-slate-100 pt-4">
+                  {confirmDisconnect ? (
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs text-slate-500">לנתק את EXM לגמרי? ניתן יהיה לחבר ספק שיחות אחר (למשל VOICENTER) לאחר מכן.</span>
+                      <div className="flex gap-2">
+                        <button onClick={handleDisconnect} disabled={disconnecting}
+                          className="px-3 py-1.5 rounded-lg text-xs font-medium bg-red-600 text-white hover:bg-red-700 transition-colors disabled:opacity-60">
+                          {disconnecting ? "מנתק..." : "אישור ניתוק"}
+                        </button>
+                        <button onClick={() => setConfirmDisconnect(false)}
+                          className="px-3 py-1.5 rounded-lg text-xs font-medium text-slate-500 hover:bg-slate-100 transition-colors">
+                          ביטול
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button onClick={() => setConfirmDisconnect(true)}
+                      className="text-xs text-red-600 hover:bg-red-50 rounded-lg px-3 py-1.5 transition-colors">
+                      ניתוק חיבור EXM
+                    </button>
+                  )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="flex justify-end gap-2 px-6 py-4 border-t border-slate-100">
+          <button onClick={onClose} className="px-4 py-2 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-100 transition-colors">
+            סגור
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ProviderPickerModal({ onPick, onClose }) {
+  const { ref, handleKeyDown } = useFocusTrap(onClose);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" dir="rtl">
+      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="calls-provider-modal-title"
+        onKeyDown={handleKeyDown}
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+          <h2 id="calls-provider-modal-title" className="font-bold text-black">חיבור שיחות טלפון</h2>
+          <button onClick={onClose} aria-label="סגור" className="p-1.5 rounded-lg hover:bg-slate-100 transition-colors text-slate-400">
+            <svg aria-hidden="true" className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+        <div className="px-6 py-5 space-y-3">
+          <p className="text-sm text-slate-500 mb-2">בחרו את ספק השיחות שאיתו הארגון עובד:</p>
+          <button onClick={() => onPick("voicenter")}
+            className="w-full flex items-center gap-3 border border-slate-200 rounded-xl p-3 hover:border-blue-400 hover:bg-blue-50/50 transition-colors text-right">
+            <div className="w-10 h-10 rounded-xl bg-red-50 flex items-center justify-center text-red-600 font-bold text-sm" aria-hidden="true">V</div>
+            <div className="font-semibold text-slate-900">VOICENTER</div>
+          </button>
+          <button onClick={() => onPick("exm")}
+            className="w-full flex items-center gap-3 border border-slate-200 rounded-xl p-3 hover:border-blue-400 hover:bg-blue-50/50 transition-colors text-right">
+            <div className="w-10 h-10 rounded-xl bg-indigo-50 flex items-center justify-center text-indigo-600 font-bold text-sm" aria-hidden="true">E</div>
+            <div className="font-semibold text-slate-900">EXM</div>
+          </button>
+        </div>
+        <div className="flex justify-end gap-2 px-6 py-4 border-t border-slate-100">
+          <button onClick={onClose} className="px-4 py-2 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-100 transition-colors">
+            ביטול
           </button>
         </div>
       </div>
@@ -307,9 +515,10 @@ export default function AdminIntegrationsTab() {
   const [banner, setBanner] = useState(null);
   const { openGuide } = useGuide();
 
-  const [voicenterSettings, setVoicenterSettings] = useState(null);
-  const [voicenterLoading, setVoicenterLoading] = useState(true);
-  const [voicenterModalOpen, setVoicenterModalOpen] = useState(false);
+  const [callsSettings, setCallsSettings] = useState(null);
+  const [callsLoading, setCallsLoading] = useState(true);
+  const [callsModalOpen, setCallsModalOpen] = useState(false);
+  const [providerPickerOpen, setProviderPickerOpen] = useState(false);
 
   const [twilioSettings, setTwilioSettings] = useState(null);
   const [twilioLoading, setTwilioLoading] = useState(true);
@@ -338,27 +547,44 @@ export default function AdminIntegrationsTab() {
     }
   }
 
-  function loadVoicenterSettings() {
-    setVoicenterLoading(true);
-    axios.get("/voicenter/settings")
-      .then(r => setVoicenterSettings(r.data))
-      .catch(() => setVoicenterSettings(null))
-      .finally(() => setVoicenterLoading(false));
+  function loadCallsSettings() {
+    setCallsLoading(true);
+    axios.get("/calls/settings")
+      .then(r => setCallsSettings(r.data))
+      .catch(() => setCallsSettings(null))
+      .finally(() => setCallsLoading(false));
   }
 
   useEffect(() => {
-    loadVoicenterSettings();
+    loadCallsSettings();
   }, []);
 
-  async function handleSaveVoicenterSettings(patch) {
+  async function handleSaveCallsSettings(patch) {
     try {
-      await axios.put("/voicenter/settings", patch);
-      loadVoicenterSettings();
+      await axios.put("/calls/settings", patch);
+      loadCallsSettings();
       return true;
     } catch {
-      setBanner({ type: "error", text: "שמירת הגדרות Voicenter נכשלה. נסו שוב." });
+      setBanner({ type: "error", text: "שמירת הגדרות השיחות נכשלה. נסו שוב." });
       return false;
     }
+  }
+
+  async function handleDisconnectCalls() {
+    try {
+      await axios.delete("/calls/settings");
+      loadCallsSettings();
+      return true;
+    } catch {
+      setBanner({ type: "error", text: "ניתוק אינטגרציית השיחות נכשל. נסו שוב." });
+      return false;
+    }
+  }
+
+  function handlePickProvider(provider) {
+    setProviderPickerOpen(false);
+    setCallsSettings({ provider, enabled: true });
+    setCallsModalOpen(true);
   }
 
   useEffect(() => {
@@ -461,50 +687,83 @@ export default function AdminIntegrationsTab() {
       </p>
 
       <p className="text-slate-500 text-sm mb-6 mt-8">
-        חיבור ל-VOICENTER מאפשר לשלוף בזמן אמת את פרטי שיחות הטלפון (מספרים, משך, סטטוס, קישור הקלטה) שהיועצים מבצעים או מקבלים, ולהציג אותם בטאב "שיחות" — בלי לשמור עותק של השיחות במערכת שלנו.
+        חיבור שיחות טלפון (VOICENTER או EXM) מאפשר לשלוף בזמן אמת את פרטי שיחות הטלפון (מספרים, משך, סטטוס) שהיועצים מבצעים או מקבלים, ולהציג אותם בטאב "שיחות" — בלי לשמור עותק של השיחות במערכת שלנו. ניתן לחבר ספק אחד בלבד לכל ארגון.
       </p>
 
-      {voicenterLoading ? (
-        <div role="status" aria-label="טוען סטטוס VOICENTER" className="flex justify-center py-10">
+      {callsLoading ? (
+        <div role="status" aria-label="טוען סטטוס שיחות" className="flex justify-center py-10">
           <div aria-hidden="true" className="spinner w-8 h-8" />
+        </div>
+      ) : !callsSettings?.provider ? (
+        <div className="border border-slate-200 rounded-2xl p-5 flex items-center justify-between gap-4 bg-white shadow-sm">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-slate-100 flex items-center justify-center text-slate-500 font-bold text-sm" aria-hidden="true">
+              📞
+            </div>
+            <div>
+              <div className="font-semibold text-slate-900">שיחות טלפון</div>
+              <div className="text-xs mt-0.5 text-slate-500">לא מחובר</div>
+            </div>
+          </div>
+          <button
+            onClick={() => setProviderPickerOpen(true)}
+            className="px-4 py-2 rounded-xl text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+          >
+            חבר ספק שיחות
+          </button>
         </div>
       ) : (
         <div className="border border-slate-200 rounded-2xl p-5 flex items-center justify-between gap-4 bg-white shadow-sm">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-red-50 flex items-center justify-center text-red-600 font-bold text-sm" aria-hidden="true">
-              V
+            <div className={`w-10 h-10 rounded-xl flex items-center justify-center font-bold text-sm ${callsSettings.provider === "voicenter" ? "bg-red-50 text-red-600" : "bg-indigo-50 text-indigo-600"}`} aria-hidden="true">
+              {callsSettings.provider === "voicenter" ? "V" : "E"}
             </div>
             <div>
-              <div className="font-semibold text-slate-900">VOICENTER — שיחות טלפון</div>
-              <div className={`text-xs mt-0.5 ${voicenterSettings?.enabled ? "text-green-600" : "text-slate-500"}`}>
-                {voicenterSettings?.enabled ? "מופעל" : "כבוי"} · {voicenterSettings?.has_bearer_token ? "טוקן הוגדר" : "טרם הוגדר טוקן"}
+              <div className="font-semibold text-slate-900">{callsSettings.provider === "voicenter" ? "VOICENTER" : "EXM"} — שיחות טלפון</div>
+              <div className={`text-xs mt-0.5 ${callsSettings.enabled ? "text-green-600" : "text-slate-500"}`}>
+                {callsSettings.enabled ? "מופעל" : "כבוי"} · {(callsSettings.provider === "voicenter" ? callsSettings.has_bearer_token : callsSettings.has_api_key) ? "פרטי חיבור הוגדרו" : "טרם הוגדרו פרטי חיבור"}
               </div>
             </div>
           </div>
 
           <div className="flex items-center gap-2">
             <button
-              onClick={() => openGuide("voicenter")}
+              onClick={() => openGuide(callsSettings.provider)}
               className="px-3 py-2 rounded-xl text-sm font-medium text-slate-500 hover:bg-slate-100 transition-colors"
             >
               הדרכה
             </button>
             <button
-              onClick={() => setVoicenterModalOpen(true)}
+              onClick={() => setCallsModalOpen(true)}
               className="px-4 py-2 rounded-xl text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition-colors"
             >
-              הגדרות Voicenter
+              הגדרות {callsSettings.provider === "voicenter" ? "Voicenter" : "EXM"}
             </button>
           </div>
         </div>
       )}
 
-      {voicenterModalOpen && (
+      {providerPickerOpen && (
+        <ProviderPickerModal onPick={handlePickProvider} onClose={() => setProviderPickerOpen(false)} />
+      )}
+
+      {callsModalOpen && callsSettings?.provider === "voicenter" && (
         <VoicenterSettingsModal
-          settings={voicenterSettings}
-          loading={voicenterLoading}
-          onSave={handleSaveVoicenterSettings}
-          onClose={() => setVoicenterModalOpen(false)}
+          settings={callsSettings}
+          loading={callsLoading}
+          onSave={handleSaveCallsSettings}
+          onDisconnect={handleDisconnectCalls}
+          onClose={() => setCallsModalOpen(false)}
+        />
+      )}
+
+      {callsModalOpen && callsSettings?.provider === "exm" && (
+        <ExmSettingsModal
+          settings={callsSettings}
+          loading={callsLoading}
+          onSave={handleSaveCallsSettings}
+          onDisconnect={handleDisconnectCalls}
+          onClose={() => setCallsModalOpen(false)}
         />
       )}
 

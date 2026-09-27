@@ -2392,6 +2392,7 @@ export default function AdminPage() {
     });
   }, []);
   useEffect(() => { if ((activeTab === "users" || activeTab === "billing" || activeTab === "connections") && users.length === 0) loadUsers(); }, [activeTab]);
+  useEffect(() => { if (activeTab === "users" && users.length > 0) refreshCallsMappingData(); }, [activeTab]);
   useEffect(() => { if (activeTab === "permissions" && !permDefaults && !permLoading) loadPermDefaults(); }, [activeTab]);
   // Advisors must not access the admin area — redirect immediately once role is confirmed
   useEffect(() => { if (myRole === "advisor") navigate("/", { replace: true }); }, [myRole]);
@@ -2665,7 +2666,7 @@ export default function AdminPage() {
       const [usersRes, countsRes, voicenterSettingsRes] = await Promise.all([
         axios.get("/schools/users/all"),
         axios.get("/schools/permissions/overrides/counts").catch(() => ({ data: {} })),
-        axios.get("/voicenter/settings").catch(() => ({ data: { enabled: false } })),
+        axios.get("/calls/settings").catch(() => ({ data: { enabled: false } })),
       ]);
       setUsers(Array.isArray(usersRes.data) ? usersRes.data : []);
       setOverrideCounts(countsRes.data || {});
@@ -2673,8 +2674,8 @@ export default function AdminPage() {
       setVoicenterEnabled(enabled);
       if (enabled) {
         const [repsRes, mappingsRes] = await Promise.all([
-          axios.get("/voicenter/known-reps").catch(() => ({ data: [] })),
-          axios.get("/voicenter/mappings").catch(() => ({ data: [] })),
+          axios.get("/calls/known-reps").catch(() => ({ data: [] })),
+          axios.get("/calls/mappings").catch(() => ({ data: [] })),
         ]);
         setVoicenterKnownReps(Array.isArray(repsRes.data) ? repsRes.data : []);
         setVoicenterMappings(Array.isArray(mappingsRes.data) ? mappingsRes.data : []);
@@ -2684,9 +2685,32 @@ export default function AdminPage() {
     }
   }
 
+  // Separate from loadUsers (which is gated by users.length === 0 so it doesn't refetch the
+  // whole user list on every tab visit): known-reps/mappings reflect live call activity (a
+  // test call just made to a newly-connected line, for example) and must refresh every time
+  // the tab is opened, not just once per page load — otherwise a freshly-seen line/rep never
+  // shows up in the picker until a full page reload.
+  async function refreshCallsMappingData() {
+    try {
+      const settingsRes = await axios.get("/calls/settings").catch(() => ({ data: { enabled: false } }));
+      const enabled = !!settingsRes.data?.enabled;
+      setVoicenterEnabled(enabled);
+      if (enabled) {
+        const [repsRes, mappingsRes] = await Promise.all([
+          axios.get("/calls/known-reps").catch(() => ({ data: [] })),
+          axios.get("/calls/mappings").catch(() => ({ data: [] })),
+        ]);
+        setVoicenterKnownReps(Array.isArray(repsRes.data) ? repsRes.data : []);
+        setVoicenterMappings(Array.isArray(mappingsRes.data) ? mappingsRes.data : []);
+      }
+    } catch {
+      /* non-fatal — picker just keeps showing whatever it already had */
+    }
+  }
+
   async function loadVoicenterMappings() {
     try {
-      const res = await axios.get("/voicenter/mappings");
+      const res = await axios.get("/calls/mappings");
       setVoicenterMappings(Array.isArray(res.data) ? res.data : []);
     } catch {
       /* non-fatal */
@@ -2701,14 +2725,14 @@ export default function AdminPage() {
     try {
       for (const code of added) {
         const rep = voicenterKnownReps.find(r => r.representative_code === code);
-        await axios.post("/voicenter/mappings", {
+        await axios.post("/calls/mappings", {
           representative_code: code,
           representative_name: rep?.representative_name || null,
           advisor_id: u.id,
         });
       }
       for (const m of removed) {
-        await axios.delete(`/voicenter/mappings/${m.id}`);
+        await axios.delete(`/calls/mappings/${m.id}`);
       }
     } finally {
       // A code added here may have been reassigned away from another user (upsert is keyed
@@ -5171,7 +5195,7 @@ export default function AdminPage() {
                               className={voicenterMappings.filter(m => m.advisor_id === u.id).length === 0 ? "flex justify-center" : ""}
                               selected={voicenterMappings.filter(m => m.advisor_id === u.id).map(m => m.representative_code)}
                               onChange={codes => saveUserVoicenterMapping(u, codes)}
-                              placeholder="בחר שם ב-VOICENTER"
+                              placeholder="בחר קו/נציג"
                               emptyIcon />
                           </td>
                         )}

@@ -68,7 +68,28 @@ export const GUIDE_CONTENT = {
         body: "בצעו שיחת טלפון בדיקה אמיתית → המתינו כמה דקות (ל-AI לוקח זמן לעבד) → רעננו את טאב \"שיחות\" → בדקו שהסיכום מופיע בשורה של אותה שיחה.",
       },
     ],
-    verifyEndpoint: "/voicenter/settings",
-    verifySuccessCheck: (data) => data?.has_bearer_token === true,
+    verifyEndpoint: "/calls/settings",
+    verifySuccessCheck: (data) => data?.provider === "voicenter" && data?.has_bearer_token === true,
+  },
+
+  exm: {
+    title: "הדרכה: חיבור EXM (שיחות טלפון)",
+    intro: "החיבור כולל רק חלק אחד: שליפת רשימת השיחות (המסלול שנרכש מ-EXM אינו כולל סיכום/תמלול AI). התהליך לוקח כמה דקות.",
+    steps: [
+      {
+        title: "שלב 1 — קבלו מפתח API מ-EXM",
+        body: "פנו לאיש הקשר שלכם ב-EXM וקבלו מפתח API (API Key) עבור החשבון שלכם.",
+      },
+      {
+        title: "שלב 2 — הזינו במערכת שלנו את המפתח שקיבלתם מ-EXM",
+        body: "באתר שלנו כנסו ל → אינטגרציות → שיחות טלפון → בחרו EXM → הדביקו את המפתח משלב 1 בשדה \"מפתח API\" → ולחצו על שמירה.\n\nאיך לדעת שהצלחתם: כנסו לטאב \"שיחות\", אם מופיעות שם שיחות אמיתיות בטבלה — שלבים 1-2 הסתיימו בהצלחה. אם טרם ביצעתם אף שיחה במספר הארגוני, בצעו אחת (אפילו לכמה שניות בודדות) ולאחר מכן בצעו את הבדיקה.",
+      },
+      {
+        title: "שלב 3 — שיוך קו ליועץ",
+        body: "בניגוד ל-Voicenter, אצל EXM אין קוד נציג לכל שיחה — רק הקו (המספר) שהשיחה עברה בו. לכן יש לשייך כל קו ליועץ הרלוונטי באזור ניהול → משתמשים, בדיוק כמו ששויכו קודי נציג ב-Voicenter.",
+      },
+    ],
+    verifyEndpoint: "/calls/settings",
+    verifySuccessCheck: (data) => data?.provider === "exm" && data?.has_api_key === true,
   },
 };

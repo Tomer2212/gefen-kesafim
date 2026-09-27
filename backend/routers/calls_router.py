@@ -5,19 +5,29 @@ import secrets
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
+from zoneinfo import ZoneInfo
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from auth import get_current_user
+from integrations.calls import exm_adapter, voicenter_adapter
 from supabase_client import get_admin_client, reset_admin_client
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+# date_from/date_to passed into _pull_org_calls are naive strings representing
+# Asia/Jerusalem wall-clock time throughout this codebase (matches the frontend's calendar
+# pickers and schools_router's academic-year/meeting-date ranges, which are always Israel
+# calendar dates). Any UTC-based "now" used to build such a window (the cron here, the
+# known-agents live top-up) must be converted through this timezone before formatting —
+# see exm_adapter._to_exm_timestamp for why: EXM interprets an offset-less string as
+# Israel-local, so a bare UTC-valued string silently shifts the window ~3 hours early.
+_IL_TZ = ZoneInfo("Asia/Jerusalem")
+
 _MANAGER_ROLES = ("owner", "manager")
-_CALL_LOG_URL = "https://api.voicenter.com/hub/cdr/"
+_PROVIDERS = ("voicenter", "exm")
 _TRANSCRIPTS_BUCKET = "voicenter-transcripts"
 CRON_SECRET = os.getenv("CRON_SECRET", "")
 
@@ -31,7 +41,7 @@ UNKNOWN_CALL_REPROMPT_AFTER = 3
 
 def _build_webhook_url(org_id: str, secret_value: str) -> str:
     base_url = os.getenv("BACKEND_PUBLIC_URL", "").rstrip("/")
-    return f"{base_url}/voicenter/webhook/{org_id}/{secret_value}"
+    return f"{base_url}/calls/webhook/{org_id}/{secret_value}"
 
 
 def _require_manager(user: dict) -> None:
@@ -44,15 +54,6 @@ def _require_owner(user: dict) -> None:
         raise HTTPException(status_code=403, detail="פעולה זו מותרת לבעלים בלבד")
 
 
-def _derive_direction(call_type: str) -> str:
-    t = (call_type or "").lower()
-    if "outgoing" in t or "leg2" in t.replace(" ", ""):
-        return "outgoing"
-    if "incoming" in t or "queue" in t:
-        return "incoming"
-    return "internal"
-
-
 def _phone_suffix(raw) -> str | None:
     """Normalize a phone number to its last 9 digits, so '972524399715', '0524399715'
     and '524399715' all compare equal — strips country code / leading zero variance."""
@@ -61,7 +62,7 @@ def _phone_suffix(raw) -> str | None:
 
 
 def _build_contact_map(org_id: str) -> dict:
-    """OUR OWN data (schools/contacts) — not Voicenter's — used to resolve the
+    """OUR OWN data (schools/contacts) — not the provider's — used to resolve the
     counterpart phone number of a call to known person(s), their role, and school(s).
     Returns dict[phone_suffix] -> list of matches (usually one; more than one means the
     same phone number is a contact at multiple schools — an ambiguity the caller must
@@ -110,18 +111,18 @@ def _build_contact_map(org_id: str) -> dict:
                     {"name": school_name, "role": "טלפון בית הספר", "school_id": school_id, "school_name": school_name}
                 )
     except Exception as exc:
-        logger.warning("voicenter: contact map enrichment failed (non-fatal): %s", exc)
+        logger.warning("calls: contact map enrichment failed (non-fatal): %s", exc)
     return contact_map
 
 
 def _get_call_resolutions(org_id: str, call_ids: list[str]) -> dict:
-    """Existing voicenter_call_contact_resolutions rows for the given call_ids, keyed by call_id."""
+    """Existing calls_call_contact_resolutions rows for the given call_ids, keyed by call_id."""
     if not call_ids:
         return {}
     try:
         db = get_admin_client()
         rows = (
-            db.table("voicenter_call_contact_resolutions")
+            db.table("calls_call_contact_resolutions")
             .select("*")
             .eq("org_id", org_id)
             .in_("call_id", call_ids)
@@ -129,28 +130,28 @@ def _get_call_resolutions(org_id: str, call_ids: list[str]) -> dict:
         ).data or []
         return {r["call_id"]: r for r in rows}
     except Exception as exc:
-        logger.warning("voicenter: call resolutions lookup failed (non-fatal): %s", exc)
+        logger.warning("calls: call resolutions lookup failed (non-fatal): %s", exc)
         return {}
 
 
 def _get_manual_school_overrides(org_id: str, call_ids: list[str]) -> tuple[dict, dict]:
-    """Manual per-school overrides for the given call_ids (voicenter_call_school_links).
+    """Manual per-school overrides for the given call_ids (calls_call_school_links).
     Two independent, per-call kinds of override:
     - 'linked' — manually attaches a call to a school's שיחות tab, IN ADDITION to (never
       instead of) any auto-detected contact match. A call can be linked to any number of
       schools.
     - 'excluded' — hides a call from ONE specific school's שיחות tab only (e.g. an owner/
       manager removed a row from that school's card). This is purely local to that school's
-      tab: it never touches the underlying Voicenter/AI call data, never affects any other
-      school's tab, and never affects the admin "ניהול-שיחות" table, which always shows
-      every call regardless of any school's exclusion.
+      tab: it never touches the underlying call/AI data, never affects any other school's
+      tab, and never affects the admin "ניהול-שיחות" table, which always shows every call
+      regardless of any school's exclusion.
     Returns (linked_by_call_id, excluded_by_call_id), each call_id -> list of school_ids."""
     if not call_ids:
         return {}, {}
     try:
         db = get_admin_client()
         rows = (
-            db.table("voicenter_call_school_links")
+            db.table("calls_call_school_links")
             .select("call_id, school_id, state")
             .eq("org_id", org_id)
             .in_("call_id", call_ids)
@@ -163,7 +164,7 @@ def _get_manual_school_overrides(org_id: str, call_ids: list[str]) -> tuple[dict
             target.setdefault(r["call_id"], []).append(r["school_id"])
         return linked, excluded
     except Exception as exc:
-        logger.warning("voicenter: manual school overrides lookup failed (non-fatal): %s", exc)
+        logger.warning("calls: manual school overrides lookup failed (non-fatal): %s", exc)
         return {}, {}
 
 
@@ -208,12 +209,35 @@ def _resolve_contact_for_call(contact_map: dict, resolutions_by_call_id: dict, c
     }
 
 
+def _upsert_known_agents(org_id: str, provider: str, calls: list[dict]) -> None:
+    """Records every (agent_key, agent_label) pair seen in a batch of already-enriched
+    calls (as returned by _pull_org_calls) — feeds the known-agents picker in
+    ניהול-משתמשים. Called both by the 15-min cron (process_new_calls) and live from
+    list_known_reps, so the picker never depends solely on the cron having already run
+    (important right after connecting a brand-new line/number that's never been scanned)."""
+    seen = {c["representative_code"]: c.get("representative_name") for c in calls if c.get("representative_code")}
+    if not seen:
+        return
+    try:
+        db = get_admin_client()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        db.table("calls_known_agents").upsert(
+            [
+                {"org_id": org_id, "provider": provider, "agent_key": key, "agent_label": label, "last_seen_at": now_iso}
+                for key, label in seen.items()
+            ],
+            on_conflict="org_id,provider,agent_key",
+        ).execute()
+    except Exception as exc:
+        logger.warning("calls: known-agents upsert failed (non-fatal) for org=%s: %s", org_id, exc)
+
+
 def _get_integration_config(org_id: str) -> dict | None:
     for attempt in range(2):
         try:
             db = get_admin_client()
             rows = (
-                db.table("voicenter_integrations")
+                db.table("calls_integrations")
                 .select("*")
                 .eq("org_id", org_id)
                 .limit(1)
@@ -225,20 +249,40 @@ def _get_integration_config(org_id: str) -> dict | None:
                 reset_admin_client()
                 time.sleep(0.1)
             else:
-                logger.error("voicenter: failed to load integration config: %s", exc, exc_info=True)
+                logger.error("calls: failed to load integration config: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
 
 # ---------------------------------------------------------------------------
 # Settings — authenticated (owner + manager). Stores ONLY our own credentials
-# for calling Voicenter's Call Log API (their account code / bearer token) —
-# never any call data itself.
+# for calling the provider's Calls API (bearer token / API key) — never any
+# call data itself. One provider per org: the first successful save locks it
+# in; switching providers requires an explicit disconnect first.
 # ---------------------------------------------------------------------------
 
-class VoicenterSettingsIn(BaseModel):
+class CallsSettingsIn(BaseModel):
+    provider: str | None = None  # only used/required when connecting for the first time
     enabled: bool | None = None
-    api_code: str | None = None
-    api_bearer_token: str | None = None
+    api_code: str | None = None          # voicenter
+    api_bearer_token: str | None = None  # voicenter
+    api_key: str | None = None           # exm
+
+
+def _settings_response(row: dict) -> dict:
+    provider = row["provider"]
+    config = row.get("config") or {}
+    resp = {
+        "provider": provider,
+        "enabled": row["enabled"],
+    }
+    if provider == "voicenter":
+        resp["has_api_code"] = bool(config.get("api_code"))
+        resp["has_bearer_token"] = bool(config.get("api_bearer_token"))
+        resp["webhook_url"] = _build_webhook_url(row["org_id"], row["webhook_secret"])
+    else:
+        resp["has_api_key"] = bool(config.get("api_key"))
+        resp["webhook_url"] = None
+    return resp
 
 
 @router.get("/settings")
@@ -247,29 +291,15 @@ def get_settings(user: Annotated[dict, Depends(get_current_user)]):
 
     row = _get_integration_config(user["org_id"])
     if not row:
-        for attempt in range(2):
-            try:
-                db = get_admin_client()
-                row = (
-                    db.table("voicenter_integrations")
-                    .insert({"org_id": user["org_id"], "enabled": True, "webhook_secret": secrets.token_urlsafe(32)})
-                    .execute()
-                ).data[0]
-                break
-            except Exception as exc:
-                if attempt == 0:
-                    reset_admin_client()
-                    time.sleep(0.1)
-                else:
-                    logger.error("voicenter get_settings: failed to create default config: %s", exc, exc_info=True)
-                    raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
-    elif not row.get("webhook_secret"):
+        return {"provider": None, "enabled": False, "webhook_url": None}
+
+    if row["provider"] == "voicenter" and not row.get("webhook_secret"):
         # Existing rows created before the webhook_secret column existed
         new_secret = secrets.token_urlsafe(32)
         for attempt in range(2):
             try:
                 db = get_admin_client()
-                db.table("voicenter_integrations").update({"webhook_secret": new_secret}).eq("org_id", user["org_id"]).execute()
+                db.table("calls_integrations").update({"webhook_secret": new_secret}).eq("org_id", user["org_id"]).execute()
                 row["webhook_secret"] = new_secret
                 break
             except Exception as exc:
@@ -277,40 +307,112 @@ def get_settings(user: Annotated[dict, Depends(get_current_user)]):
                     reset_admin_client()
                     time.sleep(0.1)
                 else:
-                    logger.error("voicenter get_settings: failed to backfill webhook_secret: %s", exc, exc_info=True)
+                    logger.error("calls get_settings: failed to backfill webhook_secret: %s", exc, exc_info=True)
                     raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
-    return {
-        "enabled": row["enabled"],
-        "has_api_code": bool(row.get("api_code")),
-        "has_bearer_token": bool(row.get("api_bearer_token")),
-        "webhook_url": _build_webhook_url(user["org_id"], row["webhook_secret"]),
-    }
+    return _settings_response(row)
 
 
 @router.put("/settings")
-def update_settings(user: Annotated[dict, Depends(get_current_user)], body: VoicenterSettingsIn):
+def update_settings(user: Annotated[dict, Depends(get_current_user)], body: CallsSettingsIn):
     _require_manager(user)
 
-    updates: dict = {"updated_at": datetime.now(timezone.utc).isoformat()}
+    row = _get_integration_config(user["org_id"])
+
+    if not row:
+        provider = body.provider
+        if provider not in _PROVIDERS:
+            raise HTTPException(status_code=400, detail="יש לבחור ספק שיחות (VOICENTER או EXM)")
+        config: dict = {}
+        if provider == "voicenter":
+            if body.api_code:
+                config["api_code"] = body.api_code
+            if body.api_bearer_token:
+                config["api_bearer_token"] = body.api_bearer_token
+        else:
+            if body.api_key:
+                config["api_key"] = body.api_key
+        insert_row = {
+            "org_id": user["org_id"],
+            "provider": provider,
+            "enabled": body.enabled if body.enabled is not None else True,
+            "config": config,
+            "webhook_secret": secrets.token_urlsafe(32) if provider == "voicenter" else None,
+        }
+        for attempt in range(2):
+            try:
+                db = get_admin_client()
+                row = db.table("calls_integrations").insert(insert_row).execute().data[0]
+                break
+            except Exception as exc:
+                if attempt == 0:
+                    reset_admin_client()
+                    time.sleep(0.1)
+                else:
+                    logger.error("calls update_settings: failed to create integration: %s", exc, exc_info=True)
+                    raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+        return _settings_response(row)
+
+    provider = row["provider"]
+    if body.provider and body.provider != provider:
+        raise HTTPException(status_code=400, detail="יש לנתק את הספק המחובר כרגע לפני חיבור ספק אחר")
+
+    config = dict(row.get("config") or {})
+    if provider == "voicenter":
+        if body.api_code is not None:
+            if body.api_code:
+                config["api_code"] = body.api_code
+            else:
+                config.pop("api_code", None)
+        if body.api_bearer_token is not None:
+            if body.api_bearer_token:
+                config["api_bearer_token"] = body.api_bearer_token
+            else:
+                config.pop("api_bearer_token", None)
+    else:
+        if body.api_key is not None:
+            if body.api_key:
+                config["api_key"] = body.api_key
+            else:
+                config.pop("api_key", None)
+
+    updates: dict = {"config": config, "updated_at": datetime.now(timezone.utc).isoformat()}
     if body.enabled is not None:
         updates["enabled"] = body.enabled
-    if body.api_code is not None:
-        updates["api_code"] = body.api_code or None
-    if body.api_bearer_token is not None:
-        updates["api_bearer_token"] = body.api_bearer_token or None
 
     for attempt in range(2):
         try:
             db = get_admin_client()
-            db.table("voicenter_integrations").update(updates).eq("org_id", user["org_id"]).execute()
+            row = db.table("calls_integrations").update(updates).eq("org_id", user["org_id"]).execute().data[0]
             break
         except Exception as exc:
             if attempt == 0:
                 reset_admin_client()
                 time.sleep(0.1)
             else:
-                logger.error("voicenter update_settings failed after 2 attempts: %s", exc, exc_info=True)
+                logger.error("calls update_settings failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    return _settings_response(row)
+
+
+@router.delete("/settings")
+def disconnect_integration(user: Annotated[dict, Depends(get_current_user)]):
+    """Fully removes the org's calls integration — required before connecting a different
+    provider (keeps call_id/agent_key namespaces from ever mixing across providers)."""
+    _require_manager(user)
+
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            db.table("calls_integrations").delete().eq("org_id", user["org_id"]).execute()
+            break
+        except Exception as exc:
+            if attempt == 0:
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("calls disconnect_integration failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
     return {"ok": True}
@@ -318,14 +420,14 @@ def update_settings(user: Annotated[dict, Depends(get_current_user)], body: Voic
 
 # ---------------------------------------------------------------------------
 # Webhook — PUBLIC, no Supabase-JWT auth (Voicenter calls this directly).
-# Deliberately narrow: captures ONLY the AI summary + transcript, since that's
-# the one thing NOT available via the Call Log (pull) API. Every other call
-# field continues to come live from the pull API above — nothing else is
-# ever written here.
+# Voicenter-only: captures ONLY the AI summary + transcript, since that's the
+# one thing NOT available via the Call Log (pull) API. Every other call field
+# continues to come live from the pull API above — nothing else is ever
+# written here. EXM's package has no AI component, so it never reaches this.
 # ---------------------------------------------------------------------------
 
 @router.post("/webhook/{org_id}/{secret}")
-async def voicenter_webhook(org_id: str, secret: str, request: Request):
+async def calls_webhook(org_id: str, secret: str, request: Request):
     try:
         body = await request.json()
     except Exception:
@@ -335,8 +437,8 @@ async def voicenter_webhook(org_id: str, secret: str, request: Request):
         try:
             db = get_admin_client()
             cfg_rows = (
-                db.table("voicenter_integrations")
-                .select("id, enabled, webhook_secret")
+                db.table("calls_integrations")
+                .select("id, provider, enabled, webhook_secret")
                 .eq("org_id", org_id)
                 .limit(1)
                 .execute()
@@ -345,20 +447,20 @@ async def voicenter_webhook(org_id: str, secret: str, request: Request):
             break
         except Exception as exc:
             if attempt == 0:
-                logger.warning("voicenter_webhook: DB attempt 1 failed for org=%s: %s — retrying", org_id, exc)
+                logger.warning("calls_webhook: DB attempt 1 failed for org=%s: %s — retrying", org_id, exc)
                 reset_admin_client()
                 time.sleep(0.1)
             else:
-                logger.error("voicenter_webhook: DB unreachable for org=%s: %s", org_id, exc, exc_info=True)
+                logger.error("calls_webhook: DB unreachable for org=%s: %s", org_id, exc, exc_info=True)
                 return {"err": 2, "errdesc": "temporary server error"}
 
-    if not cfg or cfg.get("webhook_secret") != secret or not cfg.get("enabled"):
-        logger.warning("voicenter_webhook: rejected org=%s (missing config, secret mismatch, or disabled)", org_id)
+    if not cfg or cfg.get("provider") != "voicenter" or cfg.get("webhook_secret") != secret or not cfg.get("enabled"):
+        logger.warning("calls_webhook: rejected org=%s (missing config, secret mismatch, wrong provider, or disabled)", org_id)
         return {"err": 2, "errdesc": "unauthorized or disabled"}
 
     call_id = body.get("ivruniqueid")
     if not call_id:
-        logger.warning("voicenter_webhook: payload missing ivruniqueid for org=%s", org_id)
+        logger.warning("calls_webhook: payload missing ivruniqueid for org=%s", org_id)
         return {"err": 2, "errdesc": "missing ivruniqueid"}
 
     ai_data = body.get("aiData") or {}
@@ -375,7 +477,7 @@ async def voicenter_webhook(org_id: str, secret: str, request: Request):
                 {"content-type": "application/json", "upsert": "true"},
             )
         except Exception as exc:
-            logger.warning("voicenter_webhook: transcript upload failed (non-fatal) for call=%s: %s", call_id, exc)
+            logger.warning("calls_webhook: transcript upload failed (non-fatal) for call=%s: %s", call_id, exc)
             transcript_path = None
 
     try:
@@ -384,84 +486,66 @@ async def voicenter_webhook(org_id: str, secret: str, request: Request):
             on_conflict="org_id,call_id",
         ).execute()
     except Exception as exc:
-        logger.error("voicenter_webhook: upsert failed for org=%s call_id=%s: %s", org_id, call_id, exc, exc_info=True)
+        logger.error("calls_webhook: upsert failed for org=%s call_id=%s: %s", org_id, call_id, exc, exc_info=True)
         return {"err": 2, "errdesc": "storage failure"}
 
     return {"err": 0, "errdesc": "OK"}
 
 
 # ---------------------------------------------------------------------------
-# Calls — live pull from Voicenter's Call Log API on every request.
+# Calls — live pull from the connected provider's API on every request.
 # Nothing about the calls themselves is ever written to Supabase (except the
-# ambiguous-contact resolution rows in voicenter_call_contact_resolutions).
+# ambiguous-contact resolution rows in calls_call_contact_resolutions).
 # ---------------------------------------------------------------------------
 
 def _pull_org_calls(org_id: str, date_from: str, date_to: str) -> dict:
-    """Shared puller: Call Log API fetch + advisor/AI/contact enrichment. Used by the admin
-    /calls endpoint, the per-school /schools/{id}/calls endpoint, and the scheduled
+    """Shared puller: provider Calls API fetch + advisor/AI/contact enrichment. Used by the
+    admin /calls endpoint, the per-school /schools/{id}/calls endpoint, and the scheduled
     process-new-calls job. Raises HTTPException on hard failures (bad/missing config,
-    Voicenter API errors) — callers that want a soft-fail (e.g. the cron job) should catch it."""
+    provider API errors) — callers that want a soft-fail (e.g. the cron job) should catch it."""
     cfg = _get_integration_config(org_id)
     if not cfg or not cfg.get("enabled"):
-        raise HTTPException(status_code=400, detail="אינטגרציית Voicenter אינה מוגדרת או כבויה")
-    if not cfg.get("api_bearer_token"):
-        raise HTTPException(status_code=400, detail="יש להזין טוקן API של Voicenter בהגדרות האינטגרציה")
+        raise HTTPException(status_code=400, detail="אינטגרציית שיחות אינה מוגדרת או כבויה")
 
-    # Confirmed empirically (2026-07-23): the Call Log API's "code" body field
-    # is gated by an account-level IP allowlist that our server's IP is not on.
-    # The Authorization: Bearer path validates the JWT signature instead and
-    # never reaches that IP check — it works from an unwhitelisted IP as long
-    # as the token itself is a complete, properly-signed JWT.
-    payload = {
-        "search": {"fromdate": date_from, "todate": date_to},
-        "sort": [{"field": "date", "order": "desc"}],
-    }
-    headers = {"Authorization": f"Bearer {cfg['api_bearer_token']}"}
+    provider = cfg["provider"]
+    provider_config = cfg.get("config") or {}
+    if provider == "voicenter":
+        raw_calls = voicenter_adapter.pull_calls(provider_config, date_from, date_to)
+    elif provider == "exm":
+        raw_calls = exm_adapter.pull_calls(provider_config, date_from, date_to)
+    else:
+        raise HTTPException(status_code=500, detail="ספק שיחות לא נתמך")
 
-    try:
-        resp = httpx.post(_CALL_LOG_URL, json=payload, headers=headers, timeout=15)
-        data = resp.json()
-    except Exception as exc:
-        logger.error("voicenter _pull_org_calls: request to Call Log API failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=502, detail="לא ניתן היה לשלוף שיחות מ-Voicenter כרגע — נסה שוב")
-
-    if data.get("ERROR_NUMBER") not in (0, None):
-        logger.warning("voicenter _pull_org_calls: Voicenter returned error %s: %s", data.get("ERROR_NUMBER"), data.get("ERROR_DESCRIPTION"))
-        raise HTTPException(status_code=502, detail=f"Voicenter: {data.get('ERROR_DESCRIPTION', 'שגיאה לא ידועה')}")
-
-    cdr_list = data.get("CDR_LIST") or []
-
-    # Rep→advisor mapping is OUR OWN data (not Voicenter's), stored locally — non-fatal enrichment
-    # NOTE: Voicenter's actual Call Log API response uses lowercase field names
-    # (e.g. "representativecode", "callernumber") — this differs from the PascalCase
-    # shown in their PDF documentation. Confirmed empirically against a real response.
-    rep_codes = list({c.get("representativecode") for c in cdr_list if c.get("representativecode")})
-    mapping_by_code: dict = {}
+    # Agent (advisor) mapping is OUR OWN data (not the provider's), stored locally — non-fatal
+    # enrichment. agent_key is representative_code for Voicenter, or the line's e164 for EXM
+    # (EXM's call log has no per-call "agent" field — only which line the call went through).
+    agent_keys = list({c["agent_key"] for c in raw_calls if c.get("agent_key")})
+    mapping_by_key: dict = {}
     profiles_map: dict = {}
-    if rep_codes:
+    if agent_keys:
         try:
             db = get_admin_client()
             m_rows = (
-                db.table("voicenter_rep_mappings")
-                .select("representative_code, advisor_id")
+                db.table("calls_agent_mappings")
+                .select("agent_key, advisor_id")
                 .eq("org_id", org_id)
-                .in_("representative_code", rep_codes)
+                .eq("provider", provider)
+                .in_("agent_key", agent_keys)
                 .execute()
             ).data or []
-            mapping_by_code = {m["representative_code"]: m["advisor_id"] for m in m_rows}
-            advisor_ids = list(set(mapping_by_code.values()))
+            mapping_by_key = {m["agent_key"]: m["advisor_id"] for m in m_rows}
+            advisor_ids = list(set(mapping_by_key.values()))
             if advisor_ids:
                 p_rows = db.table("profiles").select("id, full_name, email").in_("id", advisor_ids).execute()
                 profiles_map = {p["id"]: p for p in (p_rows.data or [])}
         except Exception as exc:
-            logger.warning("voicenter _pull_org_calls: advisor mapping enrichment failed (non-fatal): %s", exc)
+            logger.warning("calls _pull_org_calls: advisor mapping enrichment failed (non-fatal): %s", exc)
 
-    # AI summary/transcript come only from our own webhook capture (voicenter_call_ai) —
-    # the Call Log API never returns them (confirmed empirically). Non-fatal enrichment,
-    # same pattern as the rep→advisor mapping above.
-    call_ids = [c.get("callid") for c in cdr_list if c.get("callid")]
+    # AI summary/transcript come only from the Voicenter webhook capture (voicenter_call_ai) —
+    # EXM's package has no AI component, so this is skipped entirely for it.
+    call_ids = [c.get("call_id") for c in raw_calls if c.get("call_id")]
     ai_by_call_id: dict = {}
-    if call_ids:
+    if provider == "voicenter" and call_ids:
         try:
             db = get_admin_client()
             ai_rows = (
@@ -473,28 +557,25 @@ def _pull_org_calls(org_id: str, date_from: str, date_to: str) -> dict:
             ).data or []
             ai_by_call_id = {r["call_id"]: r for r in ai_rows}
         except Exception as exc:
-            logger.warning("voicenter _pull_org_calls: AI summary enrichment failed (non-fatal): %s", exc)
+            logger.warning("calls _pull_org_calls: AI summary enrichment failed (non-fatal): %s", exc)
 
-    # Contact matching is OUR OWN data (schools/contacts), not Voicenter's — resolves the
+    # Contact matching is OUR OWN data (schools/contacts), not the provider's — resolves the
     # counterpart phone number to known person(s)/role/school(s). Non-fatal enrichment.
     contact_map = _build_contact_map(org_id)
     resolutions_by_call_id = _get_call_resolutions(org_id, call_ids)
     manual_links_by_call_id, manual_exclusions_by_call_id = _get_manual_school_overrides(org_id, call_ids)
 
     calls = []
-    for c in cdr_list:
-        rep_code = c.get("representativecode")
-        mapped_advisor_id = mapping_by_code.get(rep_code)
-        direction = _derive_direction(c.get("type"))
-        counterpart = c.get("targetnumber") if direction == "outgoing" else c.get("callernumber")
-        duration = c.get("duration") or 0
-        ai_exists = str((c.get("customdata") or {}).get("AiExists", "")).lower() == "true"
-        call_id = c.get("callid")
+    for c in raw_calls:
+        call_id = c.get("call_id")
+        agent_key = c.get("agent_key")
+        mapped_advisor_id = mapping_by_key.get(agent_key)
+        counterpart = c.get("counterpart_phone")
         ai_row = ai_by_call_id.get(call_id)
         contact = _resolve_contact_for_call(contact_map, resolutions_by_call_id, call_id, counterpart)
         calls.append({
             "call_id": call_id,
-            "direction": direction,
+            "direction": c.get("direction"),
             "counterpart_phone": counterpart,
             "contact_name": contact["contact_name"],
             "contact_role": contact["contact_role"],
@@ -504,19 +585,22 @@ def _pull_org_calls(org_id: str, date_from: str, date_to: str) -> dict:
             "candidate_schools": contact["candidate_schools"],
             "linked_school_ids": manual_links_by_call_id.get(call_id, []),
             "excluded_school_ids": manual_exclusions_by_call_id.get(call_id, []),
-            "representative_code": rep_code,
-            "representative_name": c.get("representativename") or c.get("username"),
+            # Kept as representative_code/representative_name in the response (rather than
+            # agent_key/agent_label) so the existing frontend keeps working unmodified.
+            "representative_code": agent_key,
+            "representative_name": c.get("agent_label"),
             "advisor_id": mapped_advisor_id,
             "advisor_profile": profiles_map.get(mapped_advisor_id),
-            "start_time": c.get("date"),
-            "duration_seconds": duration,
-            "status": c.get("dialstatus"),
+            "start_time": c.get("start_time"),
+            "duration_seconds": c.get("duration_seconds") or 0,
+            "status": c.get("status"),
+            "recording_available": c.get("recording_available", False),
             "ai_summary": ai_row["summary"] if ai_row else None,
-            "ai_summary_available": ai_exists,
+            "ai_summary_available": c.get("ai_summary_available", False),
             "ai_transcript_available": bool(ai_row and ai_row.get("transcript_path")),
         })
 
-    return {"calls": calls, "total_hits": data.get("TOTAL_HITS"), "returned_hits": data.get("RETURN_HITS")}
+    return {"calls": calls, "provider": provider}
 
 
 @router.get("/calls")
@@ -551,7 +635,7 @@ def link_call_school(
     for attempt in range(2):
         try:
             db = get_admin_client()
-            db.table("voicenter_call_school_links").upsert({
+            db.table("calls_call_school_links").upsert({
                 "org_id": user["org_id"],
                 "call_id": call_id,
                 "school_id": body.school_id,
@@ -581,11 +665,11 @@ def exclude_call_from_school(
     user: Annotated[dict, Depends(get_current_user)],
 ):
     """Hides a call from ONE specific school's שיחות tab — purely local to that school's
-    card. Never deletes the underlying Voicenter/AI call data, never affects any other
-    school's tab, and never affects the admin 'ניהול-שיחות' table (which keeps showing
-    every call regardless). Owner/manager always allowed; advisor only if explicitly
-    granted the can_remove_call_from_school permission (role default or per-user override —
-    see schools_router.PERMISSION_DEFAULTS)."""
+    card. Never deletes the underlying call/AI data, never affects any other school's tab,
+    and never affects the admin 'ניהול-שיחות' table (which keeps showing every call
+    regardless). Owner/manager always allowed; advisor only if explicitly granted the
+    can_remove_call_from_school permission (role default or per-user override — see
+    schools_router.PERMISSION_DEFAULTS)."""
     from routers.schools_router import _advisor_has_access_to_school_row, _check_permission
 
     db = get_admin_client()
@@ -599,7 +683,7 @@ def exclude_call_from_school(
     for attempt in range(2):
         try:
             db = get_admin_client()
-            db.table("voicenter_call_school_links").upsert({
+            db.table("calls_call_school_links").upsert({
                 "org_id": user["org_id"],
                 "call_id": call_id,
                 "school_id": body.school_id,
@@ -632,14 +716,14 @@ def resolve_call_contact_school(
     - 'ambiguous' — same contact number is a contact at several schools; the chosen school
       must be one of the candidates. Resolution flows back through _resolve_contact_for_call.
     - 'unknown' — the counterpart number matches no school at all; any school in the org is
-      a valid target. Resolution is persisted as a manual voicenter_call_school_links row so
+      a valid target. Resolution is persisted as a manual calls_call_school_links row so
       the call shows in that school's שיחות tab and is attributed to a same-day meeting.
     Only the notified recipient(s) or an owner/manager may decide."""
     for attempt in range(2):
         try:
             db = get_admin_client()
             rows = (
-                db.table("voicenter_call_contact_resolutions")
+                db.table("calls_call_contact_resolutions")
                 .select("*")
                 .eq("org_id", user["org_id"])
                 .eq("call_id", call_id)
@@ -680,7 +764,7 @@ def resolve_call_contact_school(
     for attempt in range(2):
         try:
             db = get_admin_client()
-            db.table("voicenter_call_contact_resolutions").update({
+            db.table("calls_call_contact_resolutions").update({
                 "resolved_school_id": body.school_id,
                 "resolved_by": user["id"],
                 "resolved_at": now_iso,
@@ -689,7 +773,7 @@ def resolve_call_contact_school(
                 # Unknown numbers have no contact_map entry to flow through — persist the
                 # school attribution as a manual per-call link (same mechanism as the admin
                 # "שייך שיחה לבית ספר" action).
-                db.table("voicenter_call_school_links").upsert({
+                db.table("calls_call_school_links").upsert({
                     "org_id": user["org_id"],
                     "call_id": call_id,
                     "school_id": body.school_id,
@@ -748,7 +832,7 @@ def resolve_call_contact_school(
 # ---------------------------------------------------------------------------
 # Unknown-number call prompts — the interrupting popup that asks the advisor
 # whether an unrecognised number belongs to a school (and optionally saves it
-# as a contact). Rows live in voicenter_call_contact_resolutions with kind='unknown'.
+# as a contact). Rows live in calls_call_contact_resolutions with kind='unknown'.
 # ---------------------------------------------------------------------------
 
 def _fmt_phone(raw) -> str:
@@ -761,13 +845,13 @@ def _fmt_phone(raw) -> str:
 @router.get("/calls/unknown/my-prompts")
 def list_my_unknown_call_prompts(user: Annotated[dict, Depends(get_current_user)]):
     """Open 'unknown number' prompts addressed to the current user — feeds the Sidebar poll
-    that raises the interrupting popup. Denormalised call fields on the row mean no Voicenter
+    that raises the interrupting popup. Denormalised call fields on the row mean no provider
     round-trip is needed here."""
     for attempt in range(2):
         try:
             db = get_admin_client()
             rows = (
-                db.table("voicenter_call_contact_resolutions")
+                db.table("calls_call_contact_resolutions")
                 .select("call_id, call_time, call_direction, call_duration_seconds, counterpart_phone")
                 .eq("org_id", user["org_id"])
                 .eq("kind", "unknown")
@@ -805,7 +889,7 @@ def dismiss_unknown_call(call_id: str, user: Annotated[dict, Depends(get_current
         try:
             db = get_admin_client()
             rows = (
-                db.table("voicenter_call_contact_resolutions")
+                db.table("calls_call_contact_resolutions")
                 .select("*")
                 .eq("org_id", user["org_id"]).eq("call_id", call_id).eq("kind", "unknown")
                 .limit(1).execute()
@@ -828,11 +912,11 @@ def dismiss_unknown_call(call_id: str, user: Annotated[dict, Depends(get_current
     suffix = resolution.get("contact_phone_suffix") or _phone_suffix(resolution.get("counterpart_phone"))
     try:
         db = get_admin_client()
-        db.table("voicenter_call_contact_resolutions").update({
+        db.table("calls_call_contact_resolutions").update({
             "dismissed_at": now_iso, "dismissed_by": user["id"],
         }).eq("id", resolution["id"]).execute()
         if suffix:
-            db.table("voicenter_unknown_number_state").upsert({
+            db.table("calls_unknown_number_state").upsert({
                 "org_id": user["org_id"],
                 "advisor_id": user["id"],
                 "phone_suffix": suffix,
@@ -965,7 +1049,7 @@ def get_call_transcript(user: Annotated[dict, Depends(get_current_user)], call_i
                 reset_admin_client()
                 time.sleep(0.1)
             else:
-                logger.error("voicenter get_call_transcript failed after 2 attempts: %s", exc, exc_info=True)
+                logger.error("calls get_call_transcript failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
     transcript_path = rows[0]["transcript_path"] if rows else None
@@ -976,16 +1060,32 @@ def get_call_transcript(user: Annotated[dict, Depends(get_current_user)], call_i
         signed = db.storage.from_(_TRANSCRIPTS_BUCKET).create_signed_url(transcript_path, 60)
         signed_url = signed.get("signedURL") or signed.get("signed_url")
     except Exception as exc:
-        logger.error("voicenter get_call_transcript: failed to sign URL for %s: %s", transcript_path, exc, exc_info=True)
+        logger.error("calls get_call_transcript: failed to sign URL for %s: %s", transcript_path, exc, exc_info=True)
         raise HTTPException(status_code=503, detail="לא ניתן היה לטעון את התמלול כרגע")
 
     return {"url": signed_url}
 
 
+@router.get("/calls/{call_id}/recording-url")
+def get_call_recording_url(user: Annotated[dict, Depends(get_current_user)], call_id: str):
+    """EXM-only: trades a call id for a short-lived signed recording URL (10 min). Voicenter
+    calls have no recording pull path today — only AI transcript/summary, via the webhook."""
+    _require_manager(user)
+
+    cfg = _get_integration_config(user["org_id"])
+    if not cfg or not cfg.get("enabled") or cfg.get("provider") != "exm":
+        raise HTTPException(status_code=400, detail="הורדת הקלטה נתמכת רק עבור אינטגרציית EXM")
+
+    url = exm_adapter.get_recording_url(cfg.get("config") or {}, call_id)
+    if not url:
+        raise HTTPException(status_code=404, detail="לא נמצאה הקלטה לשיחה זו")
+    return {"url": url}
+
+
 @router.delete("/calls/{call_id}")
 def delete_call_ai_data(user: Annotated[dict, Depends(get_current_user)], call_id: str):
     """Deletes only OUR captured AI summary/transcript for this call — the call itself
-    lives permanently in Voicenter and is never affected by this."""
+    lives permanently with the provider and is never affected by this."""
     _require_manager(user)
 
     for attempt in range(2):
@@ -1005,7 +1105,7 @@ def delete_call_ai_data(user: Annotated[dict, Depends(get_current_user)], call_i
                 reset_admin_client()
                 time.sleep(0.1)
             else:
-                logger.error("voicenter delete_call_ai_data failed after 2 attempts: %s", exc, exc_info=True)
+                logger.error("calls delete_call_ai_data failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
     transcript_path = rows[0]["transcript_path"] if rows else None
@@ -1013,21 +1113,21 @@ def delete_call_ai_data(user: Annotated[dict, Depends(get_current_user)], call_i
         try:
             db.storage.from_(_TRANSCRIPTS_BUCKET).remove([transcript_path])
         except Exception as exc:
-            logger.warning("voicenter delete_call_ai_data: transcript file removal failed (non-fatal): %s", exc)
+            logger.warning("calls delete_call_ai_data: transcript file removal failed (non-fatal): %s", exc)
 
     try:
         db.table("voicenter_call_ai").delete().eq("org_id", user["org_id"]).eq("call_id", call_id).execute()
     except Exception as exc:
-        logger.error("voicenter delete_call_ai_data: row delete failed: %s", exc, exc_info=True)
+        logger.error("calls delete_call_ai_data: row delete failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=503, detail="לא ניתן היה למחוק את הנתונים כרגע — נסה שוב")
 
     return {"ok": True}
 
-    return {"url": signed_url}
-
 
 # ---------------------------------------------------------------------------
-# Rep → advisor mappings — OUR OWN data, authenticated (owner + manager)
+# Agent (rep/line) → advisor mappings — OUR OWN data, authenticated (owner + manager).
+# Exposed under the historical field names (representative_code/representative_name)
+# so the frontend picker keeps working unmodified for both providers.
 # ---------------------------------------------------------------------------
 
 class RepMappingIn(BaseModel):
@@ -1040,15 +1140,19 @@ class RepMappingIn(BaseModel):
 def list_mappings(user: Annotated[dict, Depends(get_current_user)]):
     _require_manager(user)
 
+    cfg = _get_integration_config(user["org_id"])
+    provider = cfg["provider"] if cfg else "voicenter"
+
     rows: list = []
     for attempt in range(2):
         try:
             db = get_admin_client()
             rows = (
-                db.table("voicenter_rep_mappings")
+                db.table("calls_agent_mappings")
                 .select("*")
                 .eq("org_id", user["org_id"])
-                .order("representative_name")
+                .eq("provider", provider)
+                .order("agent_label")
                 .execute()
             ).data or []
             break
@@ -1057,7 +1161,7 @@ def list_mappings(user: Annotated[dict, Depends(get_current_user)]):
                 reset_admin_client()
                 time.sleep(0.1)
             else:
-                logger.error("voicenter list_mappings failed after 2 attempts: %s", exc, exc_info=True)
+                logger.error("calls list_mappings failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
     advisor_ids = list({r["advisor_id"] for r in rows if r.get("advisor_id")})
@@ -1068,22 +1172,31 @@ def list_mappings(user: Annotated[dict, Depends(get_current_user)]):
             p_rows = db.table("profiles").select("id, full_name, email").in_("id", advisor_ids).execute()
             profiles_map = {p["id"]: p for p in (p_rows.data or [])}
         except Exception as exc:
-            logger.warning("voicenter list_mappings: advisor enrichment failed (non-fatal): %s", exc)
+            logger.warning("calls list_mappings: advisor enrichment failed (non-fatal): %s", exc)
 
-    for r in rows:
-        r["advisor_profile"] = profiles_map.get(r.get("advisor_id"))
-
-    return rows
+    return [{
+        "id": r["id"],
+        "representative_code": r["agent_key"],
+        "representative_name": r.get("agent_label"),
+        "advisor_id": r.get("advisor_id"),
+        "advisor_profile": profiles_map.get(r.get("advisor_id")),
+    } for r in rows]
 
 
 @router.post("/mappings")
 def upsert_mapping(user: Annotated[dict, Depends(get_current_user)], body: RepMappingIn):
     _require_manager(user)
 
+    cfg = _get_integration_config(user["org_id"])
+    if not cfg:
+        raise HTTPException(status_code=400, detail="אין אינטגרציית שיחות מחוברת")
+    provider = cfg["provider"]
+
     row = {
         "org_id": user["org_id"],
-        "representative_code": body.representative_code,
-        "representative_name": body.representative_name,
+        "provider": provider,
+        "agent_key": body.representative_code,
+        "agent_label": body.representative_name,
         "advisor_id": body.advisor_id,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -1092,8 +1205,8 @@ def upsert_mapping(user: Annotated[dict, Depends(get_current_user)], body: RepMa
         try:
             db = get_admin_client()
             result = (
-                db.table("voicenter_rep_mappings")
-                .upsert(row, on_conflict="org_id,representative_code")
+                db.table("calls_agent_mappings")
+                .upsert(row, on_conflict="org_id,provider,agent_key")
                 .execute()
             )
             break
@@ -1102,23 +1215,29 @@ def upsert_mapping(user: Annotated[dict, Depends(get_current_user)], body: RepMa
                 reset_admin_client()
                 time.sleep(0.1)
             else:
-                logger.error("voicenter upsert_mapping failed after 2 attempts: %s", exc, exc_info=True)
+                logger.error("calls upsert_mapping failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
-    # This rep code now has an advisor — clear the "unmapped" alert marker (so a future gap
-    # re-alerts) and close any open "rep unmapped" notifications for it.
+    # This agent now has an advisor — clear the "unmapped" alert marker (so a future gap
+    # re-alerts) and close any open "agent unmapped" notifications for it.
     try:
         db = get_admin_client()
-        db.table("voicenter_known_reps").update({"unmapped_alert_sent_at": None}).eq(
+        db.table("calls_known_agents").update({"unmapped_alert_sent_at": None}).eq(
             "org_id", user["org_id"]
-        ).eq("representative_code", body.representative_code).execute()
+        ).eq("provider", provider).eq("agent_key", body.representative_code).execute()
         db.table("notifications").update({"read_at": datetime.now(timezone.utc).isoformat()}).eq(
             "type", "voicenter_rep_unmapped"
         ).contains("data", {"representative_code": body.representative_code}).is_("read_at", "null").execute()
     except Exception as exc:
-        logger.warning("upsert_mapping: clearing unmapped-rep alert failed (non-fatal): %s", exc)
+        logger.warning("upsert_mapping: clearing unmapped-agent alert failed (non-fatal): %s", exc)
 
-    return result.data[0] if result.data else row
+    saved = result.data[0] if result.data else row
+    return {
+        "id": saved.get("id"),
+        "representative_code": saved.get("agent_key"),
+        "representative_name": saved.get("agent_label"),
+        "advisor_id": saved.get("advisor_id"),
+    }
 
 
 @router.delete("/mappings/{mapping_id}")
@@ -1128,14 +1247,14 @@ def delete_mapping(user: Annotated[dict, Depends(get_current_user)], mapping_id:
     for attempt in range(2):
         try:
             db = get_admin_client()
-            db.table("voicenter_rep_mappings").delete().eq("id", mapping_id).eq("org_id", user["org_id"]).execute()
+            db.table("calls_agent_mappings").delete().eq("id", mapping_id).eq("org_id", user["org_id"]).execute()
             break
         except Exception as exc:
             if attempt == 0:
                 reset_admin_client()
                 time.sleep(0.1)
             else:
-                logger.error("voicenter delete_mapping failed after 2 attempts: %s", exc, exc_info=True)
+                logger.error("calls delete_mapping failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
     return {"ok": True}
@@ -1143,21 +1262,38 @@ def delete_mapping(user: Annotated[dict, Depends(get_current_user)], mapping_id:
 
 @router.get("/known-reps")
 def list_known_reps(user: Annotated[dict, Depends(get_current_user)]):
-    """Every (representative_code, representative_name) pair ever seen in this org's calls —
-    populated by process_new_calls below. This is the option list for the VOICENTER-mapping
-    picker in ניהול-משתמשים: it lets the picker show every rep that has ever called without
-    hitting Voicenter's live API (which has no "list all agents" endpoint) on every page load."""
+    """Every (agent_key, agent_label) pair ever seen in this org's calls — populated by
+    process_new_calls (every 15 min) AND, right here, by a live top-up pull of the last
+    7 days. The live top-up matters for a line/number that was JUST connected and has
+    never been scanned by the cron yet (e.g. right after wiring up a brand-new EXM line)
+    — without it, the mapping picker in ניהול-משתמשים would show an empty dropdown with
+    no way to pick that line at all until the cron caught up. Non-fatal: if the live pull
+    fails, this still falls back to whatever's already cached in calls_known_agents."""
     _require_manager(user)
+
+    cfg = _get_integration_config(user["org_id"])
+    provider = cfg["provider"] if cfg else "voicenter"
+
+    if cfg and cfg.get("enabled"):
+        try:
+            now_il = datetime.now(_IL_TZ)
+            date_from = (now_il - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S")
+            date_to = now_il.strftime("%Y-%m-%dT%H:%M:%S")
+            result = _pull_org_calls(user["org_id"], date_from, date_to)
+            _upsert_known_agents(user["org_id"], provider, result["calls"])
+        except Exception as exc:
+            logger.warning("calls list_known_reps: live top-up pull failed (non-fatal) for org=%s: %s", user["org_id"], exc)
 
     rows: list = []
     for attempt in range(2):
         try:
             db = get_admin_client()
             rows = (
-                db.table("voicenter_known_reps")
-                .select("representative_code, representative_name, last_seen_at")
+                db.table("calls_known_agents")
+                .select("agent_key, agent_label, last_seen_at")
                 .eq("org_id", user["org_id"])
-                .order("representative_name")
+                .eq("provider", provider)
+                .order("agent_label")
                 .execute()
             ).data or []
             break
@@ -1166,10 +1302,14 @@ def list_known_reps(user: Annotated[dict, Depends(get_current_user)]):
                 reset_admin_client()
                 time.sleep(0.1)
             else:
-                logger.error("voicenter list_known_reps failed after 2 attempts: %s", exc, exc_info=True)
+                logger.error("calls list_known_reps failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
-    return rows
+    return [{
+        "representative_code": r["agent_key"],
+        "representative_name": r.get("agent_label"),
+        "last_seen_at": r.get("last_seen_at"),
+    } for r in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -1188,7 +1328,7 @@ def process_new_calls(request: Request):
     db = get_admin_client()
     now = datetime.now(timezone.utc)
     try:
-        orgs = db.table("voicenter_integrations").select("org_id, enabled, last_call_scan_at").eq("enabled", True).execute().data or []
+        orgs = db.table("calls_integrations").select("org_id, provider, enabled, last_call_scan_at").eq("enabled", True).execute().data or []
     except Exception as exc:
         logger.error("process_new_calls: failed to load integrations: %s", exc, exc_info=True)
         raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת")
@@ -1200,12 +1340,13 @@ def process_new_calls(request: Request):
 
     for org in orgs:
         org_id = org["org_id"]
+        provider = org["provider"]
         last_scan = org.get("last_call_scan_at")
         # First run for this org: only look back 1 hour, to avoid a flood of historical
         # ambiguous-contact notifications on rollout.
         window_start = (datetime.fromisoformat(last_scan) if last_scan else now - timedelta(hours=1)) - timedelta(minutes=5)
-        date_from = window_start.strftime("%Y-%m-%dT%H:%M:%S")
-        date_to = now.strftime("%Y-%m-%dT%H:%M:%S")
+        date_from = window_start.astimezone(_IL_TZ).strftime("%Y-%m-%dT%H:%M:%S")
+        date_to = now.astimezone(_IL_TZ).strftime("%Y-%m-%dT%H:%M:%S")
 
         try:
             result = _pull_org_calls(org_id, date_from, date_to)
@@ -1216,22 +1357,11 @@ def process_new_calls(request: Request):
             logger.warning("process_new_calls: skipping org=%s (unexpected error: %s)", org_id, exc)
             continue
 
-        # Record every rep code/name seen in this scan window — feeds the option list for the
-        # VOICENTER-mapping picker in ניהול-משתמשים (see list_known_reps above). Non-fatal:
-        # a failure here must never block the ambiguous-contact notification logic below.
-        try:
-            seen_reps = {c["representative_code"]: c.get("representative_name") for c in result["calls"] if c.get("representative_code")}
-            if seen_reps:
-                now_iso = now.isoformat()
-                db.table("voicenter_known_reps").upsert(
-                    [
-                        {"org_id": org_id, "representative_code": code, "representative_name": name, "last_seen_at": now_iso}
-                        for code, name in seen_reps.items()
-                    ],
-                    on_conflict="org_id,representative_code",
-                ).execute()
-        except Exception as exc:
-            logger.warning("process_new_calls: known-reps upsert failed (non-fatal) for org=%s: %s", org_id, exc)
+        # Record every agent key/label seen in this scan window — feeds the option list for
+        # the mapping picker in ניהול-משתמשים (see list_known_reps above, which also does
+        # its own live top-up). Non-fatal: a failure here must never block the
+        # ambiguous-contact notification logic below.
+        _upsert_known_agents(org_id, provider, result["calls"])
 
         ambiguous_calls = [c for c in result["calls"] if c.get("pending_school_resolution")]
         if ambiguous_calls:
@@ -1253,7 +1383,7 @@ def process_new_calls(request: Request):
                     continue
 
                 try:
-                    db.table("voicenter_call_contact_resolutions").insert({
+                    db.table("calls_call_contact_resolutions").insert({
                         "org_id": org_id,
                         "call_id": c["call_id"],
                         "call_time": c["start_time"],
@@ -1290,10 +1420,10 @@ def process_new_calls(request: Request):
         except Exception as exc:
             logger.warning("process_new_calls: failed to load owners/managers for org=%s: %s", org_id, exc)
 
-        # --- Track A: org-side number not mapped to any user ---
-        # A rep code seen in calls but with no voicenter_rep_mappings row can't be attributed
-        # to an advisor. Alert owners/managers once (they own ניהול-משתמשים → VOICENTER mapping);
-        # the marker is cleared by upsert_mapping so a future gap re-alerts.
+        # --- Track A: org-side agent (rep code / line) not mapped to any user ---
+        # An agent_key seen in calls but with no calls_agent_mappings row can't be attributed
+        # to an advisor. Alert owners/managers once (they own ניהול-משתמשים → mapping); the
+        # marker is cleared by upsert_mapping so a future gap re-alerts.
         try:
             seen_now = {}
             for c in result["calls"]:
@@ -1303,14 +1433,14 @@ def process_new_calls(request: Request):
             codes = list(seen_now.keys())
             if codes:
                 mapped = {
-                    m["representative_code"]
-                    for m in (db.table("voicenter_rep_mappings").select("representative_code")
-                              .eq("org_id", org_id).in_("representative_code", codes).execute().data or [])
+                    m["agent_key"]
+                    for m in (db.table("calls_agent_mappings").select("agent_key")
+                              .eq("org_id", org_id).eq("provider", provider).in_("agent_key", codes).execute().data or [])
                 }
                 known = {
-                    r["representative_code"]: r
-                    for r in (db.table("voicenter_known_reps").select("representative_code, unmapped_alert_sent_at")
-                              .eq("org_id", org_id).in_("representative_code", codes).execute().data or [])
+                    r["agent_key"]: r
+                    for r in (db.table("calls_known_agents").select("agent_key, unmapped_alert_sent_at")
+                              .eq("org_id", org_id).eq("provider", provider).in_("agent_key", codes).execute().data or [])
                 }
                 to_alert = [
                     code for code in codes
@@ -1336,12 +1466,12 @@ def process_new_calls(request: Request):
                         },
                     } for rid in owners_managers]
                     _create_notifications(db, notif_rows, pref_key="notify_voicenter_rep_unmapped")
-                    db.table("voicenter_known_reps").update(
+                    db.table("calls_known_agents").update(
                         {"unmapped_alert_sent_at": now.isoformat()}
-                    ).eq("org_id", org_id).eq("representative_code", code).execute()
+                    ).eq("org_id", org_id).eq("provider", provider).eq("agent_key", code).execute()
                     new_rep_unmapped += 1
         except Exception as exc:
-            logger.warning("process_new_calls: Track A (rep unmapped) failed for org=%s: %s", org_id, exc)
+            logger.warning("process_new_calls: Track A (agent unmapped) failed for org=%s: %s", org_id, exc)
 
         # --- Track B: counterpart number matches no school — prompt the advisor ---
         unknown_calls = [
@@ -1360,7 +1490,7 @@ def process_new_calls(request: Request):
                 continue
             try:
                 open_row = (
-                    db.table("voicenter_call_contact_resolutions")
+                    db.table("calls_call_contact_resolutions")
                     .select("id, missed_calls_since_prompt")
                     .eq("org_id", org_id).eq("kind", "unknown")
                     .eq("caller_advisor_id", advisor_id).eq("contact_phone_suffix", suffix)
@@ -1368,31 +1498,31 @@ def process_new_calls(request: Request):
                     .limit(1).execute()
                 ).data
                 if open_row:
-                    db.table("voicenter_call_contact_resolutions").update({
+                    db.table("calls_call_contact_resolutions").update({
                         "missed_calls_since_prompt": (open_row[0].get("missed_calls_since_prompt") or 0) + 1,
                     }).eq("id", open_row[0]["id"]).execute()
                     continue
 
                 state = (
-                    db.table("voicenter_unknown_number_state").select("*")
+                    db.table("calls_unknown_number_state").select("*")
                     .eq("org_id", org_id).eq("advisor_id", advisor_id).eq("phone_suffix", suffix)
                     .limit(1).execute()
                 ).data
                 state = state[0] if state else None
                 if state and state.get("muted") and (state.get("calls_since_prompt") or 0) < UNKNOWN_CALL_REPROMPT_AFTER:
-                    db.table("voicenter_unknown_number_state").update({
+                    db.table("calls_unknown_number_state").update({
                         "calls_since_prompt": (state.get("calls_since_prompt") or 0) + 1,
                         "updated_at": now.isoformat(),
                     }).eq("id", state["id"]).execute()
                     continue
 
-                db.table("voicenter_unknown_number_state").upsert({
+                db.table("calls_unknown_number_state").upsert({
                     "org_id": org_id, "advisor_id": advisor_id, "phone_suffix": suffix,
                     "muted": False, "calls_since_prompt": 0,
                     "last_prompt_at": now.isoformat(), "updated_at": now.isoformat(),
                 }, on_conflict="org_id,advisor_id,phone_suffix").execute()
 
-                db.table("voicenter_call_contact_resolutions").insert({
+                db.table("calls_call_contact_resolutions").insert({
                     "org_id": org_id,
                     "call_id": c["call_id"],
                     "kind": "unknown",
@@ -1422,17 +1552,17 @@ def process_new_calls(request: Request):
                 logger.warning("process_new_calls: Track B (unknown call) failed for call=%s: %s", c.get("call_id"), exc)
 
         try:
-            db.table("voicenter_integrations").update({"last_call_scan_at": now.isoformat()}).eq("org_id", org_id).execute()
+            db.table("calls_integrations").update({"last_call_scan_at": now.isoformat()}).eq("org_id", org_id).execute()
         except Exception as exc:
             logger.warning("process_new_calls: failed to update cursor for org=%s: %s", org_id, exc)
 
         processed_orgs += 1
 
     # Auto-dismiss stale 'unknown' prompts (>14 days, never acted on) — the underlying call
-    # has likely aged out of Voicenter's log window, so the popup can no longer be useful.
+    # has likely aged out of the provider's log window, so the popup can no longer be useful.
     try:
         cutoff = (now - timedelta(days=14)).isoformat()
-        db.table("voicenter_call_contact_resolutions").update(
+        db.table("calls_call_contact_resolutions").update(
             {"dismissed_at": now.isoformat()}
         ).eq("kind", "unknown").is_("resolved_school_id", "null").is_("dismissed_at", "null") \
          .lt("call_time", cutoff).execute()

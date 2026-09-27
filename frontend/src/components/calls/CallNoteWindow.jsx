@@ -19,7 +19,7 @@ function TranscriptBody({ callId }) {
     let cancelled = false;
     (async () => {
       try {
-        const res = await axios.get(`/voicenter/calls/${callId}/transcript`);
+        const res = await axios.get(`/calls/calls/${callId}/transcript`);
         const url = res.data?.url;
         if (!url) throw new Error("no url");
         const fileRes = await axios.get(url);
