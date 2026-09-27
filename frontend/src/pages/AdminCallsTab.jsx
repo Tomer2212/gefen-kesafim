@@ -33,7 +33,7 @@ export default function AdminCallsTab({ users }) {
         date_to: `${dateTo}T23:59:59`,
       };
       if (advisorId) params.advisor_id = advisorId;
-      const res = await axios.get("/voicenter/calls", { params });
+      const res = await axios.get("/calls/calls", { params });
       setCalls(res.data?.calls || []);
     } catch (e) {
       const detail = e.response?.data?.detail;

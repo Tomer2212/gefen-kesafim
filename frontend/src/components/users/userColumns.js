@@ -51,7 +51,7 @@ export function buildUserColumns(ctx = {}) {
     { key: "overrides", label: "הרשאות בהתאמה אישית", kind: "enum", defaultVisible: true,
       options: HAS_OPTIONS,
       getValue: u => ((overrideCounts[u.id] || 0) > 0 ? "yes" : "no") },
-    { key: "voicenter", label: "שיוך VOICENTER", kind: "enum", defaultVisible: true,
+    { key: "voicenter", label: "שיוך קו שיחות", kind: "enum", defaultVisible: true,
       options: VOICENTER_OPTIONS,
       getValue: u => (voicenterMappings.some(m => m.advisor_id === u.id) ? "yes" : "no") },
     { key: "status", label: "סטטוס", kind: "enum", defaultVisible: true,

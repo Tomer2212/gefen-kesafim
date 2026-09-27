@@ -95,9 +95,9 @@ function CallRowBase({ call, onDelete, hideSchoolColumn, canManage = true, schoo
                 onClick={async () => {
                   try {
                     if (schoolId) {
-                      await axios.post(`/voicenter/calls/${call.call_id}/exclude-from-school`, { school_id: schoolId });
+                      await axios.post(`/calls/calls/${call.call_id}/exclude-from-school`, { school_id: schoolId });
                     } else {
-                      await axios.delete(`/voicenter/calls/${call.call_id}`);
+                      await axios.delete(`/calls/calls/${call.call_id}`);
                     }
                   } catch { /* non-fatal for UI */ }
                   setConfirmDelete(false);
@@ -118,7 +118,7 @@ function CallRowBase({ call, onDelete, hideSchoolColumn, canManage = true, schoo
             submittingLabel="משייך..."
             onCancel={() => setLinkModalOpen(false)}
             onConfirm={async s => {
-              try { await axios.post(`/voicenter/calls/${call.call_id}/link-school`, { school_id: s.id }); } catch { /* non-fatal for UI */ }
+              try { await axios.post(`/calls/calls/${call.call_id}/link-school`, { school_id: s.id }); } catch { /* non-fatal for UI */ }
               setLinkModalOpen(false);
             }}
           />

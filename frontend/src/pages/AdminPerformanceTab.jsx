@@ -157,7 +157,7 @@ export default function AdminPerformanceTab({ users, loadingUsers, loadUsers }) 
       // offline-work endpoint) must never blank out the other two, and the specific failure
       // needs to stay visible instead of being swallowed by one shared try/catch.
       const plannedPromise = fetchRangeBusyByDate(advisorId, rangeStart, rangeEndExclusive);
-      const callsPromise = axios.get("/voicenter/calls", {
+      const callsPromise = axios.get("/calls/calls", {
         params: { date_from: `${rangeStart}T00:00:00`, date_to: `${rangeEnd}T23:59:59`, advisor_id: advisorId },
       }).catch(e => { setCallsError(e.response?.data?.detail || "שגיאה בטעינת שיחות"); return null; });
       const offlinePromise = axios.get("/performance/offline-work", {

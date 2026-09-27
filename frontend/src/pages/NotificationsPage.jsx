@@ -636,7 +636,7 @@ function NotificationRow({ notif, isExpanded, onToggle, onRead, onReload, onDele
     setSubmitting(true);
     setCallResolveError("");
     try {
-      await axios.patch(`/voicenter/calls/${data.call_id}/resolve-contact-school`, { school_id: schoolId });
+      await axios.patch(`/calls/calls/${data.call_id}/resolve-contact-school`, { school_id: schoolId });
       setResolvedSchoolId(schoolId);
       onRead(notif.id);
       setTimeout(() => { onToggle(notif.id); onReload(); }, 2000);

@@ -64,7 +64,7 @@ export default function UnknownCallPopup({ reminder, onDismiss, onSuccess }) {
     setBusy(true);
     setError("");
     try {
-      await axios.post(`/voicenter/calls/${callId}/dismiss-unknown`);
+      await axios.post(`/calls/calls/${callId}/dismiss-unknown`);
       onDismiss();
     } catch {
       setError("שגיאה — נסה שוב");
@@ -76,7 +76,7 @@ export default function UnknownCallPopup({ reminder, onDismiss, onSuccess }) {
     // called by SchoolResultsList's confirm button (its own submitting guard is active)
     setError("");
     try {
-      await axios.patch(`/voicenter/calls/${callId}/resolve-contact-school`, { school_id: school.id });
+      await axios.patch(`/calls/calls/${callId}/resolve-contact-school`, { school_id: school.id });
     } catch (err) {
       setError(err.response?.data?.detail || "שגיאה בשיוך השיחה — נסה שוב");
       return; // stay on the school step
@@ -92,7 +92,7 @@ export default function UnknownCallPopup({ reminder, onDismiss, onSuccess }) {
     setBusy(true);
     setError("");
     try {
-      const r = await axios.post(`/voicenter/calls/${callId}/save-contact`, {
+      const r = await axios.post(`/calls/calls/${callId}/save-contact`, {
         school_id: chosenSchool.id,
         role: contact.role.trim(),
         name: contact.name.trim(),

@@ -520,7 +520,7 @@ export default function Sidebar({ dark = false }) {
       const { data: { session } } = await supabase.auth.getSession();
       if (!sessionIsValid(session)) return;
       try {
-        const res = await axios.get("/voicenter/calls/unknown/my-prompts");
+        const res = await axios.get("/calls/calls/unknown/my-prompts");
         for (const p of (res.data?.prompts || [])) {
           const key = `call-attrib-${p.call_id}`;
           if (sessionStorage.getItem(key)) continue;

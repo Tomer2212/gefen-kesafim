@@ -11,6 +11,7 @@ export default defineConfig({
       "/analyze": { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/attendance": { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/calendar": { target: "http://127.0.0.1:8000", changeOrigin: true },
+      "/calls": { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/chatbot": { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/contact/send": { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/performance": { target: "http://127.0.0.1:8000", changeOrigin: true },
@@ -20,7 +21,6 @@ export default defineConfig({
       "/sessions": { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/signup":  { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/tasks": { target: "http://127.0.0.1:8000", changeOrigin: true },
-      "/voicenter": { target: "http://127.0.0.1:8000", changeOrigin: true },
     },
   },
 });

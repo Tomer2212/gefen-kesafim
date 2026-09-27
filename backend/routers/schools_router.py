@@ -6281,7 +6281,7 @@ def list_school_calls(
     """Calls (from Voicenter) matched to this school's contacts — same visibility as the
     rest of the school card (advisor assigned / restrict_access_to / manager+)."""
     from academic_years import get_academic_year_date_range
-    from routers.voicenter_router import _pull_org_calls
+    from routers.calls_router import _pull_org_calls
 
     for attempt in range(2):
         try:
@@ -6312,7 +6312,7 @@ def list_school_calls(
     except HTTPException as exc:
         if exc.status_code == 400:
             # Voicenter not configured/enabled for this org — friendly empty state, not an error
-            return {"calls": [], "voicenter_enabled": False}
+            return {"calls": [], "calls_enabled": False}
         raise
 
     calls = [
@@ -6320,7 +6320,7 @@ def list_school_calls(
         if school_id not in (c.get("excluded_school_ids") or [])
         and (c.get("school_id") == school_id or school_id in (c.get("linked_school_ids") or []))
     ]
-    return {"calls": calls, "voicenter_enabled": True}
+    return {"calls": calls, "calls_enabled": True}
 
 
 # ---------------------------------------------------------------------------
@@ -6563,7 +6563,7 @@ def get_meeting_actual_detail(school_id: str, meeting_id: str, user: Annotated[d
     should_sync = meeting_date and meeting_date <= today_il and (is_recent or not meeting.get("calls_synced_at"))
     if should_sync:
         try:
-            from routers.voicenter_router import _pull_org_calls
+            from routers.calls_router import _pull_org_calls
             d = meeting["meeting_date"]
             result = _pull_org_calls(user["org_id"], f"{d}T00:00:00", f"{d}T23:59:59")
             calls_for_school = [
@@ -6797,7 +6797,7 @@ def recompute_meeting_call_activity(request: Request):
         raise HTTPException(status_code=403, detail="אין הרשאה")
 
     from zoneinfo import ZoneInfo
-    from routers.voicenter_router import _pull_org_calls
+    from routers.calls_router import _pull_org_calls
 
     today_il = datetime.now(ZoneInfo("Asia/Jerusalem")).date()
     dates = [today_il.isoformat(), (today_il - timedelta(days=1)).isoformat()]
