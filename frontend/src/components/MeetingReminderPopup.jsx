@@ -24,8 +24,6 @@ export default function MeetingReminderPopup({ reminder, onDismiss, onSuccess })
   const [statusUpdating, setStatusUpdating] = useState(false);
   const [statusError, setStatusError] = useState(false);
 
-  const minsUntil = Math.ceil(reminder.msUntil / 60000);
-
   async function handleStatusSelect(status) {
     setStatusUpdating(true);
     setStatusError(false);
@@ -85,10 +83,9 @@ export default function MeetingReminderPopup({ reminder, onDismiss, onSuccess })
         {view === "main" && (
           <>
             <p className="text-sm text-slate-700 mb-3">
-              פגישה בעוד{" "}
-              <span className="font-semibold">{minsUntil}</span>{" "}
-              דקות עם בית הספר{" "}
-              <span className="font-semibold">{reminder.school_name}</span>.
+              פגישה עם בית הספר{" "}
+              <span className="font-semibold">{reminder.school_name}</span>{" "}
+              תחל ב-<span className="font-semibold">{reminder.start_time}</span>.
             </p>
             <div className="grid grid-cols-2 gap-1.5">
               <button
