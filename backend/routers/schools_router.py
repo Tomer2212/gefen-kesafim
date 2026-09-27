@@ -6828,12 +6828,22 @@ def recompute_meeting_call_activity(request: Request):
             continue
 
         for date_str in dates:
+            # school_ids is chunked to stay under PostgREST/proxy URL-length limits — a
+            # single .in_() call with a large org's full school list (confirmed with a
+            # 644-school org: fails with a 400 "JSON could not be generated" / Bad Request,
+            # since the generated query string is too long) silently broke this whole cron
+            # step for that org, which in turn meant auto-completion never ran for it.
+            # Chunk size matches the existing precedent in main.py's run_states cleanup
+            # (also chunked .in_() over UUIDs against the same Supabase/Cloudflare stack).
             try:
                 db = get_admin_client()
-                meeting_rows = (
-                    db.table("meetings").select("school_id")
-                    .eq("meeting_date", date_str).in_("school_id", school_ids).execute()
-                ).data or []
+                meeting_rows = []
+                for i in range(0, len(school_ids), 100):
+                    chunk = school_ids[i:i + 100]
+                    meeting_rows.extend(
+                        db.table("meetings").select("school_id")
+                        .eq("meeting_date", date_str).in_("school_id", chunk).execute().data or []
+                    )
             except Exception as exc:
                 logger.warning("recompute_meeting_call_activity: failed to load meetings org=%s date=%s: %s", org_id, date_str, exc)
                 continue
