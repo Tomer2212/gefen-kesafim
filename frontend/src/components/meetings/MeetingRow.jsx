@@ -13,6 +13,8 @@ import { TimeInput, normalizeTimeValue } from "./TimeInput";
 import { AdvisorReassignModal } from "./AdvisorReassignModal";
 import { MeetingActualDetail } from "./MeetingActualDetail";
 import BlockedDateConfirmModal from "./BlockedDateConfirmModal";
+import RequestedUploadYearsModal from "./RequestedUploadYearsModal";
+import { getAcademicYearForDate, isAcademicYearSeam, DEFAULT_ACADEMIC_YEAR } from "../../constants/academicYears";
 import { MEETING_STATUS_OPTIONS, MEETING_SERVICE_TYPE_OPTIONS, STATUS_MAP, getStatusDisplay, formatMeetingDate } from "./constants";
 
 function formatActualDuration(seconds) {
@@ -298,6 +300,7 @@ function MeetingRowImpl({
   const [advisorReassignPrompt, setAdvisorReassignPrompt] = useState(null);
   const [contactPickerOptions, setContactPickerOptions] = useState(null);
   const [blockedDateConfirm, setBlockedDateConfirm] = useState(null); // { pendingDate, reason } | null
+  const [pendingYearsPrompt, setPendingYearsPrompt] = useState(null); // meeting_date string | null
   const [dateHovered, setDateHovered] = useState(false);
   const [startHovered, setStartHovered] = useState(false);
   const [endHovered, setEndHovered] = useState(false);
@@ -419,6 +422,30 @@ function MeetingRowImpl({
 
   function set(field, val) {
     setDraft(p => ({ ...p, [field]: val }));
+  }
+
+  // Only at the academic-year "seam" (01.08–31.10) does it make sense to ask which
+  // year(s) of files the secretary should be asked for — outside that window the answer
+  // is unambiguous and derived silently from the date (backend resolve_requested_upload_years),
+  // so asking every time would just be friction on an otherwise one-click action.
+  function maybePromptUploadYears(dateStr) {
+    const serviceType = draft.meeting_service_type || "gefen";
+    if (serviceType !== "current" && isAcademicYearSeam(dateStr)) {
+      setPendingYearsPrompt(dateStr);
+    }
+  }
+
+  async function confirmUploadYears(years) {
+    const dateStr = pendingYearsPrompt;
+    setPendingYearsPrompt(null);
+    try {
+      await axios.patch(`/schools/${meeting.school_id}/meetings/${meeting.id}`, { requested_upload_years: years });
+      setDraft(p => ({ ...p, requested_upload_years: years }));
+      onMeetingPatched?.(meeting.id, { requested_upload_years: years });
+    } catch (err) {
+      if (err?.response?.status === 403) onPermissionDenied?.(err.response.data?.detail || PERMISSION_DENIED_MSG);
+    }
+    return dateStr;
   }
 
   // The reminder toggle writes through a dedicated PATCH — NOT the row's field autosave.
@@ -555,6 +582,13 @@ function MeetingRowImpl({
   return (
     <>
       {showNoParticipantsModal && <NoParticipantsModal onClose={() => setShowNoParticipantsModal(false)} />}
+      {pendingYearsPrompt && (
+        <RequestedUploadYearsModal
+          defaultYear={getAcademicYearForDate(pendingYearsPrompt) || DEFAULT_ACADEMIC_YEAR}
+          onConfirm={confirmUploadYears}
+          onCancel={() => setPendingYearsPrompt(null)}
+        />
+      )}
       {conflictModal && (
         <ConflictModal
           advisorName={conflictModal.advisorName}
@@ -644,6 +678,7 @@ function MeetingRowImpl({
                   return;
                 }
                 const nd = { ...draft, meeting_date: v }; setDraft(nd); saveDraft(nd);
+                maybePromptUploadYears(v);
               }}
               onClose={() => setShowDate(false)} />}
             {blockedDateConfirm && (
@@ -652,6 +687,7 @@ function MeetingRowImpl({
                 onKeepAnyway={() => {
                   const nd = { ...draft, meeting_date: blockedDateConfirm.pendingDate };
                   setDraft(nd); saveDraft(nd);
+                  maybePromptUploadYears(blockedDateConfirm.pendingDate);
                   setBlockedDateConfirm(null);
                 }}
                 onPickAnother={() => { setBlockedDateConfirm(null); setShowDate(true); }}

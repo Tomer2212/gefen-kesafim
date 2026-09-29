@@ -8,16 +8,28 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Response, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Response, UploadFile, File, Form
 
 from auth import get_current_user
 from supabase_client import get_admin_client, reset_admin_client
+from academic_years import resolve_requested_upload_years
 from meeting_upload_logic import build_upload_checklist, compute_upload_comparison, file_type_label
 from email_resend import send_resend_email
 from logic.file_identifier import identify_file
 from logic.gefen_processor import load_gefen
 from plan_roster import extract_plan_roster
-from routers.analyze_router import _detect_gefen_division
+from routers.analyze_router import (
+    _detect_gefen_division,
+    _normalize_symbol,
+    _read_tikhnun_institution_symbols,
+    _read_gefen_invoice_dates,
+    _read_finance_invoice_dates,
+    _tikhnun_year_entry,
+    _dated_file_entry,
+    _entry_has_issue,
+    _finance_budget_scoped,
+    _kesafim_is_unreadable_binary,
+)
 from routers.schools_router import _create_notifications
 
 logger = logging.getLogger(__name__)
@@ -34,8 +46,11 @@ def _classify_uploaded_file(path: Path) -> dict:
     if kind == "gefen":
         try:
             df, _ = load_gefen(str(path))
-            div = _detect_gefen_division(df)
-            division_type = None if div == "both" else div
+            # "both" is a real, informative outcome (a combined file genuinely covering
+            # both divisions, common for six-year schools) — kept as-is, not collapsed to
+            # None. compute_upload_comparison() in meeting_upload_logic.py is what decides
+            # how "both" satisfies per-division checklist items.
+            division_type = _detect_gefen_division(df)
         except Exception as exc:
             logger.warning("meeting-upload: gefen division detection failed for %s: %s", path.name, exc)
     elif kind == "tikhnun":
@@ -45,6 +60,33 @@ def _classify_uploaded_file(path: Path) -> dict:
         except Exception as exc:
             logger.warning("meeting-upload: plan roster extraction failed for %s: %s", path.name, exc)
     return {"identified_type": kind, "division_type": division_type, "budgets": budgets}
+
+
+def _validate_uploaded_file(path: Path, kind: str, expected_year: str, expected_symbol: str | None) -> str | None:
+    """Runs (a per-file subset of) the same symbol/year/scope validation that _process()
+    would otherwise only catch much later, when the advisor finally runs the check.
+    Returns a Hebrew rejection reason, or None if the file passes."""
+    if kind == "tikhnun":
+        if expected_symbol:
+            found = _read_tikhnun_institution_symbols(path)
+            if found and found != {expected_symbol}:
+                return "קובץ התכנון שייך לבית ספר אחר (סמל מוסד לא תואם)."
+        entry = _tikhnun_year_entry(path, expected_year)
+        if _entry_has_issue(entry, expected_year):
+            return f"קובץ התכנון אינו תואם את שנת הלימודים {expected_year}."
+    elif kind == "gefen":
+        entry = _dated_file_entry("gefen", [path.name], _read_gefen_invoice_dates([path]))
+        if _entry_has_issue(entry, expected_year):
+            return f"קובץ דיווח הביצוע אינו תואם את שנת הלימודים {expected_year}."
+    elif kind in ("kesafim2000", "payscool", "schoolcash"):
+        if kind == "kesafim2000" and _kesafim_is_unreadable_binary(path):
+            return "קובץ הכספים אינו קריא — ודאו שהוא הורד בצורתו המקורית מהמערכת, ללא שינויים."
+        if not _finance_budget_scoped([path], kind):
+            return "קובץ הכספים כללי ואינו ממוקד לפי תקציב/חטיבה — יש להוריד קובץ ממוקד מתוכנת הכספים."
+        entry = _dated_file_entry(kind, [path.name], _read_finance_invoice_dates([path], kind))
+        if _entry_has_issue(entry, expected_year):
+            return f"קובץ הכספים אינו תואם את שנת הלימודים {expected_year}."
+    return None
 
 
 def _get_valid_token(db, token: str) -> dict:
@@ -68,7 +110,7 @@ def get_meeting_upload_checklist(token: str):
     token_row = _get_valid_token(db, token)
     meeting_id = token_row["meeting_id"]
 
-    meeting_res = db.table("meetings").select("id, school_id, meeting_date, academic_year").eq("id", meeting_id).execute()
+    meeting_res = db.table("meetings").select("id, school_id, meeting_date, academic_year, requested_upload_years").eq("id", meeting_id).execute()
     if not meeting_res.data:
         raise HTTPException(status_code=404, detail="הפגישה לא נמצאה")
     meeting = meeting_res.data[0]
@@ -78,53 +120,78 @@ def get_meeting_upload_checklist(token: str):
         raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
     school = school_res.data[0]
 
-    checklist = build_upload_checklist(db, school, meeting.get("academic_year"))
+    upload_years = resolve_requested_upload_years(meeting)
 
     files_res = db.table("meeting_upload_files").select(
-        "original_filename, identified_type, division_type, budgets, uploaded_at"
+        "original_filename, identified_type, division_type, budgets, academic_year, uploaded_at"
     ).eq("meeting_id", meeting_id).order("uploaded_at").execute()
-    uploaded_files = files_res.data or []
-    comparison = compute_upload_comparison(checklist, uploaded_files)
+    all_uploaded = files_res.data or []
+
+    years_out = []
+    for year in upload_years:
+        checklist = build_upload_checklist(db, school, year)
+        uploaded_for_year = [f for f in all_uploaded if f.get("academic_year") == year]
+        comparison = compute_upload_comparison(checklist, uploaded_for_year)
+        years_out.append({
+            "academic_year": year,
+            "items": [{"label": i["label"], "received": i["received"]} for i in comparison["items"]],
+            "all_received": comparison["all_received"],
+            "no_baseline_this_year": checklist["no_baseline_this_year"],
+            "already_uploaded": [{"original_filename": f["original_filename"]} for f in uploaded_for_year],
+        })
 
     return {
         "school_name": school["name"],
         "meeting_date": meeting["meeting_date"],
-        "items": [{"label": i["label"], "received": i["received"]} for i in comparison["items"]],
-        "all_received": comparison["all_received"],
-        "no_baseline_this_year": checklist["no_baseline_this_year"],
-        "already_uploaded": [{"original_filename": f["original_filename"]} for f in uploaded_files],
+        "years": years_out,
     }
 
 
 @router.post("/public/meeting-upload/{token}/files")
-async def upload_meeting_files(token: str, files: list[UploadFile] = File(...)):
+async def upload_meeting_files(token: str, academic_year: str = Form(...), files: list[UploadFile] = File(...)):
     db = get_admin_client()
     token_row = _get_valid_token(db, token)
     meeting_id = token_row["meeting_id"]
 
-    meeting_res = db.table("meetings").select("id, school_id, meeting_date, academic_year, participants").eq("id", meeting_id).execute()
+    meeting_res = db.table("meetings").select("id, school_id, meeting_date, academic_year, requested_upload_years, participants").eq("id", meeting_id).execute()
     if not meeting_res.data:
         raise HTTPException(status_code=404, detail="הפגישה לא נמצאה")
     meeting = meeting_res.data[0]
 
+    upload_years = resolve_requested_upload_years(meeting)
+    if academic_year not in upload_years:
+        raise HTTPException(status_code=400, detail="שנת לימודים לא תקינה עבור פגישה זו")
+
+    school_res = db.table("schools").select("id, name, stage, finance_software, symbol").eq("id", meeting["school_id"]).execute()
+    school = school_res.data[0] if school_res.data else {"id": meeting["school_id"], "name": ""}
+    expected_symbol = _normalize_symbol(school.get("symbol"))
+
     run_dir = Path(tempfile.mkdtemp(prefix=f"meetingupload_{meeting_id}_"))
     saved_rows = []
+    rejected = []
     try:
         for uf in files:
             dest = run_dir / uf.filename
             dest.write_bytes(await uf.read())
             classification = _classify_uploaded_file(dest)
+            kind = classification["identified_type"]
+            reason = _validate_uploaded_file(dest, kind, academic_year, expected_symbol) if kind else None
+            if reason:
+                rejected.append({"filename": uf.filename, "reason": reason})
+                continue
             storage_key = f"meeting-uploads/{meeting_id}/{secrets.token_hex(8)}{dest.suffix}"
             try:
                 db.storage.from_("check-files").upload(storage_key, dest.read_bytes())
             except Exception as exc:
                 logger.error("meeting-upload: storage upload failed for %s: %s", uf.filename, exc)
+                rejected.append({"filename": uf.filename, "reason": "שגיאה בהעלאת הקובץ לאחסון — נסו שוב."})
                 continue
             row = {
                 "meeting_id": meeting_id,
                 "token_id": token_row["id"],
                 "storage_key": storage_key,
                 "original_filename": uf.filename,
+                "academic_year": academic_year,
                 **classification,
             }
             db.table("meeting_upload_files").insert(row).execute()
@@ -132,34 +199,36 @@ async def upload_meeting_files(token: str, files: list[UploadFile] = File(...)):
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)
 
-    school_res = db.table("schools").select("id, name, stage, finance_software").eq("id", meeting["school_id"]).execute()
-    school = school_res.data[0] if school_res.data else {"id": meeting["school_id"], "name": ""}
-    checklist = build_upload_checklist(db, school, meeting.get("academic_year"))
+    checklist = build_upload_checklist(db, school, academic_year)
     all_files_res = db.table("meeting_upload_files").select(
         "identified_type, division_type, budgets"
-    ).eq("meeting_id", meeting_id).execute()
+    ).eq("meeting_id", meeting_id).eq("academic_year", academic_year).execute()
     comparison = compute_upload_comparison(checklist, all_files_res.data or [])
 
-    try:
-        secretary = next((p for p in (meeting.get("participants") or []) if p.get("key") in ("secretary", "finance")), None)
-        _notify_advisors_files_arrived(
-            db, meeting_id, meeting["school_id"],
-            secretary_name=(secretary or {}).get("name") or "המנהלנית",
-            school_name=school.get("name", ""),
-            meeting_date=meeting["meeting_date"],
-        )
-    except Exception as exc:
-        logger.warning("meeting-upload: advisor notification failed (non-fatal): %s", exc)
+    if saved_rows:
+        try:
+            secretary = next((p for p in (meeting.get("participants") or []) if p.get("key") in ("secretary", "finance")), None)
+            _notify_advisors_files_arrived(
+                db, meeting_id, meeting["school_id"],
+                secretary_name=(secretary or {}).get("name") or "המנהלנית",
+                school_name=school.get("name", ""),
+                meeting_date=meeting["meeting_date"],
+                academic_year=academic_year,
+            )
+        except Exception as exc:
+            logger.warning("meeting-upload: advisor notification failed (non-fatal): %s", exc)
 
     return {
         "ok": True,
         "received": len(saved_rows),
+        "rejected": rejected,
         "items": [{"label": i["label"], "received": i["received"]} for i in comparison["items"]],
         "all_received": comparison["all_received"],
+        "gefen_division_unclear": comparison.get("gefen_division_unclear", False),
     }
 
 
-def _notify_advisors_files_arrived(db, meeting_id: str, school_id: str, secretary_name: str, school_name: str, meeting_date: str):
+def _notify_advisors_files_arrived(db, meeting_id: str, school_id: str, secretary_name: str, school_name: str, meeting_date: str, academic_year: str | None = None):
     from datetime import date
     meeting_res = db.table("meetings").select("advisor_ids, advisor_id").eq("id", meeting_id).execute()
     meeting = meeting_res.data[0] if meeting_res.data else {}
@@ -170,13 +239,14 @@ def _notify_advisors_files_arrived(db, meeting_id: str, school_id: str, secretar
     if not advisor_ids:
         return
     date_fmt = date.fromisoformat(meeting_date).strftime("%d/%m/%y")
-    title = f"התקבלו קבצים מ{secretary_name} לקראת הפגישה עם בית הספר {school_name} ב{date_fmt}"
+    year_suffix = f" — שנת לימודים {academic_year}" if academic_year else ""
+    title = f"התקבלו קבצים מ{secretary_name} לקראת הפגישה עם בית הספר {school_name} ב{date_fmt}{year_suffix}"
     notif_rows = [{
         "recipient_id": aid,
         "type": "meeting_files_arrived",
         "school_id": school_id,
         "ref_id": meeting_id,
-        "data": {"title": title},
+        "data": {"title": title, "academic_year": academic_year},
     } for aid in advisor_ids]
     _create_notifications(db, notif_rows, pref_key="notify_meeting_files_arrived")
 
@@ -186,20 +256,21 @@ def _notify_advisors_files_arrived(db, meeting_id: str, school_id: str, secretar
 # ---------------------------------------------------------------------------
 
 @router.get("/schools/meetings/{meeting_id}/upload-comparison")
-def get_upload_comparison(meeting_id: str, user: Annotated[dict, Depends(get_current_user)]):
+def get_upload_comparison(meeting_id: str, user: Annotated[dict, Depends(get_current_user)], academic_year: str | None = None):
     for attempt in range(2):
         try:
             db = get_admin_client()
-            meeting_res = db.table("meetings").select("id, school_id, academic_year").eq("id", meeting_id).execute()
+            meeting_res = db.table("meetings").select("id, school_id, meeting_date, academic_year, requested_upload_years").eq("id", meeting_id).execute()
             if not meeting_res.data:
                 raise HTTPException(status_code=404, detail="הפגישה לא נמצאה")
             meeting = meeting_res.data[0]
+            year = academic_year or resolve_requested_upload_years(meeting)[0]
 
             school_res = db.table("schools").select("id, name, stage, finance_software").eq("id", meeting["school_id"]).execute()
             school = school_res.data[0]
 
-            checklist = build_upload_checklist(db, school, meeting.get("academic_year"))
-            files_res = db.table("meeting_upload_files").select("identified_type, division_type, budgets").eq("meeting_id", meeting_id).execute()
+            checklist = build_upload_checklist(db, school, year)
+            files_res = db.table("meeting_upload_files").select("identified_type, division_type, budgets").eq("meeting_id", meeting_id).eq("academic_year", year).execute()
             comparison = compute_upload_comparison(checklist, files_res.data or [])
             return comparison
         except HTTPException:
@@ -215,13 +286,16 @@ def get_upload_comparison(meeting_id: str, user: Annotated[dict, Depends(get_cur
 
 
 @router.get("/schools/meetings/{meeting_id}/uploaded-files")
-def get_uploaded_files(meeting_id: str, user: Annotated[dict, Depends(get_current_user)]):
+def get_uploaded_files(meeting_id: str, user: Annotated[dict, Depends(get_current_user)], academic_year: str | None = None):
     for attempt in range(2):
         try:
             db = get_admin_client()
-            files_res = db.table("meeting_upload_files").select(
+            query = db.table("meeting_upload_files").select(
                 "id, original_filename, identified_type, division_type, budgets, uploaded_at"
-            ).eq("meeting_id", meeting_id).order("uploaded_at").execute()
+            ).eq("meeting_id", meeting_id)
+            if academic_year:
+                query = query.eq("academic_year", academic_year)
+            files_res = query.order("uploaded_at").execute()
             return [{
                 "id": f["id"],
                 "filename": f["original_filename"],
@@ -267,7 +341,7 @@ def request_missing_files(meeting_id: str, user: Annotated[dict, Depends(get_cur
     """The one manual button in this feature — sends a targeted follow-up
     email to the secretary/finance contact naming exactly the missing items."""
     db = get_admin_client()
-    meeting_res = db.table("meetings").select("id, school_id, participants, meeting_date").eq("id", meeting_id).execute()
+    meeting_res = db.table("meetings").select("id, school_id, participants, meeting_date, academic_year, requested_upload_years").eq("id", meeting_id).execute()
     if not meeting_res.data:
         raise HTTPException(status_code=404, detail="הפגישה לא נמצאה")
     meeting = meeting_res.data[0]
@@ -275,10 +349,17 @@ def request_missing_files(meeting_id: str, user: Annotated[dict, Depends(get_cur
     school_res = db.table("schools").select("id, name, stage, finance_software").eq("id", meeting["school_id"]).execute()
     school = school_res.data[0]
 
-    checklist = build_upload_checklist(db, school, None)
-    files_res = db.table("meeting_upload_files").select("identified_type, division_type, budgets").eq("meeting_id", meeting_id).execute()
-    comparison = compute_upload_comparison(checklist, files_res.data or [])
-    missing_items = [i["label"] for i in comparison["items"] if not i["received"]]
+    upload_years = resolve_requested_upload_years(meeting)
+    multi_year = len(upload_years) > 1
+    missing_items = []
+    for year in upload_years:
+        checklist = build_upload_checklist(db, school, year)
+        files_res = db.table("meeting_upload_files").select("identified_type, division_type, budgets").eq("meeting_id", meeting_id).eq("academic_year", year).execute()
+        comparison = compute_upload_comparison(checklist, files_res.data or [])
+        missing_items += [
+            (f'{i["label"]} — {year}' if multi_year else i["label"])
+            for i in comparison["items"] if not i["received"]
+        ]
     if not missing_items:
         raise HTTPException(status_code=400, detail="כל הקבצים הנדרשים כבר התקבלו")
 

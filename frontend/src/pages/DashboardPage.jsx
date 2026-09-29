@@ -9,19 +9,15 @@ import Sidebar from "../components/Sidebar";
 import OnboardingToast from "../components/OnboardingToast";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { ACADEMIC_YEARS, DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
+import { AcademicYearSelector } from "../components/AcademicYearSelector";
 import { CONTROL_LETTER_STATUS_MAP, CONTROL_LETTER_STATUS_OPTIONS } from "../components/controlLetter/constants";
 import { MEETING_SERVICE_TYPE_BREAKDOWN_COL_ORDER } from "../components/meetings/constants";
 import { diagnoseConnectionError } from "../lib/connectionError";
 
-// Fallback list so "סוג תקציב" has real options even before check_metrics has any rows
-// for the org (brand-new table, only populated going forward by new checks) — matches
-// normalize_budget_name's target names in backend/zihuy_core.py.
+// Fallback list so the summary-budget selector has real options even before check_metrics
+// has any rows for the org (brand-new table, only populated going forward by new checks) —
+// matches normalize_budget_name's target names in backend/zihuy_core.py.
 const DEFAULT_BUDGET_TYPES = ["גפן", "דוקאטי", "תנופה", "גפן חירום", "פל\"ג", "כללי"];
-
-function matchesBudgetType(combo, budgetTypes) {
-  if (!budgetTypes.length) return true;
-  return budgetTypes.some(b => b.value === combo.budget_name);
-}
 
 // Evaluates a chain of goal conditions left-to-right with user-chosen AND/OR connectors
 // (no operator precedence — each connector combines the running result with the next condition).
@@ -95,263 +91,54 @@ const ORDER_METHOD_LABEL = {
   district:  "מחוז",
 };
 
-const EMPTY_FILTERS = {
-  names: [], symbols: [], stages: [], divisions: [],
-  cities: [], authorities: [], financeSoftwares: [], addresses: [],
-  principals: [], secretaries: [], financeContacts: [],
-  advisorGefen: [], advisorCurrent: [], advisorDistrict: [],
-  accessAdvisors: [],
-};
-
-const EMPTY_QUERIES = {
-  names: "", symbols: "", stages: "", divisions: "",
-  cities: "", authorities: "", financeSoftwares: "", addresses: "",
-  principals: "", secretaries: "", financeContacts: "",
-  advisorGefen: "", advisorCurrent: "", advisorDistrict: "",
-  accessAdvisors: "",
-};
-
 function uniq(arr) {
   return [...new Set(arr.filter(Boolean))].sort();
 }
 
-const FILTER_CONFIG = [
-  { key: "names",           label: "שם בית ספר",    openOnFocus: false, getOptions: s => uniq(s.map(x => x.name)).map(v => ({ value: v, label: v })) },
-  { key: "symbols",         label: "סמל מוסד",       openOnFocus: false, getOptions: s => uniq(s.map(x => x.symbol)).map(v => ({ value: v, label: v })) },
-  { key: "stages",          label: "שלב מוסד",       openOnFocus: false, getOptions: s => uniq(s.map(x => x.stage)).map(v => ({ value: v, label: SCHOOL_STAGE_LABEL[v] || v })) },
-  { key: "divisions",       label: "חטיבות",         openOnFocus: false, getOptions: s => uniq(s.flatMap(x => (x.gefen_accounts || []).map(a => a.division_type))).map(v => ({ value: v, label: DIVISION_LABEL[v] || v })) },
-  { key: "cities",          label: "עיר",            openOnFocus: false, getOptions: s => uniq(s.map(x => x.city)).map(v => ({ value: v, label: v })) },
-  { key: "authorities",     label: "בעלות",           openOnFocus: false, getOptions: s => uniq(s.map(x => x.authority)).map(v => ({ value: v, label: v })) },
-  { key: "financeSoftwares",label: "תוכנת כספים",   checkbox: true,     getOptions: s => uniq(s.map(x => x.finance_software)).map(v => ({ value: v, label: FINANCE_SOFTWARE_LABEL[v] || v })) },
-  { key: "addresses",       label: "כתובת",          openOnFocus: false, getOptions: s => uniq(s.map(x => x.address)).map(v => ({ value: v, label: v })) },
-  { key: "principals",      label: "מנהל/ת",         openOnFocus: false, getOptions: s => uniq(s.map(x => x.principal_name)).map(v => ({ value: v, label: v })) },
-  { key: "secretaries",     label: "מנהלנ/ית",       openOnFocus: false, getOptions: s => uniq(s.map(x => x.secretary_name)).map(v => ({ value: v, label: v })) },
-  { key: "financeContacts", label: "אחראי/ת כספים",  openOnFocus: false, getOptions: s => uniq(s.map(x => x.finance_contact_name)).map(v => ({ value: v, label: v })) },
-  { key: "advisorGefen",    label: "יועץ מלווה [גפן]",   checkbox: true,                          getOptions: () => [] },
-  { key: "advisorCurrent",  label: "יועץ מלווה [שוטף]",  checkbox: true,                          getOptions: () => [] },
-  { key: "advisorDistrict", label: "יועץ מלווה [מחוז]",  checkbox: true,                          getOptions: () => [] },
-  { key: "accessAdvisors", label: "גישה",            checkbox: true, showAllOption: true,       getOptions: () => [] },
-];
-
-const ALL_OPTION = { value: "__all__", label: "כולם" };
-
-function CheckboxFilterField({ label, options, selected, onChange, showAllOption }) {
-  const [open, setOpen] = useState(false);
-  const [draft, setDraft] = useState(selected);
-  const [searchQuery, setSearchQuery] = useState("");
-  const containerRef = useRef(null);
-
-  useEffect(() => {
-    if (!open) { setDraft(selected); setSearchQuery(""); }
-  }, [selected, open]);
-
-  function openDropdown() { setDraft(selected); setOpen(true); }
-
-  function confirm() { onChange(draft); setOpen(false); }
-
-  function clear() { setDraft([]); }
-
-  function toggleItem(opt) {
-    setDraft(prev =>
-      prev.some(s => s.value === opt.value)
-        ? prev.filter(s => s.value !== opt.value)
-        : [...prev, opt]
-    );
-  }
-
-  const filteredOptions = options.filter(opt =>
-    !searchQuery.trim() || opt.label.toLowerCase().includes(searchQuery.toLowerCase())
-  );
-
-  useEffect(() => {
-    if (!open) return;
-    function handleOutside(e) {
-      if (containerRef.current && !containerRef.current.contains(e.target)) setOpen(false);
-    }
-    document.addEventListener("mousedown", handleOutside);
-    return () => document.removeEventListener("mousedown", handleOutside);
-  }, [open]);
-
-  function renderItem(opt) {
-    return (
-      <label
-        key={opt.value}
-        className="flex items-center gap-2.5 px-4 py-2 hover:bg-blue-50 cursor-pointer"
-      >
-        <input
-          type="checkbox"
-          checked={draft.some(s => s.value === opt.value)}
-          onChange={() => toggleItem(opt)}
-          className="w-3.5 h-3.5 rounded accent-blue-600 flex-shrink-0"
-        />
-        <span className="text-sm text-slate-700">{opt.label}</span>
-      </label>
-    );
-  }
-
-  return (
-    <div className="flex flex-col gap-1.5">
-      <span className="text-xs font-semibold text-slate-600">{label}</span>
-      <div ref={containerRef} className="relative">
-        <button
-          type="button"
-          onClick={() => (open ? setOpen(false) : openDropdown())}
-          className="input-field text-sm w-full text-right"
-          aria-expanded={open}
-          aria-haspopup="listbox"
-        >
-          {selected.length > 0 ? (
-            <span className="text-slate-700">{selected.length} נבחרו</span>
-          ) : (
-            <span className="text-slate-300 select-none">—</span>
-          )}
-        </button>
-        {open && (
-          <div
-            className="absolute z-40 right-0 left-0 bottom-full mb-1 border border-slate-200 rounded-xl bg-white shadow-xl"
-            style={{ minWidth: 180 }}
-          >
-            <div className="p-2 border-b border-slate-100">
-              <input
-                type="text"
-                autoFocus
-                value={searchQuery}
-                onChange={e => setSearchQuery(e.target.value)}
-                placeholder="חיפוש..."
-                className="w-full text-sm border border-slate-200 rounded-lg px-3 py-1.5 outline-none focus:border-blue-400 bg-white"
-                aria-label={`חיפוש ${label}`}
-              />
-            </div>
-            <div className="overflow-y-auto" style={{ maxHeight: 150 }} role="listbox" aria-multiselectable="true">
-              {showAllOption && !searchQuery.trim() && renderItem(ALL_OPTION)}
-              {filteredOptions.length === 0 && !(showAllOption && !searchQuery.trim()) ? (
-                <p className="text-xs text-slate-400 px-4 py-3 text-center">לא נמצאו תוצאות</p>
-              ) : (
-                filteredOptions.map(opt => renderItem(opt))
-              )}
-            </div>
-            <div className="p-2 border-t border-slate-100 flex items-center gap-2">
-              <button type="button" onClick={confirm} className="btn-blue text-xs px-4 py-1.5 rounded-lg">
-                אישור
-              </button>
-              <button type="button" onClick={clear} className="text-xs text-slate-400 hover:text-slate-600 transition-colors px-2 py-1.5">
-                נקה סינון
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
-      {selected.length > 0 && (
-        <div className="flex flex-wrap gap-1 mt-0.5">
-          {selected.map(s => (
-            <span
-              key={s.value}
-              className="inline-flex items-center gap-0.5 text-xs font-medium px-2 py-0.5 rounded-full"
-              style={{ background: "rgba(0,112,243,0.08)", color: "#1d4ed8" }}
-            >
-              {s.label}
-              <button
-                type="button"
-                onClick={() => onChange(selected.filter(x => x.value !== s.value))}
-                className="hover:text-red-500 leading-none"
-                aria-label={`הסר ${s.label}`}
-              >×</button>
-            </span>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function FilterField({ label, options, selected, onChange, query, onQueryChange, openOnFocus }) {
+// Small pill-style single-select, same visual language as AcademicYearSelector — picks which
+// budget's numbers show in SUMMARY_COLUMNS/goal columns. Only rendered by the caller when a
+// summary/goal column is visible (otherwise the choice has no effect).
+function SummaryBudgetSelector({ value, options, onChange }) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef(null);
 
-  const suggestions = options
-    .filter(opt => !selected.some(s => s.value === opt.value))
-    .filter(opt => !query.trim() || opt.label.toLowerCase().includes(query.toLowerCase()))
-    .slice(0, 8);
-
-  function select(opt) {
-    if (!selected.some(s => s.value === opt.value)) onChange([...selected, opt]);
-    onQueryChange("");
-    setOpen(false);
-  }
+  useEffect(() => {
+    function h(e) { if (!containerRef.current?.contains(e.target)) setOpen(false); }
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, []);
 
   return (
-    <div className="flex flex-col gap-1.5">
-      <span className="text-xs font-semibold text-slate-600">{label}</span>
-      <div
-        ref={containerRef}
-        className="relative"
-        onBlur={e => { if (!containerRef.current?.contains(e.relatedTarget)) setOpen(false); }}
-      >
-        <input
-          type="text"
-          className="input-field text-sm"
-          value={query}
-          onChange={e => { onQueryChange(e.target.value); setOpen(true); }}
-          onFocus={() => { if (openOnFocus) setOpen(true); }}
-          autoComplete="off"
-        />
-        {open && suggestions.length > 0 && (
-          <div className="absolute z-30 right-0 left-0 mt-1 border border-slate-200 rounded-xl bg-white shadow-lg max-h-40 overflow-y-auto">
-            {suggestions.map(opt => (
-              <button
-                key={opt.value}
-                type="button"
-                onMouseDown={e => { e.preventDefault(); select(opt); }}
-                className="w-full text-right px-4 py-2 text-sm text-slate-700 hover:bg-blue-50 transition-colors"
-              >
-                {opt.label}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-      {selected.length > 0 && (
-        <div className="flex flex-wrap gap-1 mt-0.5">
-          {selected.map(s => (
-            <span key={s.value} className="inline-flex items-center gap-0.5 text-xs font-medium px-2 py-0.5 rounded-full" style={{ background: "rgba(0,112,243,0.08)", color: "#1d4ed8" }}>
-              {s.label}
-              <button
-                type="button"
-                onClick={() => onChange(selected.filter(x => x.value !== s.value))}
-                className="hover:text-red-500 leading-none"
-                aria-label={`הסר ${s.label}`}
-              >×</button>
-            </span>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function AccordionSection({ title, isOpen, onToggle, badge, children }) {
-  return (
-    <div className="border border-slate-200 rounded-xl overflow-hidden bg-white">
+    <div ref={containerRef} className="relative" dir="rtl">
       <button
         type="button"
-        onClick={onToggle}
-        aria-expanded={isOpen}
-        className="w-full flex items-center justify-between px-4 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 transition-colors"
+        onClick={() => setOpen(o => !o)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-full border border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50 transition-all"
       >
-        <span className="flex items-center gap-2">
-          {title}
-          {badge > 0 && (
-            <span className="inline-flex items-center justify-center w-4 h-4 text-xs font-bold rounded-full bg-blue-100 text-blue-700 leading-none">
-              {badge}
-            </span>
-          )}
-        </span>
-        <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
-          style={{ transform: isOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}>
-          <polyline points="6 9 12 15 18 9"/>
+        <span className="text-xs text-slate-400">תקציב:</span>
+        <span>{value}</span>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+          <path d="M6 9l6 6 6-6" />
         </svg>
       </button>
-      {isOpen && <div className="px-4 pb-4 pt-1 border-t border-slate-100">{children}</div>}
+      {open && (
+        <div role="listbox" className="absolute z-30 left-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg py-1 min-w-[100px]">
+          {options.map(opt => (
+            <button
+              key={opt.value}
+              type="button"
+              role="option"
+              aria-selected={value === opt.value}
+              onMouseDown={e => { e.preventDefault(); onChange(opt.value); setOpen(false); }}
+              className={`w-full text-right px-3 py-2 text-sm hover:bg-blue-50 transition-colors ${value === opt.value ? "text-blue-600 font-semibold" : "text-slate-700"}`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -522,8 +309,9 @@ const NEWLY_ADDED_MOVABLE_COLUMNS = [
 ];
 
 // Optional columns showing summary data from the last real check run (check_metrics),
-// for the "active" budget (default "גפן", overridden when exactly one budget type is
-// selected in the advanced filter). Off by default — see colVisible init below.
+// for the "active" budget (default "גפן", overridden by the summary-budget selector shown
+// above the table whenever a summary/goal column is visible). Off by default — see
+// colVisible init below.
 const SUMMARY_COLUMNS = [
   { key: "summary_budget_amount",           label: "גובה תקציב",                     field: "budget_amount",           fmt: "money" },
   { key: "summary_planned_amount",           label: "סכום שתוכנן",                    field: "planned_amount",          fmt: "money" },
@@ -571,9 +359,19 @@ const CONTROL_LETTER_COLUMNS = [
   { key: "control_letter_response_file",  label: "מכתב בקרה - מכתב תשובה",   field: "response_letter_file_name", fmt: "file" },
 ];
 
+// "אנשי קשר" columns — plain school-level fields (read directly off the school row, like
+// GENERAL_COLUMNS). principal_name additionally surfaces the school's separate חט"ב principal
+// (principal_chativa_name) for שש-שנתי schools where principal_same_person === false — see
+// computeFilterValues/renderCellValue/renderCellText.
+const CONTACT_COLUMNS = [
+  { key: "principal_name",       label: "מנהל/ת" },
+  { key: "secretary_name",       label: "מנהלנ/ית" },
+  { key: "finance_contact_name", label: "אחראי/ת כספים" },
+];
+
 const DEFAULT_VISIBLE_MOVABLE_KEYS = ["symbol", "stage", "city", "meetings_completed", "authority", "meetings_hours"];
 
-const ALL_COLUMNS = [...MOVABLE_COLUMNS, ...SUMMARY_COLUMNS, ...CLOSURE_COLUMNS, ...CONTROL_LETTER_COLUMNS];
+const ALL_COLUMNS = [...MOVABLE_COLUMNS, ...SUMMARY_COLUMNS, ...CLOSURE_COLUMNS, ...CONTROL_LETTER_COLUMNS, ...CONTACT_COLUMNS];
 const DEFAULT_COL_ORDER = ALL_COLUMNS.map(c => c.key);
 
 // Goal columns ("goal_<goalKey>") are built dynamically from an async-loaded endpoint, so
@@ -623,6 +421,11 @@ const FILTER_COLUMN_META = [
   { key: "advisor_gefen",   label: "יועץ מלווה [גפן]",  fmt: "textMulti" },
   { key: "advisor_current", label: "יועץ מלווה [שוטף]", fmt: "textMulti" },
   { key: "advisor_district",label: "יועץ מלווה [מחוז]", fmt: "textMulti" },
+  // "אנשי קשר" group — principal_name is textMulti since a שש-שנתי school with a separate
+  // חט"ב principal (principal_same_person === false) surfaces two names for one column.
+  { key: "principal_name",       label: "מנהל/ת",        fmt: "textMulti" },
+  { key: "secretary_name",       label: "מנהלנ/ית",       fmt: "text" },
+  { key: "finance_contact_name", label: "אחראי/ת כספים",  fmt: "text" },
 ];
 const FILTER_COLUMN_KEYS = new Set(FILTER_COLUMN_META.map(c => c.key));
 
@@ -749,6 +552,16 @@ function getGoalStatus(school, combo, goalKey, activeSummaryBudget) {
 // dynamic goal columns) — computed once per row so filtering/sorting/value-list logic never
 // needs to know where a value comes from. Goal columns are ordinally encoded (0=טרם הוגדר,
 // 1=לא, 2=כן) for sort — never null, since "not yet set" is itself a valid distinct state.
+// A שש-שנתי school with a separate חט"ב principal (principal_same_person === false) has two
+// principals; every other school has at most one. Mirrors buildSchoolContacts' "principal"/
+// "principal_chativa" entries (components/meetings/schoolContacts.js).
+function principalNames(school) {
+  return [
+    school.principal_name || null,
+    (school.stage === "sheshshnati" && school.principal_same_person === false) ? school.principal_chativa_name : null,
+  ].filter(Boolean);
+}
+
 function computeFilterValues(school, combo, meetingsStats, activeSummaryBudget, goalColumns = []) {
   const out = {};
   const stats = meetingsStats[school.id];
@@ -798,6 +611,9 @@ function computeFilterValues(school, combo, meetingsStats, activeSummaryBudget, 
   out.advisor_gefen = (school.advisors_gefen || []).map(p => p.full_name || p.email);
   out.advisor_current = (school.advisors_current || []).map(p => p.full_name || p.email);
   out.advisor_district = (school.advisors_district || []).map(p => p.full_name || p.email);
+  out.principal_name = principalNames(school);
+  out.secretary_name = school.secretary_name || null;
+  out.finance_contact_name = school.finance_contact_name || null;
   return out;
 }
 
@@ -1463,6 +1279,12 @@ function renderCell(school, key, meetingsStats = {}, combo = null, activeSummary
       return (school.advisors_current || []).map(p => p.full_name || p.email).join(", ") || "—";
     case "advisor_district":
       return (school.advisors_district || []).map(p => p.full_name || p.email).join(", ") || "—";
+    case "principal_name":
+      return principalNames(school).join(", ") || "—";
+    case "secretary_name":
+      return school.secretary_name || "—";
+    case "finance_contact_name":
+      return school.finance_contact_name || "—";
     case "symbol":
       return <span className="font-mono">{school.symbol || "—"}</span>;
     case "city":
@@ -1552,6 +1374,12 @@ function renderCellText(school, key, meetingsStats = {}, combo = null, activeSum
       return (school.advisors_current || []).map(p => p.full_name || p.email).join(", ") || "";
     case "advisor_district":
       return (school.advisors_district || []).map(p => p.full_name || p.email).join(", ") || "";
+    case "principal_name":
+      return principalNames(school).join(", ") || "";
+    case "secretary_name":
+      return school.secretary_name || "";
+    case "finance_contact_name":
+      return school.finance_contact_name || "";
     case "symbol":
       return school.symbol || "";
     case "city":
@@ -1587,64 +1415,6 @@ function renderCellText(school, key, meetingsStats = {}, combo = null, activeSum
     default:
       return "";
   }
-}
-
-function applyFilters(school, filters, queries) {
-  // For a single-value field: chips = exact match; no chips = partial text match on query
-  const matchText = (selected, query, rawValue, labelValue) => {
-    if (selected.length > 0) return selected.some(f => f.value === (rawValue || ""));
-    if (query.trim()) {
-      const q = query.trim().toLowerCase();
-      return (rawValue || "").toLowerCase().includes(q) ||
-             (labelValue || "").toLowerCase().includes(q);
-    }
-    return true;
-  };
-
-  if (!matchText(filters.names,           queries.names,           school.name)) return false;
-  if (!matchText(filters.symbols,         queries.symbols,         school.symbol)) return false;
-  if (!matchText(filters.stages,          queries.stages,          school.stage,            SCHOOL_STAGE_LABEL[school.stage])) return false;
-  if (!matchText(filters.cities,          queries.cities,          school.city)) return false;
-  if (!matchText(filters.authorities,     queries.authorities,     school.authority)) return false;
-  if (!matchText(filters.financeSoftwares,queries.financeSoftwares,school.finance_software, FINANCE_SOFTWARE_LABEL[school.finance_software])) return false;
-  if (!matchText(filters.addresses,       queries.addresses,       school.address)) return false;
-  if (!matchText(filters.principals,      queries.principals,      school.principal_name)) return false;
-  if (!matchText(filters.secretaries,     queries.secretaries,     school.secretary_name)) return false;
-  if (!matchText(filters.financeContacts, queries.financeContacts, school.finance_contact_name)) return false;
-
-  // Divisions — array field
-  const divValues = (school.gefen_accounts || []).map(a => a.division_type);
-  if (filters.divisions.length > 0) {
-    if (!filters.divisions.some(f => divValues.includes(f.value))) return false;
-  } else if (queries.divisions.trim()) {
-    const q = queries.divisions.trim().toLowerCase();
-    if (!divValues.some(v => (DIVISION_LABEL[v] || v).toLowerCase().includes(q))) return false;
-  }
-
-  // Advisors — compare by UUID, per service type (school_advisors_gefen/current/district)
-  const advisorGefenIds = (school.advisors_gefen || []).map(a => a.id);
-  if (filters.advisorGefen.length > 0 && !filters.advisorGefen.some(f => advisorGefenIds.includes(f.value))) return false;
-  const advisorCurrentIds = (school.advisors_current || []).map(a => a.id);
-  if (filters.advisorCurrent.length > 0 && !filters.advisorCurrent.some(f => advisorCurrentIds.includes(f.value))) return false;
-  const advisorDistrictIds = (school.advisors_district || []).map(a => a.id);
-  if (filters.advisorDistrict.length > 0 && !filters.advisorDistrict.some(f => advisorDistrictIds.includes(f.value))) return false;
-
-  // Access (גישה) — null=open to all; specific UUID=restricted access
-  // "כולם" option matches schools with null (open to all)
-  // Specific advisor matches schools open to all (null) OR with that advisor explicitly listed
-  if (filters.accessAdvisors.length > 0) {
-    const rat = school.restrict_access_to;
-    const isOpenToAll = rat === null || rat === undefined;
-    const allSelected = filters.accessAdvisors.some(f => f.value === "__all__");
-    const specificAdvisors = filters.accessAdvisors.filter(f => f.value !== "__all__");
-    const matchesAll = allSelected && isOpenToAll;
-    const matchesSpecific = specificAdvisors.length > 0 && (
-      isOpenToAll || specificAdvisors.some(f => Array.isArray(rat) && rat.includes(f.value))
-    );
-    if (!matchesAll && !matchesSpecific) return false;
-  }
-
-  return true;
 }
 
 function RecycleBinInfoModal({ count, onClose }) {
@@ -1994,18 +1764,17 @@ export default function DashboardPage() {
   const [error, setError] = useState("");
   const [role, setRole] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
-  const [filters, setFilters] = useState(EMPTY_FILTERS);
-  const [queries, setQueries] = useState(EMPTY_QUERIES);
   const [academicYear, setAcademicYear] = useState(DEFAULT_ACADEMIC_YEAR);
-  const [budgetTypes, setBudgetTypes] = useState([]);
+  // Which budget's numbers show in SUMMARY_COLUMNS/goal columns — only surfaced in the
+  // toolbar (a small selector button) when a summary/goal column is visible; see
+  // activeSummaryBudget/hasVisibleSummaryCol below.
+  const [summaryBudget, setSummaryBudget] = useState("גפן");
   const [goalConditions, setGoalConditions] = useState([]);
   const [goalDefinitions, setGoalDefinitions] = useState([]);
-  const [openSections, setOpenSections] = useState({ main: true, goals: false });
   const [columnFilters, setColumnFilters] = useState({}); // {[colKey]: FilterSpec}
   const [sortSpecs, setSortSpecs] = useState([]); // [{key,dir}], index 0 = primary (most-recently clicked)
   const [openColFilterKey, setOpenColFilterKey] = useState(null); // only one column's filter menu open at a time
   const didMountAcademicYearRef = useRef(false);
-  const [showFilters, setShowFilters] = useState(false);
   const [filtersPersistKey, setFiltersPersistKey] = useState(null);
   const [colOrder, setColOrder] = useState(DEFAULT_COL_ORDER);
   const [colVisible, setColVisible] = useState(() => ({
@@ -2013,6 +1782,7 @@ export default function DashboardPage() {
     ...Object.fromEntries(SUMMARY_COLUMNS.map(c => [c.key, false])),
     ...Object.fromEntries(CLOSURE_COLUMNS.map(c => [c.key, false])),
     ...Object.fromEntries(CONTROL_LETTER_COLUMNS.map(c => [c.key, false])),
+    ...Object.fromEntries(CONTACT_COLUMNS.map(c => [c.key, false])),
   }));
   const [dragIndex, setDragIndex] = useState(null);
   const [dragOverIndex, setDragOverIndex] = useState(null);
@@ -2050,12 +1820,12 @@ export default function DashboardPage() {
     if (!filtersPersistKey) return;
     try {
       sessionStorage.setItem(filtersPersistKey, JSON.stringify({
-        searchQuery, filters, queries, showFilters,
-        academicYear, budgetTypes, goalConditions, openSections,
+        searchQuery,
+        academicYear, summaryBudget, goalConditions,
         columnFilters, sortSpecs,
       }));
     } catch {}
-  }, [filtersPersistKey, searchQuery, filters, queries, showFilters, academicYear, budgetTypes, goalConditions, openSections, columnFilters, sortSpecs]);
+  }, [filtersPersistKey, searchQuery, academicYear, summaryBudget, goalConditions, columnFilters, sortSpecs]);
 
   // Left/right arrow keys scroll the main schools table horizontally, without needing to
   // first click/focus the scroll container — skipped while typing in a text field so cursor
@@ -2259,6 +2029,7 @@ export default function DashboardPage() {
     { title: "בדיקות", cols: [...SUMMARY_COLUMNS, ...CLOSURE_COLUMNS] },
     { title: "יעדים", cols: goalColumns },
     { title: "מכתב בקרה", cols: CONTROL_LETTER_COLUMNS },
+    { title: "אנשי קשר", cols: CONTACT_COLUMNS },
   ], [goalColumns]);
 
   // Goal columns only become known once goalDefinitions loads (after mount); CLOSURE_COLUMNS
@@ -2270,7 +2041,7 @@ export default function DashboardPage() {
   // also re-runs once right after restoration overwrites them — the missing-check guard makes
   // this converge after one extra render instead of looping.
   useEffect(() => {
-    const candidates = [...NEWLY_ADDED_MOVABLE_COLUMNS, ...MEETING_TYPE_BREAKDOWN_COLUMNS, ...CLOSURE_COLUMNS, ...CONTROL_LETTER_COLUMNS, ...goalColumns];
+    const candidates = [...NEWLY_ADDED_MOVABLE_COLUMNS, ...MEETING_TYPE_BREAKDOWN_COLUMNS, ...CLOSURE_COLUMNS, ...CONTROL_LETTER_COLUMNS, ...CONTACT_COLUMNS, ...goalColumns];
     const missingOrder = candidates.map(c => c.key).filter(k => !colOrder.includes(k));
     const missingVisible = candidates.filter(c => !(c.key in colVisible));
     if (missingOrder.length === 0 && missingVisible.length === 0) return;
@@ -2301,13 +2072,9 @@ export default function DashboardPage() {
         if (saved) {
           const parsed = JSON.parse(saved);
           if (parsed.searchQuery !== undefined) setSearchQuery(parsed.searchQuery);
-          if (parsed.filters) setFilters(parsed.filters);
-          if (parsed.queries) setQueries(parsed.queries);
-          if (parsed.showFilters !== undefined) setShowFilters(parsed.showFilters);
           if (parsed.academicYear && ACADEMIC_YEARS.includes(parsed.academicYear)) setAcademicYear(parsed.academicYear);
-          if (Array.isArray(parsed.budgetTypes)) setBudgetTypes(parsed.budgetTypes);
+          if (typeof parsed.summaryBudget === "string" && parsed.summaryBudget) setSummaryBudget(parsed.summaryBudget);
           if (Array.isArray(parsed.goalConditions)) setGoalConditions(parsed.goalConditions);
-          if (parsed.openSections) setOpenSections(o => ({ ...o, ...parsed.openSections }));
           if (parsed.columnFilters && typeof parsed.columnFilters === "object") {
             const cleaned = Object.fromEntries(
               Object.entries(parsed.columnFilters).filter(([k]) => FILTER_COLUMN_KEYS.has(k) || k.startsWith("goal_"))
@@ -2397,53 +2164,38 @@ export default function DashboardPage() {
   const visibleColOrder = colOrder.filter(k => colVisible[k] && dynamicAllColumns.some(c => c.key === k));
   const hiddenColCount = Object.values(colVisible).filter(v => !v).length;
 
-  const orgUserOptions = allOrgUsers.map(u => ({ value: u.id, label: u.full_name || u.email }));
-  const filterOptions = Object.fromEntries(
-    FILTER_CONFIG.map(cfg => [
-      cfg.key,
-      (cfg.key === "accessAdvisors" || cfg.key === "advisorGefen" || cfg.key === "advisorCurrent" || cfg.key === "advisorDistrict")
-        ? orgUserOptions
-        : cfg.getOptions(schools),
-    ])
-  );
-
   const budgetTypeOptions = uniq([
     ...DEFAULT_BUDGET_TYPES,
     ...schools.flatMap(s => (s.check_metrics || []).map(m => m.budget_name)),
   ]).map(v => ({ value: v, label: v }));
 
-  // Default budget for summary columns is "גפן", overridden only when the advanced
-  // filter narrows "סוג תקציב" down to exactly one selection.
-  const activeSummaryBudget = budgetTypes.length === 1 ? budgetTypes[0].value : "גפן";
+  // Default budget for summary columns is "גפן", overridden by the summary-budget selector
+  // (shown in the toolbar whenever a summary/goal column is visible).
+  const activeSummaryBudget = summaryBudget;
   const hasVisibleSummaryCol = SUMMARY_COLUMNS.some(c => colVisible[c.key]) || goalColumns.some(c => colVisible[c.key]);
   const advancedFilterActive = goalConditions.length > 0 || hasVisibleSummaryCol;
 
-  const activeChipCount = Object.values(filters).reduce((sum, arr) => sum + arr.length, 0);
-  const activeQueryCount = Object.values(queries).reduce((sum, q) => sum + (q.trim() ? 1 : 0), 0);
-  const advancedActiveCount = (budgetTypes.length > 0 ? 1 : 0) + goalConditions.length;
   const columnFilterActiveCount = Object.keys(columnFilters).length + sortSpecs.length;
-  const activeFilterCount = activeChipCount + activeQueryCount + advancedActiveCount + columnFilterActiveCount;
+  const activeFilterCount = columnFilterActiveCount + goalConditions.length;
   const hasAnyFilter = !!searchQuery.trim() || activeFilterCount > 0;
 
   const filteredSchools = useMemo(() => schools.filter(school => {
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
-      const matchName = school.name?.toLowerCase().includes(q);
-      const matchSymbol = school.symbol?.includes(q);
-      const matchAdvisor = [
-        ...(school.advisors_gefen || []), ...(school.advisors_current || []), ...(school.advisors_district || []),
-      ].some(p => p.full_name?.toLowerCase().includes(q));
-      if (!matchName && !matchSymbol && !matchAdvisor) return false;
-    }
-    return applyFilters(school, filters, queries);
-  }), [schools, searchQuery, filters, queries]);
+    if (!searchQuery.trim()) return true;
+    const q = searchQuery.toLowerCase();
+    const matchName = school.name?.toLowerCase().includes(q);
+    const matchSymbol = school.symbol?.includes(q);
+    const matchAdvisor = [
+      ...(school.advisors_gefen || []), ...(school.advisors_current || []), ...(school.advisors_district || []),
+    ].some(p => p.full_name?.toLowerCase().includes(q));
+    return matchName || matchSymbol || matchAdvisor;
+  }), [schools, searchQuery]);
 
-  // When a checks/goals filter (or a visible summary column) is active, split each school
-  // into one row per division+budget combination that matches — otherwise keep one row per
-  // school. When only a summary column forced the split (no explicit single-budget filter),
-  // narrow combos down to the active summary budget so turning on a column alone doesn't
-  // explode a school into one row per unrelated budget — only per division (e.g. six-year
-  // schools running "גפן" separately for each division).
+  // When a goals filter (or a visible summary column) is active, split each school into one
+  // row per division+budget combination that matches — otherwise keep one row per school.
+  // When only a summary column forced the split, narrow combos down to the active summary
+  // budget so turning on a column alone doesn't explode a school into one row per unrelated
+  // budget — only per division (e.g. six-year schools running "גפן" separately for each
+  // division).
   const baseDisplayRows = useMemo(() => (!advancedFilterActive
     ? filteredSchools.map(school => ({
         school, combo: null, rowKey: school.id,
@@ -2454,7 +2206,7 @@ export default function DashboardPage() {
           ? school.check_metrics
           : [{ division_type: school.stage, budget_name: "כללי" }]
         );
-        if (hasVisibleSummaryCol && budgetTypes.length !== 1) {
+        if (hasVisibleSummaryCol) {
           const narrowed = combos.filter(combo => combo.budget_name === activeSummaryBudget);
           // No real goal filter is driving the split — a school without any "גפן" check
           // yet must still show up (with "—" summary values), not disappear from the list.
@@ -2462,9 +2214,7 @@ export default function DashboardPage() {
             ? narrowed
             : (goalConditions.length > 0 ? [] : [{ division_type: school.stage, budget_name: activeSummaryBudget }]);
         }
-        combos = combos
-          .filter(combo => matchesBudgetType(combo, budgetTypes))
-          .filter(combo => evalGoalConditions(school, combo, goalConditions));
+        combos = combos.filter(combo => evalGoalConditions(school, combo, goalConditions));
         return combos.map(combo => ({
           school,
           combo,
@@ -2473,7 +2223,7 @@ export default function DashboardPage() {
         }));
       })
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  ), [filteredSchools, advancedFilterActive, meetingsStats, activeSummaryBudget, goalColumns, hasVisibleSummaryCol, budgetTypes, goalConditions]);
+  ), [filteredSchools, advancedFilterActive, meetingsStats, activeSummaryBudget, goalColumns, hasVisibleSummaryCol, goalConditions]);
 
   // Excel-style per-column header filters/sort, layered on top of baseDisplayRows — all
   // active column filters combine with AND (order-independent), then the stacked
@@ -2532,19 +2282,8 @@ export default function DashboardPage() {
     });
   }
 
-  function setFilter(key, val) {
-    setFilters(f => ({ ...f, [key]: val }));
-  }
-
-  function setQuery(key, val) {
-    setQueries(q => ({ ...q, [key]: val }));
-  }
-
   function clearAll() {
     setSearchQuery("");
-    setFilters(EMPTY_FILTERS);
-    setQueries(EMPTY_QUERIES);
-    setBudgetTypes([]);
     setGoalConditions([]);
     setColumnFilters({});
     setSortSpecs([]);
@@ -2656,43 +2395,28 @@ export default function DashboardPage() {
           {/* Search + filter controls */}
           {!loading && !error && schools.length > 0 && (
             <div className="mb-4">
-              {/* Search bar */}
-              <div className="relative mb-2">
-                <div className="absolute left-4 top-1/2 -translate-y-1/2 pointer-events-none text-slate-400" aria-hidden="true">
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="11" cy="11" r="8"/>
-                    <path d="m21 21-4.35-4.35"/>
-                  </svg>
-                </div>
-                <input
-                  type="search"
-                  id="school-search"
-                  value={searchQuery}
-                  onChange={e => setSearchQuery(e.target.value)}
-                  placeholder="חיפוש לפי שם בית ספר, סמל מוסד, שם יועץ..."
-                  className="input-field pl-12"
-                  aria-label="חיפוש בתי ספר"
-                />
-              </div>
-
-              {/* Filter toggle row */}
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => setShowFilters(o => !o)}
-                    aria-expanded={showFilters}
-                    className={`flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-xl transition-all font-medium ${showFilters || activeFilterCount > 0 ? "btn-blue" : "btn-ghost"}`}
-                  >
-                    <svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                      <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
+              <div className="flex items-center gap-3">
+                {/* Search bar */}
+                <div className="relative flex-1 min-w-0">
+                  <div className="absolute left-4 top-1/2 -translate-y-1/2 pointer-events-none text-slate-400" aria-hidden="true">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <circle cx="11" cy="11" r="8"/>
+                      <path d="m21 21-4.35-4.35"/>
                     </svg>
-                    סינון מתקדם
-                    {activeFilterCount > 0 && (
-                      <span className="inline-flex items-center justify-center w-4 h-4 text-xs font-bold rounded-full bg-white/80 text-blue-700 leading-none">
-                        {activeFilterCount}
-                      </span>
-                    )}
-                  </button>
+                  </div>
+                  <input
+                    type="search"
+                    id="school-search"
+                    value={searchQuery}
+                    onChange={e => setSearchQuery(e.target.value)}
+                    placeholder="חיפוש לפי שם בית ספר, סמל מוסד, שם יועץ..."
+                    className="input-field pl-12"
+                    aria-label="חיפוש בתי ספר"
+                  />
+                </div>
+
+                {/* Filter toggle row */}
+                <div className="flex items-center gap-2 flex-shrink-0">
 
                   {/* Column visibility picker */}
                   <div className="relative" ref={colPickerRef}>
@@ -2785,11 +2509,9 @@ export default function DashboardPage() {
                       document.body
                     )}
                   </div>
-                </div>
 
-                <div className="flex items-center gap-2">
                   {activeFilterCount > 0 && (
-                    <button onClick={() => { setFilters(EMPTY_FILTERS); setQueries(EMPTY_QUERIES); setBudgetTypes([]); setGoalConditions([]); setColumnFilters({}); setSortSpecs([]); }} className="text-xs text-slate-400 hover:text-slate-600 transition-colors px-2 py-1">
+                    <button onClick={() => { setGoalConditions([]); setColumnFilters({}); setSortSpecs([]); }} className="text-xs text-slate-400 hover:text-slate-600 transition-colors px-2 py-1">
                       נקה סינון
                     </button>
                   )}
@@ -2854,6 +2576,12 @@ export default function DashboardPage() {
                     </>
                   )}
 
+                  {hasVisibleSummaryCol && (
+                    <SummaryBudgetSelector value={summaryBudget} options={budgetTypeOptions} onChange={setSummaryBudget} />
+                  )}
+
+                  <AcademicYearSelector value={academicYear} onChange={setAcademicYear} />
+
                   {/* Three-dot menu */}
                   <div className="relative" ref={tableMenuRef}>
                     <button
@@ -2895,76 +2623,6 @@ export default function DashboardPage() {
                   </div>
                 </div>
               </div>
-
-              {/* Advanced filter panel */}
-              {showFilters && (
-                <div className="flex flex-col gap-3 mt-2">
-                  <AccordionSection
-                    title="ראשי"
-                    isOpen={openSections.main}
-                    onToggle={() => setOpenSections(o => ({ ...o, main: !o.main }))}
-                    badge={activeChipCount + activeQueryCount + (budgetTypes.length > 0 ? 1 : 0)}
-                  >
-                    <div className="grid grid-cols-4 gap-4">
-                      {FILTER_CONFIG.map(cfg =>
-                        cfg.checkbox ? (
-                          <CheckboxFilterField
-                            key={cfg.key}
-                            label={cfg.label}
-                            options={filterOptions[cfg.key]}
-                            selected={filters[cfg.key]}
-                            onChange={val => setFilter(cfg.key, val)}
-                            showAllOption={cfg.showAllOption}
-                          />
-                        ) : (
-                          <FilterField
-                            key={cfg.key}
-                            label={cfg.label}
-                            options={filterOptions[cfg.key]}
-                            selected={filters[cfg.key]}
-                            onChange={val => setFilter(cfg.key, val)}
-                            query={queries[cfg.key]}
-                            onQueryChange={val => setQuery(cfg.key, val)}
-                            openOnFocus={cfg.openOnFocus}
-                          />
-                        )
-                      )}
-
-                      <div className="flex flex-col gap-1.5">
-                        <label htmlFor="dashboard-academic-year" className="text-xs font-semibold text-slate-600">שנת לימודים</label>
-                        <select
-                          id="dashboard-academic-year"
-                          value={academicYear}
-                          onChange={e => setAcademicYear(e.target.value)}
-                          className="input-field text-sm w-full text-right"
-                        >
-                          {ACADEMIC_YEARS.map(y => <option key={y} value={y}>{y}</option>)}
-                        </select>
-                      </div>
-
-                      <CheckboxFilterField
-                        label="סוג תקציב"
-                        options={budgetTypeOptions}
-                        selected={budgetTypes}
-                        onChange={setBudgetTypes}
-                      />
-                    </div>
-                  </AccordionSection>
-
-                  <div className="flex justify-end">
-                    <button
-                      type="button"
-                      onClick={() => { setFilters(EMPTY_FILTERS); setQueries(EMPTY_QUERIES); setSearchQuery(""); setBudgetTypes([]); setGoalConditions([]); setColumnFilters({}); setSortSpecs([]); }}
-                      className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 transition-colors px-2 py-1 rounded-lg hover:bg-slate-100"
-                    >
-                      <svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                        <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-                      </svg>
-                      ניקוי סינון
-                    </button>
-                  </div>
-                </div>
-              )}
             </div>
           )}
 

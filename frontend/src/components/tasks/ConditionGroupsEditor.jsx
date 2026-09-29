@@ -4,6 +4,7 @@ import TaskDateTimeInput from "./TaskDateTimeInput";
 import DirectStyleDateInput from "./DirectStyleDateInput";
 import FieldPickerButton from "./FieldPickerButton";
 import { MEETING_STATUS_OPTIONS, MEETING_TYPE_OPTIONS } from "../meetings/constants";
+import { ACADEMIC_YEARS, DEFAULT_ACADEMIC_YEAR } from "../../constants/academicYears";
 
 // Only scheduled/completed meetings are ever fetched for condition-matching at all (see
 // backend/task_logic.py's _fetch_schools_and_meetings, which pre-filters at the query level for
@@ -29,6 +30,10 @@ const EMPTY_MEETING_CONDITION = {
   // public booking page ("אפשרויות נוספות"). null (unanswered) until explicitly set; see
   // isMeetingRequirementComplete below.
   allow_time_range_search: null,
+  // Which academic year(s) the secretary will be asked to upload files for, once this
+  // requirement's meeting is actually scheduled. Only meaningful when meeting_service_type
+  // != "current"; null there. Mirrors DirectCoordinationRangeIn.requested_upload_years.
+  requested_upload_years: [DEFAULT_ACADEMIC_YEAR],
 };
 const MEETING_TYPE_PILLS = [{ value: "gefen", label: "גפן" }, { value: "current", label: "שוטף" }, { value: "district", label: "מחוז" }, { value: "takuma", label: "תקומה" }];
 const PARTICIPANT_ROLE_OPTIONS = [
@@ -551,6 +556,32 @@ export default function ConditionGroupsEditor({
                         ))}
                       </div>
                     </fieldset>
+
+                    {cond.meeting_service_type && cond.meeting_service_type !== "current" && (
+                      <fieldset className="flex flex-col gap-1.5">
+                        <legend className="text-xs font-medium text-black">
+                          קבצים של אילו שנות לימוד תתבקש המנהלנית להעלות
+                        </legend>
+                        <div className="flex gap-3">
+                          {ACADEMIC_YEARS.map(year => (
+                            <label key={year} className="flex items-center gap-1.5 text-sm text-black cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={(cond.requested_upload_years || []).includes(year)}
+                                onChange={() => {
+                                  const cur = new Set(cond.requested_upload_years || []);
+                                  if (cur.has(year)) cur.delete(year); else cur.add(year);
+                                  const next = Array.from(cur);
+                                  updateCondition(gi, ci, { requested_upload_years: next.length ? next : [DEFAULT_ACADEMIC_YEAR] });
+                                }}
+                                className="w-3.5 h-3.5 rounded accent-blue-600"
+                              />
+                              {year}
+                            </label>
+                          ))}
+                        </div>
+                      </fieldset>
+                    )}
 
                     {needsStageScope(cond) && (
                       <fieldset className="flex flex-col gap-1.5">

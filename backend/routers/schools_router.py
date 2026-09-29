@@ -35,8 +35,10 @@ from academic_years import (
     GOAL_TEMPLATE_BASE_YEAR,
     INHERITED_YEAR_ADMIN_FIELDS,
     get_academic_year_for_date,
+    get_previous_academic_year,
     merge_inherited_year_admin,
     resolve_inherited_year_admin,
+    resolve_requested_upload_years,
 )
 from auth import get_current_user, invalidate_profile_cache
 from email_resend import send_resend_email
@@ -283,6 +285,13 @@ class GoalStatusIn(BaseModel):
     met: bool | None = None
 
 
+class IncentiveModelIn(BaseModel):
+    division_type: str
+    budget_name: str
+    academic_year: str
+    met: bool
+
+
 class ControlLetterIn(BaseModel):
     received_date: str | None = None
     days_to_answer: int | None = None
@@ -310,6 +319,7 @@ class MeetingIn(BaseModel):
     academic_year: str | None = None
     primary_contact_key: str | None = None  # which participant's phone to use in the Outlook event subject
     stage_scope: str | None = None  # six-year schools only: 'tichon' | 'chativa' | 'both'
+    requested_upload_years: list[str] | None = None  # which academic year(s) the secretary is asked for files for
 
 
 class MeetingStatusPatchIn(BaseModel):
@@ -318,6 +328,7 @@ class MeetingStatusPatchIn(BaseModel):
     start_time: str | None = None
     end_time: str | None = None
     reminder_enabled: bool | None = None
+    requested_upload_years: list[str] | None = None
 
 
 class BlockedDateIn(BaseModel):
@@ -420,6 +431,7 @@ class DirectCoordinationRangeIn(BaseModel):
     stage_scope: str | None = None  # six-year schools only, gefen/current ranges only: "tichon" | "chativa"
     meeting_type: str = "remote"  # "remote" | "physical" — where the meeting will take place
     allow_time_range_search: bool  # whether the school may re-search with a narrower time window on the public booking page (no default — the frontend forces an explicit answer)
+    requested_upload_years: list[str] | None = None  # which academic year(s) the secretary is asked for files (null for a "current" range)
 
 
 class DirectCoordinationIn(BaseModel):
@@ -2038,6 +2050,127 @@ def set_goal_status(
 
 
 # ---------------------------------------------------------------------------
+# Incentive model selection (יוזמות וצרכים — 30%/40% ceiling)
+# ---------------------------------------------------------------------------
+# Kept entirely separate from school_goals: answering here never writes back to the
+# יעדים tab, and vice versa. See yozma_incentive_selections table.
+
+_INCENTIVE_REPORTING_GOAL_KEYS = ("reporting_valid_70_may", "reporting_valid_85_jul")
+
+
+@router.get("/{school_id}/incentive-model")
+def get_incentive_model(
+    school_id: str,
+    division_type: str,
+    budget_name: str,
+    academic_year: str,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            if user["role"] not in ("owner", "manager") and not _advisor_has_school_access(db, user, school_id):
+                raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
+
+            existing = (
+                db.table("yozma_incentive_selections")
+                .select("pct, source")
+                .eq("school_id", school_id)
+                .eq("division_type", division_type)
+                .eq("budget_name", budget_name)
+                .eq("academic_year", academic_year)
+                .execute()
+                .data
+            )
+            if existing:
+                return {"resolved": True, "pct": existing[0]["pct"], "source": existing[0]["source"], "target_year": None}
+
+            target_year = get_previous_academic_year(academic_year)
+            if not target_year:
+                return {"resolved": False, "needs_prompt": True, "target_year": None}
+
+            goal_rows = (
+                db.table("school_goals")
+                .select("goal_key, met")
+                .eq("school_id", school_id)
+                .eq("division_type", division_type)
+                .eq("budget_name", budget_name)
+                .eq("academic_year", target_year)
+                .in_("goal_key", _INCENTIVE_REPORTING_GOAL_KEYS)
+                .execute()
+                .data
+            ) or []
+            met_map = {r["goal_key"]: r["met"] for r in goal_rows}
+
+            pct = None
+            if any(met_map.get(k) is True for k in _INCENTIVE_REPORTING_GOAL_KEYS):
+                pct = 40
+            elif all(met_map.get(k) is False for k in _INCENTIVE_REPORTING_GOAL_KEYS):
+                pct = 30
+
+            if pct is None:
+                return {"resolved": False, "needs_prompt": True, "target_year": target_year}
+
+            row = (
+                db.table("yozma_incentive_selections")
+                .upsert(
+                    {
+                        "school_id": school_id,
+                        "division_type": division_type,
+                        "budget_name": budget_name,
+                        "academic_year": academic_year,
+                        "pct": pct,
+                        "source": "auto_goals",
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                    on_conflict="school_id,division_type,budget_name,academic_year",
+                )
+                .execute()
+            )
+            return {"resolved": True, "pct": row.data[0]["pct"], "source": "auto_goals", "target_year": None}
+        except HTTPException:
+            raise
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("get_incentive_model attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.error("get_incentive_model failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+
+@router.patch("/{school_id}/incentive-model")
+def set_incentive_model(
+    school_id: str,
+    body: IncentiveModelIn,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    db = get_admin_client()
+    if user["role"] not in ("owner", "manager") and not _advisor_has_school_access(db, user, school_id):
+        raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
+
+    row = (
+        db.table("yozma_incentive_selections")
+        .upsert(
+            {
+                "school_id": school_id,
+                "division_type": body.division_type,
+                "budget_name": body.budget_name,
+                "academic_year": body.academic_year,
+                "pct": 40 if body.met else 30,
+                "source": "manual",
+                "decided_by": user["id"],
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            on_conflict="school_id,division_type,budget_name,academic_year",
+        )
+        .execute()
+    )
+    return row.data[0]
+
+
+# ---------------------------------------------------------------------------
 # Advisor assignments
 # ---------------------------------------------------------------------------
 
@@ -2890,11 +3023,13 @@ def get_notifications(
                                          "request_status": p_status_map.get(n["ref_id"])}
             except Exception as enrich_exc:
                 logger.warning("request status enrichment failed (non-fatal): %s", enrich_exc)
-            # goal_auto_updated is delivered ONLY as an ephemeral bottom-left popup
-            # (GoalUpdatePopup) — it must not appear in the bell list or count. It is fetched
-            # as its own query below (independent of the page window) so a pending popup is
-            # never missed just because it falls outside the currently loaded page.
-            items = [n for n in items if n.get("type") != "goal_auto_updated"]
+            # goal_auto_updated / reconciliation_check_completed are delivered ONLY as
+            # ephemeral bottom-left popups (GoalUpdatePopup / ReconciliationCompletedPopup) —
+            # they must not appear in the bell list or count. Each is fetched as its own query
+            # below (independent of the page window) so a pending popup is never missed just
+            # because it falls outside the currently loaded page.
+            POPUP_ONLY_TYPES = ("goal_auto_updated", "reconciliation_check_completed")
+            items = [n for n in items if n.get("type") not in POPUP_ONLY_TYPES]
 
             # Total unread count, decoupled from the current page so it stays accurate
             # no matter how many pages have been loaded (non-fatal: falls back to 0).
@@ -2904,7 +3039,7 @@ def get_notifications(
                     db.table("notifications")
                     .select("id", count="exact", head=True)
                     .eq("recipient_id", user["id"])
-                    .neq("type", "goal_auto_updated")
+                    .not_.in_("type", list(POPUP_ONLY_TYPES))
                     .is_("read_at", "null")
                     .execute()
                 )
@@ -2928,7 +3063,27 @@ def get_notifications(
             except Exception as goal_exc:
                 logger.warning("goal_auto_updates query failed (non-fatal): %s", goal_exc)
 
-            return {"count": count, "items": items, "goal_auto_updates": goal_updates, "has_more": has_more}
+            reconciliation_completions = []
+            try:
+                rc_res = (
+                    db.table("notifications")
+                    .select("*")
+                    .eq("recipient_id", user["id"])
+                    .eq("type", "reconciliation_check_completed")
+                    .is_("read_at", "null")
+                    .order("created_at", desc=True)
+                    .limit(20)
+                    .execute()
+                )
+                reconciliation_completions = rc_res.data or []
+            except Exception as rc_exc:
+                logger.warning("reconciliation_completions query failed (non-fatal): %s", rc_exc)
+
+            return {
+                "count": count, "items": items, "has_more": has_more,
+                "goal_auto_updates": goal_updates,
+                "reconciliation_completions": reconciliation_completions,
+            }
         except Exception as exc:
             if attempt == 0:
                 logger.warning("get_notifications attempt 1 failed: %s — resetting and retrying", exc)
@@ -2936,7 +3091,7 @@ def get_notifications(
                 time.sleep(0.3)
             else:
                 logger.warning("get_notifications failed after 2 attempts: %s", exc)
-                return {"count": 0, "items": [], "goal_auto_updates": [], "has_more": False}  # silent fallback — not critical
+                return {"count": 0, "items": [], "goal_auto_updates": [], "reconciliation_completions": [], "has_more": False}  # silent fallback — not critical
 
 
 @router.patch("/notifications/read-all")
@@ -3810,7 +3965,7 @@ def send_due_reminders(request: Request):
             db = get_admin_client()
             res = (
                 db.table("meetings")
-                .select("id, school_id, meeting_date, start_time, end_time, status, participants, advisor_ids, meeting_service_type, meeting_type, reminder_enabled")
+                .select("id, school_id, meeting_date, start_time, end_time, status, participants, advisor_ids, meeting_service_type, meeting_type, reminder_enabled, academic_year, requested_upload_years")
                 .eq("status", "scheduled")
                 .in_("meeting_date", due_dates)
                 .execute()
@@ -3967,15 +4122,23 @@ def send_due_reminders(request: Request):
                 if send_mode == "upload":
                     try:
                         token = get_or_create_upload_token(db, m["id"], m["meeting_date"])
-                        checklist = build_upload_checklist(db, school, m.get("academic_year"))
+                        upload_years = resolve_requested_upload_years(m)
+                        year_checklists = [(y, build_upload_checklist(db, school, y)) for y in upload_years]
+                        # Multi-year meetings: prefix each item with its academic year so the
+                        # email is still informative even though the rich per-year split UI
+                        # only lives on the /upload/{token} page itself.
+                        checklist_items = [
+                            (f'{i["label"]} — {y}' if len(year_checklists) > 1 else i["label"])
+                            for y, cl in year_checklists for i in cl["items"]
+                        ]
                         upload_url = f"{os.getenv('APP_URL', '')}/upload/{token}"
                         html = _build_secretary_upload_email_html(
                             recipient_name=p.get("name") or "",
                             when_bet=when_bet,
                             school_name=school.get("name", ""),
-                            checklist_items=[i["label"] for i in checklist["items"]],
+                            checklist_items=checklist_items,
                             upload_url=upload_url,
-                            no_baseline=checklist["no_baseline_this_year"],
+                            no_baseline=any(cl["no_baseline_this_year"] for _, cl in year_checklists),
                             meeting_date=m["meeting_date"],
                             start_time=m.get("start_time"),
                             advisor_name=advisor_name,
@@ -7151,6 +7314,13 @@ def create_meeting(school_id: str, body: MeetingIn, user: Annotated[dict, Depend
     if body.notes: data["notes"] = body.notes
     if body.primary_contact_key is not None: data["primary_contact_key"] = body.primary_contact_key
     if body.stage_scope is not None: data["stage_scope"] = body.stage_scope
+    # Left NULL unless explicitly provided (e.g. a DirectCoordinationModal/TaskCreateWizard
+    # booking that already asked) — deliberately NOT defaulted here. See
+    # academic_years.resolve_requested_upload_years: the one-click "add meeting" paths create
+    # a meeting with no date at all, so any default baked in now would go stale the moment a
+    # real date is picked later via inline edit.
+    if body.requested_upload_years is not None:
+        data["requested_upload_years"] = body.requested_upload_years
     # advisor_ids takes precedence; fall back to legacy advisor_id
     if body.advisor_ids is not None:
         data["advisor_ids"] = _enforce_advisor_ids_for_role(user, body.advisor_ids, "create_meeting")
@@ -7983,6 +8153,7 @@ def send_direct_coordination_request(
             "participants": [p.model_dump() for p in r.participants],
             "meeting_type": r.meeting_type,
             "allow_time_range_search": r.allow_time_range_search,
+            "requested_upload_years": r.requested_upload_years,
         })
 
     # Group ranges by distinct resolved coordinator email — one email (and one booking token)
@@ -8067,6 +8238,7 @@ def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annot
     if body.academic_year: data["academic_year"] = body.academic_year
     if body.primary_contact_key is not None: data["primary_contact_key"] = body.primary_contact_key
     if body.stage_scope is not None: data["stage_scope"] = body.stage_scope
+    if body.requested_upload_years is not None: data["requested_upload_years"] = body.requested_upload_years
     # advisor_ids takes precedence; fall back to legacy advisor_id
     if body.advisor_ids is not None:
         data["advisor_ids"] = _enforce_advisor_ids_for_role(user, body.advisor_ids, "update_meeting")
@@ -8173,6 +8345,7 @@ def patch_meeting(school_id: str, meeting_id: str, body: MeetingStatusPatchIn, u
     # the full PUT — so a racing field autosave can never carry a stale reminder value and
     # silently flip it back. This is the ONLY path that turns the reminder off.
     if body.reminder_enabled is not None: data["reminder_enabled"] = body.reminder_enabled
+    if body.requested_upload_years is not None: data["requested_upload_years"] = body.requested_upload_years
     return _apply_meeting_patch(db, user["org_id"], school_id, meeting_id, data)
 
 

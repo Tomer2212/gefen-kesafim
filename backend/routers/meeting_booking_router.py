@@ -506,6 +506,10 @@ def _book_range_slot(db, token_row: dict, range_key: str, body: dict) -> dict:
         # Chosen by the manager when building the meeting request (defaults to "remote"
         # for older tokens minted before this field existed).
         "meeting_type": range_row.get("meeting_type") or "remote",
+        # Chosen by the manager in DirectCoordinationModal (null for older tokens / a
+        # "current" range) — left null otherwise, resolved lazily from the actual meeting
+        # date by academic_years.resolve_requested_upload_years.
+        "requested_upload_years": range_row.get("requested_upload_years"),
     }
     try:
         res = db.table("meetings").insert(meeting_data).execute()

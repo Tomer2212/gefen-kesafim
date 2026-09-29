@@ -5,6 +5,7 @@ import MeetingStatusUpdatePopup from "./MeetingStatusUpdatePopup";
 import TaskReminderPopup from "./TaskReminderPopup";
 import UnknownCallPopup from "./UnknownCallPopup";
 import GoalUpdatePopup from "./GoalUpdatePopup";
+import ReconciliationCompletedPopup from "./ReconciliationCompletedPopup";
 
 const HEADER_META = {
   status: { icon: "🔔", label: "עדכון סטטוס פגישה", cls: "bg-sky-50 border-sky-100 text-sky-800 hover:bg-sky-100" },
@@ -12,6 +13,7 @@ const HEADER_META = {
   reminder: { icon: "🗓️", label: "תזכורת", cls: "bg-amber-50 border-amber-100 text-amber-800 hover:bg-amber-100" },
   "call-attrib": { icon: "📞", label: "שיחה ממספר לא מוכר", cls: "bg-violet-50 border-violet-100 text-violet-800 hover:bg-violet-100" },
   "goal-update": { icon: "🎯", label: "עדכון יעדים", cls: "bg-emerald-50 border-emerald-100 text-emerald-800 hover:bg-emerald-100" },
+  "reconciliation-completed": { icon: "✅", label: "תוצאת בדיקה", cls: "bg-emerald-50 border-emerald-100 text-emerald-800 hover:bg-emerald-100" },
 };
 
 function ReminderHeaderOnly({ reminder, onClick }) {
@@ -83,6 +85,9 @@ export default function MeetingRemindersOverlay() {
         }
         if (r._type === "goal-update") {
           return <GoalUpdatePopup key={r._key} reminder={r} onDismiss={onDismiss} />;
+        }
+        if (r._type === "reconciliation-completed") {
+          return <ReconciliationCompletedPopup key={r._key} reminder={r} onDismiss={onDismiss} />;
         }
         if (r._type === "call-attrib") {
           return <UnknownCallPopup key={r._key} reminder={r} onDismiss={onDismiss} onSuccess={showSuccess} />;

@@ -10,23 +10,31 @@ function formatDateDDMMYYYY(iso) {
   return `${d}/${m}/${y}`;
 }
 
-function UploadResultModal({ mode, missing, onClose }) {
+function UploadResultModal({ mode, missing, rejected, onClose }) {
   const { ref, handleKeyDown } = useFocusTrap(onClose);
   const isError = mode === "error";
   const allReceived = mode === "complete";
+  const hasRejected = (rejected || []).length > 0;
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" dir="rtl">
       <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="upload-result-title"
         onKeyDown={handleKeyDown}
         className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-sm flex flex-col gap-3 text-center">
-        <span className="text-3xl" aria-hidden="true">{isError ? "❌" : allReceived ? "🎉" : "⚠️"}</span>
+        <span className="text-3xl" aria-hidden="true">{isError ? "❌" : hasRejected ? "⚠️" : allReceived ? "🎉" : "⚠️"}</span>
         <h2 id="upload-result-title" className="text-base font-bold text-slate-800">
-          {isError ? "אירעה שגיאה בהעלאה" : allReceived ? "תודה רבה! כל הקבצים הנדרשים התקבלו" : "עדיין חסרים קבצים"}
+          {isError ? "אירעה שגיאה בהעלאה" : hasRejected ? "חלק מהקבצים לא התקבלו" : allReceived ? "תודה רבה! כל הקבצים הנדרשים התקבלו" : "עדיין חסרים קבצים"}
         </h2>
         {isError && (
           <p className="text-sm text-slate-600 leading-relaxed">נסו שוב, או פנו ליועץ שלכם אם השגיאה חוזרת.</p>
         )}
-        {!isError && !allReceived && (
+        {hasRejected && (
+          <ul className="text-sm text-red-600 leading-relaxed text-right space-y-1" role="alert">
+            {rejected.map((r, i) => (
+              <li key={i}><b>{r.filename}</b>: {r.reason}</li>
+            ))}
+          </ul>
+        )}
+        {!isError && !allReceived && !hasRejected && missing?.length > 0 && (
           <p className="text-sm text-slate-600 leading-relaxed">
             תודה על המאמץ שלך, אבל אנחנו צריכים שתעלי גם את <b>{missing.join(", ")}</b> כדי שהמאמץ שלך לא יהיה לשווא.
           </p>
@@ -40,25 +48,12 @@ function UploadResultModal({ mode, missing, onClose }) {
   );
 }
 
-export default function MeetingUploadPage() {
-  const { token } = useParams();
-  const [status, setStatus] = useState("loading"); // loading | invalid | expired | ready
-  const [data, setData] = useState(null);
+function YearUploadSection({ token, year, standalone, onResult, onUploaded }) {
   const [pendingFiles, setPendingFiles] = useState([]);
   const [uploading, setUploading] = useState(false);
-  const [resultModal, setResultModal] = useState(null); // { allReceived, missing } | "error" | null
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef(null);
-
-  function load() {
-    axios.get(`/public/meeting-upload/${token}`)
-      .then(res => { setData(res.data); setStatus("ready"); })
-      .catch(err => {
-        setStatus(err?.response?.status === 410 ? "expired" : "invalid");
-      });
-  }
-
-  useEffect(() => { load(); }, [token]);
+  const inputId = `upload-dropzone-${year.academic_year}`;
 
   function addFiles(fileList) {
     const files = Array.from(fileList || []);
@@ -79,20 +74,132 @@ export default function MeetingUploadPage() {
     setUploading(true);
     try {
       const form = new FormData();
+      form.append("academic_year", year.academic_year);
       pendingFiles.forEach(f => form.append("files", f));
       const res = await axios.post(`/public/meeting-upload/${token}/files`, form, {
         headers: { "Content-Type": "multipart/form-data" },
       });
       const missing = (res.data.items || []).filter(i => !i.received).map(i => i.label);
-      setResultModal({ mode: res.data.all_received ? "complete" : "partial", missing });
+      const rejected = res.data.rejected || [];
+      onResult({
+        mode: rejected.length ? "rejected" : res.data.all_received ? "complete" : "partial",
+        missing, rejected,
+      });
       setPendingFiles([]);
-      load();
+      onUploaded();
     } catch {
-      setResultModal({ mode: "error", missing: [] });
+      onResult({ mode: "error", missing: [], rejected: [] });
     } finally {
       setUploading(false);
     }
   }
+
+  return (
+    <div className={standalone ? "" : "border border-slate-200 rounded-2xl p-4 mb-5"}>
+      {!standalone && (
+        <h2 className="text-base font-bold text-slate-800 mb-3 text-center">
+          שנת לימודים {year.academic_year}
+        </h2>
+      )}
+
+      {year.no_baseline_this_year && (
+        <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-4 py-2 mb-4">
+          טרם בוצעה בדיקה עבור בית הספר בשנת הלימודים הזו — הרשימה למטה כללית.
+        </p>
+      )}
+
+      <div className="mb-4">
+        <h3 className="text-sm font-semibold text-slate-700 mb-2">קבצים נדרשים:</h3>
+        <ul className="text-sm space-y-1.5">
+          {year.items.map((item, i) => (
+            <li key={i} className="flex items-center gap-2">
+              <span aria-hidden="true" className={item.received ? "text-green-600" : "text-slate-400"}>
+                {item.received ? "✓" : "○"}
+              </span>
+              <span className={item.received ? "text-slate-500 line-through" : "text-slate-700"}>{item.label}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      <label htmlFor={inputId} className="sr-only">גרירת קבצים להעלאה — שנת לימודים {year.academic_year}</label>
+      <div
+        id={inputId}
+        role="button"
+        tabIndex={0}
+        onClick={() => fileInputRef.current?.click()}
+        onKeyDown={e => { if (e.key === "Enter" || e.key === " ") fileInputRef.current?.click(); }}
+        onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={e => { e.preventDefault(); setDragOver(false); addFiles(e.dataTransfer.files); }}
+        className={`border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition-colors mb-3 ${
+          dragOver ? "border-blue-500 bg-blue-50" : "border-slate-300 bg-slate-50"
+        }`}
+      >
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          aria-label={`בחירת קבצים להעלאה — שנת לימודים ${year.academic_year}`}
+          className="hidden"
+          onChange={e => { addFiles(e.target.files); e.target.value = ""; }}
+        />
+        <p className="text-sm text-slate-500">
+          גררו לכאן קבצים, או לחצו לבחירה
+        </p>
+      </div>
+
+      {pendingFiles.length > 0 && (
+        <div className="mb-4">
+          <h3 className="text-sm font-semibold text-slate-700 mb-2">קבצים לשליחה:</h3>
+          <ul className="text-sm space-y-1.5 mb-3">
+            {pendingFiles.map((f, i) => (
+              <li key={i} className="flex items-center justify-between gap-2 bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5">
+                <span className="text-slate-700 truncate">{f.name}</span>
+                <button type="button" onClick={() => removePendingFile(i)}
+                  aria-label={`הסרת ${f.name} מרשימת השליחה`}
+                  className="text-slate-400 hover:text-red-600 transition-colors flex-shrink-0 text-base leading-none">
+                  ✕
+                </button>
+              </li>
+            ))}
+          </ul>
+          <button type="button" onClick={handleSubmit} disabled={uploading}
+            className="w-full py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold transition-colors disabled:opacity-50">
+            {uploading ? "שולח..." : `שליחת קבצים — שנת לימודים ${year.academic_year}`}
+          </button>
+        </div>
+      )}
+
+      {year.already_uploaded?.length > 0 && (
+        <div>
+          <h3 className="text-sm font-semibold text-slate-700 mb-2">קבצים שהועלו עד כה:</h3>
+          <ul className="text-sm text-slate-500 list-disc pr-5 space-y-1">
+            {year.already_uploaded.map((f, i) => <li key={i}>{f.original_filename}</li>)}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function MeetingUploadPage() {
+  const { token } = useParams();
+  const [status, setStatus] = useState("loading"); // loading | invalid | expired | ready
+  const [data, setData] = useState(null);
+  const [resultModal, setResultModal] = useState(null);
+
+  function load() {
+    axios.get(`/public/meeting-upload/${token}`)
+      .then(res => { setData(res.data); setStatus("ready"); })
+      .catch(err => {
+        setStatus(err?.response?.status === 410 ? "expired" : "invalid");
+      });
+  }
+
+  useEffect(() => { load(); }, [token]);
+
+  const multiYear = (data?.years?.length || 0) > 1;
 
   return (
     <div dir="rtl" className="bg-scene min-h-screen flex items-center justify-center p-4">
@@ -127,83 +234,22 @@ export default function MeetingUploadPage() {
                 {data.school_name} · {formatDateDDMMYYYY(data.meeting_date)}
               </p>
 
-              {data.no_baseline_this_year && (
-                <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-4 py-2 mb-4">
-                  טרם בוצעה בדיקה עבור בית הספר בשנת הלימודים הנוכחית — הרשימה למטה כללית.
+              {multiYear && (
+                <p className="text-sm text-blue-700 bg-blue-50 border border-blue-200 rounded-lg px-4 py-2 mb-5 text-center">
+                  לקראת הפגישה הזו מתבקשים קבצים עבור <b>{data.years.length} שנות לימוד שונות</b> — יש להעלות ולשלוח בנפרד עבור כל שנה, באזור המתאים לה למטה.
                 </p>
               )}
 
-              <div className="mb-4">
-                <h2 className="text-sm font-semibold text-slate-700 mb-2">קבצים נדרשים:</h2>
-                <ul className="text-sm space-y-1.5">
-                  {data.items.map((item, i) => (
-                    <li key={i} className="flex items-center gap-2">
-                      <span aria-hidden="true" className={item.received ? "text-green-600" : "text-slate-400"}>
-                        {item.received ? "✓" : "○"}
-                      </span>
-                      <span className={item.received ? "text-slate-500 line-through" : "text-slate-700"}>{item.label}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-
-              <label htmlFor="upload-dropzone" className="sr-only">גרירת קבצים להעלאה</label>
-              <div
-                id="upload-dropzone"
-                role="button"
-                tabIndex={0}
-                onClick={() => fileInputRef.current?.click()}
-                onKeyDown={e => { if (e.key === "Enter" || e.key === " ") fileInputRef.current?.click(); }}
-                onDragOver={e => { e.preventDefault(); setDragOver(true); }}
-                onDragLeave={() => setDragOver(false)}
-                onDrop={e => { e.preventDefault(); setDragOver(false); addFiles(e.dataTransfer.files); }}
-                className={`border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition-colors mb-3 ${
-                  dragOver ? "border-blue-500 bg-blue-50" : "border-slate-300 bg-slate-50"
-                }`}
-              >
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  multiple
-                  aria-label="בחירת קבצים להעלאה"
-                  className="hidden"
-                  onChange={e => { addFiles(e.target.files); e.target.value = ""; }}
+              {data.years.map(year => (
+                <YearUploadSection
+                  key={year.academic_year}
+                  token={token}
+                  year={year}
+                  standalone={!multiYear}
+                  onResult={setResultModal}
+                  onUploaded={load}
                 />
-                <p className="text-sm text-slate-500">
-                  גררו לכאן קבצים, או לחצו לבחירה
-                </p>
-              </div>
-
-              {pendingFiles.length > 0 && (
-                <div className="mb-4">
-                  <h2 className="text-sm font-semibold text-slate-700 mb-2">קבצים לשליחה:</h2>
-                  <ul className="text-sm space-y-1.5 mb-3">
-                    {pendingFiles.map((f, i) => (
-                      <li key={i} className="flex items-center justify-between gap-2 bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5">
-                        <span className="text-slate-700 truncate">{f.name}</span>
-                        <button type="button" onClick={() => removePendingFile(i)}
-                          aria-label={`הסרת ${f.name} מרשימת השליחה`}
-                          className="text-slate-400 hover:text-red-600 transition-colors flex-shrink-0 text-base leading-none">
-                          ✕
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                  <button type="button" onClick={handleSubmit} disabled={uploading}
-                    className="w-full py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold transition-colors disabled:opacity-50">
-                    {uploading ? "שולח..." : "שליחת קבצים"}
-                  </button>
-                </div>
-              )}
-
-              {data.already_uploaded?.length > 0 && (
-                <div>
-                  <h2 className="text-sm font-semibold text-slate-700 mb-2">קבצים שהועלו עד כה:</h2>
-                  <ul className="text-sm text-slate-500 list-disc pr-5 space-y-1">
-                    {data.already_uploaded.map((f, i) => <li key={i}>{f.original_filename}</li>)}
-                  </ul>
-                </div>
-              )}
+              ))}
             </>
           )}
 
@@ -219,6 +265,7 @@ export default function MeetingUploadPage() {
         <UploadResultModal
           mode={resultModal.mode}
           missing={resultModal.missing}
+          rejected={resultModal.rejected}
           onClose={() => setResultModal(null)}
         />
       )}

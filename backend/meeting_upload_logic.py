@@ -72,7 +72,7 @@ def build_upload_checklist(db, school: dict, academic_year: str | None = None) -
             {"label": "קובץ דיווח ביצוע (כלל התקציבים והחטיבות)", "kind": "gefen", "division_type": None, "budget_name": None},
         ]
         for fs in finance_softwares:
-            items.append({"label": f"קובץ כספים לפי תקציב וחטיבה ({fs})", "kind": "finance", "division_type": None, "budget_name": None})
+            items.append({"label": f"קובץ כספים לפי תקציב וחטיבה ({fs})", "kind": "finance", "division_type": None, "budget_name": None, "finance_software": fs})
         return {"items": items, "no_baseline_this_year": True, "divisions": [a["division_type"] for a in accounts]}
 
     divisions = sorted({m["division_type"] for m in metrics if m.get("division_type")})
@@ -90,7 +90,7 @@ def build_upload_checklist(db, school: dict, academic_year: str | None = None) -
     if not finance_softwares and school.get("finance_software"):
         finance_softwares = {school["finance_software"]}
     for fs in sorted(finance_softwares):
-        items.append({"label": f"קובץ כספים ({fs})", "kind": "finance", "division_type": None, "budget_name": None})
+        items.append({"label": f"קובץ כספים ({fs})", "kind": "finance", "division_type": None, "budget_name": None, "finance_software": fs})
 
     return {"items": items, "no_baseline_this_year": False, "divisions": divisions}
 
@@ -122,11 +122,25 @@ def compute_upload_comparison(checklist: dict, received_files: list[dict]) -> di
     does NOT run the real reconciliation."""
     divisions_expected = checklist.get("divisions") or []
     tikhnun_needed = max(1, len(divisions_expected)) if divisions_expected else 1
+    # A school with 0 or 1 real divisions (יסודי, or any non-six-year school) — the file
+    # classifier's division_type ("tikkon"/"beinayim"/"both", from tikkon/beinayim report
+    # codes) is a different vocabulary than the school's own division_type ("yesodi" etc.)
+    # and can never match it directly. There's no ambiguity to resolve for such a school —
+    # any successfully-identified gefen file is necessarily "the" division's file.
+    is_multi_division = len(divisions_expected) > 1
 
-    gefen_divisions_received = {
-        f["division_type"] for f in received_files
-        if f.get("identified_type") == "gefen" and f.get("division_type")
-    }
+    gefen_files = [f for f in received_files if f.get("identified_type") == "gefen"]
+    gefen_divisions_received = set()
+    gefen_unclear = False
+    for f in gefen_files:
+        dt = f.get("division_type")
+        if dt == "both":
+            gefen_divisions_received.update({"tikkon", "beinayim"})
+        elif dt:
+            gefen_divisions_received.add(dt)
+        else:
+            gefen_unclear = True
+
     tikhnun_received_count = sum(1 for f in received_files if f.get("identified_type") == "tikhnun")
     tikhnun_budgets_received = set()
     for f in received_files:
@@ -149,9 +163,13 @@ def compute_upload_comparison(checklist: dict, received_files: list[dict]) -> di
                 received = tikhnun_received_count >= tikhnun_needed
         elif kind == "gefen":
             div = item.get("division_type")
-            received = (div in gefen_divisions_received) if div else (len(gefen_divisions_received) >= tikhnun_needed)
+            if not div or not is_multi_division:
+                received = len(gefen_files) >= tikhnun_needed
+            else:
+                received = div in gefen_divisions_received
         elif kind == "finance":
-            received = len(finance_types_received) > 0
+            fs = item.get("finance_software")
+            received = (fs in finance_types_received) if fs else len(finance_types_received) > 0
         else:
             received = False
         result_items.append({**item, "received": received})
@@ -160,4 +178,8 @@ def compute_upload_comparison(checklist: dict, received_files: list[dict]) -> di
         "items": result_items,
         "all_received": all(i["received"] for i in result_items),
         "no_baseline_this_year": checklist["no_baseline_this_year"],
+        # Surfaced (not fatal) when a multi-division school got a gefen file whose division
+        # couldn't be auto-detected — the secretary/advisor should double-check it by hand
+        # rather than the item silently sitting as "not received" forever with no explanation.
+        "gefen_division_unclear": is_multi_division and gefen_unclear,
     }

@@ -2079,6 +2079,8 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
           onNewRun={() => { setView("table"); setActiveResult(null); setShowNewCheckModal(true); }}
           schoolId={schoolId}
           currentUser={meUser}
+          academicYear={academicYear}
+          schoolStage={schoolStage}
         />
       </div>
     );
@@ -3901,6 +3903,7 @@ export default function SchoolPage() {
       {uploadComparisonMeetingId && (
         <MeetingUploadComparisonModal
           meetingId={uploadComparisonMeetingId}
+          onCheckStarted={() => { setActiveTab("checks"); reloadLogs(); }}
           onClose={() => {
             setUploadComparisonMeetingId(null);
             setSearchParams(prev => {
