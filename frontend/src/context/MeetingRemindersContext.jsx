@@ -70,6 +70,18 @@ export function MeetingRemindersProvider({ children }) {
     setActiveKey(prev => prev ?? key);
   }, []);
 
+  // "הבדיקה עבור X הועלתה בהצלחה/נכשלה" — the "click and continue" completion popup for a
+  // background check triggered from a meeting-files-arrived notification (see
+  // NotificationsPage.jsx / run-check-from-uploads). Keyed by the backing notification id.
+  const addReconciliationCompletedReminder = useCallback((m) => {
+    const key = `reconciliation-${m.id}`;
+    setReminders(prev => {
+      if (prev.some(r => r._key === key)) return prev;
+      return [...prev, { ...m, _type: "reconciliation-completed", _key: key }];
+    });
+    setActiveKey(prev => prev ?? key);
+  }, []);
+
   const dismiss = useCallback((key) => {
     setReminders(prev => prev.filter(r => r._key !== key));
   }, []);
@@ -77,7 +89,8 @@ export function MeetingRemindersProvider({ children }) {
   return (
     <MeetingRemindersCtx.Provider value={{
       reminders, activeKey, setActiveKey,
-      addMeetingReminder, addStatusReminder, addTaskReminder, addCallAttribReminder, addGoalUpdateReminder, dismiss,
+      addMeetingReminder, addStatusReminder, addTaskReminder, addCallAttribReminder, addGoalUpdateReminder,
+      addReconciliationCompletedReminder, dismiss,
       userName, setUserName,
     }}>
       {children}

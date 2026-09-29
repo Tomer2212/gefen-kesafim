@@ -22,7 +22,6 @@ import LoginPage from "./pages/LoginPage";
 import DashboardPage from "./pages/DashboardPage";
 import SchoolPage from "./pages/SchoolPage";
 import AdminPage from "./pages/AdminPage";
-import MainPage from "./pages/MainPage";
 import TermsPage from "./pages/TermsPage";
 import PrivacyPage from "./pages/PrivacyPage";
 import GuidePage from "./pages/GuidePage";
@@ -103,7 +102,6 @@ const router = createBrowserRouter([
       { path: "/accessibility", element: <AccessibilityStatementPage /> },
       { path: "/", element: <PrivateRoute><DashboardPage /></PrivateRoute> },
       { path: "/school/:schoolId", element: <PrivateRoute><SchoolPage /></PrivateRoute> },
-      { path: "/check", element: <PrivateRoute><MainPage /></PrivateRoute> },
       { path: "/admin", element: <AdminRoute><AdminPage /></AdminRoute> },
       { path: "/school/new", element: <AdminRoute><AddSchoolPage /></AdminRoute> },
       { path: "/notifications", element: <PrivateRoute><NotificationsPage /></PrivateRoute> },

@@ -389,23 +389,22 @@ function SettingsModal({ onClose, role }) {
 // Meeting-files-arrived expandable detail
 // ---------------------------------------------------------------------------
 
-function MeetingFilesArrivedDetail({ meetingId, schoolId }) {
-  const navigate = useNavigate();
+function MeetingFilesArrivedDetail({ meetingId, schoolId, academicYear }) {
   const [loading, setLoading] = useState(true);
   const [comparison, setComparison] = useState(null);
   const [files, setFiles] = useState([]);
   const [error, setError] = useState("");
-  const [actionState, setActionState] = useState("idle"); // idle | working | sent | failed
+  const [actionState, setActionState] = useState("idle"); // idle | working | sent | failed | started
 
   useEffect(() => {
     Promise.all([
-      axios.get(`/schools/meetings/${meetingId}/upload-comparison`),
-      axios.get(`/schools/meetings/${meetingId}/uploaded-files`),
+      axios.get(`/schools/meetings/${meetingId}/upload-comparison`, { params: { academic_year: academicYear } }),
+      axios.get(`/schools/meetings/${meetingId}/uploaded-files`, { params: { academic_year: academicYear } }),
     ])
       .then(([cmpRes, filesRes]) => { setComparison(cmpRes.data); setFiles(filesRes.data || []); })
       .catch(() => setError("שגיאה בטעינת פרטי הקבצים"))
       .finally(() => setLoading(false));
-  }, [meetingId]);
+  }, [meetingId, academicYear]);
 
   async function handleDownload(fileId, filename) {
     try {
@@ -433,11 +432,14 @@ function MeetingFilesArrivedDetail({ meetingId, schoolId }) {
     }
   }
 
+  // "Click and continue": the check runs in the background — no waiting/navigating here.
+  // Completion (success or failure) is reported later via the global bottom-left popup
+  // (ReconciliationCompletedPopup), which keeps working no matter where the advisor is by then.
   async function handleRunCheck() {
     setActionState("working");
     try {
-      await axios.post(`/analyze/meetings/${meetingId}/run-check-from-uploads`);
-      navigate(`/school/${schoolId}?tab=checks`);
+      await axios.post(`/analyze/meetings/${meetingId}/run-check-from-uploads`, null, { params: { academic_year: academicYear } });
+      setActionState("started");
     } catch {
       setActionState("failed");
     }
@@ -495,6 +497,11 @@ function MeetingFilesArrivedDetail({ meetingId, schoolId }) {
           נשלחה בקשה למנהלנית עם פירוט הקבצים החסרים.
         </p>
       )}
+      {actionState === "started" && (
+        <p className="text-sm text-green-700 bg-green-50 border border-green-200 rounded-lg px-3 py-2 mb-2" role="status">
+          הבדיקה הופעלה ברקע — תקבל/י הודעה כשהיא תסתיים, אפשר להמשיך לעבוד.
+        </p>
+      )}
       {actionState === "failed" && (
         <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mb-2" role="alert">
           אירעה שגיאה. נסה שוב.
@@ -502,9 +509,9 @@ function MeetingFilesArrivedDetail({ meetingId, schoolId }) {
       )}
 
       <div className="flex gap-2">
-        <button type="button" onClick={handleRunCheck} disabled={actionState === "working" || files.length === 0}
+        <button type="button" onClick={handleRunCheck} disabled={actionState === "working" || actionState === "started" || files.length === 0}
           className="flex-1 text-sm py-2.5 rounded-xl font-medium text-white bg-green-700 hover:bg-green-800 transition-colors disabled:opacity-50">
-          {actionState === "working" ? "מריץ..." : "בצע בדיקה עם הקבצים שהתקבלו"}
+          {actionState === "working" ? "מפעיל..." : actionState === "started" ? "הבדיקה פועלת ברקע" : "בצע בדיקה עם הקבצים שהתקבלו"}
         </button>
         {!comparison.all_received && (
           <button type="button" onClick={handleRequestMissing} disabled={actionState === "working" || actionState === "sent"}
@@ -725,7 +732,7 @@ function NotificationRow({ notif, isExpanded, onToggle, onRead, onReload, onDele
       {/* Expanded: uploaded-files comparison + actions (meeting_files_arrived) */}
       {isExpanded && isFilesArrived && (
         <div className="px-4 pb-4 border-t border-slate-100">
-          <MeetingFilesArrivedDetail meetingId={notif.ref_id} schoolId={notif.school_id} />
+          <MeetingFilesArrivedDetail meetingId={notif.ref_id} schoolId={notif.school_id} academicYear={notif.data?.academic_year} />
         </div>
       )}
 

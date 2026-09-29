@@ -22,6 +22,7 @@ from academic_years import (
     get_academic_year_for_calendar_year,
     get_academic_year_for_date,
     get_academic_year_date_range,
+    resolve_requested_upload_years,
 )
 from auth import get_current_user
 from supabase_client import get_admin_client
@@ -232,7 +233,11 @@ def _sum_display_amounts(rows: list) -> float:
 async def upload(
     background_tasks: BackgroundTasks,
     files: list[UploadFile] = File(...),
-    school_id: str | None = Form(None),
+    # Required — every legitimate caller (SchoolPage.jsx's startCheck/startUpdateCheck) is
+    # always school-scoped. check_logs.school_id is NOT NULL in the DB, so an anonymous
+    # upload could never be saved anyway; it used to fail silently deep inside
+    # _save_check_log instead of being rejected up front here.
+    school_id: str = Form(...),
     gefen_account_id: str | None = Form(None),
     update_log_id: str | None = Form(None),
     academic_year: str | None = Form(None),
@@ -377,20 +382,25 @@ async def run_check_from_uploads(
     meeting_id: str,
     background_tasks: BackgroundTasks,
     user: dict = Depends(get_current_user),
+    academic_year: str | None = None,
 ):
     """Run the real reconciliation using files already uploaded via the
     meeting-upload portal (Phase 2) — no re-upload needed. Mirrors
-    add_file_to_check's storage-download pattern exactly."""
+    add_file_to_check's storage-download pattern exactly. A meeting can now request
+    files for more than one academic year (requested_upload_years) — each year's files
+    are a fully separate check, so `academic_year` picks which one to run (falls back to
+    the meeting's own academic_year for pre-existing single-year meetings/callers)."""
     db = get_admin_client()
-    meeting_res = db.table("meetings").select("id, school_id, academic_year").eq("id", meeting_id).execute()
+    meeting_res = db.table("meetings").select("id, school_id, meeting_date, academic_year, requested_upload_years").eq("id", meeting_id).execute()
     if not meeting_res.data:
         raise HTTPException(status_code=404, detail="הפגישה לא נמצאה")
     meeting = meeting_res.data[0]
+    academic_year = academic_year or resolve_requested_upload_years(meeting)[0]
 
-    files_res = db.table("meeting_upload_files").select("storage_key, original_filename").eq("meeting_id", meeting_id).execute()
+    files_res = db.table("meeting_upload_files").select("storage_key, original_filename").eq("meeting_id", meeting_id).eq("academic_year", academic_year).execute()
     stored_files = files_res.data or []
     if not stored_files:
-        raise HTTPException(status_code=400, detail="לא נמצאו קבצים שהועלו עבור פגישה זו")
+        raise HTTPException(status_code=400, detail="לא נמצאו קבצים שהועלו עבור פגישה זו ועבור שנת הלימודים המבוקשת")
 
     run_id = str(uuid.uuid4())
     run_dir = Path(tempfile.mkdtemp(prefix=f"gefen_{run_id}_"))
@@ -406,10 +416,40 @@ async def run_check_from_uploads(
 
     _update_run(run_id, {"status": "processing"})
     background_tasks.add_task(
-        _process, run_id, all_paths, run_dir,
-        user["id"], meeting["school_id"], None, None, meeting.get("academic_year"),
+        _run_meeting_check_and_notify, run_id, all_paths, run_dir,
+        user["id"], meeting["school_id"], academic_year,
     )
     return {"run_id": run_id}
+
+
+def _run_meeting_check_and_notify(run_id: str, paths: list[Path], run_dir: Path, user_id: str, school_id: str, academic_year: str | None) -> None:
+    """Wraps _process() for the "click and continue" meeting-upload check flow: the advisor
+    who triggered it never polls /analyze/result themselves (unlike SchoolPage.jsx's own
+    upload flow), so this reads the final run_states row back after _process() returns and
+    fires a durable notification either way — reusing the same bottom-left-popup mechanism
+    as goal_auto_updated (see _maybe_auto_update_goals) instead of leaving the advisor with
+    no signal at all when a background run fails."""
+    _process(run_id, paths, run_dir, user_id, school_id, None, None, academic_year)
+    try:
+        db = get_admin_client()
+        run = _get_run(run_id) or {}
+        school = db.table("schools").select("name, authority, symbol").eq("id", school_id).single().execute().data or {}
+        school_label = " ".join(filter(None, [school.get("name"), school.get("authority"), school.get("symbol") and f"(סמל {school['symbol']})"]))
+        if run.get("status") == "done":
+            title = f"הבדיקה עבור {school_label} הועלתה בהצלחה"
+            data = {"title": title, "deeplink": f"/school/{school_id}?tab=checks", "school_name": school.get("name"), "outcome": "success"}
+        else:
+            reason = run.get("error") or "שגיאה לא ידועה"
+            title = f"הבדיקה עבור {school_label} נכשלה"
+            data = {"title": title, "deeplink": f"/school/{school_id}?tab=checks", "school_name": school.get("name"), "outcome": "failure", "reason": reason}
+        db.table("notifications").insert({
+            "recipient_id": user_id,
+            "type": "reconciliation_check_completed",
+            "school_id": school_id,
+            "data": data,
+        }).execute()
+    except Exception as exc:
+        logger.warning("meeting-upload check completion notification failed (non-fatal): %s", exc)
 
 
 class ComparePlansRequest(BaseModel):
@@ -734,6 +774,10 @@ async def classify_rows(
         except Exception as _ye:
             logger.warning("per-budget yozma (classify) failed: %s", _ye)
         try:
+            _compute_per_budget_nihul_summary(tikhnun["budgets"], perut_rows, results_clean)
+        except Exception as _ns:
+            logger.warning("per-budget nihul summary (classify) failed: %s", _ns)
+        try:
             _propagate_meshuyakh_to_root(tikhnun)
         except Exception as _pe:
             logger.warning("meshuyakh propagation (classify) failed: %s", _pe)
@@ -873,6 +917,10 @@ async def retry_finance(
                     _compute_per_budget_yozma(tikhnun["budgets"], perut_rows, results_clean)
                 except Exception as _ye:
                     logger.warning("per-budget yozma (classify2) failed: %s", _ye)
+                try:
+                    _compute_per_budget_nihul_summary(tikhnun["budgets"], perut_rows, results_clean)
+                except Exception as _ns:
+                    logger.warning("per-budget nihul summary (classify2) failed: %s", _ns)
                 try:
                     _propagate_meshuyakh_to_root(tikhnun)
                 except Exception as _pe:
@@ -2253,6 +2301,74 @@ def _compute_per_budget_yozma(
             }
 
 
+def _compute_per_budget_nihul_summary(
+    budgets_list: list,
+    perut_rows: list,
+    results_clean: list | None,
+) -> None:
+    """Mutates each budget dict in budgets_list to add nihul_summary (max/betikhnun/hefresh)."""
+    from zihuy_core import normalize_budget_name as _nb_nihul
+
+    def _to_f(v):
+        if v is None:
+            return 0.0
+        try:
+            return float(str(v).replace(",", "").strip())
+        except Exception:
+            return 0.0
+
+    for bdict in budgets_list:
+        budget_norm = bdict.get("name", "")
+        H = float((bdict.get("overview") or {}).get("budget") or 0)
+        if not H:
+            continue
+
+        # Determine stage from results_clean (first matching row), like yozma
+        stage = None
+        if results_clean:
+            for r in results_clean:
+                if _nb_nihul(r.get("budget", "")) == budget_norm and r.get("stage"):
+                    stage = r["stage"]
+                    break
+        nihul_code = _NIHUL_CODE_TIKKON if stage == "תיכון" else _NIHUL_CODE_BEINAYIM
+
+        # Dedup by component identity, same as _compute_per_budget_yozma
+        component_seen: set = set()
+        betikhnun_total = 0.0
+        for row in perut_rows[1:]:
+            if not row[0] or _nb_nihul(str(row[0])) != budget_norm:
+                continue
+            code = str(row[17] or "").strip()
+            if code != nihul_code:
+                continue
+            _c13 = row[13] if len(row) > 13 else None
+            if _c13 is not None:
+                comp_key = (
+                    str(row[9] or "").strip()  if len(row) > 9  else "",
+                    str(row[10] or "").strip() if len(row) > 10 else "",
+                    str(row[11] or "").strip() if len(row) > 11 else "",
+                    str(row[12] or "").strip() if len(row) > 12 else "",
+                    _c13,
+                    code,
+                )
+            else:
+                comp_key = (tuple(str(x).strip() if x else "" for x in row[:10]), code)
+            if comp_key in component_seen:
+                continue
+            component_seen.add(comp_key)
+            betikhnun_total += _to_f(_c13) if _c13 is not None else _to_f(row[15])
+
+        # Max planning budget: up to 500,000 -> flat 25,000; otherwise 5% of budget height
+        mx = 25000.0 if H <= 500000 else H * 0.05
+
+        bdict["nihul_summary"] = {
+            "max":         int(mx),
+            "betikhnun":   int(betikhnun_total),
+            "hefresh":     int(mx - betikhnun_total),
+            "is_negative": (mx - betikhnun_total) < 0,
+        }
+
+
 def _propagate_meshuyakh_to_root(tikhnun_result: dict) -> None:
     """Copy meshuyakh from per-budget yozma detail back to root yozma_03/yozma_04 detail.
 
@@ -2586,6 +2702,10 @@ def _compute_multi_budget_tikhnun(
                 except Exception as _ye:
                     logger.warning("per-budget yozma (no-doch) failed: %s", _ye)
                 try:
+                    _compute_per_budget_nihul_summary(tikhnun_result["budgets"], perut_rows, None)
+                except Exception as _ns:
+                    logger.warning("per-budget nihul summary (no-doch) failed: %s", _ns)
+                try:
                     _propagate_meshuyakh_to_root(tikhnun_result)
                 except Exception as _pe:
                     logger.warning("meshuyakh propagation (no-doch) failed: %s", _pe)
@@ -2666,6 +2786,10 @@ def _compute_multi_budget_tikhnun(
                 _compute_per_budget_yozma(tikhnun_result["budgets"], perut_rows, results_clean)
             except Exception as _ye:
                 logger.warning("per-budget yozma failed: %s", _ye)
+            try:
+                _compute_per_budget_nihul_summary(tikhnun_result["budgets"], perut_rows, results_clean)
+            except Exception as _ns:
+                logger.warning("per-budget nihul summary failed: %s", _ns)
             try:
                 _propagate_meshuyakh_to_root(tikhnun_result)
             except Exception as _pe:

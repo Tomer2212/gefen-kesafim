@@ -1730,6 +1730,10 @@ def _build_meeting_ranges(
                 # blocks saving until this is explicitly answered, so bool(...) here is a defensive
                 # fallback for a legacy/malformed condition, not a real UX path.
                 "allow_time_range_search": bool(c.get("allow_time_range_search")),
+                # Mirrors DirectCoordinationRangeIn.requested_upload_years — set via
+                # ConditionGroupsEditor.jsx when service_type != "current"; null otherwise
+                # (resolved lazily from the booked meeting's date, see academic_years.py).
+                "requested_upload_years": c.get("requested_upload_years") if service_type != "current" else None,
                 # Round 17 — tags this range with which principal slot it's for (or the
                 # condition's original stage_scope when not splitting), so the booked `meetings`
                 # row can carry it too — without this, two ranges from the same "separate"

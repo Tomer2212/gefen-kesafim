@@ -178,11 +178,11 @@ function InfoGrid({ rows }) {
 
 function SummaryBlock({ title, children, index = 0 }) {
   return (
-    <div className="anim-fade-up glass-card-dark rounded-2xl overflow-hidden" style={{ animationDelay: `${index * 0.06}s` }}>
+    <div className="anim-fade-up glass-card-dark rounded-2xl overflow-hidden h-full flex flex-col" style={{ animationDelay: `${index * 0.06}s` }}>
       <div className="px-5 py-3.5 border-b border-slate-100">
         <h3 className="text-xs font-700 text-slate-500 tracking-wide" style={{ fontWeight: 700 }}>{title}</h3>
       </div>
-      <div className="px-5 py-4">{children}</div>
+      <div className="px-5 py-4 flex-1">{children}</div>
     </div>
   );
 }
@@ -552,8 +552,12 @@ function TabDownloadBar({ activeTab, runId, hasTikhnun, tikhnunOnly, yozmaMultip
 // Yozma dialog
 // ---------------------------------------------------------------------------
 
-function YozmaDialog({ onAnswer, onCancel }) {
+function YozmaDialog({ targetYear, divisionLabel, onAnswer, onCancel }) {
   const { ref, handleKeyDown } = useFocusTrap(onCancel);
+  const suffix = divisionLabel ? ` עבור ${divisionLabel}` : "";
+  const questionText = targetYear
+    ? `האם המוסד עמד במודל התמרוץ ${targetYear}${suffix}?`
+    : `האם המוסד עמד במודל התמרוץ בשנת הלימודים הקודמת${suffix}?`;
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center px-4"
       style={{ background: "rgba(15,23,42,0.45)", backdropFilter: "blur(4px)" }}>
@@ -572,7 +576,7 @@ function YozmaDialog({ onAnswer, onCancel }) {
           </svg>
         </div>
         <h2 id="yozma-modal-title" className="text-base font-800 mb-3" style={{ fontWeight: 800, color: "#0f172a" }}>
-          האם המוסד עמד במודל התמרוץ תשפ"ה?
+          {questionText}
         </h2>
         <p className="text-sm text-slate-600 leading-relaxed mb-6">
           תשובתך תשפיע על חישוב תקציב היוזמות המקסימלי (30% לעומת 40%).
@@ -598,11 +602,14 @@ function YozmaDialog({ onAnswer, onCancel }) {
   );
 }
 
-function YozmaDualDialog({ tikkonLabel, beinayimLabel, onAnswer, onCancel }) {
+function YozmaDualDialog({ tikkonLabel, beinayimLabel, targetYear, onAnswer, onCancel }) {
   const [tikkonAns,   setTikkonAns]   = useState(null);
   const [beinayimAns, setBeinayimAns] = useState(null);
   const canConfirm = tikkonAns !== null && beinayimAns !== null;
   const { ref, handleKeyDown } = useFocusTrap(onCancel);
+  const questionText = targetYear
+    ? `האם המוסד עמד במודל התמרוץ ${targetYear}?`
+    : "האם המוסד עמד במודל התמרוץ בשנת הלימודים הקודמת?";
 
   const AnswerRow = ({ label, value, onChange }) => (
     <div className="mb-4">
@@ -642,7 +649,7 @@ function YozmaDualDialog({ tikkonLabel, beinayimLabel, onAnswer, onCancel }) {
           </svg>
         </div>
         <h2 id="yozma-dual-modal-title" className="text-base font-800 mb-2" style={{ fontWeight: 800, color: "#0f172a" }}>
-          האם המוסד עמד במודל התמרוץ תשפ"ה?
+          {questionText}
         </h2>
         <p className="text-sm text-slate-600 leading-relaxed mb-5">
           בחר עבור כל חטיבה בנפרד — תשובתך תשפיע על חישוב תקציב היוזמות המקסימלי (30% לעומת 40%).
@@ -1150,7 +1157,7 @@ function formatShortDate(iso) {
   return d.toLocaleDateString("he-IL", { day: "2-digit", month: "2-digit", year: "2-digit" });
 }
 
-function YozmaSupplierBreakdown({ breakdown, title = "פירוט ספקים שדווחו — לפי יוזמה" }) {
+function YozmaSupplierBreakdown({ breakdown, title = "פירוט ספקים שדווחו — לפי יוזמה", showTitle = true }) {
   const [openSuppliers, setOpenSuppliers] = useState(new Set());
   function toggleSup(key) {
     setOpenSuppliers(prev => {
@@ -1163,7 +1170,9 @@ function YozmaSupplierBreakdown({ breakdown, title = "פירוט ספקים שד
   const isSingle = breakdown.length === 1;
   return (
     <div className="flex flex-col gap-4">
-      <h3 className="text-sm px-1 text-center mt-12" style={{ fontWeight: 700, color: "#475569" }}>{title}</h3>
+      {showTitle && (
+        <h3 className="text-sm px-1 text-center mt-12" style={{ fontWeight: 700, color: "#475569" }}>{title}</h3>
+      )}
       <div style={{ display: "grid", gridTemplateColumns: isSingle ? "1fr" : "1fr 1fr", gap: "0" }}>
       {breakdown.map((item, idx) => (
         <div key={`${item.plan_number}-${item.code}`} className="glass-card-dark overflow-hidden"
@@ -1243,15 +1252,64 @@ function YozmaSupplierBreakdown({ breakdown, title = "פירוט ספקים שד
   );
 }
 
-function YozmaTab({ tikhnun, multiplier, autoSwitch }) {
+function YozmaTab({ tikhnun, multiplier, autoSwitch, schoolId, academicYear, divisionType, onToggleMultiplier }) {
   const budgetsWithYozma = (tikhnun?.budgets || []).filter(b => b.yozma_03);
   const hasBudgetPills = budgetsWithYozma.length > 1;
 
   const [localActiveBudget, setLocalActiveBudget] = useState(null);
   const [budgetMultipliers, setBudgetMultipliers] = useState({});
-  const [pendingDialogBudget, setPendingDialogBudget] = useState(
-    () => hasBudgetPills && budgetsWithYozma.length > 0 ? budgetsWithYozma[0].name : null
-  );
+  const [budgetTargetYears, setBudgetTargetYears] = useState({});
+  const [pendingDialogBudget, setPendingDialogBudget] = useState(null);
+  const [budgetsResolving, setBudgetsResolving] = useState(hasBudgetPills);
+
+  // For multi-budget schools, resolve each budget's incentive-model answer from the
+  // backend (יעדים data / a previously saved answer) before falling back to the
+  // per-budget prompt — mirrors the top-level YozmaDialog/YozmaDualDialog flow.
+  useEffect(() => {
+    if (!hasBudgetPills) {
+      setBudgetsResolving(false);
+      return;
+    }
+    if (!schoolId || !academicYear || !divisionType) {
+      // No school/year context (e.g. the standalone /check flow) — no persistence possible,
+      // fall back to prompting for the first budget every time, as before this feature existed.
+      setBudgetsResolving(false);
+      setPendingDialogBudget(budgetsWithYozma[0]?.name ?? null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      setBudgetsResolving(true);
+      const results = await Promise.all(budgetsWithYozma.map(async b => {
+        try {
+          const { data } = await axios.get(`/schools/${schoolId}/incentive-model`, {
+            params: { division_type: divisionType, budget_name: b.name, academic_year: academicYear },
+          });
+          return { name: b.name, data };
+        } catch {
+          return { name: b.name, data: { resolved: false, needs_prompt: true, target_year: null } };
+        }
+      }));
+      if (cancelled) return;
+      const mults = {};
+      const targetYears = {};
+      let firstUnresolved = null;
+      for (const { name, data } of results) {
+        if (data.resolved) {
+          mults[name] = data.pct === 40 ? "04" : "03";
+        } else {
+          targetYears[name] = data.target_year;
+          if (!firstUnresolved) firstUnresolved = name;
+        }
+      }
+      setBudgetMultipliers(prev => ({ ...prev, ...mults }));
+      setBudgetTargetYears(targetYears);
+      setPendingDialogBudget(firstUnresolved);
+      setBudgetsResolving(false);
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasBudgetPills, schoolId, academicYear, divisionType, tikhnun]);
 
   if (!tikhnun) return <NoTikhnunNotice />;
 
@@ -1278,6 +1336,27 @@ function YozmaTab({ tikhnun, multiplier, autoSwitch }) {
     setBudgetMultipliers(prev => ({ ...prev, [budgetName]: mult }));
     setLocalActiveBudget(budgetName);
     setPendingDialogBudget(null);
+    if (schoolId && academicYear && divisionType) {
+      axios.patch(`/schools/${schoolId}/incentive-model`, {
+        division_type: divisionType,
+        budget_name: budgetName,
+        academic_year: academicYear,
+        met: answer === "yes",
+      }).catch(() => {});
+    }
+  };
+
+  const handleTogglePct = (budgetName, currentMult) => {
+    const newMult = currentMult === "04" ? "03" : "04";
+    setBudgetMultipliers(prev => ({ ...prev, [budgetName]: newMult }));
+    if (schoolId && academicYear && divisionType) {
+      axios.patch(`/schools/${schoolId}/incentive-model`, {
+        division_type: divisionType,
+        budget_name: budgetName,
+        academic_year: academicYear,
+        met: newMult === "04",
+      }).catch(() => {});
+    }
   };
 
   const effectiveBudget = hasBudgetPills ? (localActiveBudget ?? budgetsWithYozma[0]?.name ?? null) : null;
@@ -1298,6 +1377,18 @@ function YozmaTab({ tikhnun, multiplier, autoSwitch }) {
   }
 
   const hefreshTotal = yozmaData?.hefresh ?? 0;
+
+  const currentPctDisplay = hasBudgetPills && effectiveBudget
+    ? ((budgetMultipliers[effectiveBudget] ?? "03") === "04" ? 40 : 30)
+    : (multiplier === "04" ? 40 : 30);
+
+  const handleHeaderTogglePct = () => {
+    if (hasBudgetPills && effectiveBudget) {
+      handleTogglePct(effectiveBudget, budgetMultipliers[effectiveBudget] ?? "03");
+    } else if (onToggleMultiplier) {
+      onToggleMultiplier(multiplier === "04" ? "03" : "04");
+    }
+  };
 
   return (
     <div className="flex flex-col gap-4">
@@ -1330,10 +1421,15 @@ function YozmaTab({ tikhnun, multiplier, autoSwitch }) {
         </div>
       )}
 
-      {pendingDialogBudget ? (
+      {budgetsResolving ? (
+        <div className="text-sm text-slate-500 text-right" dir="rtl">בודק נתוני יעדים...</div>
+      ) : pendingDialogBudget ? (
         <div className="bg-yellow-50 border border-yellow-200 rounded-2xl p-4 text-right" dir="rtl">
           <p className="text-sm font-medium mb-3">
-            האם המוסד עמד במודל התמרוץ תשפ"ה עבור תקציב <strong>{pendingDialogBudget}</strong>?
+            {budgetTargetYears[pendingDialogBudget]
+              ? `האם המוסד עמד במודל התמרוץ ${budgetTargetYears[pendingDialogBudget]} עבור תקציב `
+              : "האם המוסד עמד במודל התמרוץ בשנת הלימודים הקודמת עבור תקציב "}
+            <strong>{pendingDialogBudget}</strong>?
           </p>
           <div className="flex gap-2">
             <button
@@ -1352,7 +1448,23 @@ function YozmaTab({ tikhnun, multiplier, autoSwitch }) {
         </div>
       ) : (
         <>
-          <SummaryBlock title="סיכום יוזמות" index={0}>
+          <SummaryBlock
+            title={
+              <>
+                סיכום יוזמות{" - לפי "}
+                <button
+                  type="button"
+                  onClick={handleHeaderTogglePct}
+                  aria-label={`אחוז יוזמות נוכחי ${currentPctDisplay}%, לחץ להחלפה`}
+                  style={{ color: "#0070F3", fontWeight: 800, cursor: "pointer", textDecoration: "underline", textDecorationStyle: "dotted", background: "none", border: "none", padding: 0, font: "inherit" }}
+                >
+                  {currentPctDisplay}%
+                </button>
+                {" מכלל התקציב"}
+              </>
+            }
+            index={0}
+          >
             <InfoGrid rows={[
               { label: "תקציב מקסימלי לתכנון יוזמות", value: fmtNum(yozmaData.max) },
               { label: "בתכנון",                        value: fmtNum(yozmaData.betikhnun) },
@@ -1417,11 +1529,13 @@ function NihulTab({ tikhnun }) {
   const effectiveBudget  = hasBudgetPills ? (activeBudget ?? budgetsWithNihul[0]?.name ?? null) : null;
 
   let breakdownData;
+  let bObj;
   if (hasBudgetPills && effectiveBudget) {
-    const bObj = budgetsWithNihul.find(b => b.name === effectiveBudget);
+    bObj = budgetsWithNihul.find(b => b.name === effectiveBudget);
     breakdownData = bObj?.nihul_breakdown ?? null;
   } else {
-    breakdownData = tikhnun?.budgets?.[0]?.nihul_breakdown ?? null;
+    bObj = tikhnun?.budgets?.[0];
+    breakdownData = bObj?.nihul_breakdown ?? null;
   }
 
   if (!tikhnun || !breakdownData?.length) {
@@ -1431,6 +1545,10 @@ function NihulTab({ tikhnun }) {
       </p>
     );
   }
+
+  const nihulSummary      = bObj?.nihul_summary ?? {};
+  const flexibleRemaining = bObj?.overview?.flexible_remaining ?? tikhnun?.overview?.flexible_remaining;
+  const hefreshTotal      = nihulSummary?.hefresh ?? 0;
 
   return (
     <div className="flex flex-col gap-4">
@@ -1448,10 +1566,25 @@ function NihulTab({ tikhnun }) {
           ))}
         </div>
       )}
-      <YozmaSupplierBreakdown
-        breakdown={breakdownData}
-        title="פירוט ספקים - ניהול ותפעול"
-      />
+
+      <div className="flex flex-col md:flex-row gap-4" dir="rtl">
+        <div className="flex-1 min-w-0">
+          <SummaryBlock title="סיכום ניהול ותפעול" index={0}>
+            <InfoGrid rows={[
+              { label: "תקציב מקסימלי לתכנון ניהול ותפעול", value: fmtNum(nihulSummary.max) },
+              { label: "בתכנון",                              value: fmtNum(nihulSummary.betikhnun) },
+              { label: "הפרש",                                value: fmtNum(hefreshTotal),
+                danger: hefreshTotal < 0, highlight: hefreshTotal >= 0 },
+              { label: "תקציב גמיש פנוי",                    value: fmtNum(flexibleRemaining) },
+            ]} />
+          </SummaryBlock>
+        </div>
+        <div className="flex-1 min-w-0">
+          <SummaryBlock title="פירוט ספקים - ניהול ותפעול" index={1}>
+            <YozmaSupplierBreakdown breakdown={breakdownData} showTitle={false} />
+          </SummaryBlock>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1836,17 +1969,45 @@ function TikhnunOnlyBanner() {
 // Main export
 // ---------------------------------------------------------------------------
 
-export default function ResultsView({ result, runId, onNewRun, onTikhnunUpdate = () => {}, schoolId, currentUser }) {
+export default function ResultsView({ result, runId, onNewRun, onTikhnunUpdate = () => {}, schoolId, currentUser, academicYear, schoolStage }) {
   const [activeTab, setActiveTab]       = useState("hashva");
   const [activeBudgetIdx, setActiveBudgetIdx] = useState(0);
   const [yozmaDialogShown, setYozmaDialogShown]             = useState(false);
   const [showYozmaDialog, setShowYozmaDialog]               = useState(false);
+  const [yozmaDialogTargetYear, setYozmaDialogTargetYear]   = useState(null);
+  // In the dual (six-year school) case, when only one division is still undetermined,
+  // only that one is asked about via the single dialog (the resolved one is applied silently).
+  const [yozmaDualPending, setYozmaDualPending]             = useState(null); // 'tikkon' | 'beinayim' | 'both' | null
   const [yozmaMultiplier, setYozmaMultiplier]               = useState("03");
   const [yozmaAutoSwitch, setYozmaAutoSwitch]               = useState(false);
   const [yozmaMultiplierTikkon,   setYozmaMultiplierTikkon]   = useState("03");
   const [yozmaAutoSwitchTikkon,   setYozmaAutoSwitchTikkon]   = useState(false);
   const [yozmaMultiplierBeinayim, setYozmaMultiplierBeinayim] = useState("03");
   const [yozmaAutoSwitchBeinayim, setYozmaAutoSwitchBeinayim] = useState(false);
+
+  // Resolves the 30%/40% incentive-model answer from the backend (a previously saved
+  // answer, or auto-derived from the school's יעדים data for the prior academic year).
+  // Falls back to "needs_prompt" (no persistence) when schoolId/academicYear are unknown —
+  // e.g. the standalone /check flow, which has no school context.
+  const resolveIncentivePct = async (divisionType, budgetName) => {
+    if (!schoolId || !academicYear || !divisionType) {
+      return { resolved: false, needs_prompt: true, target_year: null };
+    }
+    try {
+      const { data } = await axios.get(`/schools/${schoolId}/incentive-model`, {
+        params: { division_type: divisionType, budget_name: budgetName, academic_year: academicYear },
+      });
+      return data;
+    } catch {
+      return { resolved: false, needs_prompt: true, target_year: null };
+    }
+  };
+
+  const multiplierFromPct = (pct, tikhnunData) => {
+    if (pct === 40) return { mul: "04", auto: false };
+    if (tikhnunData?.yozma_03?.is_negative) return { mul: "04", auto: true };
+    return { mul: "03", auto: false };
+  };
 
   const stageOverride   = result.stage_override;
   const tikhnun         = withResolvedTikhnunStage(result.tikhnun, stageOverride);
@@ -1902,63 +2063,150 @@ export default function ResultsView({ result, runId, onNewRun, onTikhnunUpdate =
     return false;
   };
 
+  const singleDivisionType = schoolStage && schoolStage !== "sheshshnati" ? schoolStage : null;
+
+  const resolveYozmaEntry = async () => {
+    if (!isDualTikhnun) {
+      const res = await resolveIncentivePct(singleDivisionType, "גפן");
+      if (res.resolved) {
+        const { mul, auto } = multiplierFromPct(res.pct, tikhnun);
+        setYozmaMultiplier(mul);
+        setYozmaAutoSwitch(auto);
+        setYozmaDialogShown(true);
+        setActiveTab("yozma");
+      } else {
+        setYozmaDialogTargetYear(res.target_year);
+        setYozmaDualPending(null);
+        setShowYozmaDialog(true);
+      }
+      return;
+    }
+
+    const [resT, resB] = await Promise.all([
+      resolveIncentivePct("tikkon", "גפן"),
+      resolveIncentivePct("beinayim", "גפן"),
+    ]);
+    if (resT.resolved) {
+      const { mul, auto } = multiplierFromPct(resT.pct, tikhnunTikkon);
+      setYozmaMultiplierTikkon(mul);
+      setYozmaAutoSwitchTikkon(auto);
+    }
+    if (resB.resolved) {
+      const { mul, auto } = multiplierFromPct(resB.pct, tikhnunBeinayim);
+      setYozmaMultiplierBeinayim(mul);
+      setYozmaAutoSwitchBeinayim(auto);
+    }
+    if (resT.resolved && resB.resolved) {
+      setYozmaDialogShown(true);
+      setActiveTab("yozma");
+      return;
+    }
+    setYozmaDialogTargetYear((!resT.resolved ? resT.target_year : null) ?? (!resB.resolved ? resB.target_year : null));
+    if (!resT.resolved && !resB.resolved) setYozmaDualPending("both");
+    else setYozmaDualPending(!resT.resolved ? "tikkon" : "beinayim");
+    setShowYozmaDialog(true);
+  };
+
   const handleTabClick = (tab) => {
     if (TIKHNUN_ONLY_TABS.includes(tab) && !hasTikhnun) return;
     if (GEFEN_ONLY_TABS.includes(tab) && tikhnunOnly) return;
     if (tab === "yozma" && hasTikhnun && !yozmaDialogShown) {
       const _budgetsWithYozma = (tikhnun?.budgets || []).filter(b => b.yozma_03);
       if (_budgetsWithYozma.length <= 1) {
-        setShowYozmaDialog(true);
+        resolveYozmaEntry();
         return;
       }
     }
     setActiveTab(tab);
   };
 
+  const saveIncentiveAnswer = (divisionType, met) => {
+    if (!schoolId || !academicYear || !divisionType) return;
+    axios.patch(`/schools/${schoolId}/incentive-model`, {
+      division_type: divisionType, budget_name: "גפן", academic_year: academicYear, met,
+    }).catch(() => {});
+  };
+
   const handleYozmaAnswer = (answer) => {
-    setYozmaDialogShown(true);
     setShowYozmaDialog(false);
-    let multiplier = "03";
-    let autoSwitch = false;
-    if (answer === "yes") {
-      multiplier = "04";
-    } else if (tikhnun?.yozma_03?.is_negative) {
-      multiplier = "04";
-      autoSwitch = true;
+    const met = answer === "yes";
+
+    if (isDualTikhnun && yozmaDualPending && yozmaDualPending !== "both") {
+      const division = yozmaDualPending;
+      const tikhnunData = division === "tikkon" ? tikhnunTikkon : tikhnunBeinayim;
+      const { mul, auto } = multiplierFromPct(met ? 40 : 30, tikhnunData);
+      if (division === "tikkon") { setYozmaMultiplierTikkon(mul); setYozmaAutoSwitchTikkon(auto); }
+      else { setYozmaMultiplierBeinayim(mul); setYozmaAutoSwitchBeinayim(auto); }
+      saveIncentiveAnswer(division, met);
+      setYozmaDialogShown(true);
+      setYozmaDualPending(null);
+      setActiveTab("yozma");
+      return;
     }
-    setYozmaMultiplier(multiplier);
-    setYozmaAutoSwitch(autoSwitch);
+
+    const { mul, auto } = multiplierFromPct(met ? 40 : 30, tikhnun);
+    setYozmaMultiplier(mul);
+    setYozmaAutoSwitch(auto);
+    saveIncentiveAnswer(singleDivisionType, met);
+    setYozmaDialogShown(true);
     setActiveTab("yozma");
   };
 
   const handleDualYozmaAnswer = (tikkonAns, beinayimAns) => {
-    setYozmaDialogShown(true);
     setShowYozmaDialog(false);
-    const resolveMultiplier = (ans, tikhnunData) => {
-      if (ans === "yes") return { mul: "04", auto: false };
-      if (tikhnunData?.yozma_03?.is_negative) return { mul: "04", auto: true };
-      return { mul: "03", auto: false };
-    };
-    const { mul: mulT, auto: autoT } = resolveMultiplier(tikkonAns,   tikhnunTikkon);
-    const { mul: mulB, auto: autoB } = resolveMultiplier(beinayimAns, tikhnunBeinayim);
+    const { mul: mulT, auto: autoT } = multiplierFromPct(tikkonAns === "yes" ? 40 : 30, tikhnunTikkon);
+    const { mul: mulB, auto: autoB } = multiplierFromPct(beinayimAns === "yes" ? 40 : 30, tikhnunBeinayim);
     setYozmaMultiplierTikkon(mulT);
     setYozmaAutoSwitchTikkon(autoT);
     setYozmaMultiplierBeinayim(mulB);
     setYozmaAutoSwitchBeinayim(autoB);
+    saveIncentiveAnswer("tikkon", tikkonAns === "yes");
+    saveIncentiveAnswer("beinayim", beinayimAns === "yes");
+    setYozmaDialogShown(true);
+    setYozmaDualPending(null);
     setActiveTab("yozma");
+  };
+
+  const handleToggleMultiplierSingle = (newMult) => {
+    setYozmaMultiplier(newMult);
+    setYozmaAutoSwitch(false);
+    saveIncentiveAnswer(singleDivisionType, newMult === "04");
+  };
+  const handleToggleMultiplierTikkon = (newMult) => {
+    setYozmaMultiplierTikkon(newMult);
+    setYozmaAutoSwitchTikkon(false);
+    saveIncentiveAnswer("tikkon", newMult === "04");
+  };
+  const handleToggleMultiplierBeinayim = (newMult) => {
+    setYozmaMultiplierBeinayim(newMult);
+    setYozmaAutoSwitchBeinayim(false);
+    saveIncentiveAnswer("beinayim", newMult === "04");
   };
 
   return (
     <div className="flex flex-col gap-5" dir="rtl">
       {showYozmaDialog && !isDualTikhnun && (
-        <YozmaDialog onAnswer={handleYozmaAnswer} onCancel={() => setShowYozmaDialog(false)} />
+        <YozmaDialog targetYear={yozmaDialogTargetYear} onAnswer={handleYozmaAnswer} onCancel={() => setShowYozmaDialog(false)} />
       )}
-      {showYozmaDialog && isDualTikhnun && (
+      {showYozmaDialog && isDualTikhnun && yozmaDualPending && yozmaDualPending !== "both" && (
+        <YozmaDialog
+          targetYear={yozmaDialogTargetYear}
+          divisionLabel={
+            yozmaDualPending === "tikkon"
+              ? (tikhnunTikkon?.school_stage ?? "חטיבה עליונה")
+              : (tikhnunBeinayim?.school_stage ?? "חטיבת ביניים")
+          }
+          onAnswer={handleYozmaAnswer}
+          onCancel={() => { setShowYozmaDialog(false); setYozmaDualPending(null); }}
+        />
+      )}
+      {showYozmaDialog && isDualTikhnun && yozmaDualPending === "both" && (
         <YozmaDualDialog
           tikkonLabel={tikhnunTikkon?.school_stage ?? "חטיבה עליונה"}
           beinayimLabel={tikhnunBeinayim?.school_stage ?? "חטיבת ביניים"}
+          targetYear={yozmaDialogTargetYear}
           onAnswer={handleDualYozmaAnswer}
-          onCancel={() => setShowYozmaDialog(false)}
+          onCancel={() => { setShowYozmaDialog(false); setYozmaDualPending(null); }}
         />
       )}
 
@@ -2187,11 +2435,19 @@ export default function ResultsView({ result, runId, onNewRun, onTikhnunUpdate =
           </div>
         )}
         <div style={{ display: activeTab === "yozma" && !isDualTikhnun ? undefined : "none" }}>
-          <YozmaTab tikhnun={hasTikhnun ? tikhnun : null} multiplier={yozmaMultiplier} autoSwitch={yozmaAutoSwitch} />
+          <YozmaTab
+            tikhnun={hasTikhnun ? tikhnun : null}
+            multiplier={yozmaMultiplier}
+            autoSwitch={yozmaAutoSwitch}
+            schoolId={schoolId}
+            academicYear={academicYear}
+            divisionType={singleDivisionType}
+            onToggleMultiplier={handleToggleMultiplierSingle}
+          />
         </div>
         <div className="flex flex-col gap-24" style={{ display: activeTab === "yozma" && isDualTikhnun ? undefined : "none" }}>
-          {tikhnunTikkon   && <DualTikhnunSection label={tikhnunTikkon.school_stage}><YozmaTab tikhnun={tikhnunTikkon} multiplier={yozmaMultiplierTikkon} autoSwitch={yozmaAutoSwitchTikkon} /></DualTikhnunSection>}
-          {tikhnunBeinayim && <DualTikhnunSection label={tikhnunBeinayim.school_stage}><YozmaTab tikhnun={tikhnunBeinayim} multiplier={yozmaMultiplierBeinayim} autoSwitch={yozmaAutoSwitchBeinayim} /></DualTikhnunSection>}
+          {tikhnunTikkon   && <DualTikhnunSection label={tikhnunTikkon.school_stage}><YozmaTab tikhnun={tikhnunTikkon} multiplier={yozmaMultiplierTikkon} autoSwitch={yozmaAutoSwitchTikkon} schoolId={schoolId} academicYear={academicYear} divisionType="tikkon" onToggleMultiplier={handleToggleMultiplierTikkon} /></DualTikhnunSection>}
+          {tikhnunBeinayim && <DualTikhnunSection label={tikhnunBeinayim.school_stage}><YozmaTab tikhnun={tikhnunBeinayim} multiplier={yozmaMultiplierBeinayim} autoSwitch={yozmaAutoSwitchBeinayim} schoolId={schoolId} academicYear={academicYear} divisionType="beinayim" onToggleMultiplier={handleToggleMultiplierBeinayim} /></DualTikhnunSection>}
         </div>
         {activeTab === "nihul" && !isDualTikhnun && (
           <NihulTab tikhnun={hasTikhnun ? tikhnun : null} />

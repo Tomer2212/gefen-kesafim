@@ -20,12 +20,24 @@ GOAL_TEMPLATE_BASE_YEAR = "תשפ\"ו"
 # whenever ACADEMIC_YEARS grows, same manual-maintenance pattern as that list itself.
 _ACADEMIC_YEAR_START_GREGORIAN = {"תשפ\"ו": 2025, "תשפ\"ז": 2026}
 
+# Hebrew year label -> the academic year immediately preceding it. Includes one entry older
+# than ACADEMIC_YEARS (תשפ"ה) so callers can resolve "the year before the oldest known year"
+# too. Extend by hand whenever ACADEMIC_YEARS grows, same manual-maintenance pattern as above.
+_ACADEMIC_YEAR_PREVIOUS = {"תשפ\"ו": "תשפ\"ה", "תשפ\"ז": "תשפ\"ו"}
+
 
 def get_academic_year_date_range(academic_year: str) -> tuple[date, date]:
     """Returns (start, end) as Sep 1 of the academic year's first Gregorian year
     through Aug 31 of the next — falls back to DEFAULT_ACADEMIC_YEAR for unknown labels."""
     start_year = _ACADEMIC_YEAR_START_GREGORIAN.get(academic_year) or _ACADEMIC_YEAR_START_GREGORIAN[DEFAULT_ACADEMIC_YEAR]
     return date(start_year, 9, 1), date(start_year + 1, 8, 31)
+
+
+def get_previous_academic_year(academic_year: str) -> str | None:
+    """The academic year immediately preceding `academic_year` (e.g. תשפ"ז -> תשפ"ו).
+    Manually maintained — extend _ACADEMIC_YEAR_PREVIOUS when ACADEMIC_YEARS grows.
+    Returns None when there is no known preceding year."""
+    return _ACADEMIC_YEAR_PREVIOUS.get(academic_year)
 
 
 def get_academic_year_for_calendar_year(year: int) -> str | None:
@@ -50,6 +62,32 @@ def get_academic_year_for_date(d: date) -> str | None:
         if start <= d <= end:
             return year
     return None
+
+
+def resolve_requested_upload_years(meeting: dict) -> list[str]:
+    """Which academic year(s) the secretary is asked to upload files for. Deliberately
+    LAZY — meetings created via the one-click "add meeting" paths (SchoolPage.jsx /
+    AdminMeetingsTab.jsx / PersonalMeetingsTab.jsx / AdvisorFinderModal) have no
+    meeting_date at all until it's set afterward via inline edit, so baking in a default
+    at creation time would go stale the moment a real date is picked. Order of resolution:
+    1. meeting.requested_upload_years, if explicitly set (multi-year request, or a
+       DirectCoordinationModal/TaskCreateWizard booking that chose it up front).
+    2. The academic year of the meeting's actual date (get_academic_year_for_date) —
+       NOT meeting.academic_year, which (see create_meeting) is whatever UI tab was open
+       at creation time and is not reconciled against the real date.
+    3. meeting.academic_year, then DEFAULT_ACADEMIC_YEAR, if the date is missing/unmapped."""
+    explicit = meeting.get("requested_upload_years")
+    if explicit:
+        return explicit
+    meeting_date = meeting.get("meeting_date")
+    if meeting_date:
+        try:
+            year = get_academic_year_for_date(date.fromisoformat(meeting_date))
+        except (ValueError, TypeError):
+            year = None
+        if year:
+            return [year]
+    return [meeting.get("academic_year") or DEFAULT_ACADEMIC_YEAR]
 
 
 # ---------------------------------------------------------------------------

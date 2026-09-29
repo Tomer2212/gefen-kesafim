@@ -303,7 +303,7 @@ export default function Sidebar({ dark = false }) {
   const [isSuperAdmin, setIsSuperAdmin] = useState(false);
   const [notifCount, setNotifCount] = useState(0);
   const [toasts, setToasts] = useState([]);
-  const { addMeetingReminder, addStatusReminder, addTaskReminder, addCallAttribReminder, addGoalUpdateReminder, setUserName: setCtxUserName } = useMeetingReminders();
+  const { addMeetingReminder, addStatusReminder, addTaskReminder, addCallAttribReminder, addGoalUpdateReminder, addReconciliationCompletedReminder, setUserName: setCtxUserName } = useMeetingReminders();
   const prevCountRef = useRef(0);
   const lastPollTimeRef = useRef(Date.now());
   const notifPrefsRef = useRef({ meeting_reminder: true, meeting_reminder_minutes: 10 });
@@ -380,6 +380,12 @@ export default function Sidebar({ dark = false }) {
         // marks it read so it won't come back.
         for (const g of (res.data.goal_auto_updates || [])) {
           addGoalUpdateReminder({ id: g.id, school_id: g.school_id, ...(g.data || {}) });
+        }
+
+        // Reconciliation-check completion summaries: same ephemeral bottom-left popup
+        // treatment as goal_auto_updates (never a bell entry).
+        for (const rc of (res.data.reconciliation_completions || [])) {
+          addReconciliationCompletedReminder({ id: rc.id, school_id: rc.school_id, ...(rc.data || {}) });
         }
 
         // Show toasts for new unread notifications (not on first load)

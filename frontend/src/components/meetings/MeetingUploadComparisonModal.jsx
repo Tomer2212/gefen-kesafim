@@ -1,11 +1,9 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import axios from "axios";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
 
-export default function MeetingUploadComparisonModal({ meetingId, onClose }) {
+export default function MeetingUploadComparisonModal({ meetingId, onClose, onCheckStarted }) {
   const { ref, handleKeyDown } = useFocusTrap(onClose);
-  const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
   const [comparison, setComparison] = useState(null);
   const [error, setError] = useState("");
@@ -31,8 +29,9 @@ export default function MeetingUploadComparisonModal({ meetingId, onClose }) {
   async function handleRunCheck() {
     setActionState("working");
     try {
-      const res = await axios.post(`/analyze/meetings/${meetingId}/run-check-from-uploads`);
-      navigate(`/check?run_id=${res.data.run_id}`);
+      await axios.post(`/analyze/meetings/${meetingId}/run-check-from-uploads`);
+      onCheckStarted?.();
+      onClose();
     } catch {
       setActionState("failed");
     }

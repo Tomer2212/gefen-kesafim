@@ -6,7 +6,7 @@ import { resolveMeetingCoordinatorForSlot, slotForMeetingServiceType } from "./m
 import { DirectCoordinationResolutionModal } from "./DirectCoordinationResolutionModal";
 import AdvisorAccessGrantModal from "./AdvisorAccessGrantModal";
 import DirectStyleDateInput from "../tasks/DirectStyleDateInput";
-import { DEFAULT_ACADEMIC_YEAR } from "../../constants/academicYears";
+import { ACADEMIC_YEARS, DEFAULT_ACADEMIC_YEAR } from "../../constants/academicYears";
 import { MEETING_TYPE_OPTIONS } from "./constants";
 
 const SERVICE_TYPE_OPTIONS = [
@@ -48,6 +48,7 @@ function newRange() {
     advisorId: "",
     meetingType: "remote",
     allowTimeRangeSearch: null, // required yes/no — no default, must be explicitly answered
+    requestedUploadYears: [DEFAULT_ACADEMIC_YEAR], // which academic year(s) the secretary will be asked for files
   };
 }
 
@@ -236,6 +237,7 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
           stage_scope: r.stageScope || null,
           meeting_type: r.meetingType || "remote",
           allow_time_range_search: r.allowTimeRangeSearch,
+          requested_upload_years: r.serviceType !== "current" ? (r.requestedUploadYears || [DEFAULT_ACADEMIC_YEAR]) : null,
         })),
       };
       const res = await axios.post(`/schools/${school.id}/meetings/direct-coordination`, body);
@@ -328,6 +330,30 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
                       ))}
                     </div>
                   </fieldset>
+
+                  {r.serviceType && r.serviceType !== "current" && (
+                    <fieldset className="flex flex-col gap-1.5">
+                      <legend className="text-xs font-medium text-slate-500">קבצים של אילו שנות לימוד תתבקש המנהלנית להעלות</legend>
+                      <div className="flex gap-3">
+                        {ACADEMIC_YEARS.map(year => (
+                          <label key={year} className="flex items-center gap-1.5 text-sm text-slate-700 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={(r.requestedUploadYears || []).includes(year)}
+                              onChange={() => {
+                                const cur = new Set(r.requestedUploadYears || []);
+                                if (cur.has(year)) cur.delete(year); else cur.add(year);
+                                const next = Array.from(cur);
+                                updateRange(r.localId, { requestedUploadYears: next.length ? next : [DEFAULT_ACADEMIC_YEAR] });
+                              }}
+                              className="w-4 h-4"
+                            />
+                            {year}
+                          </label>
+                        ))}
+                      </div>
+                    </fieldset>
+                  )}
 
                   {school.stage === "sheshshnati" && ["gefen", "current", "gefen_current", "takuma"].includes(r.serviceType) && (
                     <fieldset className="flex flex-col gap-1.5">
