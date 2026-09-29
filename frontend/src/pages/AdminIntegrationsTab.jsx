@@ -384,6 +384,180 @@ function ExmSettingsModal({ settings, loading, onSave, onDisconnect, onClose }) 
   );
 }
 
+function AiSummarySettingsModal({ settings, loading, onSave, onDisconnect, onClose }) {
+  const { ref, handleKeyDown } = useFocusTrap(onClose);
+  const [enabled, setEnabled] = useState(true);
+  const [apiKey, setApiKey] = useState("");
+  const [showApiKey, setShowApiKey] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
+  const [saveResult, setSaveResult] = useState(null); // "success" | "error" | null
+  const prevLoadingRef = useRef(loading);
+
+  useEffect(() => {
+    if (prevLoadingRef.current && !loading && settings) {
+      setEnabled(settings.enabled);
+    }
+    prevLoadingRef.current = loading;
+  }, [loading, settings]);
+
+  async function handleToggleEnabled() {
+    const next = !enabled;
+    setEnabled(next);
+    setSaving(true);
+    await onSave({ enabled: next });
+    setSaving(false);
+  }
+
+  async function handleSaveCredentials() {
+    setSaving(true);
+    setSaveResult(null);
+    const ok = await onSave({ api_key: apiKey });
+    setSaving(false);
+    setApiKey("");
+    if (ok) {
+      setSaveResult("success");
+      setTimeout(() => { setSaveResult(null); onClose(); }, 1200);
+    } else {
+      setSaveResult("error");
+    }
+  }
+
+  async function handleDisconnect() {
+    setDisconnecting(true);
+    const ok = await onDisconnect();
+    setDisconnecting(false);
+    setConfirmDisconnect(false);
+    if (ok) onClose();
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" dir="rtl">
+      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="ai-summary-modal-title"
+        onKeyDown={handleKeyDown}
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 max-h-[90vh] flex flex-col">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+          <h2 id="ai-summary-modal-title" className="font-bold text-black">הגדרות סיכום פגישות AI</h2>
+          <button onClick={onClose} aria-label="סגור" className="p-1.5 rounded-lg hover:bg-slate-100 transition-colors text-slate-400">
+            <svg aria-hidden="true" className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="overflow-y-auto flex-1 px-6 py-4">
+          {loading ? (
+            <div role="status" aria-label="טוען הגדרות" className="flex justify-center py-10">
+              <div aria-hidden="true" className="spinner w-7 h-7" />
+            </div>
+          ) : (
+            <div className="space-y-5">
+              <p className="text-xs text-slate-400">
+                כשיועץ מעלה הקלטה מפגישה דרך כפתור "סיכום פגישה", המערכת משתמשת במפתח ה-API שתגדירו כאן — הן לתמלול ההקלטה (Whisper) והן לביצוע הסיכום מהתמליל. כל עוד לא הוגדר מפתח פעיל, הכפתור "סיכום פגישה" יהיה חסום אצל כל היועצים בארגון.
+              </p>
+
+              <div className="flex items-center justify-between border-t border-slate-100 pt-4">
+                <div>
+                  <label htmlFor="ai-summary-enabled-toggle" className="text-sm font-medium text-slate-700">סיכום פגישות פעיל</label>
+                  <div className="text-xs text-slate-400 mt-0.5">כשכבוי, כפתור "סיכום פגישה" יהיה חסום לכל היועצים</div>
+                </div>
+                <button
+                  id="ai-summary-enabled-toggle"
+                  role="switch"
+                  aria-checked={enabled}
+                  onClick={handleToggleEnabled}
+                  disabled={saving}
+                  className={`w-11 h-6 rounded-full transition-colors relative disabled:opacity-60 ${enabled ? "bg-green-500" : "bg-slate-300"}`}
+                >
+                  <span aria-hidden="true" className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-transform ${enabled ? "right-0.5" : "right-5"}`} />
+                </button>
+              </div>
+
+              <div className="border-t border-slate-100 pt-4">
+                <label htmlFor="ai-summary-key-input" className="block text-sm font-medium text-slate-700 mb-1">
+                  מפתח API של OpenAI
+                </label>
+                <p className="text-xs text-slate-400 mb-2">
+                  {settings?.has_api_key ? "מפתח שמור במערכת כרגע." : "לא הוזן מפתח עדיין."} יש להזין מפתח API שקיבלתם מ-OpenAI (הכולל גישה ל-Whisper ולמודלי צ'אט לסיכום).
+                </p>
+                <div className="flex gap-2">
+                  <input
+                    id="ai-summary-key-input"
+                    type={showApiKey ? "text" : "password"}
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                    placeholder="הדביקו כאן את המפתח..."
+                    className="flex-1 text-sm border border-slate-200 rounded-lg px-2.5 py-1.5 outline-none focus:border-blue-400 bg-white font-mono"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowApiKey((v) => !v)}
+                    aria-label={showApiKey ? "הסתר מפתח" : "הצג מפתח"}
+                    className="px-3 py-1.5 rounded-lg text-xs font-medium text-slate-500 hover:bg-slate-100 transition-colors"
+                  >
+                    {showApiKey ? "הסתר" : "הצג"}
+                  </button>
+                </div>
+              </div>
+
+              <button
+                onClick={handleSaveCredentials}
+                disabled={saving || !apiKey}
+                className="w-full px-3 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition-colors disabled:opacity-60"
+              >
+                {saving ? "שומר..." : "שמור מפתח"}
+              </button>
+
+              {saveResult === "success" && (
+                <p role="status" className="text-sm text-green-700 bg-green-50 border border-green-200 rounded-lg px-3 py-2 text-center">
+                  המפתח נשמר בהצלחה ✓
+                </p>
+              )}
+              {saveResult === "error" && (
+                <p role="alert" className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-center">
+                  שמירת המפתח נכשלה — נסו שוב
+                </p>
+              )}
+
+              {settings?.has_api_key && (
+                <div className="border-t border-slate-100 pt-4">
+                  {confirmDisconnect ? (
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs text-slate-500">לנתק את אינטגרציית הסיכום לגמרי? כפתור "סיכום פגישה" יחסם עד לחיבור מחדש.</span>
+                      <div className="flex gap-2">
+                        <button onClick={handleDisconnect} disabled={disconnecting}
+                          className="px-3 py-1.5 rounded-lg text-xs font-medium bg-red-600 text-white hover:bg-red-700 transition-colors disabled:opacity-60">
+                          {disconnecting ? "מנתק..." : "אישור ניתוק"}
+                        </button>
+                        <button onClick={() => setConfirmDisconnect(false)}
+                          className="px-3 py-1.5 rounded-lg text-xs font-medium text-slate-500 hover:bg-slate-100 transition-colors">
+                          ביטול
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button onClick={() => setConfirmDisconnect(true)}
+                      className="text-xs text-red-600 hover:bg-red-50 rounded-lg px-3 py-1.5 transition-colors">
+                      ניתוק אינטגרציית הסיכום
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="flex justify-end gap-2 px-6 py-4 border-t border-slate-100">
+          <button onClick={onClose} className="px-4 py-2 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-100 transition-colors">
+            סגור
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ProviderPickerModal({ onPick, onClose }) {
   const { ref, handleKeyDown } = useFocusTrap(onClose);
   return (
@@ -523,6 +697,44 @@ export default function AdminIntegrationsTab() {
   const [twilioSettings, setTwilioSettings] = useState(null);
   const [twilioLoading, setTwilioLoading] = useState(true);
   const [twilioModalOpen, setTwilioModalOpen] = useState(false);
+
+  const [aiSummarySettings, setAiSummarySettings] = useState(null);
+  const [aiSummaryLoading, setAiSummaryLoading] = useState(true);
+  const [aiSummaryModalOpen, setAiSummaryModalOpen] = useState(false);
+
+  function loadAiSummarySettings() {
+    setAiSummaryLoading(true);
+    axios.get("/schools/meeting-summary-settings")
+      .then(r => setAiSummarySettings(r.data))
+      .catch(() => setAiSummarySettings(null))
+      .finally(() => setAiSummaryLoading(false));
+  }
+
+  useEffect(() => {
+    loadAiSummarySettings();
+  }, []);
+
+  async function handleSaveAiSummarySettings(patch) {
+    try {
+      await axios.put("/schools/meeting-summary-settings", patch);
+      loadAiSummarySettings();
+      return true;
+    } catch {
+      setBanner({ type: "error", text: "שמירת הגדרות סיכום הפגישות נכשלה. נסו שוב." });
+      return false;
+    }
+  }
+
+  async function handleDisconnectAiSummary() {
+    try {
+      await axios.delete("/schools/meeting-summary-settings");
+      loadAiSummarySettings();
+      return true;
+    } catch {
+      setBanner({ type: "error", text: "ניתוק אינטגרציית הסיכום נכשל. נסו שוב." });
+      return false;
+    }
+  }
 
   function loadTwilioSettings() {
     setTwilioLoading(true);
@@ -764,6 +976,46 @@ export default function AdminIntegrationsTab() {
           onSave={handleSaveCallsSettings}
           onDisconnect={handleDisconnectCalls}
           onClose={() => setCallsModalOpen(false)}
+        />
+      )}
+
+      <p className="text-slate-500 text-sm mb-6 mt-8">
+        חיבור סיכום פגישות AI מאפשר ליועצים להעלות הקלטה מפגישה ולקבל תמלול וסיכום אוטומטיים. המודל היחיד הנתמך כרגע הוא Whisper (OpenAI) — יש להזין מפתח API של OpenAI. כל עוד לא הוגדר מפתח פעיל, כפתור "סיכום פגישה" יהיה חסום לכל היועצים בארגון.
+      </p>
+
+      {aiSummaryLoading ? (
+        <div role="status" aria-label="טוען סטטוס סיכום פגישות" className="flex justify-center py-10">
+          <div aria-hidden="true" className="spinner w-8 h-8" />
+        </div>
+      ) : (
+        <div className="border border-slate-200 rounded-2xl p-5 flex items-center justify-between gap-4 bg-white shadow-sm">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-purple-50 flex items-center justify-center text-purple-600 font-bold text-sm" aria-hidden="true">
+              🎙
+            </div>
+            <div>
+              <div className="font-semibold text-slate-900">סיכום פגישות AI (Whisper)</div>
+              <div className={`text-xs mt-0.5 ${aiSummarySettings?.enabled && aiSummarySettings?.has_api_key ? "text-green-600" : "text-slate-500"}`}>
+                {aiSummarySettings?.enabled ? "מופעל" : "כבוי"} · {aiSummarySettings?.has_api_key ? "פרטי חיבור הוגדרו" : "טרם הוגדרו פרטי חיבור"}
+              </div>
+            </div>
+          </div>
+          <button
+            onClick={() => setAiSummaryModalOpen(true)}
+            className="px-4 py-2 rounded-xl text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+          >
+            הגדרות סיכום AI
+          </button>
+        </div>
+      )}
+
+      {aiSummaryModalOpen && (
+        <AiSummarySettingsModal
+          settings={aiSummarySettings}
+          loading={aiSummaryLoading}
+          onSave={handleSaveAiSummarySettings}
+          onDisconnect={handleDisconnectAiSummary}
+          onClose={() => setAiSummaryModalOpen(false)}
         />
       )}
 

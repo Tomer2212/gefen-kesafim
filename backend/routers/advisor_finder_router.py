@@ -1,4 +1,5 @@
 import logging
+import re
 from datetime import datetime
 from typing import Annotated
 from zoneinfo import ZoneInfo
@@ -28,7 +29,7 @@ def _all_slots_for_day(day_iso: str, window: dict, busy_blocks: list[dict]) -> l
     from their start with no gaps, so a 2-hour free block with a 1-hour duration yields two
     adjacent options (e.g. 9-10, 10-11) instead of one — Find Advisor shows every usable option
     so the secretary can pick whichever fits the school's callback best."""
-    start_hour, end_hour, duration = window["start_hour"], window["end_hour"], window["duration_minutes"]
+    start_minute, end_minute, duration = window["start_minute"], window["end_minute"], window["duration_minutes"]
     day_busy = sorted(
         (b for b in busy_blocks if b.get("start", "").startswith(day_iso)),
         key=lambda b: b["start"],
@@ -37,8 +38,8 @@ def _all_slots_for_day(day_iso: str, window: dict, busy_blocks: list[dict]) -> l
     # between them are computed correctly even if two sources (Graph + local) overlap.
     merged: list[list[int]] = []
     for b in day_busy:
-        s = max(int(b["start"][11:13]) * 60 + int(b["start"][14:16]), start_hour * 60)
-        e = min(int(b["end"][11:13]) * 60 + int(b["end"][14:16]), end_hour * 60)
+        s = max(int(b["start"][11:13]) * 60 + int(b["start"][14:16]), start_minute)
+        e = min(int(b["end"][11:13]) * 60 + int(b["end"][14:16]), end_minute)
         if e <= s:
             continue
         if merged and s <= merged[-1][1]:
@@ -47,8 +48,8 @@ def _all_slots_for_day(day_iso: str, window: dict, busy_blocks: list[dict]) -> l
             merged.append([s, e])
 
     slots = []
-    cursor = start_hour * 60
-    day_end = end_hour * 60
+    cursor = start_minute
+    day_end = end_minute
     for busy_start, busy_end in merged + [[day_end, day_end]]:
         free_end = min(busy_start, day_end)
         while cursor + duration <= free_end:
@@ -64,12 +65,25 @@ def _all_slots_for_day(day_iso: str, window: dict, busy_blocks: list[dict]) -> l
 _DOMAIN_LEVEL_RANK = {"beginner": 1, "advanced": 2, "expert": 3}
 
 
+def _parse_hhmm(text: str | None) -> int | None:
+    """Parses a "HH:MM" string into minutes-since-midnight, or None if missing/invalid."""
+    m = re.fullmatch(r"(\d{2}):(\d{2})", text or "")
+    if not m:
+        return None
+    hour, minute = int(m.group(1)), int(m.group(2))
+    if hour > 23 or minute > 59:
+        return None
+    return hour * 60 + minute
+
+
 class AdvisorFinderSearchIn(BaseModel):
     control_domains: list[str]
     control_domain_levels: dict[str, str] = {}
     duration_minutes: int
     date_from: str
     date_to: str
+    time_from: str | None = None
+    time_to: str | None = None
 
 
 @router.post("/search")
@@ -111,7 +125,33 @@ def search_advisors(body: AdvisorFinderSearchIn, user: Annotated[dict, Depends(g
     if not dates:
         return {"advisors": []}
 
-    window = {"start_hour": DIRECT_BOOKING_START_HOUR, "end_hour": DIRECT_BOOKING_END_HOUR, "duration_minutes": body.duration_minutes}
+    # Advisor Finder has no specific school in context (it searches across all schools by
+    # control-domain), so only org-wide blocked dates (scope_field is null) can be filtered
+    # here — a school-scoped rule is applied later, at booking time, once a school is chosen.
+    blocked_rows = (
+        db.table("blocked_dates").select("start_date, end_date").eq("org_id", user["org_id"])
+        .is_("scope_field", "null").lte("start_date", dates[-1]).gte("end_date", dates[0])
+        .execute().data or []
+    )
+    if blocked_rows:
+        dates = [d for d in dates if not any(r["start_date"] <= d <= r["end_date"] for r in blocked_rows)]
+    if not dates:
+        return {"advisors": []}
+
+    # An explicit time_from/time_to narrows (never widens) the org's default work window —
+    # e.g. a school only available 12:00-14:00 shouldn't see slots outside that hour range.
+    start_minute = DIRECT_BOOKING_START_HOUR * 60
+    end_minute = DIRECT_BOOKING_END_HOUR * 60
+    parsed_time_from = _parse_hhmm(body.time_from)
+    if parsed_time_from is not None:
+        start_minute = max(start_minute, parsed_time_from)
+    parsed_time_to = _parse_hhmm(body.time_to)
+    if parsed_time_to is not None:
+        end_minute = min(end_minute, parsed_time_to)
+    if start_minute >= end_minute:
+        return {"advisors": []}
+
+    window = {"start_minute": start_minute, "end_minute": end_minute, "duration_minutes": body.duration_minutes}
     range_start = f"{dates[0]}T00:00:00Z"
     range_end = f"{dates[-1]}T23:59:59Z"
     mailbox = booking_logic.get_org_mailbox_capability(user["org_id"])

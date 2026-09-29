@@ -320,6 +320,14 @@ class MeetingStatusPatchIn(BaseModel):
     reminder_enabled: bool | None = None
 
 
+class BlockedDateIn(BaseModel):
+    start_date: str
+    end_date: str
+    reason: str
+    scope_field: str | None = None   # one of BLOCKED_DATE_SCOPE_FIELDS, or None = applies to all schools
+    scope_values: list[str] | None = None
+
+
 class MeetingImportRowIn(BaseModel):
     row_index: int
     meeting_date: str | None = None
@@ -411,6 +419,7 @@ class DirectCoordinationRangeIn(BaseModel):
     participants: list[DirectCoordinationParticipantIn]
     stage_scope: str | None = None  # six-year schools only, gefen/current ranges only: "tichon" | "chativa"
     meeting_type: str = "remote"  # "remote" | "physical" — where the meeting will take place
+    allow_time_range_search: bool  # whether the school may re-search with a narrower time window on the public booking page (no default — the frontend forces an explicit answer)
 
 
 class DirectCoordinationIn(BaseModel):
@@ -3206,6 +3215,10 @@ def list_all_meetings(
         for m in meetings:
             m["advisor_profiles"] = []
 
+    note_counts = _count_meeting_notes([m["id"] for m in meetings])
+    for m in meetings:
+        m["notes_count"] = note_counts.get(m["id"], 0)
+
     return meetings
 
 
@@ -3232,7 +3245,7 @@ def list_my_meetings(
             # school status — a soft-deleted school's meeting history must stay visible here too.
             q = (
                 db.table("meetings")
-                .select("*, schools!inner(id, name, symbol, city, district, org_id)")
+                .select("*, schools!inner(id, name, symbol, city, authority, district, org_id)")
                 .eq("schools.org_id", user["org_id"])
                 .filter("advisor_ids", "cs", json.dumps([user["id"]]))
             )
@@ -3261,6 +3274,7 @@ def list_my_meetings(
         m["school_name"] = sc.get("name", "")
         m["school_symbol"] = sc.get("symbol", "")
         m["school_city"] = sc.get("city", "")
+        m["school_authority"] = sc.get("authority", "")
         m["school_district"] = sc.get("district", "")
 
     if meetings:
@@ -3281,8 +3295,10 @@ def list_my_meetings(
             logger.warning("list_my_meetings profile enrichment failed (non-fatal): %s", exc)
             for m in meetings:
                 m.setdefault("advisor_profiles", [])
-    else:
-        pass
+
+    note_counts = _count_meeting_notes([m["id"] for m in meetings])
+    for m in meetings:
+        m["notes_count"] = note_counts.get(m["id"], 0)
 
     return meetings
 
@@ -3490,6 +3506,112 @@ def _day_phrases(meeting_date: str, today: "date") -> tuple[str, str]:
         return "למחר", "מחר"
     day_name = _HEBREW_WEEKDAY_NAMES[d.weekday()]
     return f"ל{day_name}", f"ב{day_name}"
+
+
+BLOCKED_DATE_SCOPE_FIELDS = ("sector", "district", "authority", "stage", "supervision", "city")
+
+
+def _find_blocking_rule(db, org_id: str, date_iso: str, school: dict | None = None) -> dict | None:
+    """Returns the first blocked_dates row covering date_iso for this org — either an
+    org-wide rule (scope_field is null) or a rule scoped to a school field/value that matches
+    the given school. `school` is only needed when checking scoped rules; a caller that only
+    cares about org-wide blocking (e.g. before it knows which school) can omit it."""
+    rows = (
+        db.table("blocked_dates").select("*").eq("org_id", org_id)
+        .lte("start_date", date_iso).gte("end_date", date_iso)
+        .execute().data or []
+    )
+    for r in rows:
+        if not r.get("scope_field"):
+            return r
+        if school and school.get(r["scope_field"]) in (r.get("scope_values") or []):
+            return r
+    return None
+
+
+def _is_date_blocked(db, org_id: str, date_iso: str, school: dict | None = None) -> bool:
+    return _find_blocking_rule(db, org_id, date_iso, school) is not None
+
+
+@router.get("/blocked-dates")
+def list_blocked_dates(user: Annotated[dict, Depends(get_current_user)]):
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            rows = (
+                db.table("blocked_dates").select("*").eq("org_id", user["org_id"])
+                .order("start_date").execute().data or []
+            )
+            return rows
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("list_blocked_dates attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("list_blocked_dates failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+
+@router.post("/blocked-dates")
+def create_blocked_date(body: BlockedDateIn, user: Annotated[dict, Depends(get_current_user)]):
+    if user["role"] not in ("owner", "manager"):
+        raise HTTPException(status_code=403, detail="אין הרשאה לפעולה זו")
+    if not body.reason.strip():
+        raise HTTPException(status_code=400, detail="יש להזין הערה עבור טווח התאריכים החסום")
+    if body.scope_field and body.scope_field not in BLOCKED_DATE_SCOPE_FIELDS:
+        raise HTTPException(status_code=400, detail="שדה פלח לא תקין")
+    if body.end_date < body.start_date:
+        raise HTTPException(status_code=400, detail="תאריך הסיום חייב להיות אחרי תאריך ההתחלה")
+    db = get_admin_client()
+    data = {
+        "org_id": user["org_id"],
+        "start_date": body.start_date,
+        "end_date": body.end_date,
+        "reason": body.reason.strip(),
+        "scope_field": body.scope_field,
+        "scope_values": body.scope_values if body.scope_field else None,
+        "created_by": user["id"],
+    }
+    try:
+        res = db.table("blocked_dates").insert(data).execute()
+        return res.data[0]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"שגיאת DB: {str(e)}")
+
+
+@router.delete("/blocked-dates/{blocked_date_id}")
+def delete_blocked_date(blocked_date_id: str, user: Annotated[dict, Depends(get_current_user)]):
+    if user["role"] not in ("owner", "manager"):
+        raise HTTPException(status_code=403, detail="אין הרשאה לפעולה זו")
+    db = get_admin_client()
+    db.table("blocked_dates").delete().eq("id", blocked_date_id).eq("org_id", user["org_id"]).execute()
+    return {"ok": True}
+
+
+@router.get("/{school_id}/blocked-date-check")
+def check_blocked_date(school_id: str, date: str, user: Annotated[dict, Depends(get_current_user)]):
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            school = (
+                db.table("schools").select(",".join(("org_id",) + BLOCKED_DATE_SCOPE_FIELDS))
+                .eq("id", school_id).single().execute().data
+            )
+            if not school:
+                raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
+            rule = _find_blocking_rule(db, school["org_id"], date, school)
+            return {"blocked": rule is not None, "reason": rule["reason"] if rule else None}
+        except HTTPException:
+            raise
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("check_blocked_date attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("check_blocked_date failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
 
 def _org_reminders_default_on(db, school_id: str) -> bool:
@@ -4741,14 +4863,42 @@ def delete_my_avatar(user: Annotated[dict, Depends(get_current_user)]):
     return {"ok": True}
 
 
+@router.get("/users/mentionable")
+def list_mentionable_users(user: Annotated[dict, Depends(get_current_user)]):
+    """Lightweight org-wide name list for @-mention autocomplete in meeting notes — open to
+    every role (unlike /users/all below, which is manager-gated and returns full profiles).
+    Advisors need this too since they can tag colleagues from their own meetings view."""
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            rows = db.table("profiles").select("id, full_name").eq("org_id", user["org_id"]).order("full_name").execute()
+            return rows.data
+        except Exception as exc:
+            if attempt == 0:
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.warning("list_mentionable_users failed after 2 attempts: %s", exc)
+                return []
+
+
+_TYPED_ADVISOR_COUNT_FIELDS = {
+    "gefen": "gefen_support_count",
+    "current": "current_support_count",
+    "district": "district_support_count",
+}
+
+
 @router.get("/users/all")
 def list_users(user: Annotated[dict, Depends(get_current_user)]):
     _require_manager(user)
+    profiles = None
     for attempt in range(2):
         try:
             db = get_admin_client()
             rows = db.table("profiles").select("*").eq("org_id", user["org_id"]).order("full_name").execute()
-            return rows.data
+            profiles = rows.data
+            break
         except Exception as exc:
             if attempt == 0:
                 logger.warning("list_users attempt 1 failed: %s — resetting client and retrying", exc)
@@ -4757,6 +4907,33 @@ def list_users(user: Annotated[dict, Depends(get_current_user)]):
             else:
                 logger.error("list_users failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    for profile in profiles:
+        for field in _TYPED_ADVISOR_COUNT_FIELDS.values():
+            profile[field] = 0
+
+    for service_type, table_name in _TYPED_ADVISOR_TABLES.items():
+        field = _TYPED_ADVISOR_COUNT_FIELDS[service_type]
+        try:
+            db = get_admin_client()
+            link_rows = (
+                db.table(table_name)
+                .select("advisor_id, schools!inner(status, org_id)")
+                .eq("schools.org_id", user["org_id"])
+                .eq("schools.status", "active")
+                .execute()
+            )
+            counts: dict = {}
+            for row in link_rows.data or []:
+                advisor_id = row.get("advisor_id")
+                if advisor_id:
+                    counts[advisor_id] = counts.get(advisor_id, 0) + 1
+            for profile in profiles:
+                profile[field] = counts.get(profile["id"], 0)
+        except Exception as exc:
+            logger.warning("list_users ligui count enrichment failed for %s (non-fatal): %s", table_name, exc)
+
+    return profiles
 
 
 @router.post("/users/invite")
@@ -6927,7 +7104,29 @@ def list_meetings(school_id: str, user: Annotated[dict, Depends(get_current_user
         for m in meetings:
             m["advisor_profiles"] = []
 
+    note_counts = _count_meeting_notes([m["id"] for m in meetings])
+    for m in meetings:
+        m["notes_count"] = note_counts.get(m["id"], 0)
+
     return meetings
+
+
+def _enforce_advisor_ids_for_role(user: dict, requested_ids: list[str] | None, context: str) -> list[str]:
+    """An advisor-role user may never be assigned as anyone but themselves on a meeting —
+    only owner/manager may set advisor_ids to someone else. Coerces silently (defense-in-depth;
+    the frontend already locks this field for advisor-role users) and logs when a mismatch
+    was actually sent, since that should never happen in normal operation."""
+    if user["role"] in ("owner", "manager"):
+        return requested_ids if requested_ids is not None else []
+    self_id = user["id"]
+    # Only warn on a genuine mismatch — an empty/omitted list is the normal "not set yet" case,
+    # not an attempted override, and would otherwise log noise on every advisor-created meeting.
+    if requested_ids and requested_ids != [self_id]:
+        logger.warning(
+            "advisor %s attempted to set advisor_ids=%s on %s — coerced to self",
+            self_id, requested_ids, context,
+        )
+    return [self_id]
 
 
 @router.post("/{school_id}/meetings")
@@ -6954,11 +7153,11 @@ def create_meeting(school_id: str, body: MeetingIn, user: Annotated[dict, Depend
     if body.stage_scope is not None: data["stage_scope"] = body.stage_scope
     # advisor_ids takes precedence; fall back to legacy advisor_id
     if body.advisor_ids is not None:
-        data["advisor_ids"] = body.advisor_ids
+        data["advisor_ids"] = _enforce_advisor_ids_for_role(user, body.advisor_ids, "create_meeting")
     elif body.advisor_id:
-        data["advisor_ids"] = [body.advisor_id]
+        data["advisor_ids"] = _enforce_advisor_ids_for_role(user, [body.advisor_id], "create_meeting")
     else:
-        data["advisor_ids"] = []
+        data["advisor_ids"] = _enforce_advisor_ids_for_role(user, [], "create_meeting")
     # Reminder toggle: honour an explicit value (meeting_booking_router sends True); otherwise
     # default it from automation 1 — ON only for a future-dated meeting that already has a
     # participant. update_meeting flips it on later if the meeting becomes eligible.
@@ -7783,6 +7982,7 @@ def send_direct_coordination_request(
             "advisor_ids": r.advisor_ids,
             "participants": [p.model_dump() for p in r.participants],
             "meeting_type": r.meeting_type,
+            "allow_time_range_search": r.allow_time_range_search,
         })
 
     # Group ranges by distinct resolved coordinator email — one email (and one booking token)
@@ -7839,6 +8039,14 @@ def send_direct_coordination_request(
 @router.put("/{school_id}/meetings/{meeting_id}")
 def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annotated[dict, Depends(get_current_user)]):
     db = get_admin_client()
+    if user["role"] not in ("owner", "manager"):
+        existing_row = db.table("meetings").select("advisor_ids, advisor_id") \
+            .eq("id", meeting_id).eq("school_id", school_id).single().execute().data
+        if not existing_row:
+            raise HTTPException(status_code=404, detail="פגישה לא נמצאה")
+        existing_advisor_ids = existing_row.get("advisor_ids") or ([existing_row["advisor_id"]] if existing_row.get("advisor_id") else [])
+        if user["id"] not in existing_advisor_ids:
+            raise HTTPException(status_code=403, detail="אין לך הרשאה לערוך פגישה זו — הפגישה משויכת ליועץ אחר")
     data = {
         "status": body.status or "scheduled",
         "participants": body.participants if body.participants is not None else [],
@@ -7861,11 +8069,11 @@ def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annot
     if body.stage_scope is not None: data["stage_scope"] = body.stage_scope
     # advisor_ids takes precedence; fall back to legacy advisor_id
     if body.advisor_ids is not None:
-        data["advisor_ids"] = body.advisor_ids
+        data["advisor_ids"] = _enforce_advisor_ids_for_role(user, body.advisor_ids, "update_meeting")
     elif body.advisor_id:
-        data["advisor_ids"] = [body.advisor_id]
+        data["advisor_ids"] = _enforce_advisor_ids_for_role(user, [body.advisor_id], "update_meeting")
     else:
-        data["advisor_ids"] = []
+        data["advisor_ids"] = _enforce_advisor_ids_for_role(user, [], "update_meeting")
 
     # Auto-enable the reminder the first time a meeting becomes eligible for one (gains its
     # first participant, or a future date) — the whole point of the org "send reminders"
@@ -7948,6 +8156,14 @@ def _apply_meeting_patch(db, org_id: str, school_id: str, meeting_id: str, patch
 def patch_meeting(school_id: str, meeting_id: str, body: MeetingStatusPatchIn, user: Annotated[dict, Depends(get_current_user)]):
     """Partial update — only updates the fields provided. Does not touch advisor_ids, participants, etc."""
     db = get_admin_client()
+    if user["role"] not in ("owner", "manager"):
+        existing_row = db.table("meetings").select("advisor_ids, advisor_id") \
+            .eq("id", meeting_id).eq("school_id", school_id).single().execute().data
+        if not existing_row:
+            raise HTTPException(status_code=404, detail="פגישה לא נמצאה")
+        existing_advisor_ids = existing_row.get("advisor_ids") or ([existing_row["advisor_id"]] if existing_row.get("advisor_id") else [])
+        if user["id"] not in existing_advisor_ids:
+            raise HTTPException(status_code=403, detail="אין לך הרשאה לערוך פגישה זו — הפגישה משויכת ליועץ אחר")
     data = {}
     if body.status is not None: data["status"] = body.status
     if body.notes is not None: data["notes"] = body.notes
@@ -7958,6 +8174,25 @@ def patch_meeting(school_id: str, meeting_id: str, body: MeetingStatusPatchIn, u
     # silently flip it back. This is the ONLY path that turns the reminder off.
     if body.reminder_enabled is not None: data["reminder_enabled"] = body.reminder_enabled
     return _apply_meeting_patch(db, user["org_id"], school_id, meeting_id, data)
+
+
+@router.post("/{school_id}/meetings/{meeting_id}/join")
+def join_meeting_as_advisor(school_id: str, meeting_id: str, user: Annotated[dict, Depends(get_current_user)]):
+    """Lets a user add themselves as an additional performing advisor on a meeting they are
+    not currently assigned to — the one exception to "an advisor can't touch a meeting that
+    isn't theirs": they may always add themselves, never anyone else, and this never removes
+    or changes any other field. Idempotent if already present."""
+    db = get_admin_client()
+    existing_row = db.table("meetings").select("advisor_ids, advisor_id") \
+        .eq("id", meeting_id).eq("school_id", school_id).single().execute().data
+    if not existing_row:
+        raise HTTPException(status_code=404, detail="פגישה לא נמצאה")
+    existing_advisor_ids = existing_row.get("advisor_ids") or ([existing_row["advisor_id"]] if existing_row.get("advisor_id") else [])
+    if user["id"] in existing_advisor_ids:
+        return {"advisor_ids": existing_advisor_ids}
+    new_advisor_ids = existing_advisor_ids + [user["id"]]
+    res = db.table("meetings").update({"advisor_ids": new_advisor_ids}).eq("id", meeting_id).eq("school_id", school_id).execute()
+    return res.data[0] if res.data else {"advisor_ids": new_advisor_ids}
 
 
 @router.delete("/{school_id}/meetings/{meeting_id}")
@@ -8032,37 +8267,187 @@ def reassign_meeting_school(meeting_id: str, body: MeetingReassignSchoolIn, user
     return {"ok": True}
 
 
-class MentionIn(BaseModel):
-    mentioned_user_ids: list[str]
-    note_preview: str | None = None
+# ---------------------------------------------------------------------------
+# Meeting notes ("הערות פגישה" — the floating, minimizable notes window opened
+# from the "+"/📝 column in every meetings surface: school card, אזור אישי,
+# ניהול). Modeled directly on the school_notes pattern above (group_id/segments,
+# same edit/delete role-rank rules) — meeting_notes just has meeting_id instead
+# of note_type/quarter as the discriminator, and no imported_from_excel case.
+# @-mentions are parsed here (server-side) rather than per-caller on the
+# frontend, so every one of the three meetings surfaces behaves identically.
+# ---------------------------------------------------------------------------
+
+def _group_meeting_note_rows(rows: list[dict], profiles_map: dict) -> list[dict]:
+    by_group: dict = {}
+    for r in rows:
+        author_profile = profiles_map.get(r["author_id"]) or {}
+        segment = {
+            "id": r["id"],
+            "author_id": r["author_id"],
+            "author_name": "סיכום אוטומטי מהקלטה" if r.get("author_id") is None else author_profile.get("full_name"),
+            "author_role": author_profile.get("role"),
+            "content": r["content"],
+            "created_at": r["created_at"],
+            "updated_at": r["updated_at"],
+        }
+        by_group.setdefault(r["group_id"], []).append(segment)
+    group_list = []
+    for group_id, segments in by_group.items():
+        segments.sort(key=lambda s: s["created_at"])  # oldest segment first within a record
+        group_list.append({"group_id": group_id, "segments": segments})
+    group_list.sort(key=lambda g: g["segments"][0]["created_at"], reverse=True)  # newest record first
+    return group_list
 
 
-@router.post("/{school_id}/meetings/{meeting_id}/mentions")
-def create_mentions(school_id: str, meeting_id: str, body: MentionIn, user: Annotated[dict, Depends(get_current_user)]):
-    db = get_admin_client()
-    recipients = [uid for uid in body.mentioned_user_ids if uid != user["id"]]
-    if not recipients:
-        return {"ok": True, "sent": 0}
+def _count_meeting_notes(meeting_ids: list[str]) -> dict[str, int]:
+    """Batched, chunked count of meeting_notes rows per meeting — used only to drive the
+    📝/+ indicator in meeting list tables. Chunked at 200 ids per request so a large org's
+    meeting list never builds the ~25KB IN-list URL that broke school_id filtering before
+    (see _fetch_all_rows / list_all_meetings comments). Non-fatal: a failure here degrades
+    the indicator to "no notes" rather than failing the whole meetings list."""
+    counts: dict[str, int] = {}
+    if not meeting_ids:
+        return counts
     try:
-        school_row = db.table("schools").select("name").eq("id", school_id).execute()
-        school_name = school_row.data[0]["name"] if school_row.data else "בית ספר"
-        rows = [{
-            "recipient_id": uid,
-            "type": "mention",
-            "ref_id": meeting_id,
-            "school_id": school_id,
-            "data": {
-                "title": f'{user.get("full_name", "משתמש")} תייג אותך בהערה ב-{school_name}',
-                "school_name": school_name,
-                "sender_name": user.get("full_name", ""),
-                "note_preview": body.note_preview,
-                "deeplink": f"/school/{school_id}?tab=meetings&meeting={meeting_id}",
-            }
-        } for uid in recipients]
-        _create_notifications(db, rows, pref_key="notify_mention")
+        db = get_admin_client()
+        CHUNK = 200
+        for i in range(0, len(meeting_ids), CHUNK):
+            chunk = meeting_ids[i:i + CHUNK]
+            rows = db.table("meeting_notes").select("meeting_id").in_("meeting_id", chunk).execute().data or []
+            for r in rows:
+                counts[r["meeting_id"]] = counts.get(r["meeting_id"], 0) + 1
     except Exception as exc:
-        logger.warning("create_mentions failed (non-fatal): %s", exc)
-    return {"ok": True, "sent": len(recipients)}
+        logger.warning("meeting notes count enrichment failed (non-fatal): %s", exc)
+    return counts
+
+
+@router.get("/{school_id}/meetings/{meeting_id}/notes")
+def get_meeting_notes(school_id: str, meeting_id: str, user: Annotated[dict, Depends(get_current_user)]):
+    rows = []
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            rows = (db.table("meeting_notes").select("*")
+                    .eq("meeting_id", meeting_id).eq("school_id", school_id)
+                    .order("created_at").execute().data or [])
+            break
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("get_meeting_notes attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.error("get_meeting_notes failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    author_ids = list({r["author_id"] for r in rows if r.get("author_id")})
+    profiles_map = {}
+    if author_ids:
+        try:
+            db = get_admin_client()
+            p_rows = db.table("profiles").select("id, full_name, role").in_("id", author_ids).execute()
+            profiles_map = {p["id"]: p for p in (p_rows.data or [])}
+        except Exception as exc:
+            logger.warning("get_meeting_notes profile enrichment failed (non-fatal): %s", exc)
+
+    return {"groups": _group_meeting_note_rows(rows, profiles_map)}
+
+
+class MeetingNoteCreateIn(BaseModel):
+    content: str
+
+
+@router.post("/{school_id}/meetings/{meeting_id}/notes")
+def create_meeting_note(school_id: str, meeting_id: str, body: MeetingNoteCreateIn, user: Annotated[dict, Depends(get_current_user)]):
+    content = body.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="לא ניתן לשמור הערה ריקה")
+    db = get_admin_client()
+    row = db.table("meeting_notes").insert({
+        "meeting_id": meeting_id,
+        "school_id": school_id,
+        "group_id": str(uuid4()),
+        "author_id": user["id"],
+        "content": content,
+    }).execute()
+    note = row.data[0]
+
+    try:
+        profiles = db.table("profiles").select("id, full_name").eq("org_id", user["org_id"]).execute().data or []
+        mentioned_ids = [
+            p["id"] for p in profiles
+            if p.get("full_name") and f'@{p["full_name"]}' in content and p["id"] != user["id"]
+        ]
+        if mentioned_ids:
+            school_row = db.table("schools").select("name, authority, symbol").eq("id", school_id).execute()
+            school = school_row.data[0] if school_row.data else {}
+            school_name = school.get("name") or "בית ספר"
+            notif_rows = [{
+                "recipient_id": uid,
+                "type": "mention",
+                "ref_id": meeting_id,
+                "school_id": school_id,
+                "data": {
+                    "title": f'{user.get("full_name", "משתמש")} תייג אותך בהערה ב-{school_name}',
+                    "school_name": school_name,
+                    "school_authority": school.get("authority"),
+                    "school_symbol": school.get("symbol"),
+                    "sender_name": user.get("full_name", ""),
+                    "note_preview": content[:100],
+                    "note_id": note["id"],
+                    "meeting_id": meeting_id,
+                    "deeplink": f"/school/{school_id}?tab=meetings&meeting={meeting_id}&note={note['id']}",
+                },
+            } for uid in mentioned_ids]
+            _create_notifications(db, notif_rows, pref_key="notify_mention")
+    except Exception as exc:
+        logger.warning("create_meeting_note mention notify failed (non-fatal): %s", exc)
+
+    return note
+
+
+class MeetingNoteSegmentIn(BaseModel):
+    content: str
+
+
+def _get_meeting_note_author(db, meeting_id: str, segment_id: str) -> str:
+    existing = db.table("meeting_notes").select("author_id").eq("id", segment_id).eq("meeting_id", meeting_id).execute()
+    if not existing.data:
+        raise HTTPException(status_code=404, detail="ההערה לא נמצאה")
+    return existing.data[0]["author_id"]
+
+
+# Meeting notes are strictly self-edit/self-delete only — unlike school_notes /
+# partial_row_updates above, there is NO cross-user override for owner/manager here. Every
+# user, regardless of role, can only edit or delete a note they authored themselves; every
+# other user's note is view-only to them.
+@router.patch("/{school_id}/meetings/{meeting_id}/notes/segments/{segment_id}")
+def edit_meeting_note_segment(school_id: str, meeting_id: str, segment_id: str, body: MeetingNoteSegmentIn, user: Annotated[dict, Depends(get_current_user)]):
+    content = body.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="לא ניתן לשמור הערה ריקה")
+    db = get_admin_client()
+    author_id = _get_meeting_note_author(db, meeting_id, segment_id)
+    if user["id"] != author_id:
+        raise HTTPException(status_code=403, detail="ניתן לערוך רק הערות שכתבת בעצמך")
+    db.table("meeting_notes").update({
+        "content": content,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", segment_id).execute()
+    return {"ok": True}
+
+
+@router.delete("/{school_id}/meetings/{meeting_id}/notes/segments/{segment_id}")
+def delete_meeting_note_segment(school_id: str, meeting_id: str, segment_id: str, user: Annotated[dict, Depends(get_current_user)]):
+    # Deletion (unlike editing above) DOES have an owner/manager override — they may delete
+    # any user's note, gated in the frontend behind a "are you sure" confirmation naming the
+    # original author. An advisor may still only delete their own.
+    db = get_admin_client()
+    author_id = _get_meeting_note_author(db, meeting_id, segment_id)
+    if user["id"] != author_id and user["role"] not in ("owner", "manager"):
+        raise HTTPException(status_code=403, detail="ניתן למחוק רק הערות שכתבת בעצמך")
+    db.table("meeting_notes").delete().eq("id", segment_id).eq("meeting_id", meeting_id).execute()
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------

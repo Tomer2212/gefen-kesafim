@@ -12,6 +12,7 @@ import { ParticipantsSelector } from "./ParticipantsSelector";
 import { TimeInput, normalizeTimeValue } from "./TimeInput";
 import { AdvisorReassignModal } from "./AdvisorReassignModal";
 import { MeetingActualDetail } from "./MeetingActualDetail";
+import BlockedDateConfirmModal from "./BlockedDateConfirmModal";
 import { MEETING_STATUS_OPTIONS, MEETING_SERVICE_TYPE_OPTIONS, STATUS_MAP, getStatusDisplay, formatMeetingDate } from "./constants";
 
 function formatActualDuration(seconds) {
@@ -272,8 +273,17 @@ function MeetingRowImpl({
   selectable, selected, onToggleSelect, onSendStatusReminder, hideAdvisorColumn,
   showCalendarColumn, onOpenSummary, typedAdvisors, schoolStage,
   expanded, onToggleExpand, colSpanTotal,
+  currentUserRole, currentUserId, onPermissionDenied,
+  aiSummaryEnabled = true,
 }) {
   const navigate = useNavigate();
+  const PERMISSION_DENIED_MSG = "אין לך הרשאה לערוך פגישה זו — הפגישה משויכת ליועץ אחר";
+  const ROW_LOCKED_MSG = "פגישה נעולה לעריכה — משויכת ליועץ אחר. ניתן להצטרף כיועץ מבצע נוסף.";
+  const isAdvisorRole = currentUserRole === "advisor";
+  const meetingAdvisorIds = (meeting.advisor_ids && meeting.advisor_ids.length ? meeting.advisor_ids
+    : meeting.advisor_id ? [meeting.advisor_id] : []);
+  // Locked when: I'm an advisor, this meeting already has advisor(s) assigned, and I'm not one of them.
+  const rowLocked = isAdvisorRole && meetingAdvisorIds.length > 0 && !meetingAdvisorIds.includes(currentUserId);
   const [draft, setDraft] = useState({ ...meeting });
   const [showDate, setShowDate] = useState(false);
   const [showStatus, setShowStatus] = useState(false);
@@ -287,6 +297,7 @@ function MeetingRowImpl({
   const [conflictModal, setConflictModal] = useState(null);
   const [advisorReassignPrompt, setAdvisorReassignPrompt] = useState(null);
   const [contactPickerOptions, setContactPickerOptions] = useState(null);
+  const [blockedDateConfirm, setBlockedDateConfirm] = useState(null); // { pendingDate, reason } | null
   const [dateHovered, setDateHovered] = useState(false);
   const [startHovered, setStartHovered] = useState(false);
   const [endHovered, setEndHovered] = useState(false);
@@ -420,8 +431,25 @@ function MeetingRowImpl({
     try {
       await axios.patch(`/schools/${meeting.school_id}/meetings/${meeting.id}`, { reminder_enabled: newVal });
       onMeetingPatched?.(meeting.id, { reminder_enabled: newVal });
-    } catch {
+    } catch (err) {
       setDraft(p => ({ ...p, reminder_enabled: !newVal }));
+      if (err?.response?.status === 403) onPermissionDenied?.(err.response.data?.detail || PERMISSION_DENIED_MSG);
+    }
+  }
+
+  // Lets an advisor who isn't on this meeting add themselves as an additional performing
+  // advisor — the one action allowed on an otherwise-locked row (see rowLocked above).
+  async function handleJoinAsAdvisor() {
+    try {
+      const res = await axios.post(`/schools/${meeting.school_id}/meetings/${meeting.id}/join`);
+      const newIds = res.data?.advisor_ids || [...meetingAdvisorIds, currentUserId];
+      const selfProfile = usersWithAccess?.find(u => u.id === currentUserId) || usersWithoutAccess?.find(u => u.id === currentUserId);
+      const newProfiles = [...(draft.advisor_profiles || []), ...(selfProfile && !meetingAdvisorIds.includes(currentUserId) ? [selfProfile] : [])];
+      const nd = { ...draft, advisor_ids: newIds, advisor_profiles: newProfiles };
+      setDraft(nd);
+      onMeetingPatched?.(meeting.id, { advisor_ids: newIds });
+    } catch (err) {
+      onPermissionDenied?.(err?.response?.data?.detail || "ההצטרפות לפגישה נכשלה, נסה שוב");
     }
   }
 
@@ -491,7 +519,12 @@ function MeetingRowImpl({
     // it earlier leaves a window where a freebusy fetch can slip in before the backend
     // has actually written the change, cache the pre-save snapshot, and then sit there
     // looking authoritative for the full cache TTL even though it's now stale again.
-    await onSave(draftToSave);
+    try {
+      await onSave(draftToSave);
+    } catch (err) {
+      if (err?.response?.status === 403) onPermissionDenied?.(err.response.data?.detail || PERMISSION_DENIED_MSG);
+      throw err;
+    }
     (draftToSave.advisor_ids || []).forEach(invalidateFreebusyCache);
   }
 
@@ -558,7 +591,9 @@ function MeetingRowImpl({
         />
       )}
       <tr ref={rowRef} onBlur={handleRowBlur}
-        className="border-b border-slate-300 hover:bg-slate-50/50 transition-colors group">
+        aria-disabled={rowLocked || undefined}
+        title={rowLocked ? ROW_LOCKED_MSG : undefined}
+        className={`border-b border-slate-300 hover:bg-slate-50/50 transition-colors group${rowLocked ? " opacity-60 pointer-events-none select-none" : ""}`}>
         {selectable && (
           <td className="py-2.5 px-2 text-center">
             <input type="checkbox" checked={!!selected} onChange={() => onToggleSelect?.(meeting.id)}
@@ -567,6 +602,9 @@ function MeetingRowImpl({
         )}
         {/* כפתור הרחבת שורה */}
         <td className="py-2.5 px-1 text-center">
+          {rowLocked && (
+            <span aria-label="פגישה נעולה — לא ניתן לערוך, ניתן להצטרף כיועץ מבצע נוסף" className="ml-1 text-slate-400" title={ROW_LOCKED_MSG}>🔒</span>
+          )}
           <button type="button" onClick={() => onToggleExpand?.(meeting.id)} aria-expanded={!!expanded}
             aria-label={expanded ? "כווץ שורה" : "הרחב שורה — פירוט פעילות בפועל"}
             className="text-slate-400 hover:text-slate-700 transition-colors">
@@ -591,8 +629,35 @@ function MeetingRowImpl({
               advisorId={draft.advisor_ids?.[0]}
               ownEventId={ownEventId}
               anchorRef={dateCellRef}
-              onChange={v => { const nd = { ...draft, meeting_date: v }; setDraft(nd); setShowDate(false); saveDraft(nd); }}
+              onChange={async v => {
+                setShowDate(false);
+                let blocked = false, reason = null;
+                try {
+                  const res = await axios.get(`/schools/${meeting.school_id}/blocked-date-check`, { params: { date: v } });
+                  blocked = res.data?.blocked;
+                  reason = res.data?.reason;
+                } catch {
+                  // Fails open — a transient check failure must never prevent a manual save.
+                }
+                if (blocked) {
+                  setBlockedDateConfirm({ pendingDate: v, reason });
+                  return;
+                }
+                const nd = { ...draft, meeting_date: v }; setDraft(nd); saveDraft(nd);
+              }}
               onClose={() => setShowDate(false)} />}
+            {blockedDateConfirm && (
+              <BlockedDateConfirmModal
+                reason={blockedDateConfirm.reason}
+                onKeepAnyway={() => {
+                  const nd = { ...draft, meeting_date: blockedDateConfirm.pendingDate };
+                  setDraft(nd); saveDraft(nd);
+                  setBlockedDateConfirm(null);
+                }}
+                onPickAnother={() => { setBlockedDateConfirm(null); setShowDate(true); }}
+                onCancel={() => setBlockedDateConfirm(null)}
+              />
+            )}
             {!showDate && dateHovered && advisorIdForBusyCheck && draft.meeting_date && (
               <ScheduleTooltip anchorRef={dateCellRef}>
                 {busyLoading ? (
@@ -715,7 +780,7 @@ function MeetingRowImpl({
         </td>
         {/* יועץ מבצע */}
         {!hideAdvisorColumn && (
-          <td className="py-2.5 px-2">
+          <td className={`py-2.5 px-2${rowLocked ? " pointer-events-auto" : ""}`}>
             {(!draft.advisor_profiles || draft.advisor_profiles.length === 0) && draft.advisor_name_text && (
               <span className="text-xs text-slate-500 inline-flex items-center gap-1 mb-1" title="יובא כטקסט חופשי — ללא שיוך לפרופיל משתמש">
                 <span aria-hidden="true">📥</span> {draft.advisor_name_text}
@@ -725,6 +790,9 @@ function MeetingRowImpl({
               value={draft.advisor_profiles || []}
               usersWithAccess={usersWithAccess}
               usersWithoutAccess={usersWithoutAccess}
+              canJoin={rowLocked}
+              onJoin={handleJoinAsAdvisor}
+              readOnly={isAdvisorRole}
               onChange={profiles => { const nd = { ...draft, advisor_ids: profiles.map(x => x.id), advisor_profiles: profiles }; setDraft(nd); saveDraft(nd); }}
               onRequestAccess={(advisorId, name) => onRequestAccess?.(advisorId, name, draft.meeting_date, meeting)}
             />
@@ -778,6 +846,13 @@ function MeetingRowImpl({
               const oldType = draft.meeting_service_type;
               const nd = { ...draft, meeting_service_type: v };
               const existing = draft.advisor_profiles || [];
+              // Advisor-role users are always locked to themselves — never offer to switch
+              // to the school's "designated" advisor for this service type.
+              if (isAdvisorRole) {
+                setDraft(nd);
+                saveDraft(nd);
+                return;
+              }
               const typed = typedAdvisorsForServiceType(v, typedAdvisors);
               if (existing.length === 0) {
                 // Advisor field empty — fill it in automatically, no need to ask.
@@ -802,9 +877,9 @@ function MeetingRowImpl({
         {/* הערות */}
         <td className="py-2.5 px-2 text-center">
           <button type="button"
-            onMouseDown={e => { e.preventDefault(); onOpenNotes(meeting.id, draft.notes || "", val => { const nd = { ...draft, notes: val }; setDraft(nd); saveDraft(nd); }); }}
+            onMouseDown={e => { e.preventDefault(); onOpenNotes(meeting); }}
             className="text-slate-400 hover:text-blue-600 transition-colors text-base leading-none" aria-label="פתח הערות">
-            {draft.notes ? "📝" : <span className="text-slate-400 text-lg font-light">+</span>}
+            {meeting.notes_count > 0 ? "📝" : <span className="text-slate-400 text-lg font-light">+</span>}
           </button>
         </td>
         {/* תזכורת */}
@@ -871,21 +946,23 @@ function MeetingRowImpl({
         <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap text-center" dir="ltr">{formatActualDuration(offlineSeconds)}</td>
         {/* בפועל: סה"כ שהושקע */}
         <td className="py-2.5 px-2 text-sm font-semibold text-slate-800 whitespace-nowrap text-center" dir="ltr">{formatActualDuration(callsSeconds + offlineSeconds)}</td>
-        {/* סיכום פגישה */}
-        <td className="py-2.5 px-2 text-center">
-          {meeting.summary_status === "processing" ? (
-            <span className="text-xs text-amber-600 font-medium whitespace-nowrap">מעבד...</span>
-          ) : (
-            <button type="button"
-              onMouseDown={e => { e.preventDefault(); onOpenSummary?.(meeting); }}
-              className="text-slate-400 hover:text-blue-600 transition-colors text-base leading-none"
-              aria-label="סיכום פגישה">
-              {meeting.summary_status === "error"
-                ? <span title={meeting.summary_error || "אירעה שגיאה"} className="text-red-500">⚠</span>
-                : <span className="text-slate-400 text-lg font-light">+</span>}
-            </button>
-          )}
-        </td>
+        {/* סיכום פגישה — העמודה כולה מוצגת רק כשלארגון יש אינטגרציית סיכום AI מוגדרת ופעילה */}
+        {aiSummaryEnabled && (
+          <td className="py-2.5 px-2 text-center">
+            {meeting.summary_status === "processing" ? (
+              <span className="text-xs text-amber-600 font-medium whitespace-nowrap">מעבד...</span>
+            ) : (
+              <button type="button"
+                onMouseDown={e => { e.preventDefault(); onOpenSummary?.(meeting); }}
+                className="text-slate-400 hover:text-blue-600 transition-colors text-base leading-none"
+                aria-label="סיכום פגישה">
+                {meeting.summary_status === "error"
+                  ? <span title={meeting.summary_error || "אירעה שגיאה"} className="text-red-500">⚠</span>
+                  : <span className="text-slate-400 text-lg font-light">+</span>}
+              </button>
+            )}
+          </td>
+        )}
         {/* Actions */}
         {(onRequestDelete || onSendStatusReminder) && (
           <td className="py-2.5 px-2 text-center">

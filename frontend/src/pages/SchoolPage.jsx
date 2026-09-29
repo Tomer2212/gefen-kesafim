@@ -21,14 +21,16 @@ import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useRowVirtualizer } from "../hooks/useRowVirtualizer";
 import { VirtualRows } from "../components/common/VirtualRows";
 import { useMeetingsPolling } from "../hooks/useMeetingsPolling";
+import { useAiSummaryEnabled } from "../hooks/useAiSummaryEnabled";
 import { mergeMeetingsSilently } from "../components/meetings/mergeMeetings";
 import { useCompareChecks } from "../context/CompareChecksContext";
+import { useMeetingNotes } from "../context/MeetingNotesContext";
 import { AdvisorSearch } from "../components/AdvisorSearch";
 import { AccessSelector } from "../components/AccessSelector";
 import HourMinuteInput from "../components/HourMinuteInput";
 import { MultiSelectChips } from "../components/MultiSelectChips";
 import { Building2, Phone, Handshake, UsersRound, MessageSquareText, Folder, CalendarDays, Pencil } from "lucide-react";
-import { defaultMeetingServiceType, resolveDefaultAdvisorIds } from "../components/meetings/constants";
+import { defaultMeetingServiceType, resolveDefaultAdvisorIds, personalDefaultServiceType } from "../components/meetings/constants";
 import { AdvisorCell } from "../components/meetings/AdvisorCell";
 import AdvisorAccessGrantModal from "../components/meetings/AdvisorAccessGrantModal";
 import { DatePickerPopover } from "../components/meetings/DatePickerPopover";
@@ -41,7 +43,6 @@ import MeetingNavigationGuardModal from "../components/meetings/MeetingNavigatio
 import { getMissingCriticalFields, isMeetingIncomplete } from "../components/meetings/meetingCompleteness";
 import { NoParticipantsModal } from "../components/meetings/NoParticipantsModal";
 import MeetingUploadComparisonModal from "../components/meetings/MeetingUploadComparisonModal";
-import { NotesModal } from "../components/meetings/NotesModal";
 import { ParticipantsSelector } from "../components/meetings/ParticipantsSelector";
 import { StageScopeModal } from "../components/meetings/StageScopeModal";
 import { TimeInput } from "../components/meetings/TimeInput";
@@ -2764,7 +2765,18 @@ export default function SchoolPage() {
   // Meetings state
   const [meetings, setMeetings] = useState([]);
   const [meetingsLoading, setMeetingsLoading] = useState(true);
-  const [notesModal, setNotesModal] = useState(null);
+  const { openMeetingNotes } = useMeetingNotes();
+  // School is implicit on this page (not carried per-meeting like in the admin/personal
+  // meetings lists), so the notes window's title is built from the page's own `school` state.
+  function openMeetingNotesForSchool(meeting) {
+    openMeetingNotes({
+      meetingId: meeting.id,
+      schoolId: meeting.school_id || schoolId,
+      schoolName: school?.name,
+      schoolAuthority: school?.authority,
+      schoolSymbol: school?.symbol,
+    });
+  }
   const [summaryModalFor, setSummaryModalFor] = useState(null);
   const [showCalendarColumn, setShowCalendarColumn] = useState(false);
   const [advisorAccessModal, setAdvisorAccessModal] = useState(null); // {advisorId, advisorName, meetingDate}
@@ -3104,6 +3116,7 @@ export default function SchoolPage() {
   }, []);
 
   useMeetingsPolling(() => loadMeetings({ silent: true }), activeTab === "meetings", [schoolId, academicYear]);
+  const aiSummaryEnabled = useAiSummaryEnabled();
 
   // Union of the 3 per-service-type advisor drafts — replaces the old single general
   // "יועץ מלווה" list for the "גישה" convenience selector and its "linked to advisors" mode.
@@ -3119,13 +3132,23 @@ export default function SchoolPage() {
   }, [draftTypedAdvisorIds, accessLinkedToAdvisors]);
 
   async function createMeetingRow(stageScope) {
-    const meetingServiceType = defaultMeetingServiceType(yearAdminData.service_type);
-    const defaultAdvisorIds = resolveDefaultAdvisorIds(meetingServiceType, {
+    const isAdvisorRole = (currentUser?.role || role) === "advisor";
+    // An advisor-role user can only ever be the sole performing advisor on a meeting they
+    // create (enforced server-side too) — default "סוג" to whichever type(s) *they* are
+    // personally the designated advisor for, not the school's full (possibly combined) type.
+    const meetingServiceType = isAdvisorRole
+      ? personalDefaultServiceType(yearAdminData.service_type, currentUser?.id, {
+          gefenAdvisors: typedAdvisors.gefen, currentAdvisors: typedAdvisors.current, districtAdvisors: typedAdvisors.district,
+        })
+      : defaultMeetingServiceType(yearAdminData.service_type);
+    const defaultAdvisorIds = isAdvisorRole ? [currentUser?.id] : resolveDefaultAdvisorIds(meetingServiceType, {
       gefenAdvisors: typedAdvisors.gefen, currentAdvisors: typedAdvisors.current, districtAdvisors: typedAdvisors.district,
     });
-    const defaultAdvisorProfiles = [typedAdvisors.gefen, typedAdvisors.current, typedAdvisors.district]
-      .flat().filter(p => defaultAdvisorIds.includes(p.id))
-      .filter((p, i, arr) => arr.findIndex(x => x.id === p.id) === i);
+    const defaultAdvisorProfiles = isAdvisorRole
+      ? (currentUser ? [currentUser] : [])
+      : [typedAdvisors.gefen, typedAdvisors.current, typedAdvisors.district]
+          .flat().filter(p => defaultAdvisorIds.includes(p.id))
+          .filter((p, i, arr) => arr.findIndex(x => x.id === p.id) === i);
     // For a six-year school, "תיכון בלבד"/"חט"ב בלבד" pre-fill the relevant principal as
     // the default participant; "שניהם יחד" leaves participants empty for manual selection.
     const contacts = getSchoolContacts();
@@ -3149,7 +3172,15 @@ export default function SchoolPage() {
     };
     try {
       const res = await axios.post(`/schools/${schoolId}/meetings`, payload);
-      const newMeeting = { ...res.data, advisor_profiles: defaultAdvisorProfiles };
+      // advisor_profiles must reflect what the server actually persisted (advisor_ids), not
+      // what was requested — the server silently coerces an advisor-role user's advisor_ids
+      // to themselves, so trusting the pre-request defaultAdvisorProfiles here would show a
+      // wrong/extra advisor name in the UI even though the DB row is correct.
+      const savedAdvisorIds = res.data?.advisor_ids || [];
+      const advisorProfiles = savedAdvisorIds
+        .map(id => users.find(u => u.id === id) || defaultAdvisorProfiles.find(p => p.id === id))
+        .filter(Boolean);
+      const newMeeting = { ...res.data, advisor_profiles: advisorProfiles };
       setMeetings(prev => [newMeeting, ...prev]);
       sessionCreatedMeetingIdsRef.current.add(newMeeting.id);
     } catch (err) {
@@ -3225,11 +3256,19 @@ export default function SchoolPage() {
     };
     try {
       const res = await axios.put(`/schools/${schoolId}/meetings/${draft.id}`, payload);
-      const saved = { ...res.data, advisor_profiles: draft.advisor_profiles || [] };
+      // Same rule as createMeetingRow: advisor_profiles must reflect what the server actually
+      // persisted (advisor_ids), not the pre-request draft — the server may have silently
+      // coerced an advisor-role user's advisor_ids back to themselves.
+      const savedAdvisorIds = res.data?.advisor_ids || [];
+      const advisorProfiles = savedAdvisorIds
+        .map(id => users.find(u => u.id === id) || (draft.advisor_profiles || []).find(p => p.id === id))
+        .filter(Boolean);
+      const saved = { ...res.data, advisor_profiles: advisorProfiles };
       setMeetings(prev => prev.map(m => m.id === draft.id ? saved : m));
     } catch (err) {
       console.error("Update meeting failed:", err);
       loadMeetings(); // revert on error
+      throw err; // let the row (MeetingRow.performSave) detect e.g. a 403 and surface it
     }
   }
 
@@ -4907,29 +4946,11 @@ export default function SchoolPage() {
           {activeTab === "meetings" && (
             <div>
               {/* Modals */}
-              {notesModal && (
-                <NotesModal
-                  notes={notesModal.notes}
-                  users={users}
-                  onSave={(noteText, mentionedIds) => {
-                    notesModal.onSave(noteText);
-                    if (mentionedIds && mentionedIds.length > 0 && notesModal.meetingId) {
-                      axios.post(`/schools/${schoolId}/meetings/${notesModal.meetingId}/mentions`, {
-                        mentioned_user_ids: mentionedIds,
-                        note_preview: noteText.slice(0, 100),
-                      }).catch(console.error);
-                    }
-                    setNotesModal(null);
-                  }}
-                  onClose={() => setNotesModal(null)}
-                />
-              )}
               {summaryModalFor && (
                 <MeetingSummaryModal
                   meeting={summaryModalFor}
                   onClose={() => setSummaryModalFor(null)}
-                  onOpenNotes={(meetingId, notes, onSave) => setNotesModal({ meetingId, notes, onSave })}
-                  onSave={updateMeeting}
+                  onOpenNotes={openMeetingNotesForSchool}
                   onUploadStarted={meetingId => setMeetings(prev => prev.map(m => m.id === meetingId ? { ...m, summary_status: "processing" } : m))}
                 />
               )}
@@ -5034,13 +5055,16 @@ export default function SchoolPage() {
                   onSave={updateMeeting}
                   onMeetingPatched={(id, patch) => setMeetings(prev => prev.map(m => m.id === id ? { ...m, ...patch } : m))}
                   onDelete={deleteMeeting}
-                  onOpenNotes={(meetingId, notes, onSave) => setNotesModal({ meetingId, notes, onSave })}
+                  onOpenNotes={openMeetingNotesForSchool}
                   onRequestAccess={handleRequestAdvisorAccess}
                   canDeleteMeetings={canDeleteMeetings}
                   onSendStatusReminder={sendStatusReminderFromSchool}
                   showCalendarColumn={showCalendarColumn}
                   onOpenSummary={setSummaryModalFor}
+                  aiSummaryEnabled={aiSummaryEnabled}
                   typedAdvisorsFor={() => typedAdvisors}
+                  currentUserRole={currentUser?.role || role}
+                  currentUserId={currentUser?.id}
                 />
                 </>
               )}

@@ -4,6 +4,8 @@ import { MeetingRemindersProvider } from "./context/MeetingRemindersContext";
 import MeetingRemindersOverlay from "./components/MeetingRemindersOverlay";
 import { CompareChecksProvider } from "./context/CompareChecksContext";
 import CompareResultsWindow from "./components/CompareResultsWindow";
+import { MeetingNotesProvider } from "./context/MeetingNotesContext";
+import MeetingNotesWindow from "./components/meetings/MeetingNotesWindow";
 import { GefenOrganizedResultsProvider } from "./context/GefenOrganizedResultsContext";
 import GefenOrganizedResultsWindow from "./components/GefenOrganizedResultsWindow";
 import { TasksProvider } from "./context/TasksContext";
@@ -78,6 +80,7 @@ function AppLayout() {
       <Outlet />
       <MeetingRemindersOverlay />
       <CompareResultsWindow />
+      <MeetingNotesWindow />
       <GefenOrganizedResultsWindow />
       <TaskPanel />
       <CallNoteWindows />
@@ -155,15 +158,17 @@ export default function App() {
     <SessionContext.Provider value={session}>
       <MeetingRemindersProvider>
         <CompareChecksProvider>
-          <GefenOrganizedResultsProvider>
-            <TasksProvider>
-              <CallNoteWindowsProvider>
-                <GuideProvider>
-                  <RouterProvider router={router} />
-                </GuideProvider>
-              </CallNoteWindowsProvider>
-            </TasksProvider>
-          </GefenOrganizedResultsProvider>
+          <MeetingNotesProvider>
+            <GefenOrganizedResultsProvider>
+              <TasksProvider>
+                <CallNoteWindowsProvider>
+                  <GuideProvider>
+                    <RouterProvider router={router} />
+                  </GuideProvider>
+                </CallNoteWindowsProvider>
+              </TasksProvider>
+            </GefenOrganizedResultsProvider>
+          </MeetingNotesProvider>
         </CompareChecksProvider>
       </MeetingRemindersProvider>
     </SessionContext.Provider>

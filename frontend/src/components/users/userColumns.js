@@ -57,6 +57,12 @@ export function buildUserColumns(ctx = {}) {
     { key: "status", label: "סטטוס", kind: "enum", defaultVisible: true,
       options: STATUS_OPTIONS,
       getValue: u => (u.status === "pending" ? "pending" : "active") },
+    { key: "gefen_support_count", label: "ליווי גפן", kind: "number", defaultVisible: false,
+      getValue: u => u.gefen_support_count ?? 0 },
+    { key: "current_support_count", label: "ליווי שוטף", kind: "number", defaultVisible: false,
+      getValue: u => u.current_support_count ?? 0 },
+    { key: "district_support_count", label: "ליווי מחוז", kind: "number", defaultVisible: false,
+      getValue: u => u.district_support_count ?? 0 },
   ];
 }
 
@@ -80,6 +86,19 @@ export function matchesUserColumnFilter(row, col, filter) {
       case "before": return raw < filter.value;
       case "after": return raw > filter.value;
       default: return raw === filter.value;
+    }
+  }
+  if (col.kind === "number") {
+    if (filter.value === "" || filter.value === undefined || filter.value === null) return true;
+    const n = Number(raw), v = Number(filter.value);
+    if (Number.isNaN(n) || Number.isNaN(v)) return true;
+    switch (filter.op) {
+      case "ne": return n !== v;
+      case "gt": return n > v;
+      case "gte": return n >= v;
+      case "lt": return n < v;
+      case "lte": return n <= v;
+      default: return n === v;
     }
   }
   return true;

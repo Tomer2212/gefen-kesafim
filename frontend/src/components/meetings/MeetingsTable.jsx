@@ -59,6 +59,22 @@ function ReminderToast({ onClose }) {
   );
 }
 
+function PermissionDeniedToast({ message, onClose }) {
+  useEffect(() => {
+    const t = setTimeout(onClose, 5000);
+    return () => clearTimeout(t);
+  }, [onClose]);
+  return (
+    <div className="fixed bottom-6 left-6 z-50" dir="rtl">
+      <div role="alert" className="bg-red-50 border border-red-400 rounded-xl shadow-xl p-4 flex items-start gap-3 max-w-xs">
+        <p className="text-sm text-red-800 flex-1">{message}</p>
+        <button type="button" onClick={onClose} aria-label="סגור התראה"
+          className="text-red-500 hover:text-red-800 text-lg leading-none mt-0.5 transition-colors">×</button>
+      </div>
+    </div>
+  );
+}
+
 export function MeetingsTable({
   meetings, usersWithAccess, usersWithoutAccess, usersWithAccessFor, usersWithoutAccessFor,
   contacts, contactsFor, onSave, onDelete, onOpenNotes, onMeetingPatched,
@@ -68,6 +84,8 @@ export function MeetingsTable({
   onSendStatusReminder, hideAdvisorColumn,
   showCalendarColumn, onOpenSummary, typedAdvisorsFor,
   schoolStage, schoolStageFor,
+  currentUserRole, currentUserId,
+  aiSummaryEnabled = true,
 }) {
   // Excel-style per-column filter + stacked multi-column sort (see meetingColumnMenu.jsx).
   // Local state only — intentionally not persisted, resets on remount / tab change.
@@ -76,6 +94,7 @@ export function MeetingsTable({
   const [openMenuKey, setOpenMenuKey] = useState(null);
   const [pendingDeleteId, setPendingDeleteId] = useState(null);
   const [reminderToast, setReminderToast] = useState(false);
+  const [permissionDeniedMsg, setPermissionDeniedMsg] = useState(null);
   const [expandedIds, setExpandedIds] = useState(() => new Set());
 
   function toggleExpand(meetingId) {
@@ -102,7 +121,7 @@ export function MeetingsTable({
     1 /* תזכורת */ +
     (showCalendarColumn ? 1 : 0) +
     4 /* בפועל */ +
-    1 /* סיכום פגישה */ +
+    (aiSummaryEnabled ? 1 : 0) /* סיכום פגישה */ +
     (canDeleteMeetings ? 1 : 0);
 
   // One { m, filterValues } per meeting — filterValues feeds both the header menus'
@@ -174,6 +193,7 @@ export function MeetingsTable({
   return (
     <>
       {reminderToast && <ReminderToast onClose={() => setReminderToast(false)} />}
+      {permissionDeniedMsg && <PermissionDeniedToast message={permissionDeniedMsg} onClose={() => setPermissionDeniedMsg(null)} />}
       {pendingDeleteId && (
         <DeleteMeetingModal
           onConfirm={() => { onDelete(pendingDeleteId); setPendingDeleteId(null); }}
@@ -236,7 +256,9 @@ export function MeetingsTable({
                   <th scope="col" rowSpan={2} className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap" style={{ width: "95px" }}>יומן</th>
                 )}
                 <th scope="col" colSpan={4} className="py-2 px-2 text-xs font-semibold text-slate-500 text-center border-b border-slate-200">בפועל</th>
-                <th scope="col" rowSpan={2} className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">סיכום פגישה</th>
+                {aiSummaryEnabled && (
+                  <th scope="col" rowSpan={2} className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">סיכום פגישה</th>
+                )}
                 {canDeleteMeetings && <th scope="col" rowSpan={2} className="py-3 px-2 text-xs font-semibold text-slate-500"></th>}
               </tr>
               <tr className="border-b border-slate-200 bg-slate-50/80">
@@ -278,11 +300,15 @@ export function MeetingsTable({
                           hideAdvisorColumn={hideAdvisorColumn}
                           showCalendarColumn={showCalendarColumn}
                           onOpenSummary={onOpenSummary}
+                          aiSummaryEnabled={aiSummaryEnabled}
                           typedAdvisors={typedAdvisorsFor ? typedAdvisorsFor(m) : null}
                           schoolStage={schoolStageFor ? schoolStageFor(m) : schoolStage}
                           expanded={expandedIds.has(m.id)}
                           onToggleExpand={toggleExpand}
                           colSpanTotal={colSpanTotal}
+                          currentUserRole={currentUserRole}
+                          currentUserId={currentUserId}
+                          onPermissionDenied={setPermissionDeniedMsg}
                         />
                       </tbody>
                     );

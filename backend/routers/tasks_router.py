@@ -1726,6 +1726,10 @@ def _build_meeting_ranges(
                 "service_type": service_type, "duration_minutes": duration_minutes,
                 "label": label, "participants": participants, "advisor_ids": advisor_ids,
                 "meeting_type": c.get("meeting_type") or "remote",
+                # Mirrors DirectCoordinationRangeIn.allow_time_range_search — the UI (ConditionGroupsEditor.jsx)
+                # blocks saving until this is explicitly answered, so bool(...) here is a defensive
+                # fallback for a legacy/malformed condition, not a real UX path.
+                "allow_time_range_search": bool(c.get("allow_time_range_search")),
                 # Round 17 — tags this range with which principal slot it's for (or the
                 # condition's original stage_scope when not splitting), so the booked `meetings`
                 # row can carry it too — without this, two ranges from the same "separate"

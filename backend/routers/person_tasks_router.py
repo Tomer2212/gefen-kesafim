@@ -950,6 +950,40 @@ def unpin_person_task(task_id: str, user: Annotated[dict, Depends(get_current_us
     return {"ok": True}
 
 
+@router.post("/{task_id}/remind/{assignee_id}")
+def send_person_task_reminder(task_id: str, assignee_id: str, user: Annotated[dict, Depends(get_current_user)]):
+    """Manager/owner nudges one assignee who hasn't finished their share of the task yet — used
+    by the 'שלח תזכורת' button in the admin 'אנשי הארגון' detail view. Re-fetches the assignee's
+    current completed/total from the DB (not trusting whatever the client had cached) so the
+    notification text is accurate even if it lags a recent completion."""
+    _require_manager(user)
+    db = get_admin_client()
+    task = _get_person_task_or_404(db, task_id, user["org_id"])
+    targets = (
+        db.table("org_person_task_targets").select("completed")
+        .eq("task_id", task_id).contains("assignee_ids", [assignee_id]).execute().data or []
+    )
+    if not targets:
+        raise HTTPException(status_code=404, detail="היועץ אינו מוקצה למשימה זו")
+    completed = sum(1 for t in targets if t.get("completed"))
+    total = len(targets)
+    try:
+        _schools_router._create_notifications(db, [{
+            "recipient_id": assignee_id, "type": "person_task_reminder",
+            "data": {
+                "title": (
+                    f'קיבלת תזכורת מ{user.get("full_name", "מנהל")} להשלים את המשימה '
+                    f'"{task.get("name")}". מצבך הנוכחי הוא {completed} מתוך {total} פעולות. למעבר למשימה הקש כאן.'
+                ),
+                "task_id": task_id, "task_name": task.get("name"),
+                "sender_name": user.get("full_name", ""), "completed": completed, "total": total,
+            },
+        }], pref_key="notify_task_assigned")
+    except Exception as exc:
+        logger.warning("send_person_task_reminder: notification failed (non-fatal): %s", exc)
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------------------
 # Personal display-name override (אזור אישי only) — a purely cosmetic per-user nickname, never
 # touches org_person_tasks.name (what the creator set, what every other assignee/admin sees).

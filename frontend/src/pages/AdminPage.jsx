@@ -3208,6 +3208,7 @@ export default function AdminPage() {
     if (!col) return sortByRole(filtered);
     const sorted = [...filtered].sort((a, b) => {
       const av = col.getValue(a), bv = col.getValue(b);
+      if (col.kind === "number") return (Number(av) || 0) - (Number(bv) || 0);
       const as = Array.isArray(av) ? av.join(",") : (av ?? "");
       const bs = Array.isArray(bv) ? bv.join(",") : (bv ?? "");
       return String(as).localeCompare(String(bs), "he", { numeric: true });
@@ -5020,9 +5021,10 @@ export default function AdminPage() {
               )}
 
               <div className="glass-card rounded-2xl overflow-hidden">
+                <div className="overflow-auto dash-scroll-x max-h-[70vh]">
                 <table className="w-full text-sm">
                   <thead>
-                    <tr className="border-b border-slate-100">
+                    <tr className="border-b border-slate-100" style={STICKY_HEADER_ROW_STYLE}>
                       {userTh("role")}
                       {userTh("full_name")}
                       {userTh("email")}
@@ -5031,6 +5033,9 @@ export default function AdminPage() {
                       {userTh("birth_date")}
                       {userTh("overrides", { center: true })}
                       {voicenterEnabled && userTh("voicenter")}
+                      {userTh("gefen_support_count", { center: true })}
+                      {userTh("current_support_count", { center: true })}
+                      {userTh("district_support_count", { center: true })}
                       {userTh("status")}
                     </tr>
                   </thead>
@@ -5199,6 +5204,21 @@ export default function AdminPage() {
                               emptyIcon />
                           </td>
                         )}
+                        {isUserColVisible("gefen_support_count") && (
+                          <td className="px-5 py-3 text-center whitespace-nowrap text-slate-600">
+                            {u.gefen_support_count ?? 0}
+                          </td>
+                        )}
+                        {isUserColVisible("current_support_count") && (
+                          <td className="px-5 py-3 text-center whitespace-nowrap text-slate-600">
+                            {u.current_support_count ?? 0}
+                          </td>
+                        )}
+                        {isUserColVisible("district_support_count") && (
+                          <td className="px-5 py-3 text-center whitespace-nowrap text-slate-600">
+                            {u.district_support_count ?? 0}
+                          </td>
+                        )}
                         {isUserColVisible("status") && (
                         <td className={`px-5 py-3 whitespace-nowrap relative ${(myRole === "owner" || canDeleteUsers) ? "pl-9" : ""}`}>
                           <span className="text-slate-600">
@@ -5232,6 +5252,7 @@ export default function AdminPage() {
                     )}
                   </tbody>
                 </table>
+                </div>
               </div>
 
             </div>

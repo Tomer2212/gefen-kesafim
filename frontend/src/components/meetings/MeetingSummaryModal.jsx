@@ -2,11 +2,11 @@ import { useRef, useState } from "react";
 import axios from "axios";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
 
-// Entry point for "סיכום פגישה" — not a content viewer. Choosing "לכתוב הערה" just
-// delegates to the existing notes modal (same onOpenNotes/onSave already wired for the
-// "הערות" column); choosing "להעלות הקלטה" uploads audio for background transcription +
-// AI summarization, whose result later lands in the meeting's regular notes field.
-export function MeetingSummaryModal({ meeting, onClose, onOpenNotes, onSave, onUploadStarted }) {
+// Entry point for "סיכום פגישה" — not a content viewer. Choosing "לכתוב הערה" just opens the
+// same floating meeting-notes window as the "הערות" column (onOpenNotes); choosing "להעלות
+// הקלטה" uploads audio for background transcription + AI summarization, whose result lands
+// as a new entry in that same notes thread.
+export function MeetingSummaryModal({ meeting, onClose, onOpenNotes, onUploadStarted }) {
   const [mode, setMode] = useState("choice"); // "choice" | "uploading"
   const [file, setFile] = useState(null);
   const [error, setError] = useState("");
@@ -16,7 +16,7 @@ export function MeetingSummaryModal({ meeting, onClose, onOpenNotes, onSave, onU
 
   function handleWriteNote() {
     onClose();
-    onOpenNotes(meeting.id, meeting.notes || "", val => onSave({ ...meeting, notes: val }));
+    onOpenNotes(meeting);
   }
 
   async function handleUpload() {

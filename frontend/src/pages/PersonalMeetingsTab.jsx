@@ -6,10 +6,9 @@ import { DeleteMeetingModal } from "../components/meetings/DeleteMeetingModal";
 import { MeetingsBulkActionBar } from "../components/meetings/MeetingsBulkActionBar";
 import { MeetingsTable } from "../components/meetings/MeetingsTable";
 import { MeetingSummaryModal } from "../components/meetings/MeetingSummaryModal";
-import { NotesModal } from "../components/meetings/NotesModal";
 import { SchoolPickerModal, SchoolPickerPopover, schoolLabel } from "../components/meetings/SchoolPickerCell";
 import { StageScopeModal } from "../components/meetings/StageScopeModal";
-import { MEETING_STATUS_OPTIONS, MEETING_TYPE_OPTIONS, MEETING_SERVICE_TYPE_OPTIONS, STATUS_MAP, formatMeetingDate, defaultMeetingServiceType } from "../components/meetings/constants";
+import { MEETING_STATUS_OPTIONS, MEETING_TYPE_OPTIONS, MEETING_SERVICE_TYPE_OPTIONS, STATUS_MAP, formatMeetingDate, defaultMeetingServiceType, personalDefaultServiceType } from "../components/meetings/constants";
 import { AcademicYearSelector } from "../components/AcademicYearSelector";
 import { DEFAULT_ACADEMIC_YEAR, getAcademicYearStartDate } from "../constants/academicYears";
 import MeetingNavigationGuardModal from "../components/meetings/MeetingNavigationGuardModal";
@@ -17,7 +16,9 @@ import { getMissingCriticalFields, isMeetingIncomplete } from "../components/mee
 import { buildSchoolContacts } from "../components/meetings/schoolContacts";
 import { normalizeTimeValue } from "../components/meetings/TimeInput";
 import { useMeetingsPolling } from "../hooks/useMeetingsPolling";
+import { useAiSummaryEnabled } from "../hooks/useAiSummaryEnabled";
 import { mergeMeetingsSilently, visibleDateBounds } from "../components/meetings/mergeMeetings";
+import { useMeetingNotes } from "../context/MeetingNotesContext";
 
 const TODAY = new Date().toISOString().slice(0, 10);
 // date_from defaults to the start of a given academic year (not a fixed value) so the list
@@ -48,7 +49,7 @@ function saveState(state) {
   try { sessionStorage.setItem(SS_KEY, JSON.stringify(state)); } catch { /* ignore */ }
 }
 
-export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }) {
+export default function PersonalMeetingsTab({ userId, role, canDeleteMeetings, users }) {
   const saved = readSavedState();
 
   const [meetings, setMeetings] = useState([]);
@@ -68,7 +69,16 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
   const [dotsOpen, setDotsOpen] = useState(false);
   const dotsRef = useRef(null);
   const [selectedIds, setSelectedIds] = useState({});
-  const [notesModal, setNotesModal] = useState(null);
+  const { openMeetingNotes } = useMeetingNotes();
+  function openMeetingNotesFor(meeting) {
+    openMeetingNotes({
+      meetingId: meeting.id,
+      schoolId: meeting.school_id,
+      schoolName: meeting.school_name,
+      schoolAuthority: meeting.school_authority,
+      schoolSymbol: meeting.school_symbol,
+    });
+  }
   const [summaryModalFor, setSummaryModalFor] = useState(null);
   const [showCalendarColumn, setShowCalendarColumn] = useState(false);
   const [schoolPickerFor, setSchoolPickerFor] = useState(null);
@@ -150,6 +160,7 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
   }, [filters, academicYear]);
 
   useMeetingsPolling(() => loadMeetings(filters, { silent: true }), true, [filters, academicYear]);
+  const aiSummaryEnabled = useAiSummaryEnabled();
 
   useEffect(() => {
     axios.get("/schools/").then(r => setSchools((r.data || []).filter(s => s.status !== "deleted"))).catch(() => {});
@@ -211,9 +222,17 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
       const c = contacts.find(x => x.key === "principal_chativa") || contacts.find(x => x.key === "principal");
       if (c) participants = [c];
     }
+    // An advisor's default "סוג" reflects only what *they* personally are the designated
+    // advisor for at this school (never the school's full, possibly combined, configured
+    // type) — same rule as SchoolPage.jsx's createMeetingRow.
+    const meetingServiceType = role === "advisor"
+      ? personalDefaultServiceType(schoolServiceType, userId, {
+          gefenAdvisors: school.advisors_gefen || [], currentAdvisors: school.advisors_current || [], districtAdvisors: school.advisors_district || [],
+        })
+      : defaultMeetingServiceType(schoolServiceType);
     const payload = {
       status: "scheduled", meeting_type: "remote",
-      meeting_service_type: defaultMeetingServiceType(schoolServiceType),
+      meeting_service_type: meetingServiceType,
       advisor_ids: userId ? [userId] : [], participants,
       primary_contact_key: participants.length === 1 ? participants[0].key : null,
       academic_year: academicYear,
@@ -466,17 +485,11 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
       })()}
 
       {/* Modals */}
-      {notesModal && (
-        <NotesModal notes={notesModal.notes} users={users || []}
-          onSave={noteText => { notesModal.onSave(noteText); setNotesModal(null); }}
-          onClose={() => setNotesModal(null)} />
-      )}
       {summaryModalFor && (
         <MeetingSummaryModal
           meeting={summaryModalFor}
           onClose={() => setSummaryModalFor(null)}
-          onOpenNotes={(meetingId, notes, onSave) => setNotesModal({ meetingId, notes, onSave })}
-          onSave={updateMeeting}
+          onOpenNotes={openMeetingNotesFor}
           onUploadStarted={meetingId => setMeetings(prev => prev.map(m => m.id === meetingId ? { ...m, summary_status: "processing" } : m))}
         />
       )}
@@ -666,7 +679,7 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
             onSave={updateMeeting}
             onMeetingPatched={(id, patch) => setMeetings(prev => prev.map(m => m.id === id ? { ...m, ...patch } : m))}
             onDelete={deleteMeeting}
-            onOpenNotes={(meetingId, notes, onSave) => setNotesModal({ meetingId, notes, onSave })}
+            onOpenNotes={openMeetingNotesFor}
             onRequestAccess={() => {}}
             canDeleteMeetings={canDeleteMeetings}
             showSchoolColumn
@@ -680,6 +693,7 @@ export default function PersonalMeetingsTab({ userId, canDeleteMeetings, users }
             onSendStatusReminder={sendStatusReminder}
             showCalendarColumn={showCalendarColumn}
             onOpenSummary={setSummaryModalFor}
+            aiSummaryEnabled={aiSummaryEnabled}
           />
           {currentSchoolPickerMeeting && (
             <SchoolPickerPopover

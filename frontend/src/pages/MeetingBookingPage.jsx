@@ -3,6 +3,7 @@ import { useParams, Link } from "react-router-dom";
 import axios from "axios";
 import logoImg from "../assets/logo.png";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { TimeInput, normalizeTimeValue } from "../components/meetings/TimeInput";
 
 const HEBREW_MONTHS = ["ינואר", "פברואר", "מרץ", "אפריל", "מאי", "יוני", "יולי", "אוגוסט", "ספטמבר", "אוקטובר", "נובמבר", "דצמבר"];
 const HEBREW_WEEKDAYS = ["ראשון", "שני", "שלישי", "רביעי", "חמישי", "שישי", "שבת"];
@@ -153,16 +154,36 @@ function RangeSlotPickerModal({ token, range, onClose, onBooked }) {
   const [booking, setBooking] = useState(false);
   const [selected, setSelected] = useState(null); // { date, slot }
   const [confirmed, setConfirmed] = useState(null);
+  const [moreOptionsOpen, setMoreOptionsOpen] = useState(false);
+  const [timeFrom, setTimeFrom] = useState("");
+  const [timeTo, setTimeTo] = useState("");
+  const [timeRangeError, setTimeRangeError] = useState("");
+  const [activeTimeRange, setActiveTimeRange] = useState(null); // { from, to } once a re-search was applied
 
-  function loadDays() {
+  function loadDays(timeRange) {
     setLoading(true);
-    return axios.get(`/public/meeting-booking/${token}/freebusy`, { params: { range_key: range.key } })
+    const params = { range_key: range.key };
+    if (timeRange) { params.time_from = timeRange.from; params.time_to = timeRange.to; }
+    return axios.get(`/public/meeting-booking/${token}/freebusy`, { params })
       .then(res => {
         setDays(res.data.days || []);
         if (!res.data.ok) setError("לא ניתן היה לבדוק זמינות ביומן כרגע, נסו שוב מאוחר יותר.");
       })
       .catch(() => setError("אירעה שגיאה בטעינת המשבצות הפנויות."))
       .finally(() => setLoading(false));
+  }
+
+  function handleResearch() {
+    const from = normalizeTimeValue(timeFrom);
+    const to = normalizeTimeValue(timeTo);
+    if (!from || !to || from >= to) {
+      setTimeRangeError("יש להזין טווח שעות תקין (שעת סיום אחרי שעת התחלה)");
+      return;
+    }
+    setTimeRangeError("");
+    setSelected(null);
+    setActiveTimeRange({ from, to });
+    loadDays({ from, to });
   }
 
   useEffect(() => {
@@ -183,7 +204,8 @@ function RangeSlotPickerModal({ token, range, onClose, onBooked }) {
       setError(err?.response?.data?.detail || "אופס.. הזמן הזה כבר נתפס. נא לבחור מועד אחר.");
       setSelected(null);
       // Round 9: refresh immediately so the next earliest available slot shows up right away.
-      loadDays();
+      // Preserves an active "אפשרויות נוספות" narrowed search, if one was applied.
+      loadDays(activeTimeRange);
     } finally {
       setBooking(false);
     }
@@ -246,11 +268,45 @@ function RangeSlotPickerModal({ token, range, onClose, onBooked }) {
           </div>
         ))}
 
+        {range.allow_time_range_search && moreOptionsOpen && (
+          <div className="border-t border-slate-100 pt-3 mt-1 flex flex-col gap-2">
+            <p className="text-xs text-slate-500">
+              יכולים להיפגש רק בטווח שעות מסוים? הגדירו אותו כאן וחפשו שוב.
+            </p>
+            <div className="flex items-end gap-2">
+              <div className="flex flex-col gap-1">
+                <label htmlFor="rangepicker-time-from" className="text-xs font-medium text-slate-500">משעה</label>
+                <div className="border border-slate-300 rounded-lg px-2 py-1 w-20">
+                  <TimeInput id="rangepicker-time-from" value={timeFrom} onChange={setTimeFrom} ariaLabel="משעה" />
+                </div>
+              </div>
+              <div className="flex flex-col gap-1">
+                <label htmlFor="rangepicker-time-to" className="text-xs font-medium text-slate-500">עד שעה</label>
+                <div className="border border-slate-300 rounded-lg px-2 py-1 w-20">
+                  <TimeInput id="rangepicker-time-to" value={timeTo} onChange={setTimeTo} ariaLabel="עד שעה" />
+                </div>
+              </div>
+              <button type="button" onClick={handleResearch} disabled={loading}
+                className="px-4 py-2 rounded-full bg-slate-700 hover:bg-slate-800 text-white text-sm font-semibold transition-colors disabled:opacity-50">
+                חיפוש מחדש
+              </button>
+            </div>
+            {timeRangeError && <p role="alert" className="text-xs text-red-600">{timeRangeError}</p>}
+          </div>
+        )}
+
         <div className="flex items-center gap-2 justify-center mt-2">
           <button type="button" onClick={onClose} disabled={booking}
             className="px-6 py-2.5 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-semibold transition-colors disabled:opacity-50">
             סגירה
           </button>
+          {range.allow_time_range_search && (
+            <button type="button" onClick={() => setMoreOptionsOpen(o => !o)} disabled={booking}
+              aria-expanded={moreOptionsOpen}
+              className="px-6 py-2.5 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-semibold transition-colors disabled:opacity-50">
+              אפשרויות נוספות
+            </button>
+          )}
           <button type="button" onClick={confirmSelection} disabled={!selected || booking}
             className="px-6 py-2.5 rounded-full bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
             {booking ? "קובע..." : "אישור"}

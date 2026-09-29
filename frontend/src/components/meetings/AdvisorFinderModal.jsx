@@ -48,6 +48,32 @@ function isoToDDMMYY(iso) {
   return `${d}/${m}/${y.slice(2)}`;
 }
 
+// Displayed/typed as HH:MM, free text (no picker) — used for the optional hour-range filter.
+function maskTimeInput(raw) {
+  const digits = raw.replace(/\D/g, "").slice(0, 4);
+  if (digits.length > 2) return `${digits.slice(0, 2)}:${digits.slice(2)}`;
+  return digits;
+}
+
+// Fills in whatever the user didn't bother typing: "15" -> "15:00", "5" -> "05:00",
+// "9:3" -> "09:03" — so a bare hour is understood as that hour on the dot.
+function normalizeTimeText(text) {
+  if (!text) return "";
+  if (/^\d{1,2}$/.test(text)) return `${text.padStart(2, "0")}:00`;
+  const m = /^(\d{1,2}):(\d{0,2})$/.exec(text);
+  if (m) return `${m[1].padStart(2, "0")}:${(m[2] || "0").padStart(2, "0")}`;
+  return text;
+}
+
+function parseTimeHHMM(text) {
+  const normalized = normalizeTimeText(text);
+  const m = /^(\d{2}):(\d{2})$/.exec(normalized);
+  if (!m) return null;
+  const hour = parseInt(m[1], 10), minute = parseInt(m[2], 10);
+  if (hour > 23 || minute > 59) return null;
+  return normalized;
+}
+
 function todayDDMMYY() {
   const now = new Date();
   const dd = String(now.getDate()).padStart(2, "0");
@@ -62,7 +88,9 @@ export function AdvisorFinderModal({ onClose, schools, users, onBook }) {
   const [domainLevels, setDomainLevels] = useState({});
   const [duration, setDuration] = useState(60);
   const [fromText, setFromText] = useState(todayDDMMYY);
-  const [toText, setToText] = useState("");
+  const [toText, setToText] = useState(todayDDMMYY);
+  const [timeFromText, setTimeFromText] = useState("");
+  const [timeToText, setTimeToText] = useState("");
   const [searching, setSearching] = useState(false);
   const [error, setError] = useState("");
   const [results, setResults] = useState(null);
@@ -109,6 +137,16 @@ export function AdvisorFinderModal({ onClose, schools, users, onBook }) {
       setError("תאריך הסיום חייב להיות אחרי תאריך ההתחלה");
       return;
     }
+    const timeFrom = timeFromText ? parseTimeHHMM(timeFromText) : null;
+    const timeTo = timeToText ? parseTimeHHMM(timeToText) : null;
+    if ((timeFromText && !timeFrom) || (timeToText && !timeTo)) {
+      setError("טווח שעות לא תקין (HH:MM)");
+      return;
+    }
+    if (timeFrom && timeTo && timeTo <= timeFrom) {
+      setError("שעת הסיום בטווח השעות חייבת להיות אחרי שעת ההתחלה");
+      return;
+    }
     setError("");
     setSearching(true);
     setResults(null);
@@ -119,6 +157,8 @@ export function AdvisorFinderModal({ onClose, schools, users, onBook }) {
         duration_minutes: duration,
         date_from: dateFrom,
         date_to: dateTo,
+        ...(timeFrom && { time_from: timeFrom }),
+        ...(timeTo && { time_to: timeTo }),
       });
       setResults(res.data?.advisors || []);
     } catch {
@@ -145,7 +185,7 @@ export function AdvisorFinderModal({ onClose, schools, users, onBook }) {
       onClick={e => { if (e.target === e.currentTarget && !pendingSlot) onClose(); }}>
       <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="advisor-finder-title"
         onKeyDown={handleKeyDown} dir="rtl"
-        className="glass-card rounded-2xl p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto flex flex-col gap-4">
+        className="glass-card rounded-2xl p-6 w-full max-w-4xl max-h-[90vh] overflow-y-auto flex flex-col gap-4">
         <h2 id="advisor-finder-title" className="font-bold text-slate-900 text-lg">איתור יועץ</h2>
 
         {error && <p role="alert" className="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">{error}</p>}
@@ -211,6 +251,22 @@ export function AdvisorFinderModal({ onClose, schools, users, onBook }) {
               </div>
             </div>
           </div>
+          <div className="flex flex-col gap-1">
+            <span className="text-xs font-semibold text-slate-500 text-center">טווח שעות</span>
+            <div className="flex items-center gap-1.5">
+              <label htmlFor="af-time-from" className="sr-only">משעה</label>
+              <input id="af-time-from" type="text" inputMode="numeric" placeholder="HH:MM" maxLength={5}
+                value={timeFromText} onChange={e => setTimeFromText(maskTimeInput(e.target.value))}
+                onBlur={() => setTimeFromText(t => (parseTimeHHMM(t) || t))}
+                className="w-20 text-sm text-center border border-slate-200 rounded-lg px-2 py-1.5 outline-none focus:border-blue-400 bg-white" />
+              <span className="text-xs text-slate-500 whitespace-nowrap">עד</span>
+              <label htmlFor="af-time-to" className="sr-only">עד שעה</label>
+              <input id="af-time-to" type="text" inputMode="numeric" placeholder="HH:MM" maxLength={5}
+                value={timeToText} onChange={e => setTimeToText(maskTimeInput(e.target.value))}
+                onBlur={() => setTimeToText(t => (parseTimeHHMM(t) || t))}
+                className="w-20 text-sm text-center border border-slate-200 rounded-lg px-2 py-1.5 outline-none focus:border-blue-400 bg-white" />
+            </div>
+          </div>
         </div>
 
         <div className="flex items-center justify-center gap-2">
@@ -246,7 +302,7 @@ export function AdvisorFinderModal({ onClose, schools, users, onBook }) {
                   <tr className="border-b border-slate-200 bg-slate-50">
                     <th scope="col" className="text-right py-2 px-3 font-semibold text-slate-600">יועץ</th>
                     {allDates.map(d => (
-                      <th key={d} scope="col" className="text-right py-2 px-3 font-semibold text-slate-600">{formatDateHe(d)}</th>
+                      <th key={d} scope="col" className="text-center py-2 px-3 font-semibold text-slate-600">{formatDateHe(d)}</th>
                     ))}
                   </tr>
                 </thead>
