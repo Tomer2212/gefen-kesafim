@@ -47,6 +47,7 @@ function newRange() {
     advisorMode: "default",
     advisorId: "",
     meetingType: "remote",
+    allowTimeRangeSearch: null, // required yes/no — no default, must be explicitly answered
   };
 }
 
@@ -150,6 +151,7 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
       if (!r.startDate || !r.endDate) return "יש למלא תאריך תקין לכל פגישה";
       if (r.startDate > r.endDate) return "תאריך ההתחלה מאוחר מתאריך הסיום באחד הטווחים";
       if (r.participantKeys.length === 0) return "יש לבחור לפחות משתתף אחד לכל פגישה";
+      if (r.allowTimeRangeSearch === null) return 'יש לענות על השאלה "האם לאפשר לבית הספר אפשרויות נוספות לשעת הפגישה?" (שדה חובה) לכל פגישה';
       if (slotForMeetingServiceType(school, r.serviceType, r.stageScope) === null) {
         return 'יש לבחור חטיבה (תיכון/חט"ב) לכל פגישה מסוג גפן/שוטף/תקומה בבית ספר שש-שנתי';
       }
@@ -233,6 +235,7 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
           }),
           stage_scope: r.stageScope || null,
           meeting_type: r.meetingType || "remote",
+          allow_time_range_search: r.allowTimeRangeSearch,
         })),
       };
       const res = await axios.post(`/schools/${school.id}/meetings/direct-coordination`, body);
@@ -410,6 +413,26 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
                         ))}
                       </div>
                     )}
+                  </fieldset>
+
+                  <fieldset className="flex flex-col gap-1.5">
+                    <legend className="text-xs font-medium text-slate-500">
+                      האם לאפשר לבית הספר אפשרויות נוספות לשעת הפגישה במקום השעה הפנויה המוקדמת ביותר? <span className="text-red-600">(שדה חובה)</span>
+                    </legend>
+                    <div className={`flex gap-2 ${error && r.allowTimeRangeSearch === null ? "border border-red-400 rounded-lg p-1.5 -m-1.5" : ""}`}>
+                      {[{ value: true, label: "כן" }, { value: false, label: "לא" }].map(opt => (
+                        <button key={String(opt.value)} type="button"
+                          aria-pressed={r.allowTimeRangeSearch === opt.value}
+                          onClick={() => updateRange(r.localId, { allowTimeRangeSearch: opt.value })}
+                          className={`text-sm px-4 py-1.5 rounded-lg border transition-colors ${
+                            r.allowTimeRangeSearch === opt.value
+                              ? "bg-blue-600 border-blue-600 text-white font-semibold"
+                              : "border-black text-black hover:bg-slate-50"
+                          }`}>
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
                   </fieldset>
                 </div>
               ))}

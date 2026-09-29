@@ -6,6 +6,7 @@ import Sidebar from "../components/Sidebar";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useTasks } from "../context/TasksContext";
 import { useMeetingReminders } from "../context/MeetingRemindersContext";
+import { useMeetingNotes } from "../context/MeetingNotesContext";
 import { useRowVirtualizer } from "../hooks/useRowVirtualizer";
 
 const NOTIF_PAGE_SIZE = 25;
@@ -41,6 +42,7 @@ const TYPE_ICON = {
   task_send_problems:       "⚠️",
   person_task_assigned:     "📌",
   person_task_updated:      "✏️",
+  person_task_reminder:     "⏰",
   person_task_routing_problem: "⚠️",
   temp_access_granted:      "🔓",
   temp_access_expired:      "🔒",
@@ -523,6 +525,7 @@ function NotificationRow({ notif, isExpanded, onToggle, onRead, onReload, onDele
   const navigate = useNavigate();
   const { openTask } = useTasks();
   const { addCallAttribReminder } = useMeetingReminders();
+  const { openMeetingNotes } = useMeetingNotes();
   const isUnread  = !notif.read_at;
   const icon      = TYPE_ICON[notif.type] || "🔔";
   const title     = notif.data?.title || "התראה";
@@ -567,7 +570,7 @@ function NotificationRow({ notif, isExpanded, onToggle, onRead, onReload, onDele
       // TaskPanel.jsx) when the loaded task has has_meeting_send_problems, so opening it here
       // is enough to land on the right screen either way.
       openTask(data.task_id);
-    } else if (notif.type === "person_task_assigned" || notif.type === "person_task_updated") {
+    } else if (notif.type === "person_task_assigned" || notif.type === "person_task_updated" || notif.type === "person_task_reminder") {
       // Person-tasks live in "אזור אישי" (no floating-window equivalent — TasksContext is
       // school-task-specific), so this navigates there instead of calling openTask(). For
       // person_task_updated, the "what changed" explanation is already embedded directly in
@@ -589,6 +592,21 @@ function NotificationRow({ notif, isExpanded, onToggle, onRead, onReload, onDele
         call_time: data.call_time,
       });
       if (isUnread) onRead(notif.id);
+    } else if (notif.type === "mention" && data.meeting_id) {
+      // Opens the floating meeting-notes window directly (it's mounted globally above the
+      // router — see MeetingNotesContext) instead of just navigate()-ing to the school page,
+      // so the tagged note opens and is highlighted from wherever the user currently is,
+      // without losing whatever they were doing. data.deeplink stays as a fallback for older
+      // mention notifications sent before this field existed.
+      if (isUnread) onRead(notif.id);
+      openMeetingNotes({
+        meetingId: data.meeting_id,
+        schoolId: notif.school_id,
+        schoolName: data.school_name,
+        schoolAuthority: data.school_authority,
+        schoolSymbol: data.school_symbol,
+        highlightNoteId: data.note_id,
+      });
     } else if (isActionable || isResultExpandable || isFilesArrived || isCallResolvable) {
       onToggle(notif.id);
     } else if (data.deeplink) {

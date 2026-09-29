@@ -5,12 +5,12 @@ import { DeleteMeetingModal } from "../components/meetings/DeleteMeetingModal";
 import { MeetingsBulkActionBar } from "../components/meetings/MeetingsBulkActionBar";
 import { MeetingsTable } from "../components/meetings/MeetingsTable";
 import { MeetingSummaryModal } from "../components/meetings/MeetingSummaryModal";
-import { NotesModal } from "../components/meetings/NotesModal";
 import { SchoolPickerModal, SchoolPickerPopover, schoolLabel } from "../components/meetings/SchoolPickerCell";
 import { StageScopeModal } from "../components/meetings/StageScopeModal";
 import { DirectCoordinationModal } from "../components/meetings/DirectCoordinationModal";
 import AdvisorAccessGrantModal from "../components/meetings/AdvisorAccessGrantModal";
 import MeetingAutomationsModal from "../components/meetings/MeetingAutomationsModal";
+import BlockedDatesModal from "../components/meetings/BlockedDatesModal";
 import ImportMeetingsModal from "../components/meetings/ImportMeetingsModal";
 import ImportValueMappingModal from "../components/meetings/ImportValueMappingModal";
 import { AdvisorFinderModal } from "../components/meetings/AdvisorFinderModal";
@@ -20,7 +20,9 @@ import { DEFAULT_ACADEMIC_YEAR, getAcademicYearStartDate } from "../constants/ac
 import { getMissingCriticalFields, isMeetingIncomplete } from "../components/meetings/meetingCompleteness";
 import { buildSchoolContacts } from "../components/meetings/schoolContacts";
 import { useMeetingsPolling } from "../hooks/useMeetingsPolling";
+import { useAiSummaryEnabled } from "../hooks/useAiSummaryEnabled";
 import { mergeMeetingsSilently, visibleDateBounds } from "../components/meetings/mergeMeetings";
+import { useMeetingNotes } from "../context/MeetingNotesContext";
 
 const TODAY = new Date().toISOString().slice(0, 10);
 // date_from defaults to the start of a given academic year (not a fixed value) so the list
@@ -77,7 +79,16 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
   const [dotsOpen, setDotsOpen] = useState(false);
   const dotsRef = useRef(null);
   const [selectedIds, setSelectedIds] = useState({});
-  const [notesModal, setNotesModal] = useState(null);
+  const { openMeetingNotes } = useMeetingNotes();
+  function openMeetingNotesFor(meeting) {
+    openMeetingNotes({
+      meetingId: meeting.id,
+      schoolId: meeting.school_id,
+      schoolName: meeting.school_name,
+      schoolAuthority: meeting.school_authority,
+      schoolSymbol: meeting.school_symbol,
+    });
+  }
   const [summaryModalFor, setSummaryModalFor] = useState(null);
   const [showCalendarColumn, setShowCalendarColumn] = useState(false);
   const [schoolPickerFor, setSchoolPickerFor] = useState(null);
@@ -85,6 +96,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
   const [directCoordSchool, setDirectCoordSchool] = useState(null);
   const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false);
   const [automationsModalOpen, setAutomationsModalOpen] = useState(false);
+  const [blockedDatesOpen, setBlockedDatesOpen] = useState(false);
   const showAutomationsButton = myRole === "owner" || canEditAutomations;
   const showImportMeetingsButton = myRole === "owner" || myRole === "manager";
   const [advisorFinderOpen, setAdvisorFinderOpen] = useState(false);
@@ -178,6 +190,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
   }
 
   useMeetingsPolling(() => loadAllMeetings(filters, academicYear, { silent: true }), true, [filters, academicYear]);
+  const aiSummaryEnabled = useAiSummaryEnabled();
 
   // Per-school advisor-access, needed so AdvisorCell can flag no-access users on this
   // cross-school table (unlike SchoolPage.jsx, which is scoped to one school and can compute
@@ -803,21 +816,11 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
         );
       })()}
 
-      {notesModal && (
-        <NotesModal
-          notes={notesModal.notes}
-          users={users}
-          onSave={(noteText) => { notesModal.onSave(noteText); setNotesModal(null); }}
-          onClose={() => setNotesModal(null)}
-        />
-      )}
-
       {summaryModalFor && (
         <MeetingSummaryModal
           meeting={summaryModalFor}
           onClose={() => setSummaryModalFor(null)}
-          onOpenNotes={(meetingId, notes, onSave) => setNotesModal({ meetingId, notes, onSave })}
-          onSave={updateMeeting}
+          onOpenNotes={openMeetingNotesFor}
           onUploadStarted={meetingId => setMeetings(prev => prev.map(m => m.id === meetingId ? { ...m, summary_status: "processing" } : m))}
         />
       )}
@@ -865,6 +868,10 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
 
       {automationsModalOpen && (
         <MeetingAutomationsModal onClose={() => setAutomationsModalOpen(false)} />
+      )}
+
+      {blockedDatesOpen && (
+        <BlockedDatesModal onClose={() => setBlockedDatesOpen(false)} />
       )}
 
       {importMeetingsOpen && (
@@ -944,6 +951,14 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
               <button type="button" onClick={() => setValueMappingOpen(true)}
                 className="btn-ghost flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-xl font-medium text-amber-700">
                 <span aria-hidden="true">🏷️</span> מיפוי ערכים מיובאים
+              </button>
+            </div>
+          )}
+          {showAutomationsButton && (
+            <div className="relative">
+              <button type="button" onClick={() => setBlockedDatesOpen(true)}
+                className="btn-ghost flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-xl font-medium">
+                <span aria-hidden="true">🚫</span> תאריכים חסומים
               </button>
             </div>
           )}
@@ -1107,7 +1122,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
             onSave={updateMeeting}
             onMeetingPatched={(id, patch) => setMeetings(prev => prev.map(m => m.id === id ? { ...m, ...patch } : m))}
             onDelete={deleteMeeting}
-            onOpenNotes={(meetingId, notes, onSave) => setNotesModal({ meetingId, notes, onSave })}
+            onOpenNotes={openMeetingNotesFor}
             onRequestAccess={handleRequestAdvisorAccess}
             canDeleteMeetings={canDeleteMeetings}
             showSchoolColumn
@@ -1120,6 +1135,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
             onSendStatusReminder={sendStatusReminder}
             showCalendarColumn={showCalendarColumn}
             onOpenSummary={setSummaryModalFor}
+            aiSummaryEnabled={aiSummaryEnabled}
             typedAdvisorsFor={typedAdvisorsFor}
           />
           {currentSchoolPickerMeeting && (

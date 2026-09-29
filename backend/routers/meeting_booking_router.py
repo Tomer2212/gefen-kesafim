@@ -1,4 +1,5 @@
 import logging
+import re
 import time
 from datetime import date, datetime, timedelta, timezone
 
@@ -102,6 +103,37 @@ def _time_overlaps(s1: str, e1: str, s2: str, e2: str) -> bool:
     return s1 < e2 and s2 < e1
 
 
+def _filter_blocked_dates(db, org_id: str, school_id: str, dates: list[str]) -> list[str]:
+    """Drops any date covered by an org-wide or school-scoped blocked_dates row — a blocked
+    date must never appear as a bookable slot on the public self-scheduling page. Fetches the
+    school's scope fields + all overlapping blocked_dates rows once (not per-date) to keep this
+    cheap even for a full month/range of candidate dates."""
+    if not dates:
+        return dates
+    from routers.schools_router import BLOCKED_DATE_SCOPE_FIELDS
+    school_res = db.table("schools").select(",".join(("id",) + BLOCKED_DATE_SCOPE_FIELDS)).eq("id", school_id).execute().data
+    school = school_res[0] if school_res else None
+    rules = (
+        db.table("blocked_dates").select("*").eq("org_id", org_id)
+        .lte("start_date", dates[-1]).gte("end_date", dates[0])
+        .execute().data or []
+    )
+    if not rules:
+        return dates
+
+    def is_blocked(d):
+        for r in rules:
+            if not (r["start_date"] <= d <= r["end_date"]):
+                continue
+            if not r.get("scope_field"):
+                return True
+            if school and school.get(r["scope_field"]) in (r.get("scope_values") or []):
+                return True
+        return False
+
+    return [d for d in dates if not is_blocked(d)]
+
+
 def _month_dates_in_window(month: str, days_of_week: list[int]) -> list[str]:
     """All calendar dates in `month` (YYYY-MM) whose weekday is in days_of_week.
     Convention: 0=Sunday .. 6=Saturday (Israeli work week), matching Python's
@@ -136,12 +168,14 @@ def _slots_for_day(day_iso: str, window: dict, busy_blocks: list[dict]) -> list[
     contiguous free time for the full meeting duration. Previously enumerated every 30-minute
     grid position across the whole window regardless of duration, which let a school pick a
     time that left a gap too short for the advisor to ever book anything else into (e.g. a
-    lone 30-minute hole before/after an existing meeting)."""
-    start_hour, end_hour, duration = window["start_hour"], window["end_hour"], window["duration_minutes"]
+    lone 30-minute hole before/after an existing meeting).
+
+    window uses minute-of-day precision (start_minute/end_minute, same convention as
+    advisor_finder_router._all_slots_for_day) rather than whole hours — needed so a school's
+    "אפשרויות נוספות" narrowed re-search (e.g. 14:30-16:00) isn't rounded to the hour."""
+    cur_minutes, end_minutes, duration = window["start_minute"], window["end_minute"], window["duration_minutes"]
     day_busy = [b for b in busy_blocks if b.get("start", "").startswith(day_iso)]
     slots = []
-    cur_minutes = start_hour * 60
-    end_minutes = end_hour * 60
     while cur_minutes + duration <= end_minutes:
         slot_start = f"{cur_minutes // 60:02d}:{cur_minutes % 60:02d}"
         slot_end_min = cur_minutes + duration
@@ -219,8 +253,19 @@ def get_booking_info(token: str):
     }
 
 
+def _parse_hhmm_to_minutes(text: str | None) -> int | None:
+    m = re.fullmatch(r"(\d{2}):(\d{2})", text or "")
+    if not m:
+        return None
+    hour, minute = int(m.group(1)), int(m.group(2))
+    if hour > 23 or minute > 59:
+        return None
+    return hour * 60 + minute
+
+
 @router.get("/public/meeting-booking/{token}/freebusy")
-def get_booking_freebusy(token: str, month: str | None = None, range_key: str | None = None):
+def get_booking_freebusy(token: str, month: str | None = None, range_key: str | None = None,
+                          time_from: str | None = None, time_to: str | None = None):
     db = get_admin_client()
     token_row = _get_valid_token(db, token)
 
@@ -231,8 +276,25 @@ def get_booking_freebusy(token: str, month: str | None = None, range_key: str | 
         if _find_existing_meeting(db, token_row["school_id"], range_row["service_type"], range_row["start_date"], range_row["end_date"], range_row.get("stage_scope")):
             raise HTTPException(status_code=400, detail="כבר קיימת פגישה מסוג זה בטווח התאריכים הזה")
 
-        window = {**token_row["scheduling_window"], "duration_minutes": range_row["duration_minutes"]}
+        sched = token_row["scheduling_window"]
+        start_minute, end_minute = sched["start_hour"] * 60, sched["end_hour"] * 60
+        # "אפשרויות נוספות" — a school-side re-search with a narrower time window. Only ever
+        # honored when the org explicitly opted this range into it (allow_time_range_search) —
+        # never trust the client's own flag, since these params are on an unauthenticated public
+        # endpoint and can be sent regardless of what the UI shows. The window can only be
+        # narrowed (intersected), never widened past the org's own configured scheduling_window.
+        if range_row.get("allow_time_range_search"):
+            requested_from = _parse_hhmm_to_minutes(time_from)
+            requested_to = _parse_hhmm_to_minutes(time_to)
+            if requested_from is not None and requested_to is not None:
+                start_minute = max(start_minute, requested_from)
+                end_minute = min(end_minute, requested_to)
+        if start_minute >= end_minute:
+            return {"days": [], "ok": True}
+
+        window = {"days_of_week": sched["days_of_week"], "start_minute": start_minute, "end_minute": end_minute, "duration_minutes": range_row["duration_minutes"]}
         dates = _range_dates_in_window(range_row["start_date"], range_row["end_date"], window["days_of_week"])
+        dates = _filter_blocked_dates(db, token_row["org_id"], token_row["school_id"], dates)
         if not dates:
             return {"days": [], "ok": True}
 
@@ -260,8 +322,10 @@ def get_booking_freebusy(token: str, month: str | None = None, range_key: str | 
     if month not in _open_months(token_row):
         raise HTTPException(status_code=400, detail="חודש זה כבר אינו פתוח לשריון")
 
-    window = token_row["scheduling_window"]
+    sched = token_row["scheduling_window"]
+    window = {**sched, "start_minute": sched["start_hour"] * 60, "end_minute": sched["end_hour"] * 60}
     dates = _month_dates_in_window(month, window["days_of_week"])
+    dates = _filter_blocked_dates(db, token_row["org_id"], token_row["school_id"], dates)
     if not dates:
         return {"days": [], "ok": True}
 
@@ -308,12 +372,16 @@ def book_meeting_slot(token: str, body: dict):
     if any(_time_overlaps(start_time, end_time, b["start"][11:16], b["end"][11:16]) for b in busy):
         raise HTTPException(status_code=409, detail="אופס.. הזמן הזה כבר נתפס. נא לבחור מועד אחר.")
 
+    from routers.schools_router import BLOCKED_DATE_SCOPE_FIELDS, _find_blocking_rule
     school_res = db.table("schools").select(
-        "id, name, secretary_name, secretary_email, finance_contact_name, finance_contact_email"
+        "id, name, secretary_name, secretary_email, finance_contact_name, finance_contact_email, "
+        + ",".join(BLOCKED_DATE_SCOPE_FIELDS)
     ).eq("id", token_row["school_id"]).execute()
     if not school_res.data:
         raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
     school = school_res.data[0]
+    if _find_blocking_rule(db, token_row["org_id"], meeting_date, school):
+        raise HTTPException(status_code=400, detail="תאריך זה חסום לקביעת פגישות")
 
     participants = []
     if school.get("secretary_email"):
@@ -411,10 +479,13 @@ def _book_range_slot(db, token_row: dict, range_key: str, body: dict) -> dict:
     if any(_time_overlaps(start_time, end_time, b["start"][11:16], b["end"][11:16]) for b in busy):
         raise HTTPException(status_code=409, detail="אופס.. הזמן הזה כבר נתפס. נא לבחור מועד אחר.")
 
-    school_res = db.table("schools").select("id, name").eq("id", token_row["school_id"]).execute()
+    from routers.schools_router import BLOCKED_DATE_SCOPE_FIELDS, _find_blocking_rule
+    school_res = db.table("schools").select("id, name, " + ",".join(BLOCKED_DATE_SCOPE_FIELDS)).eq("id", token_row["school_id"]).execute()
     if not school_res.data:
         raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
     school = school_res.data[0]
+    if _find_blocking_rule(db, token_row["org_id"], meeting_date, school):
+        raise HTTPException(status_code=400, detail="תאריך זה חסום לקביעת פגישות")
 
     meeting_data = {
         "school_id": token_row["school_id"],

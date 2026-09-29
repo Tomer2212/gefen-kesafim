@@ -145,6 +145,9 @@ export default function PersonTaskAdminDetailContent({ taskId, onTaskChange }) {
   // Shared free-text / advanced / column-filter / sort state for the drill-in schools table —
   // reset whenever a different assignee is opened (only one is open at a time).
   const [subFilter, setSubFilter] = useState(EMPTY_SUB_FILTER);
+  // Assignee ids currently showing a "✓ נשלח" confirmation on their reminder button — cleared
+  // automatically a couple seconds after the request succeeds.
+  const [remindedIds, setRemindedIds] = useState(() => new Set());
 
   useEffect(() => {
     setLoading(true);
@@ -164,6 +167,22 @@ export default function PersonTaskAdminDetailContent({ taskId, onTaskChange }) {
   function openAssignee(id) {
     setExpandedAssignee(prev => (prev === id ? null : id));
     setSubFilter(EMPTY_SUB_FILTER);
+  }
+
+  async function handleSendReminder(assigneeId) {
+    try {
+      await axios.post(`/person-tasks/${taskId}/remind/${assigneeId}`);
+      setRemindedIds(prev => new Set(prev).add(assigneeId));
+      setTimeout(() => {
+        setRemindedIds(prev => {
+          const next = new Set(prev);
+          next.delete(assigneeId);
+          return next;
+        });
+      }, 2500);
+    } catch {
+      window.alert("שליחת התזכורת נכשלה — נסה שוב.");
+    }
   }
 
   if (loading) {
@@ -191,8 +210,22 @@ export default function PersonTaskAdminDetailContent({ taskId, onTaskChange }) {
     }
   }
   const assignees = [...byAssignee.values()]
-    .map(a => ({ ...a, completed: a.targets.filter(t => t.completed).length, total: a.targets.length }))
+    .map(a => ({ ...a, completed: a.targets.filter(t => t.completed).length, total: a.targets.length }));
+
+  // Split into "done" (alphabetical) vs "pending" (biggest completion gap first) — only when
+  // there's more than one assignee; a single-assignee task keeps the old single-column view.
+  const doneAssignees = [...assignees]
+    .filter(a => a.total > 0 && a.completed === a.total)
     .sort((a, b) => a.name.localeCompare(b.name, "he"));
+  const pendingAssignees = [...assignees]
+    .filter(a => !(a.total > 0 && a.completed === a.total))
+    .sort((a, b) => {
+      const pctA = a.total > 0 ? a.completed / a.total : 0;
+      const pctB = b.total > 0 ? b.completed / b.total : 0;
+      if (pctA !== pctB) return pctA - pctB;
+      return a.name.localeCompare(b.name, "he");
+    });
+  const showSplit = assignees.length > 1;
 
   const hasMetricCol = metric.kind === "number" || metric.kind === "file";
   const cols = makeSchoolColumns({ hasMetricCol });
@@ -238,69 +271,120 @@ export default function PersonTaskAdminDetailContent({ taskId, onTaskChange }) {
         </div>
       </div>
 
-      {/* Column headers — same grid template as every assignee card below (name column = right
-          quarter, status column starts on the right-quarter line). */}
-      <div className="grid grid-cols-[1fr_3fr] items-center gap-2 px-3 pb-2 border border-transparent text-[11px] font-bold text-slate-500">
-        <span className="pr-[22px]">אחראי לביצוע</span>
-        <span>סטטוס ביצוע</span>
-      </div>
-
-      {/* Assignee accordion — each row is its own compact card */}
+      {/* Empty state (no targets at all — split columns would both be empty, so short-circuit) */}
       {assignees.length === 0 ? (
         <div className="text-center text-slate-400 text-xs py-6">אין יעדים למשימה זו</div>
-      ) : assignees.map(a => {
-        const isOpen = expandedAssignee === a.id;
-        return (
-          <Fragment key={a.id}>
-            <div
-              onClick={() => openAssignee(a.id)}
-              aria-expanded={isOpen}
-              className={`border rounded-xl p-3 mb-2 grid grid-cols-[1fr_3fr] items-center gap-2 cursor-pointer transition-colors ${
-                isOpen ? "bg-blue-50/70 border-blue-200" : "bg-white border-slate-200 hover:bg-slate-50/80"
-              }`}
-            >
-              <div className="flex items-center gap-2 min-w-0">
-                <svg
-                  aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none"
-                  stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
-                  className={`text-slate-400 shrink-0 transition-transform ${isOpen ? "rotate-90" : ""}`}
-                >
-                  <path d="M15 6l-6 6 6 6" />
-                </svg>
-                <span className="font-semibold text-slate-900 text-sm truncate">{a.name}</span>
-              </div>
-              <span className="inline-flex items-center justify-self-start rounded-full px-2.5 py-1 text-xs font-semibold tabular-nums bg-slate-100 text-slate-600">
-                {a.completed}/{a.total}
-              </span>
-            </div>
-
-            {isOpen && (
-              <div className="bg-slate-50/80 border border-slate-200 rounded-xl p-3 mr-4 my-2">
-                <PersonTaskTableToolbar
-                  freeText={subFilter.freeText}
-                  setFreeText={v => setSubFilter(s => ({ ...s, freeText: v }))}
-                  advanced={subFilter.advanced}
-                  setAdvanced={v => setSubFilter(s => ({ ...s, advanced: v }))}
-                  fieldOptions={fieldMeta?.fieldOptions || []}
-                />
-                {/* inline-block + max-w-full — the bordered white box shrinks to exactly the
-                table's width (the grey panel shows to its left), and only scrolls if a school
-                name is genuinely wider than the panel. */}
-                <AssigneeSchoolsTable
-                  targets={a.targets}
-                  subFilter={subFilter}
-                  cols={cols}
-                  onColFilter={setColFilter}
-                  onColSort={setColSort}
-                  taskId={taskId}
-                  metric={metric}
-                  taskName={task.name}
-                />
-              </div>
-            )}
-          </Fragment>
-        );
-      })}
+      ) : showSplit ? (
+        <>
+          {/* Group titles — first in source order sits on the right in this RTL layout, so
+              "טרם השלימו" (right) is listed before "השלימו" (left), matching the requested
+              side-by-side placement. */}
+          <div className="grid grid-cols-2 gap-4 px-1 pb-2">
+            <span className="text-2xl font-extrabold text-slate-800">טרם השלימו את המשימה</span>
+            <span className="text-2xl font-extrabold text-slate-800">השלימו את המשימה</span>
+          </div>
+          <div className="grid grid-cols-2 gap-4 items-start">
+            <div>{renderAssigneeGroup(pendingAssignees, { showReminder: true })}</div>
+            <div>{renderAssigneeGroup(doneAssignees, { done: true })}</div>
+          </div>
+        </>
+      ) : (
+        renderAssigneeGroup(assignees)
+      )}
     </div>
   );
+
+  // Column headers + accordion cards for one group of assignees — shared by the single-column
+  // (one assignee) view and by each of the two split columns.
+  // showReminder: adds a 3rd grid column with a per-row "שלח תזכורת" button (pending column only).
+  // done: paints every row a light green (the "already completed" group).
+  function renderAssigneeGroup(list, { showReminder = false, done = false } = {}) {
+    if (list.length === 0) {
+      return <div className="text-center text-slate-400 text-xs py-4">אין יועצים בקבוצה זו</div>;
+    }
+    const gridCols = showReminder ? "grid-cols-[1fr_3fr_auto]" : "grid-cols-[1fr_3fr]";
+    return (
+      <>
+        {/* Column headers — same grid template as every assignee card below (name column = right
+            quarter, status column starts on the right-quarter line). */}
+        <div className={`grid ${gridCols} items-center gap-2 px-3 pb-2 border border-transparent text-[11px] font-bold text-slate-500`}>
+          <span className="pr-[22px]">אחראי לביצוע</span>
+          <span>סטטוס ביצוע</span>
+          {showReminder && <span />}
+        </div>
+
+        {/* Assignee accordion — each row is its own compact card */}
+        {list.map(a => {
+          const isOpen = expandedAssignee === a.id;
+          const justReminded = remindedIds.has(a.id);
+          return (
+            <Fragment key={a.id}>
+              <div
+                onClick={() => openAssignee(a.id)}
+                aria-expanded={isOpen}
+                className={`border rounded-xl p-3 mb-2 grid ${gridCols} items-center gap-2 cursor-pointer transition-colors ${
+                  done
+                    ? (isOpen ? "bg-emerald-100 border-emerald-300" : "bg-emerald-50 border-emerald-200 hover:bg-emerald-100/70")
+                    : (isOpen ? "bg-blue-50/70 border-blue-200" : "bg-white border-slate-200 hover:bg-slate-50/80")
+                }`}
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <svg
+                    aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none"
+                    stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+                    className={`text-slate-400 shrink-0 transition-transform ${isOpen ? "rotate-90" : ""}`}
+                  >
+                    <path d="M15 6l-6 6 6 6" />
+                  </svg>
+                  <span className="font-semibold text-slate-900 text-sm truncate">{a.name}</span>
+                </div>
+                <span className="inline-flex items-center justify-self-start rounded-full px-2.5 py-1 text-xs font-semibold tabular-nums bg-slate-100 text-slate-600">
+                  {a.completed}/{a.total}
+                </span>
+                {showReminder && (
+                  <button
+                    type="button"
+                    onClick={e => { e.stopPropagation(); if (!justReminded) handleSendReminder(a.id); }}
+                    disabled={justReminded}
+                    className={`text-xs font-semibold px-2.5 py-1.5 rounded-lg transition-colors whitespace-nowrap ${
+                      justReminded
+                        ? "bg-green-100 text-green-700"
+                        : "bg-amber-100 text-amber-800 hover:bg-amber-200"
+                    }`}
+                  >
+                    {justReminded ? "✓ נשלח" : "שלח תזכורת"}
+                  </button>
+                )}
+              </div>
+
+              {isOpen && (
+                <div className="bg-slate-50/80 border border-slate-200 rounded-xl p-3 mr-4 my-2">
+                  <PersonTaskTableToolbar
+                    freeText={subFilter.freeText}
+                    setFreeText={v => setSubFilter(s => ({ ...s, freeText: v }))}
+                    advanced={subFilter.advanced}
+                    setAdvanced={v => setSubFilter(s => ({ ...s, advanced: v }))}
+                    fieldOptions={fieldMeta?.fieldOptions || []}
+                  />
+                  {/* inline-block + max-w-full — the bordered white box shrinks to exactly the
+                  table's width (the grey panel shows to its left), and only scrolls if a school
+                  name is genuinely wider than the panel. */}
+                  <AssigneeSchoolsTable
+                    targets={a.targets}
+                    subFilter={subFilter}
+                    cols={cols}
+                    onColFilter={setColFilter}
+                    onColSort={setColSort}
+                    taskId={taskId}
+                    metric={metric}
+                    taskName={task.name}
+                  />
+                </div>
+              )}
+            </Fragment>
+          );
+        })}
+      </>
+    );
+  }
 }

@@ -55,6 +55,23 @@ export function resolveDefaultAdvisorIds(serviceType, { gefenAdvisors = [], curr
   return [...new Set(list.map(a => a.id))];
 }
 
+// For an advisor-role user creating a new meeting: default "סוג" to whichever service type(s)
+// *they personally* are the designated "יועץ מלווה" for at this school, not the school's full
+// (possibly combined) configured type — e.g. a school configured as "גפן+שוטף" whose שוטף
+// advisor adds a meeting should default to "שוטף" alone, not the combined type they don't
+// fully cover. Falls back to the school's configured type if the advisor isn't personally
+// listed in any of the three per-service-type lists.
+export function personalDefaultServiceType(schoolServiceType, userId, { gefenAdvisors = [], currentAdvisors = [], districtAdvisors = [] }) {
+  const isGefen = gefenAdvisors.some(a => a.id === userId);
+  const isCurrent = currentAdvisors.some(a => a.id === userId);
+  const isDistrict = districtAdvisors.some(a => a.id === userId);
+  if (isGefen && isCurrent) return "gefen_current";
+  if (isGefen) return "gefen";
+  if (isCurrent) return "current";
+  if (isDistrict) return "district";
+  return schoolServiceType || null;
+}
+
 export const STATUS_SORT_ORDER = { completed: 0, scheduled: 1, postponed: 2, other: 3 };
 
 // Ordered service-type buckets for the "פגישות שבוצעו" breakdown — the detail rows above the

@@ -25,6 +25,10 @@ const EMPTY_MEETING_CONDITION = {
   // "principal" is a chosen participant_role (see isMeetingRequirementComplete below) —
   // "שוטף" is school-wide and never stage-dependent, so it's never asked there.
   stage_scope: null,
+  // Required yes/no — whether the school may re-search with a narrower time window on the
+  // public booking page ("אפשרויות נוספות"). null (unanswered) until explicitly set; see
+  // isMeetingRequirementComplete below.
+  allow_time_range_search: null,
 };
 const MEETING_TYPE_PILLS = [{ value: "gefen", label: "גפן" }, { value: "current", label: "שוטף" }, { value: "district", label: "מחוז" }, { value: "takuma", label: "תקומה" }];
 const PARTICIPANT_ROLE_OPTIONS = [
@@ -61,7 +65,8 @@ const MEETING_SERVICE_TYPE_LABELS = { gefen: "גפן", current: "שוטף", gefe
 export function isMeetingRequirementComplete(cond) {
   return !!(
     cond.meeting_service_type && cond.date_from && cond.date_to && (cond.participant_roles || []).length > 0 &&
-    (!needsStageScope(cond) || cond.stage_scope)
+    (!needsStageScope(cond) || cond.stage_scope) &&
+    cond.allow_time_range_search !== null && cond.allow_time_range_search !== undefined
   );
 }
 const EMPTY_FIELD_CONDITION = { type: "field", field: "", op: "eq", value: "" };
@@ -524,6 +529,26 @@ export default function ConditionGroupsEditor({
                             </label>
                           );
                         })}
+                      </div>
+                    </fieldset>
+
+                    <fieldset className="flex flex-col gap-1.5">
+                      <legend className="text-xs font-medium text-black">
+                        האם לאפשר לבית הספר אפשרויות נוספות לשעת הפגישה במקום השעה הפנויה המוקדמת ביותר? <span className="text-red-600">(שדה חובה)</span>
+                      </legend>
+                      <div className={`flex gap-2 ${showValidationErrors && (cond.allow_time_range_search === null || cond.allow_time_range_search === undefined) ? "border border-red-400 rounded-lg p-1.5 -m-1.5" : ""}`}>
+                        {[{ value: true, label: "כן" }, { value: false, label: "לא" }].map(opt => (
+                          <button key={String(opt.value)} type="button"
+                            aria-pressed={cond.allow_time_range_search === opt.value}
+                            onClick={() => updateCondition(gi, ci, { allow_time_range_search: opt.value })}
+                            className={`text-sm px-4 py-1.5 rounded-lg border transition-colors ${
+                              cond.allow_time_range_search === opt.value
+                                ? "bg-blue-600 border-blue-600 text-white font-semibold"
+                                : "border-black text-black hover:bg-slate-50"
+                            }`}>
+                            {opt.label}
+                          </button>
+                        ))}
                       </div>
                     </fieldset>
 

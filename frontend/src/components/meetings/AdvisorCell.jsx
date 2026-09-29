@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-export function AdvisorCell({ value, usersWithAccess, usersWithoutAccess, onChange, onRequestAccess }) {
+export function AdvisorCell({ value, usersWithAccess, usersWithoutAccess, onChange, onRequestAccess, readOnly, canJoin, onJoin }) {
   const [open, setOpen] = useState(false);
   const [showOthers, setShowOthers] = useState(false);
   const containerRef = useRef(null);
@@ -13,6 +13,22 @@ export function AdvisorCell({ value, usersWithAccess, usersWithoutAccess, onChan
 
   // value = array of profile objects [{id, full_name, email}]
   const selected = value || [];
+
+  if (readOnly) {
+    return (
+      <div className="w-full text-right text-sm px-1.5 py-0.5 min-h-[24px] flex items-center justify-end gap-1.5 flex-wrap" aria-label="יועץ מבצע — לא ניתן לשינוי">
+        {selected.length === 0
+          ? <span className="text-slate-400">—</span>
+          : <span className="text-slate-700">{selected.map(s => s.full_name || s.email).join(", ")}</span>}
+        {canJoin && (
+          <button type="button" onClick={onJoin}
+            className="text-xs text-blue-600 hover:text-blue-800 hover:underline whitespace-nowrap">
+            + הצטרף כיועץ מבצע
+          </button>
+        )}
+      </div>
+    );
+  }
 
   function toggle(user, hasAccess) {
     const exists = selected.some(s => s.id === user.id);

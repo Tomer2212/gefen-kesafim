@@ -396,6 +396,7 @@ export default function ProfilePage() {
               {activeTab === "meetings" && (
                 <PersonalMeetingsTab
                   userId={userId}
+                  role={userRole}
                   canDeleteMeetings={userRole === "owner" || userRole === "manager"}
                   users={[]}
                 />
