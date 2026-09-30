@@ -16,10 +16,16 @@ logger = logging.getLogger(__name__)
 _PRESIGNED_URL_TTL_SECONDS = 900  # 15 minutes
 
 
+def _env(name: str) -> str | None:
+    # Defends against trailing newlines/whitespace from pasting values into a host's env var UI.
+    val = os.getenv(name)
+    return val.strip() if val else val
+
+
 def _r2_client():
-    account_id = os.getenv("R2_ACCOUNT_ID")
-    access_key = os.getenv("R2_ACCESS_KEY_ID")
-    secret_key = os.getenv("R2_SECRET_ACCESS_KEY")
+    account_id = _env("R2_ACCOUNT_ID")
+    access_key = _env("R2_ACCESS_KEY_ID")
+    secret_key = _env("R2_SECRET_ACCESS_KEY")
     if not (account_id and access_key and secret_key):
         raise HTTPException(status_code=503, detail="אחסון סרטוני ההדרכה טרם הוגדר (חסרים פרטי R2)")
     return boto3.client(
@@ -55,7 +61,7 @@ def list_training_videos(user: Annotated[dict, Depends(get_current_user)]):
                 logger.error("list_training_videos failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
-    bucket = os.getenv("R2_BUCKET_NAME")
+    bucket = _env("R2_BUCKET_NAME")
     if not bucket:
         # DB rows exist but R2 isn't configured yet — return metadata without a playable URL.
         return [{**row, "video_url": None} for row in rows]
