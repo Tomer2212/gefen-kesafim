@@ -71,8 +71,14 @@ def build_upload_checklist(db, school: dict, academic_year: str | None = None) -
             {"label": "קובץ תכנון (כלל החטיבות)", "kind": "tikhnun", "division_type": None, "budget_name": None},
             {"label": "קובץ דיווח ביצוע (כלל התקציבים והחטיבות)", "kind": "gefen", "division_type": None, "budget_name": None},
         ]
-        for fs in finance_softwares:
-            items.append({"label": f"קובץ כספים לפי תקציב וחטיבה ({fs})", "kind": "finance", "division_type": None, "budget_name": None, "finance_software": fs})
+        if finance_softwares:
+            for fs in finance_softwares:
+                items.append({"label": f"קובץ כספים לפי תקציב וחטיבה ({fs})", "kind": "finance", "division_type": None, "budget_name": None, "finance_software": fs})
+        else:
+            # Neither gefen_accounts nor the school itself has a finance_software on record —
+            # still ask for *something*, generically, rather than silently dropping the
+            # requirement entirely (matches this branch's whole "generic when unknown" intent).
+            items.append({"label": "קובץ מתוכנת הכספים", "kind": "finance", "division_type": None, "budget_name": None, "finance_software": None})
         return {"items": items, "no_baseline_this_year": True, "divisions": [a["division_type"] for a in accounts]}
 
     divisions = sorted({m["division_type"] for m in metrics if m.get("division_type")})
@@ -89,8 +95,11 @@ def build_upload_checklist(db, school: dict, academic_year: str | None = None) -
     finance_softwares = {a["finance_software"] for a in accounts if a.get("division_type") in divisions and a.get("finance_software")}
     if not finance_softwares and school.get("finance_software"):
         finance_softwares = {school["finance_software"]}
-    for fs in sorted(finance_softwares):
-        items.append({"label": f"קובץ כספים ({fs})", "kind": "finance", "division_type": None, "budget_name": None, "finance_software": fs})
+    if finance_softwares:
+        for fs in sorted(finance_softwares):
+            items.append({"label": f"קובץ כספים ({fs})", "kind": "finance", "division_type": None, "budget_name": None, "finance_software": fs})
+    else:
+        items.append({"label": "קובץ מתוכנת הכספים", "kind": "finance", "division_type": None, "budget_name": None, "finance_software": None})
 
     return {"items": items, "no_baseline_this_year": False, "divisions": divisions}
 
