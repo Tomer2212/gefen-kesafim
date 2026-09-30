@@ -13,7 +13,10 @@ axios.defaults.timeout = 45000;
 // Module-level token mirror — updated synchronously by onAuthStateChange.
 let _currentToken = null;
 
-supabase.auth.getSession().then(({ data: { session } }) => {
+// On a cold page load (e.g. a hard refresh on a deep link), a request can fire before this
+// initial getSession() resolves, going out with no Authorization header — the request
+// interceptor below awaits this once so that race can't produce an unauthenticated request.
+const _initialSession = supabase.auth.getSession().then(({ data: { session } }) => {
   _currentToken = session?.access_token ?? null;
 });
 
@@ -21,9 +24,10 @@ supabase.auth.onAuthStateChange((_event, session) => {
   _currentToken = session?.access_token ?? null;
 });
 
-// Attach Supabase JWT + this browser's device id to every outgoing request (synchronous).
-axios.interceptors.request.use((config) => {
+// Attach Supabase JWT + this browser's device id to every outgoing request.
+axios.interceptors.request.use(async (config) => {
   if (config._retried) return config;
+  if (_currentToken === null) await _initialSession;
   if (_currentToken) {
     config.headers.Authorization = `Bearer ${_currentToken}`;
   }
