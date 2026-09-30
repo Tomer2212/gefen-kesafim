@@ -95,7 +95,7 @@ function YearUploadSection({ token, year, standalone, onResult, onUploaded }) {
   }
 
   return (
-    <div className={standalone ? "" : "border border-slate-200 rounded-2xl p-4 mb-5"}>
+    <div className={standalone ? "" : "border border-slate-200 rounded-2xl p-4 h-full"}>
       {!standalone && (
         <h2 className="text-base font-bold text-slate-800 mb-3 text-center">
           שנת לימודים {year.academic_year}
@@ -203,7 +203,7 @@ export default function MeetingUploadPage() {
 
   return (
     <div dir="rtl" className="bg-scene min-h-screen flex items-center justify-center p-4">
-      <div className="w-full max-w-lg anim-fade-up">
+      <div className={`w-full anim-fade-up ${multiYear ? "max-w-3xl" : "max-w-lg"}`}>
         <div className="glass-card rounded-3xl px-8 py-10">
           <div className="flex justify-center mb-6">
             <img src={logoImg} alt="גפן AI לוגו" className="h-20 w-auto object-contain" />
@@ -240,16 +240,18 @@ export default function MeetingUploadPage() {
                 </p>
               )}
 
-              {data.years.map(year => (
-                <YearUploadSection
-                  key={year.academic_year}
-                  token={token}
-                  year={year}
-                  standalone={!multiYear}
-                  onResult={setResultModal}
-                  onUploaded={load}
-                />
-              ))}
+              <div className={multiYear ? "grid grid-cols-1 sm:grid-cols-2 gap-4 items-start" : ""}>
+                {data.years.map(year => (
+                  <YearUploadSection
+                    key={year.academic_year}
+                    token={token}
+                    year={year}
+                    standalone={!multiYear}
+                    onResult={setResultModal}
+                    onUploaded={load}
+                  />
+                ))}
+              </div>
             </>
           )}
 
