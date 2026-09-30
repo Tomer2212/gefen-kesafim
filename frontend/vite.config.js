@@ -21,6 +21,7 @@ export default defineConfig({
       "/sessions": { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/signup":  { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/tasks": { target: "http://127.0.0.1:8000", changeOrigin: true },
+      "/training-videos": { target: "http://127.0.0.1:8000", changeOrigin: true },
     },
   },
 });

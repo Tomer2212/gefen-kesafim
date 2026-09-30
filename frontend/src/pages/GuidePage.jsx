@@ -1,4 +1,6 @@
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import axios from "axios";
 import Sidebar from "../components/Sidebar";
 
 function Logo() {
@@ -28,95 +30,72 @@ function Logo() {
   );
 }
 
-const REQUIRED   = "required";
-const OPTIONAL   = "optional";
-const NOT_NEEDED = "none";
+const FILES_CHECKLIST_PDF = "/guide/which-files-to-upload.pdf";
 
-const FILE_COLS = [
-  { key: "tikhnun", label: "תכנון תקציבי" },
-  { key: "doch",    label: "דיווח ביצוע (גפן)" },
-  { key: "ksafim",  label: "תוכנת כספים" },
-];
+function TrainingVideos() {
+  const [videos, setVideos] = useState([]);
+  const [openId, setOpenId] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
-const TABS = [
-  {
-    name: "כלל הבדיקות האפשריות",
-    desc: "להפעלת כל הלשוניות במערכת יש להעלות את שלושת סוגי הקבצים יחד. העלאה חלקית תאפשר גישה ללשוניות הרלוונטיות בלבד.",
-    tikhnun: REQUIRED, doch: REQUIRED, ksafim: REQUIRED,
-  },
-  {
-    name: "השוואה גפן-כספים",
-    desc: "השוואה בין אסמכתאות המשויכות בגפן לבין רשומות תוכנת הכספים. מציגה פערים בשני הכיוונים.",
-    tikhnun: NOT_NEEDED, doch: REQUIRED,  ksafim: REQUIRED,
-  },
-  {
-    name: "סקירה",
-    desc: "סקירה כוללת של מצב התקציב: פרטי מוסד, סכום שתוכנן, תקציב שנותר, ואחוזי דיווח.",
-    tikhnun: REQUIRED,   doch: OPTIONAL,  ksafim: NOT_NEEDED,
-  },
-  {
-    name: "אסמכתאות שנדחו",
-    desc: "רשימת חשבוניות שנדחו על ידי מערכת הגפן.",
-    tikhnun: NOT_NEEDED, doch: REQUIRED,  ksafim: NOT_NEEDED,
-  },
-  {
-    name: "ללא PDF",
-    desc: "אסמכתאות בגפן שאין להן קובץ PDF מצורף.",
-    tikhnun: NOT_NEEDED, doch: REQUIRED,  ksafim: NOT_NEEDED,
-  },
-  {
-    name: "דיווח חסר",
-    desc: "תוכניות שתוכננו בגפן אך טרם דווחו במלואן — מציג את הפער בין התכנון לביצוע.",
-    tikhnun: REQUIRED,   doch: REQUIRED,  ksafim: NOT_NEEDED,
-  },
-  {
-    name: "יוזמות וצרכים",
-    desc: "בדיקת ניצול תקציב היוזמות לפי מודל התמרוץ (30% / 40%).",
-    tikhnun: REQUIRED,   doch: NOT_NEEDED, ksafim: NOT_NEEDED,
-  },
-  {
-    name: "תקציב קבוע",
-    desc: "השוואה בין התקציב הקבוע המאושר לבין הסכום שתוכנן — מציגה הפרשים לפי סל ותת-סל.",
-    tikhnun: REQUIRED,   doch: NOT_NEEDED, ksafim: NOT_NEEDED,
-  },
-];
+  useEffect(() => {
+    let cancelled = false;
+    axios.get("/training-videos/")
+      .then(res => { if (!cancelled) setVideos(res.data || []); })
+      .catch(() => { if (!cancelled) setError("לא ניתן לטעון את סרטוני ההדרכה כרגע"); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
 
-function StatusBadge({ status }) {
-  if (status === REQUIRED) {
+  if (loading) {
     return (
-      <span
-        className="inline-flex items-center justify-center w-7 h-7 rounded-full"
-        style={{ background: "rgba(22,163,74,0.12)" }}
-        title="נדרש"
-      >
-        <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
-          <path d="M2.5 6.5l3 3 5-6" stroke="#16a34a" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
-        </svg>
-      </span>
+      <div role="status" aria-label="טוען סרטוני הדרכה" className="text-sm text-slate-400 mb-8">
+        טוען סרטוני הדרכה...
+      </div>
     );
   }
-  if (status === OPTIONAL) {
-    return (
-      <span
-        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-700"
-        style={{ fontWeight: 600, background: "rgba(251,191,36,0.12)", color: "#92400e" }}
-        title="אופציונלי"
-      >
-        <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#f59e0b", display: "inline-block", flexShrink: 0 }} />
-        אופציונלי
-      </span>
-    );
+  if (error) {
+    return <div role="alert" className="text-sm text-red-600 mb-8">{error}</div>;
   }
+  if (videos.length === 0) return null;
+
   return (
-    <span
-      className="inline-flex items-center justify-center w-7 h-7 rounded-full"
-      style={{ background: "rgba(220,38,38,0.08)" }}
-      title="לא נדרש"
-    >
-      <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
-        <path d="M2 2l7 7M9 2L2 9" stroke="#dc2626" strokeWidth="1.7" strokeLinecap="round"/>
-      </svg>
-    </span>
+    <div className="mb-8 anim-fade-up text-right">
+      <h2 className="text-base font-800 text-slate-700 mb-3 text-center" style={{ fontWeight: 800 }}>
+        סרטוני הדרכה
+      </h2>
+      <div className="flex flex-col gap-3">
+        {videos.map(v => {
+          const isOpen = openId === v.id;
+          return (
+            <div key={v.id} className="glass-card rounded-2xl px-5 py-4">
+              <button
+                onClick={() => setOpenId(isOpen ? null : v.id)}
+                aria-expanded={isOpen}
+                aria-controls={`training-video-${v.id}`}
+                className="w-full flex items-center justify-between text-sm font-700 text-slate-800"
+                style={{ fontWeight: 700, background: "none", border: "none", cursor: "pointer" }}
+              >
+                <span>{v.title}</span>
+                <span aria-hidden="true">{isOpen ? "▲" : "▼"}</span>
+              </button>
+              {isOpen && (
+                <div id={`training-video-${v.id}`} className="mt-3">
+                  {v.video_url ? (
+                    <video controls preload="metadata" width="100%" style={{ borderRadius: 12 }}>
+                      <source src={v.video_url} type="video/mp4" />
+                      הדפדפן שלך אינו תומך בהצגת וידאו.
+                    </video>
+                  ) : (
+                    <p className="text-xs text-slate-400">הסרטון עדיין לא זמין</p>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -135,58 +114,32 @@ export default function GuidePage() {
           <p className="text-slate-500 text-sm">מדריך למשתמש — גפן AI</p>
         </div>
 
+        <TrainingVideos />
+
         {/* Section heading */}
-        <div className="mb-4 anim-fade-up">
-          <h2 className="text-base font-800 text-slate-700" style={{ fontWeight: 800 }}>קבצים להעלאה לפי תוצאה רצויה</h2>
-          <p className="text-sm text-slate-400 mt-1">בחר את הלשונית הרצויה כדי לדעת אילו קבצים יש להעלות</p>
+        <div className="mb-4 anim-fade-up flex items-center justify-between flex-wrap gap-2">
+          <div className="text-right">
+            <h2 className="text-base font-800 text-slate-700" style={{ fontWeight: 800 }}>אילו קבצים צריך להעלות לביצוע תקין של בדיקה</h2>
+          </div>
+          <a
+            href={FILES_CHECKLIST_PDF}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-xs font-700 text-blue-600 hover:underline"
+            style={{ fontWeight: 700 }}
+          >
+            פתיחה בכרטיסייה נפרדת
+          </a>
         </div>
 
-        {/* Legend */}
-        <div className="flex items-center justify-center gap-5 mb-5 anim-fade-up flex-wrap">
-          <div className="flex items-center gap-1.5">
-            <span className="inline-flex items-center justify-center w-6 h-6 rounded-full" style={{ background: "rgba(22,163,74,0.12)" }}>
-              <svg width="11" height="11" viewBox="0 0 13 13" fill="none">
-                <path d="M2.5 6.5l3 3 5-6" stroke="#16a34a" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
-              </svg>
-            </span>
-            <span className="text-xs text-slate-500">נדרש</span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#f59e0b", display: "inline-block" }} />
-            <span className="text-xs text-slate-500">אופציונלי — משפיע על חלק מהנתונים</span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <span className="inline-flex items-center justify-center w-6 h-6 rounded-full" style={{ background: "rgba(220,38,38,0.08)" }}>
-              <svg width="9" height="9" viewBox="0 0 11 11" fill="none">
-                <path d="M2 2l7 7M9 2L2 9" stroke="#dc2626" strokeWidth="1.7" strokeLinecap="round"/>
-              </svg>
-            </span>
-            <span className="text-xs text-slate-500">לא נדרש</span>
-          </div>
-        </div>
-
-        {/* Cards */}
-        <div className="flex flex-col gap-3">
-          {TABS.map((tab, i) => (
-            <div
-              key={tab.name}
-              className="glass-card rounded-2xl px-5 py-4 anim-fade-up"
-              style={{ animationDelay: `${i * 0.05}s` }}
-            >
-              <div className="mb-3">
-                <h3 className="text-sm font-800 text-slate-800 mb-0.5" style={{ fontWeight: 800 }}>{tab.name}</h3>
-                <p className="text-xs text-slate-500 leading-relaxed">{tab.desc}</p>
-              </div>
-              <div className="flex items-center justify-center gap-6 flex-wrap">
-                {FILE_COLS.map(col => (
-                  <div key={col.key} className="flex flex-col items-center gap-1.5">
-                    <span className="text-xs text-slate-400 font-500 text-center" style={{ fontWeight: 500 }}>{col.label}</span>
-                    <StatusBadge status={tab[col.key]} />
-                  </div>
-                ))}
-              </div>
-            </div>
-          ))}
+        {/* PDF guide */}
+        <div className="glass-card rounded-2xl overflow-hidden anim-fade-up" style={{ height: "80vh" }}>
+          <iframe
+            src={`${FILES_CHECKLIST_PDF}#toolbar=0&navpanes=0&view=FitH`}
+            title="אילו קבצים צריך להעלות לביצוע תקין של בדיקה"
+            className="w-full h-full"
+            style={{ border: "none" }}
+          />
         </div>
 
         <div className="flex justify-center mt-8">
