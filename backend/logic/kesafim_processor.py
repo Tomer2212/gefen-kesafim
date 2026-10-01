@@ -1,10 +1,14 @@
+from pathlib import Path
+
+import openpyxl
 import pandas as pd
 
 from logic.gefen_processor import normalize_amount
 
 
 def load_kesafim(filepath: str) -> pd.DataFrame:
-    rows = _parse_tsv(filepath)
+    line_rows = _read_rows(filepath)
+    rows = _parse_blocks(line_rows)
     if not rows:
         return pd.DataFrame(columns=[
             "report_code", "supplier", "supplier_name",
@@ -62,19 +66,37 @@ _HEADER_TO_FIELD = {
 }
 
 
-def _parse_tsv(filepath: str) -> list[dict]:
+def _read_rows(filepath: str) -> list[list[str]]:
+    """Return the file's rows as lists of stripped strings, regardless of whether
+    the file is the classic Kesafim2000 export (.xls, actually TSV text in
+    iso-8859-8) or a genuine .xlsx the file was re-saved as (e.g. to make it
+    easier to locate/save). Both encode the same block structure (see
+    _parse_blocks), just with different cell types — a real xlsx can hand back
+    numbers (int/float) instead of text, so every cell is stringified here to
+    keep that structure identical for both sources."""
+    if Path(filepath).suffix.lower() == ".xlsx":
+        rows = []
+        wb = openpyxl.load_workbook(filepath, read_only=True)
+        try:
+            for sheet_name in wb.sheetnames:
+                for row in wb[sheet_name].iter_rows(values_only=True):
+                    rows.append(["" if v is None else str(v).strip() for v in row])
+        finally:
+            wb.close()
+        return rows
+
     with open(filepath, "r", encoding="iso-8859-8") as f:
         content = f.read()
+    return [line.rstrip("\r").split("\t") for line in content.strip().split("\n")]
 
+
+def _parse_blocks(line_rows: list[list[str]]) -> list[dict]:
     rows = []
     current_code = None
     header_next = False
     col_idx = dict(_LEGACY_IDX)  # field -> column index for the current block
 
-    for line in content.strip().split("\n"):
-        line = line.rstrip("\r")
-        parts = line.split("\t")
-
+    for parts in line_rows:
         if parts[0] == "קוד גפן":
             current_code = int(parts[1]) if parts[1].strip().isdigit() else None
             header_next = True

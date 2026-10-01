@@ -31,7 +31,7 @@ from logic.pdf_exporter import export_pdf
 from logic.file_identifier import identify_file
 from plan_roster import extract_plan_roster
 from logic.gefen_processor import load_gefen, normalize_amount
-from logic.kesafim_processor import load_kesafim
+from logic.kesafim_processor import load_kesafim, _read_rows as _read_kesafim_rows
 from logic.payscool_processor import canonical_payscool_invoice, load_payscool
 from logic.schoolcash_processor import load_schoolcash
 from logic.reconciler import BEINAYIM_ONLY, TIKKON_ONLY, reconcile
@@ -1402,13 +1402,13 @@ def _build_finance_ichud_budget_map(
     if finance_type == "kesafim2000":
         for fpath in finance_paths:
             try:
-                with open(str(fpath), "rb") as fh:
-                    raw = fh.read().decode("iso-8859-8")
-                lines = raw.splitlines()
-                if not lines:
+                # Supports both the classic .xls (TSV/iso-8859-8) export and a
+                # genuine .xlsx re-save of it — see _read_kesafim_rows.
+                rows = _read_kesafim_rows(str(fpath))
+                if not rows:
                     continue
                 # Row 0 = header: E1 at index 4
-                header = lines[0].split("\t")
+                header = rows[0]
                 e1_val = header[4].strip() if len(header) > 4 else ""
                 budget_norm = _norm_bname(e1_val) if e1_val else None
 
@@ -1427,8 +1427,7 @@ def _build_finance_ichud_budget_map(
 
                 covered_set.add(budget_norm)
 
-                for line in lines[1:]:
-                    row = line.split("\t")
+                for row in rows[1:]:
                     if len(row) < 11:
                         continue
                     supplier    = str(row[0]).strip()
@@ -1841,19 +1840,18 @@ def _get_fallback_stage(results_clean: list, budget_norm: str) -> str | None:
 
 
 def _split_finance_kesafim(finance_paths: list, results_clean: list) -> dict:
-    """Returns {(budget_norm, stage): df} for Kesafim2000 files."""
+    """Returns {(budget_norm, stage): df} for Kesafim2000 files (either the classic
+    .xls export or a genuine .xlsx re-save of it — see _read_kesafim_rows)."""
     import pandas as pd
     from zihuy_core import normalize_budget_name as _nb
     from logic.kesafim_processor import load_kesafim
     all_groups: dict = {}
     for fpath in finance_paths:
         try:
-            with open(str(fpath), "rb") as fh:
-                raw = fh.read().decode("iso-8859-8")
-            lines = raw.splitlines()
-            if not lines:
+            rows = _read_kesafim_rows(str(fpath))
+            if not rows:
                 continue
-            header = lines[0].split("\t")
+            header = rows[0]
             e1_val = header[4].strip() if len(header) > 4 else ""
             budget_norm = _nb(e1_val) if e1_val else None
             if not budget_norm:
@@ -3511,15 +3509,15 @@ _KNOWN_BUDGET_NAMES = {
 
 
 def _kesafim_is_unreadable_binary(path: Path) -> bool:
-    """True when the file identifies as kesafim2000 but is actually a genuine binary
-    .xlsx export (not the classic TSV/iso-8859-8 export load_kesafim() expects) —
-    detected by the exact UnicodeDecodeError the real reconciliation pipeline hits
-    later on such a file (see the dedicated `except UnicodeDecodeError` handler in
-    _process). Surfacing this immediately in the pre-check modal, with the identical
-    message, avoids a confusing detour through a misleading "empty file" warning."""
+    """True when the kesafim2000 file (either the classic TSV/iso-8859-8 .xls export,
+    or a genuine .xlsx re-save of it) cannot actually be read by load_kesafim().
+    _read_rows() (shared with kesafim_processor.load_kesafim) picks the right reader
+    for the extension, so a valid .xlsx export is no longer mistaken for the old
+    "binary file sent as .xls" failure mode. Surfacing this immediately in the
+    pre-check modal, with the identical message, avoids a confusing detour through a
+    misleading "empty file" warning."""
     try:
-        with open(str(path), "r", encoding="iso-8859-8") as f:
-            f.read()
+        _read_kesafim_rows(str(path))
         return False
     except UnicodeDecodeError:
         return True
@@ -3532,15 +3530,15 @@ def _kesafim_budget_scoped(path: Path) -> bool:
     (this is a whole-file/export-level property, not per-block — verified against a
     real 15-block sample where every block declared the same value) against the known
     budget names. Fail-open (True) on any read error or if no block is found at all —
-    a genuinely broken file is the normal pipeline's problem to report, not this check's."""
+    a genuinely broken file is the normal pipeline's problem to report, not this check's.
+    Uses the same _read_rows() as load_kesafim() so this works for both the classic
+    .xls export and a genuine .xlsx re-save of it."""
     try:
         from zihuy_core import normalize_budget_name
-        with open(str(path), "r", encoding="iso-8859-8") as f:
-            for line in f:
-                parts = line.rstrip("\r\n").split("\t")
-                if parts[0] == "קוד גפן":
-                    raw = parts[4].strip() if len(parts) > 4 else ""
-                    return normalize_budget_name(raw) in _KNOWN_BUDGET_NAMES
+        for parts in _read_kesafim_rows(str(path)):
+            if parts[0] == "קוד גפן":
+                raw = parts[4].strip() if len(parts) > 4 else ""
+                return normalize_budget_name(raw) in _KNOWN_BUDGET_NAMES
     except Exception as exc:
         logger.warning("Could not check budget scoping for kesafim file %s: %s", path, exc)
     return True
