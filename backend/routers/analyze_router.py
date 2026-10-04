@@ -267,9 +267,10 @@ async def detect_file_year(
     file_role: str = Form(...),
     _user: dict = Depends(get_current_user),
 ):
-    """Lightweight, single-file academic-year detection — no check is run and nothing
-    is saved. Used by the year-mismatch modal's "החלף קובץ" action to preview a
-    replacement file's detected year before the user commits to re-running the check."""
+    """Lightweight, single-file academic-year (and, for gefen/tikhnun, division)
+    detection — no check is run and nothing is saved. Used by the unified file-issues
+    modal's "החלף קובץ" action to preview a replacement file's detected year/division
+    before the user commits to re-running the check."""
     tmp_dir = Path(tempfile.mkdtemp(prefix="gefen_detect_"))
     try:
         dest = tmp_dir / (file.filename or "upload")
@@ -278,15 +279,21 @@ async def detect_file_year(
             found_years = _read_tikhnun_school_years(dest)
             mapped_years = {get_academic_year_for_calendar_year(y) for y in found_years}
             mapped_years.discard(None)
+            detected_division = _detect_tikhnun_division(dest)
             if not mapped_years:
-                return {"status": "unrecognized", "detected_academic_year": None}
-            return {"status": "recognized", "detected_academic_year": sorted(mapped_years)[0]}
+                return {"status": "unrecognized", "detected_academic_year": None, "detected_division": detected_division}
+            return {"status": "recognized", "detected_academic_year": sorted(mapped_years)[0], "detected_division": detected_division}
         if file_role == "gefen":
             dates = _read_gefen_invoice_dates([dest])
             result = _classify_file_year(dates)
+            try:
+                detected_division = _detect_gefen_division(load_gefen(str(dest))[0])
+            except Exception as exc:
+                logger.warning("detect_file_year: gefen division detection failed for %s: %s", dest, exc)
+                detected_division = None
             if result["status"] == "recognized":
-                return {"status": "recognized", "detected_academic_year": result["academic_year"]}
-            return {"status": result["status"], "detected_academic_year": None}
+                return {"status": "recognized", "detected_academic_year": result["academic_year"], "detected_division": detected_division}
+            return {"status": result["status"], "detected_academic_year": None, "detected_division": detected_division}
         if file_role in ("kesafim2000", "payscool", "schoolcash"):
             if file_role == "kesafim2000" and _kesafim_is_unreadable_binary(dest):
                 return {"status": "unreadable_raw_file", "detected_academic_year": None}
@@ -300,22 +307,6 @@ async def detect_file_year(
         raise HTTPException(status_code=400, detail="file_role לא מוכר")
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
-
-
-@router.post("/save-for-account")
-async def save_for_account(
-    run_id: str = Form(...),
-    school_id: str = Form(...),
-    gefen_account_id: str | None = Form(None),
-    academic_year: str | None = Form(None),
-    user: dict = Depends(get_current_user),
-):
-    """Save a completed run under a different gefen account (used when division mismatch is detected)."""
-    run = _get_run(run_id)
-    if not run or run.get("status") != "done":
-        raise HTTPException(status_code=404, detail="הריצה לא נמצאה או טרם הושלמה")
-    _save_check_log(run_id, user["id"], school_id, gefen_account_id, run_data=run, academic_year=academic_year)
-    return {"ok": True}
 
 
 @router.post("/add-file/{log_id}")
@@ -2022,6 +2013,42 @@ def _get_school_stage(gefen_account_id: str | None) -> str | None:
         return None
 
 
+def _is_sheshshnati_school(school_id: str | None) -> bool:
+    """True when the school's own stage is 'sheshshnati' — mirrors the frontend's
+    isSheshsSnati flag exactly, so the pre-flight division check in _collect_file_issues
+    only ever engages for the same schools where the frontend's unified
+    YearMismatchModal division selector applies, and never for the unrelated
+    StageMismatchModal flow (single-division schools), which must stay untouched."""
+    if not school_id:
+        return False
+    try:
+        db = get_admin_client()
+        row = db.table("schools").select("stage").eq("id", school_id).single().execute()
+        return (row.data or {}).get("stage") == "sheshshnati"
+    except Exception as exc:
+        logger.warning("_is_sheshshnati_school failed for %s: %s", school_id, exc)
+        return False
+
+
+def _resolve_gefen_account_id(school_id: str | None, division_type: str) -> str | None:
+    """Look up the gefen_accounts row id for (school_id, division_type). Non-fatal —
+    returns None on any failure, letting callers fall back to saving without an
+    account id rather than crashing the whole background run."""
+    if not school_id:
+        return None
+    try:
+        db = get_admin_client()
+        rows = (
+            db.table("gefen_accounts").select("id")
+            .eq("school_id", school_id).eq("division_type", division_type)
+            .limit(1).execute()
+        )
+        return rows.data[0]["id"] if rows.data else None
+    except Exception as exc:
+        logger.warning("_resolve_gefen_account_id failed for %s/%s: %s", school_id, division_type, exc)
+        return None
+
+
 def _resolve_display_stage(school_id: str | None, gefen_account_id: str | None) -> str | None:
     """Best-effort, DISPLAY-ONLY resolution of יסודי/חטיבת ביניים for the UI.
 
@@ -2854,6 +2881,142 @@ def _upload_files_to_storage(paths: list[Path], run_id: str) -> list[dict]:
     return stored
 
 
+def _build_division_run_data(
+    df_gefen: pd.DataFrame,
+    gefen_stat: dict,
+    finance_paths: list[Path],
+    finance_path: Path | None,
+    finance_type: str | None,
+    df_finance_raw: pd.DataFrame | None,
+    finance_label: str | None,
+    finance_file_stats: dict | None,
+    tikhnun_result: dict | None,
+    tikhnun_tikkon_result: dict | None,
+    tikhnun_beinayim_result: dict | None,
+    results_clean_for_recon: list | None,
+    school_stage: str | None,
+    stage_override: str | None,
+    stored_file_paths: list,
+    tikhnun_paths: list[Path],
+    run_dir: Path,
+    storage_run_id: str,
+) -> dict:
+    """Builds one division's run_data dict + exports its own standalone Excel file.
+
+    Mirrors the gefen-only / gefen+finance branches of _process() exactly (same
+    export()/reconcile() calls, same display-record building), but scoped to a
+    SINGLE, already-isolated division's df_gefen instead of a merged dataframe —
+    this is the six-year split path's per-division counterpart of that existing code.
+    Does not save to check_logs; the caller decides when/whether to save.
+    """
+    in_gefen_rejected, in_gefen_no_pdf = _extract_gefen_only_results(df_gefen)
+    excel_path = str(run_dir / f"hashvaa-{storage_run_id}.xlsx")
+
+    if finance_path is None:
+        export(
+            _for_excel(df_gefen), None, None, None, excel_path,
+            finance_label=None,
+            in_gefen_rejected=_for_excel(in_gefen_rejected),
+            in_gefen_no_pdf=_for_excel(in_gefen_no_pdf),
+            gefen_only=True,
+        )
+        excel_storage_key = _upload_excel_to_storage(storage_run_id, excel_path)
+        return {
+            "status": "saving",
+            "gefen_only": True,
+            "finance_type": None,
+            "tikhnun": tikhnun_result,
+            "tikhnun_tikkon": tikhnun_tikkon_result,
+            "tikhnun_beinayim": tikhnun_beinayim_result,
+            "tikhnun_filenames": [p.name for p in tikhnun_paths],
+            "stored_file_paths": stored_file_paths or None,
+            "excel_storage_key": excel_storage_key,
+            "stage_override": stage_override,
+            "summary": {
+                "gefen_rows": len(df_gefen),
+                "in_gefen_rejected": len(in_gefen_rejected),
+                "in_gefen_no_pdf": len(in_gefen_no_pdf),
+                "division": _detect_gefen_division(df_gefen),
+                "gefen_files": [gefen_stat],
+                "gefen_merge_note": None,
+            },
+            "rows_gefen_rejected": _build_display_records(in_gefen_rejected, _GEFEN_REJECTED_COL_MAP),
+            "rows_gefen_no_pdf": _build_display_records(in_gefen_no_pdf, _GEFEN_COL_MAP),
+        }
+
+    in_finance_not_gefen, in_gefen_not_finance, division, finance_rows_checked = reconcile(df_gefen, df_finance_raw)
+
+    if finance_type == "kesafim2000":
+        df_finance = df_finance_raw.rename(columns=_KESAFIM_RENAME)
+        in_finance_not_gefen = in_finance_not_gefen.rename(columns=_KESAFIM_RENAME)
+    else:
+        _payscool_rename = {"report_code": "קוד דיווח"}
+        df_finance = df_finance_raw.rename(columns=_payscool_rename)
+        in_finance_not_gefen = in_finance_not_gefen.rename(columns=_payscool_rename)
+
+    export(
+        _for_excel(df_gefen), _for_excel(df_finance), _for_excel(in_finance_not_gefen), _for_excel(in_gefen_not_finance),
+        excel_path,
+        finance_label=finance_label,
+        in_gefen_rejected=_for_excel(in_gefen_rejected),
+        in_gefen_no_pdf=_for_excel(in_gefen_no_pdf),
+    )
+
+    if finance_type == "kesafim2000":
+        finance_col_map = _KESAFIM_COL_MAP
+    elif finance_type == "schoolcash":
+        finance_col_map = _SCHOOLCASH_COL_MAP
+    else:
+        finance_col_map = _PAYSCOOL_COL_MAP
+
+    per_combo_results: dict | None = None
+    if results_clean_for_recon:
+        try:
+            per_combo_results = _run_per_combo_reconciliation(
+                df_gefen, finance_paths, finance_type,
+                results_clean_for_recon, finance_col_map,
+                school_stage=school_stage,
+            )
+        except Exception as exc:
+            logger.warning("per_combo_results failed in division split (%s): %s", storage_run_id, exc)
+
+    excel_storage_key = _upload_excel_to_storage(storage_run_id, excel_path)
+    return {
+        "status": "saving",
+        "gefen_only": False,
+        "finance_type": finance_type,
+        "tikhnun": tikhnun_result,
+        "tikhnun_tikkon": tikhnun_tikkon_result,
+        "tikhnun_beinayim": tikhnun_beinayim_result,
+        "tikhnun_filenames": [p.name for p in tikhnun_paths],
+        "stored_file_paths": stored_file_paths or None,
+        "excel_storage_key": excel_storage_key,
+        "stage_override": stage_override,
+        "summary": {
+            "gefen_rows": len(df_gefen),
+            "finance_rows_total": len(df_finance_raw),
+            "finance_rows_checked": finance_rows_checked,
+            "in_finance_not_gefen": len(in_finance_not_gefen),
+            "in_gefen_not_finance": len(in_gefen_not_finance),
+            "in_gefen_rejected": len(in_gefen_rejected),
+            "in_gefen_no_pdf": len(in_gefen_no_pdf),
+            "division": division,
+            "gefen_files": [gefen_stat],
+            "gefen_merge_note": None,
+            "finance_file": {
+                **(finance_file_stats or {}),
+                "rows_total": len(df_finance_raw),
+                "rows_checked": finance_rows_checked,
+            },
+        },
+        "rows_finance_not_gefen": _build_display_records(in_finance_not_gefen, finance_col_map),
+        "rows_gefen_not_finance": _build_display_records(in_gefen_not_finance, _GEFEN_COL_MAP),
+        "rows_gefen_rejected": _build_display_records(in_gefen_rejected, _GEFEN_REJECTED_COL_MAP),
+        "rows_gefen_no_pdf": _build_display_records(in_gefen_no_pdf, _GEFEN_COL_MAP),
+        "per_combo_results": per_combo_results,
+    }
+
+
 def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", school_id: str | None = None, gefen_account_id: str | None = None, update_log_id: str | None = None, academic_year: str | None = None) -> None:
     run_data: dict = {"status": "processing"}
     try:
@@ -2870,6 +3033,12 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
 
         gefen_paths, finance_paths, finance_type, tikhnun_paths = _classify_files(paths)
         finance_path = finance_paths[0] if finance_paths else None
+
+        # Load each gefen file individually (no merge yet) — needed both by the
+        # pre-flight file-issues check below (per-file division) AND, further down,
+        # by the six-year division-split detection. Loading it here (once) avoids
+        # loading every gefen file twice.
+        gefen_dfs, _gefen_dedup_flags, gefen_file_stats = _load_gefen_files_unmerged(gefen_paths)
 
         # ── Verify tikhnun file(s) belong to this school (סמל מוסד) ──────────
         if tikhnun_paths and school_id:
@@ -2889,16 +3058,30 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
                         })
                         return
 
-        # ── Verify tikhnun/gefen/finance file(s) belong to the active academic year ──
+        # ── Determine requested_division (six-year/sheshshnati schools only) ──────
+        # Meaningful only when the school has both תיכון and חטיבת ביניים divisions
+        # AND a gefen_account_id was supplied (reflects the tab the advisor was on).
+        requested_division: str | None = None
+        if school_id and gefen_account_id and _is_sheshshnati_school(school_id):
+            _requested_stage = _get_school_stage(gefen_account_id)
+            if _requested_stage in ("tikkon", "beinayim"):
+                requested_division = _requested_stage
+
+        # ── Verify tikhnun/gefen/finance file(s) belong to the active academic year
+        #     AND (for six-year schools) the active division/tab ──────────────────
         expected_year = academic_year or DEFAULT_ACADEMIC_YEAR
-        file_year_issues = _collect_file_year_issues(tikhnun_paths, gefen_paths, finance_paths, finance_type, expected_year)
-        if file_year_issues:
+        file_issues = _collect_file_issues(
+            tikhnun_paths, gefen_paths, gefen_file_stats, finance_paths, finance_type,
+            expected_year, requested_division,
+        )
+        if file_issues:
             _update_run(run_id, {
                 "status": "error",
-                "error_code": "year_issues",
-                "error": "שים לב: חלק מהקבצים שהועלו אינם תואמים את שנת הלימודים שנבחרה במערכת.",
-                "file_year_issues": file_year_issues,
+                "error_code": "file_issues",
+                "error": "שים לב: יש בעיה באחד או יותר מהקבצים שהועלו — בדוק את הפרטים למטה.",
+                "file_issues": file_issues,
                 "expected_academic_year": expected_year,
+                "expected_division": requested_division,
             })
             return
 
@@ -2949,8 +3132,37 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
             return
 
         # ── Normal run: gefen files present ──────────────────────────────────
-        df_gefen, gefen_file_stats, gefen_merge_note = _load_gefen_files(gefen_paths)
-        in_gefen_rejected, in_gefen_no_pdf = _extract_gefen_only_results(df_gefen)
+        # gefen_dfs/gefen_file_stats were already loaded (unmerged) above, before the
+        # pre-flight file-issues check — reused here to detect, BEFORE any merge
+        # happens, whether this is a six-year school upload with exactly 2 gefen files
+        # that cleanly classify into 2 DIFFERENT divisions (תיכון + חטיבת ביניים). That
+        # case must be reconciled as two fully separate runs, never merged into one —
+        # see plan section 1 ("השינוי הנדרש").
+        split_divisions: tuple[str, str] | None = None  # (division of gefen_paths[0], of gefen_paths[1])
+        if len(gefen_dfs) == 2:
+            d0, d1 = gefen_file_stats[0]["division"], gefen_file_stats[1]["division"]
+            if {d0, d1} == {"tikkon", "beinayim"}:
+                split_divisions = (d0, d1)
+            elif (d0 == "both") != (d1 == "both"):
+                # Exactly one of the two files could not be cleanly classified while the
+                # other was — genuinely ambiguous, can't safely merge OR split. Note that
+                # "both files → the SAME single division" is intentionally NOT treated as
+                # ambiguous here: that's the pre-existing, legitimate same-division
+                # overlap/dedup upload pattern (see GefenFilesDetail's merge-note UI),
+                # which must keep merging exactly as before for backward compatibility.
+                _update_run(run_id, {
+                    "status": "error",
+                    "error_code": "gefen_division_ambiguous",
+                    "error": (
+                        "לא ניתן לקבוע בבירור לאיזו חטיבה (תיכון / חטיבת ביניים) משתייך כל אחד "
+                        "מהקבצים שהועלו. אנא בדוק את הקבצים ונסה שוב."
+                    ),
+                })
+                return
+
+        if split_divisions is None:
+            df_gefen, gefen_merge_note = _merge_gefen_dfs(gefen_dfs)
+        in_gefen_rejected, in_gefen_no_pdf = (None, None) if split_divisions else _extract_gefen_only_results(df_gefen)
         excel_path = str(run_dir / "hashvaa-gefen-ksafim.xlsx")
 
         # Process tikhnun if present (cross-reference with matching-division gefen doch)
@@ -2958,6 +3170,8 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
         tikhnun_tikkon_result  = None
         tikhnun_beinayim_result = None
         results_clean_for_recon: list | None = None
+        rc_t: list | None = None
+        rc_b: list | None = None
 
         if len(tikhnun_paths) == 1:
             try:
@@ -2981,8 +3195,6 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
                 tikkon_data, beinayim_data = _assign_tikhnun_pair(td0, td1)
                 tikkon_fpath   = str(tikhnun_paths[0]) if td0 is tikkon_data   else str(tikhnun_paths[1])
                 beinayim_fpath = str(tikhnun_paths[0]) if td0 is beinayim_data else str(tikhnun_paths[1])
-                rc_t: list | None = None
-                rc_b: list | None = None
                 if tikkon_data:
                     tikkon_gpath = _find_gefen_path_for_division(gefen_paths, gefen_file_stats, "tikkon")
                     if tikkon_gpath:
@@ -3008,6 +3220,71 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
             except Exception as exc:
                 logger.error("Tikhnun processing error for run %s: %s", run_id, exc)
                 tikhnun_result = {"error": str(exc)}
+
+        # ── Six-year split path: 2 gefen files, 2 distinct divisions ─────────
+        # Run the rest of the pipeline (reconcile + export) TWICE, once per division,
+        # on each division's own un-merged df_gefen — never on a merged dataframe.
+        # Both divisions are "correct" relative to themselves, so (per plan decision,
+        # case ג) both are saved immediately, with no tab-mismatch gate.
+        if split_divisions is not None:
+            df_finance_raw = finance_label = finance_file_stats = None
+            if finance_path is not None:
+                df_finance_raw, finance_label, finance_file_stats = _load_finance_raw(finance_paths, finance_type)
+
+            # The single-tikhnun-file branch above (len==1) is not division-aware — it
+            # cross-references only gefen_paths[0]. Attribute that result to whichever
+            # division gefen_paths[0] actually is; leave the other division's tikhnun
+            # empty. (The len==2 branch above is already fully division-aware via
+            # tikhnun_tikkon_result/tikhnun_beinayim_result/rc_t/rc_b.)
+            if len(tikhnun_paths) == 1:
+                if gefen_file_stats[0]["division"] == "tikkon":
+                    tikhnun_tikkon_result, rc_t = tikhnun_result, results_clean_for_recon
+                else:
+                    tikhnun_beinayim_result, rc_b = tikhnun_result, results_clean_for_recon
+
+            division_run_ids: dict[str, str] = {}
+            for idx, division_type in enumerate(split_divisions):
+                storage_run_id = f"{run_id}-{division_type}"
+                # Each division's saved row must carry ONLY its own tikhnun_tikkon/tikhnun_beinayim
+                # (never the sibling's) — otherwise every sub-tab that renders both when present
+                # (e.g. YozmaTab's DualTikhnunSection pair) shows both divisions stacked together
+                # inside what should be a single-division check. See plan follow-up investigation.
+                run_data_div = _build_division_run_data(
+                    gefen_dfs[idx], gefen_file_stats[idx],
+                    finance_paths, finance_path, finance_type, df_finance_raw, finance_label, finance_file_stats,
+                    tikhnun_tikkon_result if division_type == "tikkon" else tikhnun_beinayim_result,
+                    tikhnun_tikkon_result if division_type == "tikkon" else None,
+                    tikhnun_beinayim_result if division_type == "beinayim" else None,
+                    rc_t if division_type == "tikkon" else rc_b,
+                    school_stage, stage_override, stored_file_paths, tikhnun_paths, run_dir, storage_run_id,
+                )
+                # Shared key (the original, un-suffixed run_id) so the frontend can find this
+                # row's sibling division from the same upload batch and switch between them
+                # when the advisor toggles the תיכון/חטיבת ביניים tab inside an open check.
+                run_data_div["summary"]["split_batch_id"] = run_id
+                resolved_account_id = _resolve_gefen_account_id(school_id, division_type) if school_id else None
+                run_data_div["_school_ctx"] = {
+                    "user_id": user_id, "school_id": school_id,
+                    "gefen_account_id": resolved_account_id,
+                    "update_log_id": None, "academic_year": academic_year,
+                }
+                if school_id and not _any_tikhnun_pending(run_data_div):
+                    _save_check_log(storage_run_id, user_id, school_id, resolved_account_id, None, run_data=run_data_div, academic_year=academic_year)
+                run_data_div["status"] = "done"
+                _update_run(storage_run_id, run_data_div)
+                division_run_ids[division_type] = storage_run_id
+
+            # The frontend's upload-polling loop only ever polls the ORIGINAL run_id
+            # (it has no reason to know about the two per-division sub-ids ahead of
+            # time) — mark it done with pointers to both sub-runs so the frontend can
+            # follow up (reload logs; fetch each sub-run's /analyze/result to check
+            # for pending tikhnun identification) without any recomputation.
+            _update_run(run_id, {
+                "status": "done",
+                "split_divisions": True,
+                "division_run_ids": division_run_ids,
+            })
+            return
 
         # Gefen-only run (no finance) — skip reconciliation
         if finance_path is None:
@@ -3579,23 +3856,79 @@ def _finance_budget_scoped(paths: list[Path], finance_type: str) -> bool:
     return True  # schoolcash — not checked yet
 
 
-def _collect_file_year_issues(
+def _detect_tikhnun_division(path: Path) -> str | None:
+    """Detect which division (תיכון / חטיבת ביניים) a tikhnun planning file belongs to,
+    via its school_stage field — same mapping convention already used by
+    _assign_tikhnun_pair ("תיכון" → tikkon, anything else → beinayim). Fail-open
+    (None) on any read error; a genuinely broken file is the normal pipeline's
+    problem to report, not this pre-flight check's."""
+    try:
+        td = load_tikhnun(str(path))
+        return "tikkon" if td.get("school_stage") == "תיכון" else "beinayim"
+    except Exception as exc:
+        logger.warning("_detect_tikhnun_division failed for %s: %s", path, exc)
+        return None
+
+
+def _division_status(detected: str | None, requested_division: str | None, exempt: bool) -> str | None:
+    """Computes a single gefen/tikhnun entry's division_status against
+    requested_division. Returns None when division isn't meaningful for this entry
+    (not a six-year/sheshshnati school, no requested_division, division couldn't be
+    detected, or this file is part of a legitimate "both divisions at once" upload —
+    see gefen_both/tikhnun_both in _collect_file_issues). 'ambiguous' (detected ==
+    "both") never blocks, same as an unreadable year doesn't necessarily block."""
+    if not requested_division or detected is None or exempt:
+        return None
+    if detected == "both":
+        return "ambiguous"
+    return "match" if detected == requested_division else "mismatch"
+
+
+def _entry_has_division_issue(entry: dict) -> bool:
+    return entry.get("division_status") == "mismatch"
+
+
+def _collect_file_issues(
     tikhnun_paths: list[Path],
     gefen_paths: list[Path],
+    gefen_file_stats: list[dict],
     finance_paths: list[Path],
     finance_type: str | None,
     expected_year: str,
+    requested_division: str | None,
 ) -> list[dict]:
     """Builds one entry per uploaded tikhnun/gefen/finance file (or file group) —
-    unconditionally, whether it matches expected_year or not. If at least one entry is
-    actually a problem, returns the FULL list (so the frontend can show every uploaded
-    file's status together, not just the offenders — the user needs the whole picture
-    to know what to fix). If everything matches, returns an empty list and the check
-    proceeds normally. Finance files are grouped into a single entry (multiple
-    kesafim2000/schoolcash files already get merged into one logical ledger elsewhere
-    in the app), unlike tikhnun/gefen where each file is its own division."""
-    entries: list[dict] = [_tikhnun_year_entry(p, expected_year) for p in tikhnun_paths]
-    entries += [_dated_file_entry("gefen", [p.name], _read_gefen_invoice_dates([p])) for p in gefen_paths]
+    unconditionally, whether it matches expected_year/requested_division or not. If at
+    least one entry is actually a problem (year mismatch OR division mismatch),
+    returns the FULL list (so the frontend's unified file-issues modal can show every
+    uploaded file's status together, not just the offenders). If everything matches,
+    returns an empty list and the check proceeds normally. Finance files are grouped
+    into a single entry (multiple kesafim2000/schoolcash files already get merged into
+    one logical ledger elsewhere in the app) and never carry division keys — division
+    only applies to gefen/tikhnun files. Replaces the former year-only, same-named
+    helper that didn't account for division."""
+    tikhnun_divisions = [_detect_tikhnun_division(p) for p in tikhnun_paths]
+    # Exactly 2 tikhnun files, one of each division — a legitimate "both divisions at
+    # once" upload (mirrors the gefen split_divisions case below); never flag either
+    # file's division as a mismatch in that case, regardless of the active tab.
+    tikhnun_both = len(tikhnun_paths) == 2 and set(tikhnun_divisions) == {"tikkon", "beinayim"}
+
+    gefen_divisions = [s["division"] for s in gefen_file_stats] if gefen_file_stats else []
+    gefen_both = len(gefen_divisions) == 2 and set(gefen_divisions) == {"tikkon", "beinayim"}
+
+    entries: list[dict] = []
+    for p, det in zip(tikhnun_paths, tikhnun_divisions):
+        entry = _tikhnun_year_entry(p, expected_year)
+        entry["detected_division"] = det
+        entry["division_status"] = _division_status(det, requested_division, tikhnun_both)
+        entries.append(entry)
+
+    for p, det in zip(gefen_paths, gefen_divisions):
+        entry = _dated_file_entry("gefen", [p.name], _read_gefen_invoice_dates([p]))
+        entry["detected_division"] = det
+        entry["division_status"] = _division_status(det, requested_division, gefen_both)
+        entries.append(entry)
+
     if finance_paths and finance_type:
         filenames = [p.name for p in finance_paths]
         if finance_type == "kesafim2000" and any(_kesafim_is_unreadable_binary(p) for p in finance_paths):
@@ -3605,7 +3938,7 @@ def _collect_file_year_issues(
         else:
             entries.append(_dated_file_entry(finance_type, filenames, _read_finance_invoice_dates(finance_paths, finance_type)))
 
-    if any(_entry_has_issue(e, expected_year) for e in entries):
+    if any(_entry_has_issue(e, expected_year) for e in entries) or any(_entry_has_division_issue(e) for e in entries):
         return entries
     return []
 
@@ -3683,11 +4016,14 @@ def _detect_gefen_division(df: pd.DataFrame) -> str:
     return "both"
 
 
-def _load_gefen_files(paths: list[Path]) -> tuple[pd.DataFrame, list[dict], dict | None]:
-    loaded    = [load_gefen(str(p)) for p in paths]
-    dfs       = [df for df, _ in loaded]
+def _load_gefen_files_unmerged(paths: list[Path]) -> tuple[list[pd.DataFrame], list[bool], list[dict]]:
+    """Loads each gefen file individually, WITHOUT merging — used both by
+    _load_gefen_files() (which merges afterwards, for the legacy/default path) and by
+    _process()'s six-year division-split detection, which needs per-file division
+    classification before deciding whether to merge at all."""
+    loaded = [load_gefen(str(p)) for p in paths]
+    dfs = [df for df, _ in loaded]
     dedup_flags = [was_dedup for _, was_dedup in loaded]
-
     per_file_stats = [
         {
             "filename": p.name,
@@ -3697,9 +4033,14 @@ def _load_gefen_files(paths: list[Path]) -> tuple[pd.DataFrame, list[dict], dict
         }
         for p, df, was_dedup in zip(paths, dfs, dedup_flags)
     ]
+    return dfs, dedup_flags, per_file_stats
 
+
+def _merge_gefen_dfs(dfs: list[pd.DataFrame]) -> tuple[pd.DataFrame, dict | None]:
+    """Merges already-loaded gefen dataframes (dedup by 'ichud'). Extracted from the
+    old _load_gefen_files() body unchanged, so the merged-path behavior is identical."""
     if len(dfs) == 1:
-        return dfs[0], per_file_stats, None
+        return dfs[0], None
 
     if len(dfs) == 2:
         # Two gefen files — compute overlap, merge with dedup
@@ -3724,7 +4065,7 @@ def _load_gefen_files(paths: list[Path]) -> tuple[pd.DataFrame, list[dict], dict
             "file0_rows": len(dfs[0]),
             "file1_rows": len(dfs[1]),
         }
-        return merged, per_file_stats, merge_note
+        return merged, merge_note
 
     # Three or more gefen files — merge all with dedup
     merged = (
@@ -3733,6 +4074,12 @@ def _load_gefen_files(paths: list[Path]) -> tuple[pd.DataFrame, list[dict], dict
         .reset_index(drop=True)
     )
     merge_note = {"unique": len(merged)}
+    return merged, merge_note
+
+
+def _load_gefen_files(paths: list[Path]) -> tuple[pd.DataFrame, list[dict], dict | None]:
+    dfs, _dedup_flags, per_file_stats = _load_gefen_files_unmerged(paths)
+    merged, merge_note = _merge_gefen_dfs(dfs)
     return merged, per_file_stats, merge_note
 
 

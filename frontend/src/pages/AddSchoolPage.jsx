@@ -165,7 +165,7 @@ const EMPTY_FORM = {
   principal_email: "", secretary_name: "", secretary_phone: "",
   secretary_email: "", finance_contact_name: "", finance_contact_phone: "",
   finance_contact_email: "", school_phone: "", address: "", district: "",
-  restrict_access_to: [], extra_contacts: [],
+  restrict_access_to: null, extra_contacts: [],
   principal_day_off: [], secretary_day_off: [], finance_contact_day_off: [],
   meeting_coordinator: null,
   meeting_coordinators: {},
@@ -368,7 +368,7 @@ export default function AddSchoolPage() {
   // Keep restrict_access_to in sync when "היועצים המלווים" is selected
   useEffect(() => {
     if (!accessLinkedToAdvisors) return;
-    setSchoolForm(p => ({ ...p, restrict_access_to: draftLinkedAdvisorIds.length > 0 ? draftLinkedAdvisorIds : [] }));
+    setSchoolForm(p => ({ ...p, restrict_access_to: draftLinkedAdvisorIds.length > 0 ? draftLinkedAdvisorIds : null }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [typedAdvisorIds, accessLinkedToAdvisors]);
 
