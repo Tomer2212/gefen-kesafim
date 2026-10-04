@@ -650,7 +650,6 @@ const COL_GROUP_MAP = Object.fromEntries(
   COL_GROUPS.flatMap(g => g.keys.map(k => [k, g]))
 );
 
-const DIV_LABEL = { tikkon: "תיכון", beinayim: "חטיבת ביניים" };
 const DIV_ABBR = { tikkon: 'חט"ע', beinayim: 'חט"ב' };
 
 function formatNum(val) {
@@ -1521,37 +1520,6 @@ function CheckLinkTooltip({ children }) {
   );
 }
 
-// ─── DivisionMismatchModal ────────────────────────────────────────────────────
-function DivisionMismatchModal({ detectedDivision, activeSubTab, onSaveForOther, onDismiss }) {
-  const { ref, handleKeyDown } = useFocusTrap(onDismiss);
-  const detected = DIV_LABEL[detectedDivision] || detectedDivision;
-  const active = DIV_LABEL[activeSubTab] || activeSubTab;
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" dir="rtl">
-      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="div-mismatch-title"
-        onKeyDown={handleKeyDown}
-        className="bg-white rounded-2xl shadow-2xl p-6 w-[380px] flex flex-col gap-4">
-        <h2 id="div-mismatch-title" className="text-base font-bold text-slate-800">זוהתה חטיבה שונה</h2>
-        <p className="text-sm text-slate-600">
-          הקבצים שהועלו מזוהים כ<strong>{detected}</strong>,
-          אך הבדיקה בוצעה תחת לשונית <strong>{active}</strong>.
-          הנתונים נשמרו תחת {active}. האם לשמור גם תחת {detected}?
-        </p>
-        <div className="flex gap-3 justify-center mt-1">
-          <button type="button" onClick={onSaveForOther}
-            className="px-5 py-2 rounded-full bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold transition-colors">
-            כן, שמור גם
-          </button>
-          <button type="button" onClick={onDismiss}
-            className="px-5 py-2 rounded-full border border-slate-300 hover:border-slate-400 text-slate-600 text-sm font-semibold transition-colors">
-            לא, תודה
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ─── StageMismatchModal ───────────────────────────────────────────────────────
 const STAGE_DIV_MAP = { tikkon: "tikkon", beinayim: "beinayim", yesodi: "yesodi" };
 const DIV_HEB  = { tikkon: "תיכון", beinayim: "חטיבת ביניים", yesodi: "יסודי" };
@@ -1620,7 +1588,6 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
   const [deleteTargetId, setDeleteTargetId] = useState(null);
   const [deletingId, setDeletingId] = useState(null);
   const [loadingLogId, setLoadingLogId] = useState(null);
-  const [divisionMismatch, setDivisionMismatch] = useState(null); // { runId, result, detectedDivision }
   const [stageMismatch, setStageMismatch]       = useState(null); // { runId, result, detectedDivision, savedLogId }
   const [symbolMismatch, setSymbolMismatch] = useState(false);
   const [yearMismatch, setYearMismatch] = useState(null); // { detectedYear, expectedYear, files, selectedAccountId }
@@ -1690,6 +1657,33 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
           : acc?.division_type === "beinayim";
       })
     : logs), [isSheshsSnati, logs, activeSubTab, accounts]);
+
+  // Keep an open check's detail view in sync with the תיכון/חטיבת ביניים tab: when the
+  // advisor switches tabs while viewing a specific check, jump to that same upload batch's
+  // sibling row for the newly selected division (matched via summary.split_batch_id, set by
+  // the backend for every six-year split-save) instead of silently leaving the old division's
+  // data on screen. If this check has no sibling for the other division, there's nothing to
+  // show there — fall back to the history list (now filtered on the newly selected tab).
+  useEffect(() => {
+    if (!isSheshsSnati || view !== "result" || !activeResult) return;
+    const currentDivision = activeResult.result?.summary?.division;
+    if (!currentDivision || currentDivision === activeSubTab) return;
+    const batchId = activeResult.result?.summary?.split_batch_id;
+    const sibling = batchId
+      ? logs.find(l => {
+          if (l.summary?.split_batch_id !== batchId) return false;
+          const acc = accounts.find(a => a.id === l.gefen_account_id);
+          return acc?.division_type === activeSubTab;
+        })
+      : null;
+    if (sibling) {
+      handleLogClick(sibling);
+    } else {
+      setView("table");
+      setActiveResult(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSubTab]);
 
   const allHistBudgets = useMemo(() => {
     const seen = new Set();
@@ -1782,6 +1776,25 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
           const { data: r } = await axios.get(`/analyze/result/${runId}`);
           if (r.status === "done") {
             clearInterval(pollRef.current);
+            if (r.split_divisions) {
+              // Six-year split: 2 gefen files → 2 distinct divisions, both already
+              // saved (each under its own correct gefen_account_id) — no mismatch
+              // gate applies here (both are "correct" relative to themselves).
+              setPendingRun(null);
+              onReloadLogs(yearOverride);
+              const subIds = r.division_run_ids || {};
+              const queue = [];
+              for (const dt of Object.keys(subIds)) {
+                try {
+                  const { data: subR } = await axios.get(`/analyze/result/${subIds[dt]}`);
+                  if (subR?.tikhnun_tikkon?.pending_identification) queue.push({ tikhnun: subR.tikhnun_tikkon, division: "tikkon", runId: subIds[dt] });
+                  if (subR?.tikhnun_beinayim?.pending_identification) queue.push({ tikhnun: subR.tikhnun_beinayim, division: "beinayim", runId: subIds[dt] });
+                  if (subR?.tikhnun?.pending_identification && !subR?.tikhnun_tikkon && !subR?.tikhnun_beinayim) queue.push({ tikhnun: subR.tikhnun, division: "main", runId: subIds[dt] });
+                } catch { /* non-fatal — sub-run result fetch failed, skip its classify check */ }
+              }
+              if (queue.length > 0) setClassifyQueue(queue);
+              return;
+            }
             // Stage mismatch only relevant for tikkon/beinayim — yesodi codes overlap with beinayim range
             if (!isSheshsSnati && (schoolStage === "tikkon" || schoolStage === "beinayim")) {
               const detected = r.summary?.division;
@@ -1794,13 +1807,6 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
             }
             setPendingRun(prev => ({ ...prev, status: "done", result: r }));
             onReloadLogs(yearOverride);
-            if (isSheshsSnati) {
-              const detected = r.summary?.division;
-              const expected = activeSubTab;
-              if (detected && detected !== "both" && detected !== expected) {
-                setDivisionMismatch({ runId, result: r, detectedDivision: detected });
-              }
-            }
             // Pending identification — show classify modal
             const queue = [];
             if (r.tikhnun?.pending_identification) queue.push({ tikhnun: r.tikhnun, division: "main", runId });
@@ -1812,16 +1818,19 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
             if (r.error_code === "symbol_mismatch") {
               setPendingRun(null);
               setSymbolMismatch(true);
-            } else if (r.error_code === "year_issues") {
+            } else if (r.error_code === "file_issues") {
               setPendingRun(null);
               setYearMismatch({
-                issues: (r.file_year_issues || []).map(iss => ({
+                issues: (r.file_issues || []).map(iss => ({
                   fileRole: iss.file_role,
                   filenames: iss.filenames,
                   status: iss.status,
                   detectedAcademicYear: iss.detected_academic_year,
+                  detectedDivision: iss.detected_division ?? null,
+                  divisionStatus: iss.division_status ?? null,
                 })),
                 initialYear: r.expected_academic_year,
+                initialDivision: r.expected_division ?? null,
                 files,
                 selectedAccountId,
               });
@@ -1839,9 +1848,9 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
     }
   }
 
-  async function startUpdateCheck(files) {
-    if (!addFileModal) return;
-    const targetLog = addFileModal.log;
+  async function startUpdateCheck(files, targetLogOverride) {
+    const targetLog = targetLogOverride || addFileModal?.log;
+    if (!targetLog) return;
     const hasStoredFiles = !!(targetLog.summary?.stored_file_paths?.length);
     const now = new Date().toISOString();
     setPendingRun({ date: now, status: "loading", runId: null, result: null, error: "", updateLogId: targetLog.id });
@@ -1881,6 +1890,27 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
             if (r.error_code === "symbol_mismatch") {
               setPendingRun(null);
               setSymbolMismatch(true);
+            } else if (r.error_code === "file_issues") {
+              // Same unified problems modal as a brand-new check — but here the check's
+              // year and division are already fixed by the existing log being updated,
+              // so the modal is shown in "swap only" mode (no year/division selectors,
+              // see allowYearOverride={false} / accounts={[]} below): the sole resolution
+              // is replacing the offending file with one that actually matches.
+              setPendingRun(null);
+              setYearMismatch({
+                issues: (r.file_issues || []).map(iss => ({
+                  fileRole: iss.file_role,
+                  filenames: iss.filenames,
+                  status: iss.status,
+                  detectedAcademicYear: iss.detected_academic_year,
+                  detectedDivision: iss.detected_division ?? null,
+                  divisionStatus: iss.division_status ?? null,
+                })),
+                initialYear: r.expected_academic_year,
+                initialDivision: r.expected_division ?? null,
+                files,
+                addFile: { targetLog, hasStoredFiles },
+              });
             } else {
               setPendingRun(prev => ({ ...prev, status: "error", error: r.user_message || r.error || "הבדיקה נכשלה" }));
             }
@@ -1968,25 +1998,6 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
     setPendingRun(null);
     if (savedLogId) {
       try { await axios.delete(`/schools/${schoolId}/logs/${savedLogId}`); } catch { /* silent */ }
-    }
-  }
-
-  async function handleSaveForOtherDivision() {
-    if (!divisionMismatch) return;
-    const { runId, detectedDivision } = divisionMismatch;
-    const targetAcc = accounts.find(a => a.division_type === detectedDivision);
-    setDivisionMismatch(null);
-    if (!targetAcc) return;
-    try {
-      const form = new FormData();
-      form.append("run_id", runId);
-      form.append("school_id", schoolId);
-      form.append("gefen_account_id", targetAcc.id);
-      form.append("academic_year", academicYear);
-      await axios.post("/analyze/save-for-account", form);
-      onReloadLogs();
-    } catch {
-      // silent — non-critical
     }
   }
 
@@ -2610,15 +2621,6 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
         />
       )}
 
-      {divisionMismatch && (
-        <DivisionMismatchModal
-          detectedDivision={divisionMismatch.detectedDivision}
-          activeSubTab={activeSubTab}
-          onSaveForOther={handleSaveForOtherDivision}
-          onDismiss={() => setDivisionMismatch(null)}
-        />
-      )}
-
       {stageMismatch && (
         <StageMismatchModal
           detectedDivision={stageMismatch.detectedDivision}
@@ -2658,12 +2660,35 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
           issues={yearMismatch.issues}
           files={yearMismatch.files}
           initialYear={yearMismatch.initialYear}
+          isSheshsSnati={isSheshsSnati}
+          // "Add file" is updating one specific, already-existing check — its year and
+          // division are fixed by that check, not something to retarget here. Hide both
+          // selectors (accounts=[] hides the division one; allowYearOverride=false hides
+          // the year one) so the only path to resolution is swapping the offending file.
+          accounts={yearMismatch.addFile ? [] : accounts}
+          allowYearOverride={!yearMismatch.addFile}
+          initialDivision={yearMismatch.initialDivision}
           detectFileYear={detectFileYear}
-          onRun={(resolvedFiles, selectedYear) => {
+          onRun={(resolvedFiles, selectedYear, selectedDivision) => {
+            if (yearMismatch.addFile) {
+              const { targetLog } = yearMismatch.addFile;
+              setYearMismatch(null);
+              startUpdateCheck(resolvedFiles, targetLog);
+              return;
+            }
             const { selectedAccountId } = yearMismatch;
             setAcademicYear(selectedYear);
+            // If the advisor chose to run the check for a different division (via
+            // the "בצע בדיקה עבור חטיבה" selector) rather than swapping files,
+            // resolve and use THAT division's gefen_account_id instead of the
+            // originally requested one.
+            let finalAccountId = selectedAccountId;
+            if (isSheshsSnati && selectedDivision) {
+              const match = accounts.find(a => a.division_type === selectedDivision);
+              if (match) finalAccountId = match.id;
+            }
             setYearMismatch(null);
-            startCheck(resolvedFiles, selectedAccountId, selectedYear);
+            startCheck(resolvedFiles, finalAccountId, selectedYear);
           }}
           onCancel={() => setYearMismatch(null)}
         />
