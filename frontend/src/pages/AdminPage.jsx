@@ -2822,6 +2822,29 @@ export default function AdminPage() {
           return false;
         }
         await axios.put(`/schools/${editingSchool.id}`, { ...schoolForm, ...chativaSync, ...legacyCoordinatorSync, student_count: studentCountValue });
+        // A school edited INTO "שש שנתי" needs BOTH תיכון and חטיבת ביניים gefen_accounts
+        // to actually work (division-aware checks, tabs, the division-mismatch modal's
+        // selector, etc.) — unlike creating a new school (which already auto-creates them,
+        // see the `else` branch below), editing never did this, so a school converted from
+        // a single division could silently end up missing the other one's account. This only
+        // ever ADDS accounts that don't already exist — never touches/removes existing ones.
+        if (schoolForm.stage === "sheshshnati") {
+          try {
+            const existing = schoolAccounts[editingSchool.id] || (await axios.get(`/schools/${editingSchool.id}/accounts`)).data || [];
+            const existingTypes = new Set(existing.map(a => a.division_type));
+            const missing = ["tikkon", "beinayim"].filter(dt => !existingTypes.has(dt));
+            for (const divisionType of missing) {
+              await axios.post(`/schools/${editingSchool.id}/accounts`, { division_type: divisionType });
+            }
+            if (missing.length > 0) {
+              const res = await axios.get(`/schools/${editingSchool.id}/accounts`);
+              setSchoolAccounts(prev => ({ ...prev, [editingSchool.id]: res.data }));
+            }
+          } catch {
+            // non-fatal — the school update itself already succeeded; the admin can
+            // still add the missing division manually from the expanded row's "חשבונות גפן" panel
+          }
+        }
         await axios.put(`/schools/${editingSchool.id}/year-admin-data`, yearAdminForm, { params: { academic_year: DEFAULT_ACADEMIC_YEAR } });
         try {
           const res = await axios.get(`/schools/${editingSchool.id}/advisors`);
@@ -2958,6 +2981,12 @@ export default function AdminPage() {
       setDraftTypedAdvisorIds(ids);
       setOriginalTypedAdvisorIds(ids);
     });
+    // Needed by the save handler's sheshshnati division-account completion check
+    // (see handleSaveSchool) — fetched here (not just lazily on row-expand) so it's
+    // available even if the admin edits a school without ever expanding its row.
+    axios.get(`/schools/${school.id}/accounts`).then(res => {
+      setSchoolAccounts(prev => ({ ...prev, [school.id]: res.data || [] }));
+    }).catch(() => {});
     loadUsers();
   }
 

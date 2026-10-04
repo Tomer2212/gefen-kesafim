@@ -2686,6 +2686,11 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
             if (isSheshsSnati && selectedDivision) {
               const match = accounts.find(a => a.division_type === selectedDivision);
               if (match) finalAccountId = match.id;
+              // Keep the visible תיכון/חטיבת ביניים tab in sync with whichever division the
+              // check is actually being saved under — otherwise the just-completed check
+              // briefly doesn't show up under the (now stale) active tab, even though it
+              // was saved correctly, which reads as "did it run in the right place?".
+              setActiveSubTab(selectedDivision);
             }
             setYearMismatch(null);
             startCheck(resolvedFiles, finalAccountId, selectedYear);
