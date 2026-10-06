@@ -241,6 +241,11 @@ async def upload(
     gefen_account_id: str | None = Form(None),
     update_log_id: str | None = Form(None),
     academic_year: str | None = Form(None),
+    # Comma-separated file_role values the user explicitly confirmed in the
+    # file-issues modal (e.g. "gefen,kesafim2000") — lets a "warn"-severity entry
+    # (see _entry_severity) be re-submitted with its ORIGINAL file and actually run,
+    # instead of re-triggering the identical classification and looping forever.
+    acknowledged_file_roles: str | None = Form(None),
     user: dict = Depends(get_current_user),
 ):
     run_id = str(uuid.uuid4())
@@ -256,8 +261,9 @@ async def upload(
         dest.write_bytes(await uf.read())
         saved.append(dest)
 
+    acknowledged_roles = {r.strip() for r in (acknowledged_file_roles or "").split(",") if r.strip()}
     _update_run(run_id, {"status": "processing"})
-    background_tasks.add_task(_process, run_id, saved, run_dir, user["id"], school_id, gefen_account_id, update_log_id, academic_year)
+    background_tasks.add_task(_process, run_id, saved, run_dir, user["id"], school_id, gefen_account_id, update_log_id, academic_year, acknowledged_roles)
     return {"run_id": run_id}
 
 
@@ -265,6 +271,7 @@ async def upload(
 async def detect_file_year(
     file: UploadFile = File(...),
     file_role: str = Form(...),
+    expected_year: str | None = Form(None),
     _user: dict = Depends(get_current_user),
 ):
     """Lightweight, single-file academic-year (and, for gefen/tikhnun, division)
@@ -272,6 +279,7 @@ async def detect_file_year(
     modal's "החלף קובץ" action to preview a replacement file's detected year/division
     before the user commits to re-running the check."""
     tmp_dir = Path(tempfile.mkdtemp(prefix="gefen_detect_"))
+    eff_year = expected_year or DEFAULT_ACADEMIC_YEAR
     try:
         dest = tmp_dir / (file.filename or "upload")
         dest.write_bytes(await file.read())
@@ -281,8 +289,10 @@ async def detect_file_year(
             mapped_years.discard(None)
             detected_division = _detect_tikhnun_division(dest)
             if not mapped_years:
-                return {"status": "unrecognized", "detected_academic_year": None, "detected_division": detected_division}
-            return {"status": "recognized", "detected_academic_year": sorted(mapped_years)[0], "detected_division": detected_division}
+                entry = {"status": "unrecognized", "detected_academic_year": None}
+                return {**entry, "detected_division": detected_division, "severity": _entry_severity(entry, eff_year)}
+            entry = {"status": "recognized", "detected_academic_year": sorted(mapped_years)[0]}
+            return {**entry, "detected_division": detected_division, "severity": _entry_severity(entry, eff_year)}
         if file_role == "gefen":
             dates = _read_gefen_invoice_dates([dest])
             result = _classify_file_year(dates)
@@ -291,19 +301,21 @@ async def detect_file_year(
             except Exception as exc:
                 logger.warning("detect_file_year: gefen division detection failed for %s: %s", dest, exc)
                 detected_division = None
+            severity = _entry_severity(result, eff_year)
             if result["status"] == "recognized":
-                return {"status": "recognized", "detected_academic_year": result["academic_year"], "detected_division": detected_division}
-            return {"status": result["status"], "detected_academic_year": None, "detected_division": detected_division}
+                return {"status": "recognized", "detected_academic_year": result["academic_year"], "detected_division": detected_division, "severity": severity}
+            return {"status": result["status"], "detected_academic_year": None, "detected_division": detected_division, "severity": severity}
         if file_role in ("kesafim2000", "payscool", "schoolcash"):
             if file_role == "kesafim2000" and _kesafim_is_unreadable_binary(dest):
-                return {"status": "unreadable_raw_file", "detected_academic_year": None}
+                return {"status": "unreadable_raw_file", "detected_academic_year": None, "severity": "block"}
             if not _finance_budget_scoped([dest], file_role):
-                return {"status": "unscoped_budget", "detected_academic_year": None}
+                return {"status": "unscoped_budget", "detected_academic_year": None, "severity": "block"}
             dates = _read_finance_invoice_dates([dest], file_role)
             result = _classify_file_year(dates)
+            severity = _entry_severity(result, eff_year)
             if result["status"] == "recognized":
-                return {"status": "recognized", "detected_academic_year": result["academic_year"]}
-            return {"status": result["status"], "detected_academic_year": None}
+                return {"status": "recognized", "detected_academic_year": result["academic_year"], "severity": severity}
+            return {"status": result["status"], "detected_academic_year": None, "severity": severity}
         raise HTTPException(status_code=400, detail="file_role לא מוכר")
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -314,6 +326,7 @@ async def add_file_to_check(
     log_id: str,
     background_tasks: BackgroundTasks,
     files: list[UploadFile] = File(...),
+    acknowledged_file_roles: str | None = Form(None),
     user: dict = Depends(get_current_user),
 ):
     """Re-run a check with original stored files + new uploaded file(s)."""
@@ -360,10 +373,12 @@ async def add_file_to_check(
         all_paths.append(dest)
         file_idx += 1
 
+    acknowledged_roles = {r.strip() for r in (acknowledged_file_roles or "").split(",") if r.strip()}
     _update_run(run_id, {"status": "processing"})
     background_tasks.add_task(
         _process, run_id, all_paths, run_dir,
         user["id"], log["school_id"], log.get("gefen_account_id"), log_id, log.get("academic_year"),
+        acknowledged_roles,
     )
     return {"run_id": run_id}
 
@@ -1627,6 +1642,15 @@ def _finalize_tikhnun_metrics(
             iname = str(r[8]).strip()  if len(r) > 8  and r[8]  else ""
             return f"{rcode}-{iname}"
 
+        # NARROW ADDITIVE FALLBACK: when col J (מספר מענה) is blank, the plan-side
+        # key falls back to the full report-code+name text above, which fails to
+        # match the doch-side key whenever the doch description carries the
+        # program number as a leading prefix instead (e.g. plan "... - 53448" vs
+        # doch "53448-..."). Only ever consulted when the primary lookup below is 0.
+        def _extract_trailing_plan_num(name: str) -> str | None:
+            m = re.search(r"-\s*(\d{3,7})\s*$", name or "")
+            return m.group(1) if m else None
+
         # Per-budget exec sums: {budget_norm: {plan_key: amount}}
         # Must be per-budget to avoid cross-budget contamination when two budgets
         # share the same plan key (same report code + no plan number).
@@ -1701,6 +1725,10 @@ def _finalize_tikhnun_metrics(
             budget_norm = g["budget_norm"]
             pkey        = g["pkey"]
             divuach     = exec_sums.get(budget_norm, {}).get(pkey, 0.0)
+            if divuach == 0.0 and g["mispnum"] == "אין":
+                _trail = _extract_trailing_plan_num(g["name"])
+                if _trail:
+                    divuach = exec_sums.get(budget_norm, {}).get(_trail, divuach)
             hefresh     = tikhnun_v - divuach
             if hefresh < 1:
                 continue
@@ -1734,6 +1762,7 @@ def _finalize_tikhnun_metrics(
                 # Approximate: H - L (kvua correction per-budget is computed separately when available)
                 "flexible_remaining": max(bud["H"] - bud["L"], 0.0),
                 "doch_analyzed":      bud.get("doch_analyzed", False),
+                "machozi_i":          bud.get("machozi_i", 0.0),
             },
         })
 
@@ -2344,9 +2373,13 @@ def _compute_per_budget_nihul_summary(
 
     for bdict in budgets_list:
         budget_norm = bdict.get("name", "")
-        H = float((bdict.get("overview") or {}).get("budget") or 0)
+        ov = bdict.get("overview") or {}
+        H = float(ov.get("budget") or 0)
         if not H:
             continue
+        # Base for the max-planning-budget formula includes "תקציב לליווי דיפרנציאלי"
+        # (machozi_i), same enrichment used for יוזמות's max base in tikhnun_processor.py.
+        H_base = H + float(ov.get("machozi_i") or 0)
 
         # Determine stage from results_clean (first matching row), like yozma
         stage = None
@@ -2384,7 +2417,7 @@ def _compute_per_budget_nihul_summary(
             betikhnun_total += _to_f(_c13) if _c13 is not None else _to_f(row[15])
 
         # Max planning budget: up to 500,000 -> flat 25,000; otherwise 5% of budget height
-        mx = 25000.0 if H <= 500000 else H * 0.05
+        mx = 25000.0 if H_base <= 500000 else H_base * 0.05
 
         bdict["nihul_summary"] = {
             "max":         int(mx),
@@ -2671,6 +2704,18 @@ def _compute_multi_budget_tikhnun(
             h_num = _to_f(row[7]) if len(row) > 7 else 0.0
             if h_num <= 0:
                 continue
+            # תקציב לליווי דיפרנציאלי מחוזי: שורה נפרדת עם אותו שם תקציב (עמודה A)
+            # אך F מכילה "מחוזי"+"דיפרנציאלי"; הסכום נלקח מעמודה I. נוסף ל-H כבסיס
+            # לחישובי "תקציב מקסימלי" (יוזמות / ניהול ותפעול), תואם ל-tikhnun_processor.py.
+            machozi_i = 0.0
+            for mrow in hakol_rows[1:]:
+                mname = str(mrow[0]).strip() if mrow and mrow[0] else ""
+                if mname != name_s:
+                    continue
+                mfval = str(mrow[5]).strip() if len(mrow) > 5 and mrow[5] else ""
+                if "מחוזי" in mfval and "דיפרנציאלי" in mfval:
+                    machozi_i = _to_f(mrow[8]) if len(mrow) > 8 else 0.0
+                    break
             budgets_raw.append({
                 "raw_name":   name_s,
                 "norm_name":  _norm_bname(name_s),
@@ -2681,6 +2726,7 @@ def _compute_multi_budget_tikhnun(
                 "sum_chayav": 0.0,
                 "nikuy":      None,
                 "pct_tanuz":  None,
+                "machozi_i":  machozi_i,
             })
 
         if len(budgets_raw) == 0:
@@ -2771,6 +2817,29 @@ def _compute_multi_budget_tikhnun(
                         else:
                             r["stage"] = ""
             unidentified = [r for r in results_clean if not r.get("budget")]
+
+        # Last-resort retry: some report codes are shared across more than one budget
+        # in the plan file, so zihuy's identification of those specific rows relies on
+        # sequential context (nearby already-resolved rows in the merged doch
+        # sequence) — which file happens to come first can change the outcome for
+        # JUST those ambiguous rows. Confirmed by direct testing: reversing doch file
+        # order never changes an already-uniquely-resolved row, only ones that were
+        # ambiguous to begin with. Only worth trying with 2+ doch files, and only
+        # when something is still stuck after the normal pass + finance cross-ref.
+        if unidentified and len(doch_paths) >= 2:
+            try:
+                doch_str_rev = list(reversed(doch_str))
+                results_clean_rev, _warn_rev, _miss_rev, _all_rev = _zihuy_identify(doch_str_rev, [plan_fpath])
+                unidentified_rev = [r for r in results_clean_rev if not r.get("budget")]
+                if not unidentified_rev:
+                    logger.info(
+                        "Tikhnun identification resolved only via reversed doch file order (%d rows)",
+                        len(results_clean_rev),
+                    )
+                    results_clean = results_clean_rev
+                    unidentified = []
+            except Exception as exc:
+                logger.warning("Reversed-order zihuy retry failed (non-fatal): %s", exc)
 
         # Still unidentified — block tikhnun and store context for classify endpoint
         if unidentified:
@@ -3017,7 +3086,7 @@ def _build_division_run_data(
     }
 
 
-def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", school_id: str | None = None, gefen_account_id: str | None = None, update_log_id: str | None = None, academic_year: str | None = None) -> None:
+def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", school_id: str | None = None, gefen_account_id: str | None = None, update_log_id: str | None = None, academic_year: str | None = None, acknowledged_roles: set[str] | None = None) -> None:
     run_data: dict = {"status": "processing"}
     try:
         # Upload source files to Supabase Storage for future "add file" retrieval
@@ -3072,7 +3141,7 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
         expected_year = academic_year or DEFAULT_ACADEMIC_YEAR
         file_issues = _collect_file_issues(
             tikhnun_paths, gefen_paths, gefen_file_stats, finance_paths, finance_type,
-            expected_year, requested_division,
+            expected_year, requested_division, acknowledged_roles,
         )
         if file_issues:
             _update_run(run_id, {
@@ -3712,11 +3781,28 @@ def _read_finance_invoice_dates(paths: list[Path], finance_type: str) -> list[da
 
 def _classify_file_year(dates: list[date]) -> dict:
     """Classifies a list of invoice dates into a single academic year using a
-    majority-share rule (see _GEFEN_YEAR_MAJORITY_THRESHOLD), after requiring at least
-    _GEFEN_YEAR_MIN_DATED_ROWS dated rows to trust the result at all.
-    Returns {"status": "empty"} | {"status": "unrecognized"} | {"status": "recognized", "academic_year": ...}."""
-    if len(dates) < _GEFEN_YEAR_MIN_DATED_ROWS:
+    majority-share rule (see _GEFEN_YEAR_MAJORITY_THRESHOLD) once there are at least
+    _GEFEN_YEAR_MIN_DATED_ROWS dated rows. Below that threshold, a small but internally
+    CONSISTENT sample (all dates agree on one academic year) is still trusted outright —
+    this covers legitimately tiny budgets (e.g. תקומה/פל"ג) that may never accumulate 5
+    dated invoices in a whole year. A genuinely empty file, or a small sample that
+    disagrees with itself, is handled by the caller (see _entry_severity) rather than
+    silently dropped here.
+    Returns {"status": "empty"} | {"status": "mixed_years"} | {"status": "unrecognized"}
+    | {"status": "recognized", "academic_year": ...}."""
+    if not dates:
         return {"status": "empty"}
+    if len(dates) < _GEFEN_YEAR_MIN_DATED_ROWS:
+        years = {get_academic_year_for_date(d) for d in dates}
+        years.discard(None)
+        if len(years) == 1:
+            return {"status": "recognized", "academic_year": next(iter(years))}
+        if not years:
+            # None of the dates map to any known academic year at all — not "a small
+            # sample disagreeing with itself", just no usable signal. Consistent with
+            # the 5+-row branch below (no counts -> "unrecognized"), always blocking.
+            return {"status": "unrecognized"}
+        return {"status": "mixed_years"}
     counts: dict[str, int] = {}
     for d in dates:
         year = get_academic_year_for_date(d)
@@ -3763,15 +3849,29 @@ _KESAFIM_UNREADABLE_MESSAGE = (
 )
 
 
-def _entry_has_issue(entry: dict, expected_year: str) -> bool:
-    if entry["status"] in ("unscoped_budget", "unreadable_raw_file"):
-        return True
-    if entry["status"] == "unrecognized":
-        return True
+def _entry_severity(entry: dict, expected_year: str) -> str:
+    """Returns "none" | "warn" | "block" for a file-issues entry.
+    "block" can only be resolved by swapping/removing the file. "warn" can ALSO be
+    resolved by the user explicitly acknowledging it (see acknowledged_roles in
+    _collect_file_issues) — reserved for the two cases where we genuinely can't tell
+    if the file is wrong, vs. it just legitimately has very little data."""
+    if entry["status"] in ("unscoped_budget", "unreadable_raw_file", "unrecognized"):
+        return "block"
     if entry["status"] == "recognized":
-        return entry["detected_academic_year"] != expected_year
-    # "empty" — only a problem once suspicious for the expected year
-    return _is_empty_file_suspicious(expected_year)
+        return "block" if entry["detected_academic_year"] != expected_year else "none"
+    if entry["status"] == "mixed_years":
+        return "warn"
+    # "empty" — only a problem once suspicious for the expected year, and even then
+    # only a warning (a legitimately tiny/unused budget can stay empty all year).
+    return "warn" if _is_empty_file_suspicious(expected_year) else "none"
+
+
+def _entry_has_issue(entry: dict, expected_year: str) -> bool:
+    """Plain-bool wrapper around _entry_severity for callers with no acknowledgment
+    path of their own (e.g. meeting_upload_router's per-file portal validation,
+    which just rejects a file outright with a message — there's no modal/checkbox
+    there to resolve a "warn" the way the main file-issues flow does)."""
+    return _entry_severity(entry, expected_year) != "none"
 
 
 # The 8 canonical budget names the app recognizes (mirrors zihuy_core.BUDGET_NAME_MAP's
@@ -3896,6 +3996,7 @@ def _collect_file_issues(
     finance_type: str | None,
     expected_year: str,
     requested_division: str | None,
+    acknowledged_roles: set[str] | None = None,
 ) -> list[dict]:
     """Builds one entry per uploaded tikhnun/gefen/finance file (or file group) —
     unconditionally, whether it matches expected_year/requested_division or not. If at
@@ -3938,7 +4039,17 @@ def _collect_file_issues(
         else:
             entries.append(_dated_file_entry(finance_type, filenames, _read_finance_invoice_dates(finance_paths, finance_type)))
 
-    if any(_entry_has_issue(e, expected_year) for e in entries) or any(_entry_has_division_issue(e) for e in entries):
+    acknowledged_roles = acknowledged_roles or set()
+    blocking = False
+    for e in entries:
+        severity = _entry_severity(e, expected_year)
+        if _entry_has_division_issue(e):
+            severity = "block"
+        e["severity"] = severity
+        if severity == "block" or (severity == "warn" and e["file_role"] not in acknowledged_roles):
+            blocking = True
+
+    if blocking:
         return entries
     return []
 

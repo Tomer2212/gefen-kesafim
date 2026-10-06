@@ -10,6 +10,17 @@ const FILE_ROLE_LABEL = {
   schoolcash: "קובץ סקולקאש",
 };
 
+// Used instead of FILE_ROLE_LABEL whenever a row represents more than one physical
+// file (finance-software rows can merge several files into one logical ledger) —
+// makes it visually explicit this is a group, not a single file that might be missing.
+const FILE_ROLE_LABEL_PLURAL = {
+  tikhnun: "קבצי תכנון",
+  gefen: "קבצי דיווח ביצוע",
+  kesafim2000: "קבצי כספים2000",
+  payscool: "קבצי פייסקול",
+  schoolcash: "קבצי סקולקאש",
+};
+
 const FINANCE_SOFTWARE_NAME = {
   kesafim2000: "כספים2000",
   payscool: "פייסקול",
@@ -26,7 +37,12 @@ function rowNote(row, selectedYear) {
     return `הקובץ שהועלה אינו תקין. נא להוריד מחדש את הקובץ מ${softwareName} ולוודא שבחרתם "לפי סוג תקציב". לאחר מכן החליפו את הקובץ הקיים ונסו שוב.`;
   }
   if (row.status === "empty") {
-    return `אין אסמכתאות מתוארכות בקובץ זה — נא לוודא שהוא שייך לשנת הלימודים ${selectedYear}.`;
+    if (row.severity !== "warn") return null;
+    const roleLabel = FILE_ROLE_LABEL[row.fileRole] || row.fileRole;
+    return `שים לב — ${roleLabel} שהעלית ריק מאסמכתאות. האם לבצע איתו את הבדיקה בכל זאת?`;
+  }
+  if (row.status === "mixed_years") {
+    return "שים לב — יש אסמכתאות משנות לימוד שונות בקובץ זה.";
   }
   if (row.status === "unrecognized") {
     return "לא ניתן לזהות בבירור לאיזו שנת לימודים קובץ זה שייך.";
@@ -57,11 +73,12 @@ const REMOVABLE_ROLES = new Set(["gefen", "kesafim2000", "payscool", "schoolcash
 // as opposed to a plain year mismatch which the year selector can resolve.
 const INVALID_FILE_STATUSES = new Set(["unscoped_budget", "unreadable_raw_file"]);
 
-function RowItem({ row, index, selectedYear, selectedDivision, isSheshsSnati, onSwap, onRemove }) {
+function RowItem({ row, index, selectedYear, selectedDivision, isSheshsSnati, onSwap, onRemove, onAcknowledge }) {
   const note = rowNote(row, selectedYear);
   const mismatched = row.status === "recognized" && row.detectedYear !== selectedYear;
   const divNote = isSheshsSnati ? divisionNote(row, selectedDivision) : null;
-  const roleLabel = FILE_ROLE_LABEL[row.fileRole] || row.fileRole;
+  const isMultiFile = row.currentFilenames.length > 1;
+  const roleLabel = (isMultiFile ? FILE_ROLE_LABEL_PLURAL[row.fileRole] : FILE_ROLE_LABEL[row.fileRole]) || row.fileRole;
   const divisionWord = isSheshsSnati && row.detectedDivision && row.detectedDivision !== "both"
     ? DIVISION_WORD[row.detectedDivision] : null;
   return (
@@ -70,16 +87,33 @@ function RowItem({ row, index, selectedYear, selectedDivision, isSheshsSnati, on
         <div className="text-sm font-semibold text-slate-800">
           {roleLabel}{divisionWord ? ` ${divisionWord}` : ""}
         </div>
-        <div className="text-xs text-slate-500 truncate">{row.currentFilenames.join(", ")}</div>
+        <div className="text-xs text-slate-500">
+          {row.currentFilenames.map((name, i) => (
+            <div key={i} className="truncate">{name}</div>
+          ))}
+        </div>
         {row.status === "recognized" ? (
           <div className={`text-xs font-semibold mt-1 ${mismatched ? "text-red-600" : "text-green-600"}`}>
             זוהתה שנת לימודים: {row.detectedYear}
           </div>
         ) : (
-          <div className={`text-xs mt-1 ${INVALID_FILE_STATUSES.has(row.status) ? "text-red-600 font-semibold" : "text-amber-700"}`}>{note}</div>
+          note && (
+            <div className={`text-xs mt-1 ${INVALID_FILE_STATUSES.has(row.status) ? "text-red-600 font-semibold" : "text-amber-700"}`}>{note}</div>
+          )
         )}
         {divNote && (
           <div className={`text-xs font-semibold mt-1 ${divNote.color}`}>{divNote.text}</div>
+        )}
+        {row.severity === "warn" && (
+          <label htmlFor={`warn-ack-${index}`} className="flex items-center gap-2 mt-1.5 text-xs text-slate-700">
+            <input
+              id={`warn-ack-${index}`}
+              type="checkbox"
+              checked={row.warnAcknowledged}
+              onChange={e => onAcknowledge(index, e.target.checked)}
+            />
+            אני מאשר/ת שבדקתי מול בית הספר ובחרתי להמשיך עם הקובץ כפי שהוא
+          </label>
         )}
       </div>
       <SwapFileButton rowId={`swap-file-${index}`} disabled={row.checking} onPick={file => onSwap(index, file)} />
@@ -143,13 +177,27 @@ export function YearMismatchModal({
     // division) are part of a legitimate "both divisions at once" upload — never
     // block/flag them regardless of which division is currently selected.
     divisionExempt: isSheshsSnati && iss.detectedDivision != null && !iss.divisionStatus,
+    severity: iss.severity ?? "block",
+    warnAcknowledged: false,
     replacementFile: null,
     checking: false,
     removed: false,
   })));
 
+  // "recognized" is re-checked live against the currently selected year (the dropdown
+  // lets the advisor retarget the whole check to a different year without swapping any
+  // file) — every other status's severity was computed server-side once and doesn't
+  // change based on that selector. "warn"-severity rows (empty/mixed_years) can ALSO be
+  // resolved by ticking their acknowledgment checkbox, not only by swapping the file.
+  function rowBlocked(row) {
+    if (INVALID_FILE_STATUSES.has(row.status)) return true;
+    if (row.status === "recognized") return row.detectedYear !== selectedYear;
+    if (row.severity === "warn") return !row.warnAcknowledged;
+    return row.severity === "block";
+  }
+
   const canRun = rows.every(r => r.removed || (
-    (!INVALID_FILE_STATUSES.has(r.status) && (r.status !== "recognized" || r.detectedYear === selectedYear))
+    !rowBlocked(r)
     && (!isSheshsSnati || r.divisionExempt || !r.detectedDivision || r.detectedDivision === "both" || r.detectedDivision === selectedDivision)
   ));
   const rowsWithIndex = rows.map((row, index) => ({ row, index })).filter(({ row }) => !row.removed);
@@ -160,10 +208,14 @@ export function YearMismatchModal({
     setRows(prev => prev.map((r, i) => (i === index ? { ...r, removed: true } : r)));
   }
 
+  function handleAcknowledge(index, checked) {
+    setRows(prev => prev.map((r, i) => (i === index ? { ...r, warnAcknowledged: checked } : r)));
+  }
+
   async function handleSwap(index, file) {
     setRows(prev => prev.map((r, i) => (i === index ? { ...r, checking: true } : r)));
     try {
-      const result = await detectFileYear(file, rows[index].fileRole);
+      const result = await detectFileYear(file, rows[index].fileRole, selectedYear);
       setRows(prev => prev.map((r, i) => (i === index ? {
         ...r,
         checking: false,
@@ -174,6 +226,8 @@ export function YearMismatchModal({
         // ever applied to the ORIGINAL pairing, so it's cleared on swap.
         detectedDivision: result.detected_division ?? null,
         divisionExempt: false,
+        severity: result.severity ?? "block",
+        warnAcknowledged: false,
         currentFilenames: [file.name],
         replacementFile: file,
       } : r)));
@@ -198,7 +252,14 @@ export function YearMismatchModal({
       }
     });
     const finalFiles = [...files.filter(f => !excludedNames.has(f.name)), ...replacements];
-    onRun(finalFiles, selectedYear, selectedDivision);
+    // Only a row that's (a) still carrying its ORIGINAL file (no replacement — a
+    // swapped-in file gets re-classified fresh server-side) and (b) explicitly
+    // acknowledged needs to tell the backend to skip re-flagging it, or re-submitting
+    // the same file would re-trigger the identical "warn" classification forever.
+    const acknowledgedRoles = rows
+      .filter(r => !r.removed && !r.replacementFile && r.severity === "warn" && r.warnAcknowledged)
+      .map(r => r.fileRole);
+    onRun(finalFiles, selectedYear, selectedDivision, acknowledgedRoles);
   }
 
   return (
@@ -216,7 +277,7 @@ export function YearMismatchModal({
         {yearIssueRows.length > 0 && (
           <ul className="flex flex-col gap-2">
             {yearIssueRows.map(({ row, index }) => (
-              <RowItem key={index} row={row} index={index} selectedYear={selectedYear} selectedDivision={selectedDivision} isSheshsSnati={isSheshsSnati} onSwap={handleSwap} onRemove={handleRemove} />
+              <RowItem key={index} row={row} index={index} selectedYear={selectedYear} selectedDivision={selectedDivision} isSheshsSnati={isSheshsSnati} onSwap={handleSwap} onRemove={handleRemove} onAcknowledge={handleAcknowledge} />
             ))}
           </ul>
         )}
@@ -226,7 +287,7 @@ export function YearMismatchModal({
             <h3 className="text-base font-bold text-slate-800">קובץ לא תקין</h3>
             <ul className="flex flex-col gap-2">
               {budgetIssueRows.map(({ row, index }) => (
-                <RowItem key={index} row={row} index={index} selectedYear={selectedYear} selectedDivision={selectedDivision} isSheshsSnati={isSheshsSnati} onSwap={handleSwap} onRemove={handleRemove} />
+                <RowItem key={index} row={row} index={index} selectedYear={selectedYear} selectedDivision={selectedDivision} isSheshsSnati={isSheshsSnati} onSwap={handleSwap} onRemove={handleRemove} onAcknowledge={handleAcknowledge} />
               ))}
             </ul>
           </>

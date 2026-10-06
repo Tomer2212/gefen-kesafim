@@ -1,9 +1,14 @@
+import re
 from pathlib import Path
 
 import openpyxl
 import pandas as pd
 
 from logic.gefen_processor import normalize_amount
+
+_DATE_SHAPE_RE = re.compile(r"^\d{2}\.\d{2}\.\d{2}$")
+_PLAIN_INT_RE = re.compile(r"^\d+$")
+_AMOUNT_SHAPE_RE = re.compile(r"^-?\d+(,\d{3})*(\.\d{1,2})?-?$")
 
 
 def load_kesafim(filepath: str) -> pd.DataFrame:
@@ -90,13 +95,74 @@ def _read_rows(filepath: str) -> list[list[str]]:
     return [line.rstrip("\r").split("\t") for line in content.strip().split("\n")]
 
 
+def _looks_like_date(s: str) -> bool:
+    return bool(_DATE_SHAPE_RE.match(s.strip()))
+
+
+def _looks_like_plain_number(s: str) -> bool:
+    return bool(_PLAIN_INT_RE.match(s.strip()))
+
+
+def _looks_like_amount(s: str) -> bool:
+    s = s.strip()
+    if not _AMOUNT_SHAPE_RE.match(s):
+        return False
+    return normalize_amount(s) != ""
+
+
+def _looks_like_invoice_number(s: str) -> bool:
+    s = s.strip()
+    return bool(s) and any(ch.isdigit() for ch in s)
+
+
+def _try_splice_continuation(parts: list[str], line_rows: list[list[str]], idx: int, col_idx: dict) -> list[str] | None:
+    """Recover a row broken across two physical lines by a stray line-break in
+    the source export (observed real-world Kesafim2000 artifact: columns A,B
+    land on one line, columns C.. land on the next with an empty leading cell).
+    Deliberately scoped to the exact observed shape (only columns A,B present)
+    rather than any truncation width. Returns the merged row, or None if this
+    isn't that pattern (caller then falls back to today's existing drop)."""
+    if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
+        return None
+    if idx + 1 >= len(line_rows):
+        return None
+
+    next_parts = line_rows[idx + 1]
+    next_col_a = next_parts[0].strip() if next_parts else ""
+    if next_col_a and _PLAIN_INT_RE.match(next_col_a):
+        return None  # next line is its own legitimate data row
+
+    merged = parts + next_parts[1:]
+
+    def _merged_cell(field: str) -> str:
+        i = col_idx.get(field)
+        return merged[i].strip() if i is not None and i < len(merged) else ""
+
+    if not _looks_like_date(_merged_cell("invoice_date")):
+        return None
+    if not _looks_like_plain_number(_merged_cell("item_number")):
+        return None
+    if not _looks_like_amount(_merged_cell("amount_raw")):
+        return None
+    if not _looks_like_amount(_merged_cell("total")):
+        return None
+    if not _looks_like_invoice_number(_merged_cell("invoice_number")):
+        return None
+
+    return merged
+
+
 def _parse_blocks(line_rows: list[list[str]]) -> list[dict]:
     rows = []
     current_code = None
     header_next = False
     col_idx = dict(_LEGACY_IDX)  # field -> column index for the current block
+    skip_next = False
 
-    for parts in line_rows:
+    for idx, parts in enumerate(line_rows):
+        if skip_next:
+            skip_next = False
+            continue
         if parts[0] == "קוד גפן":
             current_code = int(parts[1]) if parts[1].strip().isdigit() else None
             header_next = True
@@ -117,13 +183,19 @@ def _parse_blocks(line_rows: list[list[str]]) -> list[dict]:
         if current_code is None:
             continue
 
+        # A valid data row must at least reach the amount column. If not, try
+        # to recover a row that got split across two physical lines (see
+        # _try_splice_continuation) before giving up on it as before.
+        if col_idx["amount_raw"] >= len(parts):
+            merged = _try_splice_continuation(parts, line_rows, idx, col_idx)
+            if merged is None:
+                continue
+            parts = merged
+            skip_next = True
+
         def _cell(field: str) -> str:
             i = col_idx.get(field)
             return parts[i].strip() if i is not None and i < len(parts) else ""
-
-        # A valid data row must at least reach the amount column.
-        if col_idx["amount_raw"] >= len(parts):
-            continue
 
         rows.append({
             "report_code": current_code,

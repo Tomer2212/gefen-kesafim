@@ -316,6 +316,7 @@ resolved_at TIMESTAMPTZ
 - **API calls:** `main.jsx` axios interceptor reads `supabase.auth.getSession()` and adds `Authorization: Bearer <token>` to every request.
 - **Backend verification:** `auth.py` verifies the JWT using Supabase's public JWKS key (fetched once on startup, cached 1 hour). No network call per request. Fetches `role` from the `profiles` table (cached 5 min per user).
 - **Cache invalidation:** `invalidate_profile_cache(user_id)` is called immediately after any role change so it takes effect without waiting for the cache TTL.
+- **Cold-load race guard:** `main.jsx`'s request interceptor `await`s the initial `supabase.auth.getSession()` call if it hasn't resolved yet before attaching the token. Without this, a request fired from a component's `useEffect` on a hard/direct page load (e.g. navigating straight to a deep link) can go out before the token is ready, with no `Authorization` header — `HTTPBearer()` in `auth.py` then returns **403** (not 401), which bypasses the token-refresh-and-retry logic in the response interceptor (that logic only triggers on 401). Don't reintroduce a component that fires its own request before this resolves.
 
 ---
 
@@ -932,6 +933,46 @@ In addition, alongside the professional/technical explanation, include a **simpl
 **How to detect it:** `Get-CimInstance Win32_Process -Filter "Name='python.exe'"` (PowerShell) and look for **more than one** python process, especially ones with `-c "from multiprocessing.spawn import spawn_main; spawn_main(parent_pid=...)"` in the command line whose `parent_pid` no longer corresponds to a running process.
 
 **Fix:** Kill *all* `python.exe` processes related to the backend (both the reloader and any orphaned `--multiprocessing-fork` children), confirm the port is free (`Get-NetTCPConnection -LocalPort 8000 -State Listen`), then start a single fresh `uvicorn` instance. Verify with a direct `curl` to a known new route — a `403`/expected-auth response confirms the route is registered; a `404` means you're still hitting a stale process.
+
+---
+
+## Local Dev Troubleshooting — `vite.config.js` Proxy Changes Need a Full Restart
+
+Adding a new entry to the `server.proxy` map in `frontend/vite.config.js` (e.g. a new backend router prefix) is **not hot-reloadable**. Vite's dev server proxy is configured once at server startup. If the frontend dev server (`npm run dev`) was already running when the entry was added, requests to that new prefix will silently fall through to the SPA's `index.html` (the React Router fallback) instead of reaching the backend — the browser gets HTML back where JSON was expected, which typically surfaces as a confusing frontend crash (e.g. `"X.map is not a function"`) rather than an obvious network error.
+
+**Fix:** Stop and restart `npm run dev` (frontend only — the backend's `--reload` is unaffected) any time `vite.config.js` itself changes, then hard-refresh the browser.
+
+---
+
+## External File Storage — Cloudflare R2 (large files served outside Supabase)
+
+For large binary assets that shouldn't live in Supabase Storage or on Render's ephemeral disk (e.g. training videos), this project uses a private **Cloudflare R2** bucket (`gefenai-tutorial`), accessed server-side via the S3-compatible API (`boto3`), with short-lived **presigned URLs** handed to the authenticated frontend. See `backend/routers/training_videos_router.py` and the `training_videos` table for the reference implementation (nullable `org_id` column — `null` = visible to all orgs, otherwise scoped to one org, filtered server-side using the requesting user's `org_id`).
+
+**R2 env vars:** `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME` (local `.env` + must also be set separately in Render's Environment tab for the backend service — they are **not** deployed via git).
+
+**Lessons learned (apply these before spending time debugging what looks like a CORS/ORB issue):**
+
+1. **Always `.strip()` env vars read for R2/external API config.** Pasting a value into Render's Environment UI can silently include a trailing newline. A malformed bucket name like `"gefenai-tutorial\n"` produces a broken request path, R2 returns an `application/xml` error body instead of the video, and the browser reports this as `net::ERR_BLOCKED_BY_ORB` — which looks exactly like a missing-CORS-header problem but isn't. `training_videos_router.py`'s `_env()` helper does this; follow the same pattern for any new external-storage env var. If ORB/CORS errors show up despite correct-looking config, inspect the actual **Request URL** in the Network tab first for stray `%0A`/whitespace before touching CORS settings.
+2. **R2 buckets need an explicit CORS policy for browser access**, configured once via the Cloudflare dashboard (R2 → bucket → **Settings** → **CORS Policy**) — not settable via a bucket-scoped "Object Read & Write" API token (`PutBucketCors` requires Admin-level permissions, so a least-privilege token gets `AccessDenied`). Required whenever the frontend origin(s) change or a new bucket is created:
+   ```json
+   [
+     {
+       "AllowedOrigins": ["https://gefenai.co.il", "http://localhost:5173"],
+       "AllowedMethods": ["GET", "HEAD"],
+       "AllowedHeaders": ["*"],
+       "ExposeHeaders": ["Content-Range", "Content-Length", "Accept-Ranges", "ETag"],
+       "MaxAgeSeconds": 3600
+     }
+   ]
+   ```
+3. **Before uploading a new video, check its codec and remux if needed** — don't re-encode unless necessary:
+   ```bash
+   ffprobe -v error -show_entries stream=codec_type,codec_name -of default=noprint_wrappers=1 input.mkv
+   # If video=h264 and audio=aac, a lossless, near-instant remux is enough:
+   ffmpeg -y -i input.mkv -c copy -movflags +faststart output.mp4
+   ```
+   `-movflags +faststart` moves the `moov` atom to the front of the file so the browser can start playback/seeking without waiting on a request for the end of a multi-GB file — check with a quick MP4 box scan (`mdat` appearing before `moov` means it's missing) before assuming a file already has it.
+4. **A cross-org access requirement (e.g. "only org X can see this video") belongs in the `training_videos.org_id` filter, server-side** — never rely on the presigned URL's obscurity alone for that. The presigned URL's short TTL (15 min) is about limiting link-sharing/caching exposure, not about enforcing who gets a URL in the first place.
 
 ---
 

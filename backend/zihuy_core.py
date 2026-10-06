@@ -269,6 +269,13 @@ def identify(doch_paths, plan_fpaths):
         if rows and header_row is None:
             header_row = rows[0]
         for row in rows[1:]:
+            # Trailing fully-blank rows are a recurring artifact in exported doch
+            # files (leftover formatting, not real data) — they can never be
+            # identified (no supplier/amount/code at all), so skip them before they
+            # ever enter the identification pipeline, instead of always surfacing
+            # as a dead-end "unidentified" row in the manual-classification screen.
+            if all(v is None or (isinstance(v, str) and not v.strip()) for v in row):
+                continue
             key = tuple(row)
             if key not in seen_rows:
                 seen_rows.add(key)

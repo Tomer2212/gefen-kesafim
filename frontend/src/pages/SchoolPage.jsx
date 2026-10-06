@@ -1750,15 +1750,16 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
     setColOrder(next);
   }
 
-  async function detectFileYear(file, fileRole) {
+  async function detectFileYear(file, fileRole, expectedYear) {
     const form = new FormData();
     form.append("file", file);
     form.append("file_role", fileRole);
+    if (expectedYear) form.append("expected_year", expectedYear);
     const { data } = await axios.post("/analyze/detect-file-year", form);
     return data;
   }
 
-  async function startCheck(files, selectedAccountId, yearOverride) {
+  async function startCheck(files, selectedAccountId, yearOverride, acknowledgedRoles) {
     const now = new Date().toISOString();
     setPendingRun({ date: now, status: "loading", runId: null, result: null, error: "" });
     setShowNewCheckModal(false);
@@ -1768,6 +1769,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
       form.append("school_id", schoolId);
       if (selectedAccountId) form.append("gefen_account_id", selectedAccountId);
       form.append("academic_year", yearOverride || academicYear);
+      if (acknowledgedRoles?.length) form.append("acknowledged_file_roles", acknowledgedRoles.join(","));
       const { data } = await axios.post("/analyze/upload", form);
       const runId = data.run_id;
       setPendingRun(prev => ({ ...prev, runId }));
@@ -1828,6 +1830,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
                   detectedAcademicYear: iss.detected_academic_year,
                   detectedDivision: iss.detected_division ?? null,
                   divisionStatus: iss.division_status ?? null,
+                  severity: iss.severity ?? "block",
                 })),
                 initialYear: r.expected_academic_year,
                 initialDivision: r.expected_division ?? null,
@@ -1848,7 +1851,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
     }
   }
 
-  async function startUpdateCheck(files, targetLogOverride) {
+  async function startUpdateCheck(files, targetLogOverride, acknowledgedRoles) {
     const targetLog = targetLogOverride || addFileModal?.log;
     if (!targetLog) return;
     const hasStoredFiles = !!(targetLog.summary?.stored_file_paths?.length);
@@ -1858,6 +1861,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
     try {
       const form = new FormData();
       files.forEach(f => form.append("files", f));
+      if (acknowledgedRoles?.length) form.append("acknowledged_file_roles", acknowledgedRoles.join(","));
       let apiUrl;
       if (hasStoredFiles) {
         // New: only upload the missing file — originals are fetched from Storage
@@ -1905,6 +1909,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
                   detectedAcademicYear: iss.detected_academic_year,
                   detectedDivision: iss.detected_division ?? null,
                   divisionStatus: iss.division_status ?? null,
+                  severity: iss.severity ?? "block",
                 })),
                 initialYear: r.expected_academic_year,
                 initialDivision: r.expected_division ?? null,
@@ -2669,11 +2674,11 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
           allowYearOverride={!yearMismatch.addFile}
           initialDivision={yearMismatch.initialDivision}
           detectFileYear={detectFileYear}
-          onRun={(resolvedFiles, selectedYear, selectedDivision) => {
+          onRun={(resolvedFiles, selectedYear, selectedDivision, acknowledgedRoles) => {
             if (yearMismatch.addFile) {
               const { targetLog } = yearMismatch.addFile;
               setYearMismatch(null);
-              startUpdateCheck(resolvedFiles, targetLog);
+              startUpdateCheck(resolvedFiles, targetLog, acknowledgedRoles);
               return;
             }
             const { selectedAccountId } = yearMismatch;
@@ -2693,7 +2698,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
               setActiveSubTab(selectedDivision);
             }
             setYearMismatch(null);
-            startCheck(resolvedFiles, finalAccountId, selectedYear);
+            startCheck(resolvedFiles, finalAccountId, selectedYear, acknowledgedRoles);
           }}
           onCancel={() => setYearMismatch(null)}
         />
