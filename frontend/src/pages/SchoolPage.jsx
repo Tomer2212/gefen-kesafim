@@ -1063,7 +1063,10 @@ function FileCheckCell({ log, colKey, state, notCheckedReason, title, onAddFile 
 
   let filenames = [];
   if (colKey === "doch")    filenames = log.gefen_file_names || [];
-  if (colKey === "kasafim") filenames = log.finance_file_name ? [log.finance_file_name] : [];
+  // finance_file_name can be several filenames joined with ", " (see _load_finance_raw —
+  // multiple kesafim2000/schoolcash files get concatenated into one string) — split it back
+  // into individual names so each renders on its own line and downloads correctly, same as doch.
+  if (colKey === "kasafim") filenames = log.finance_file_name ? log.finance_file_name.split(", ") : [];
   if (colKey === "tikhnun") filenames = log.summary?.tikhnun_filenames || [];
 
   if (state === "absent") {

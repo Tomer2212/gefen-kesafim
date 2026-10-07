@@ -1433,16 +1433,25 @@ def _build_finance_ichud_budget_map(
 
                 covered_set.add(budget_norm)
 
-                for row in rows[1:]:
-                    if len(row) < 11:
-                        continue
-                    supplier    = str(row[0]).strip()
-                    report_code = str(row[1]).strip()
-                    invoice     = str(row[3]).strip()
-                    amount      = _norm_key_amount(row[10])
+                # Kesafim2000 is NOT a flat table — it's organized in blocks, each
+                # preceded by its own "קוד גפן X ..." header line and its own
+                # column-header row (report_code lives in that block header, not in
+                # a per-row column). Reading raw rows at fixed indices here (as this
+                # code used to) silently reads the wrong fields (e.g. row[1] is the
+                # supplier NAME, not the report code) and produces ichud keys that
+                # can never match a doch row's union_key. load_kesafim() already
+                # parses the block structure correctly and builds the exact same
+                # "supplier-invoice-report_code-amount" ichud key doch rows use —
+                # reuse it instead of re-deriving it from raw rows (same pattern as
+                # _split_finance_kesafim below, which already does this correctly).
+                df = load_kesafim(str(fpath))
+                for _, drow in df.iterrows():
+                    supplier    = str(drow.get("supplier") or "").strip()
+                    report_code = str(drow.get("report_code") or "").strip()
+                    invoice     = str(drow.get("invoice_number") or "").strip()
+                    amount      = drow.get("amount") or ""
                     if supplier and report_code and invoice and amount:
-                        key = f"{supplier}-{invoice}-{report_code}-{amount}"
-                        ichud_to_budget[key] = budget_norm
+                        ichud_to_budget[drow["ichud"]] = budget_norm
             except Exception as exc:
                 logger.error("Failed to build ichud map from kesafim2000 %s: %s", fpath, exc)
 
