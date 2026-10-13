@@ -13,7 +13,10 @@ _AMOUNT_SHAPE_RE = re.compile(r"^-?\d+(,\d{3})*(\.\d{1,2})?-?$")
 
 def load_kesafim(filepath: str) -> pd.DataFrame:
     line_rows = _read_rows(filepath)
-    rows = _parse_blocks(line_rows)
+    if _is_flat_layout(line_rows):
+        rows = _parse_flat(line_rows)
+    else:
+        rows = _parse_blocks(line_rows)
     if not rows:
         return pd.DataFrame(columns=[
             "report_code", "supplier", "supplier_name",
@@ -69,6 +72,87 @@ _HEADER_TO_FIELD = {
     'סה"כ לחשבונית': "total",
     "סטטוס חשבונית": "status",
 }
+
+
+# Alternate Kesafim2000 export: a single flat table (one header row, one data row
+# per invoice line) instead of the block-per-report-code layout above. The report
+# code and budget type are regular per-row columns (not a block marker row).
+# Signature: header row 0 is "שובר הוצאה" / ... / "קוד גפן" (col 6) / "סוג תקציב" (col 7).
+_FLAT_HEADER_TO_FIELD = {
+    "שובר הוצאה": "voucher",
+    "חשבונית": "invoice_number",
+    "תאריך חשבונית": "invoice_date",
+    "קוד גפן": "report_code",
+    "סוג תקציב": "budget_type",
+    "סכום": "amount_raw",
+    "מס.ספק": "supplier",
+    "שם ספק": "supplier_name",
+    "תאור": "description",
+    "סטטוס חשבונית": "status",
+}
+
+
+def _is_flat_layout(line_rows: list[list[str]]) -> bool:
+    if not line_rows:
+        return False
+    header = line_rows[0]
+    a0 = header[0].strip() if len(header) > 0 else ""
+    a6 = header[6].strip() if len(header) > 6 else ""
+    a7 = header[7].strip() if len(header) > 7 else ""
+    return a0 == "שובר הוצאה" and a6 == "קוד גפן" and a7 == "סוג תקציב"
+
+
+def _csv_unquote(s: str) -> str:
+    """Some flat-layout exports wrap any field containing a comma or quote in
+    CSV-style quoting (doubled internal quotes) even though the file itself is
+    tab-separated, e.g. '"1,786.00"' or '"יסוד בע""מ"'. Strip that wrapping so
+    downstream parsing (normalize_amount etc.) sees the plain value."""
+    s = s.strip()
+    if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
+        return s[1:-1].replace('""', '"')
+    return s
+
+
+def _parse_flat(line_rows: list[list[str]]) -> list[dict]:
+    header = [_csv_unquote(c) for c in line_rows[0]]
+    col_idx: dict = {}
+    for i, cell in enumerate(header):
+        field = _FLAT_HEADER_TO_FIELD.get(cell.strip())
+        if field is not None:
+            col_idx[field] = i
+
+    rows = []
+    for parts in line_rows[1:]:
+        if not parts or not parts[0].strip():
+            continue
+
+        def _cell(field: str) -> str:
+            i = col_idx.get(field)
+            if i is None or i >= len(parts):
+                return ""
+            return _csv_unquote(parts[i])
+
+        report_code_raw = _cell("report_code")
+        report_code = int(report_code_raw) if report_code_raw.isdigit() else None
+        if report_code is None:
+            continue
+
+        rows.append({
+            "report_code": report_code,
+            "supplier": _cell("supplier"),
+            "supplier_name": _cell("supplier_name"),
+            "invoice_date": _cell("invoice_date"),
+            "invoice_number": _cell("invoice_number"),
+            "voucher": _cell("voucher"),
+            "item_number": "",
+            "item_name": "",
+            "description": _cell("description"),
+            "amount_raw": _cell("amount_raw"),
+            "total": _cell("amount_raw"),
+            "status": _cell("status"),
+        })
+
+    return rows
 
 
 def _read_rows(filepath: str) -> list[list[str]]:

@@ -22,6 +22,21 @@ _PCT2_FMT = "0.00%"
 _ALIGN_R = Alignment(horizontal="right", vertical="center")
 _ALIGN_C = Alignment(horizontal="center", vertical="center")
 
+# Mirrors frontend/src/components/ResultsView.jsx's resolveStageLabel/AMBIGUOUS_STAGE
+# exactly: tikhnun_processor.STAGE_MAP always emits "חטיבת ביניים" for any non-תיכון
+# plan (including a genuinely יסודי school, since the YOZMA/report-code matching logic
+# only buckets by "תיכון"/"חטיבת ביניים"). That raw value is correct internally but
+# wrong to show verbatim — the live UI substitutes a DB-resolved stage_override
+# ("יסודי"/"חטיבת ביניים", or None if unknown) wherever it sees that ambiguous value.
+# Exports must apply the same substitution so the PDF/Excel match what's on screen.
+_AMBIGUOUS_STAGE = "יסודי/חטיבת ביניים"
+
+
+def _resolve_stage_label(raw_value, stage_override):
+    if raw_value in ("beinayim", "חטיבת ביניים"):
+        return stage_override or _AMBIGUOUS_STAGE
+    return raw_value
+
 
 def _rtl(ws):
     ws.sheet_view.rightToLeft = True
@@ -75,21 +90,24 @@ def _get_nihul_breakdown(tikhnun: dict) -> list:
     return _get_breakdown(tikhnun, "nihul_breakdown")
 
 
-def export_tikhnun_excel(tikhnun: dict, section: str, multiplier: str = "03") -> bytes:
+def export_tikhnun_excel(tikhnun: dict, section: str, multiplier: str = "03", stage_override: str | None = None) -> bytes:
     """
     Export a single tikhnun section to Excel bytes.
     section: "sikar" | "kvua" | "partial" | "yozma"
     multiplier: "03" | "04" (used only for yozma section)
+    stage_override: DB-resolved "יסודי"/"חטיבת ביניים" label (see _resolve_stage_label);
+    None keeps the raw tikhnun value, matching pre-existing behavior for any caller
+    that doesn't pass it.
     """
     wb = openpyxl.Workbook()
     ws = wb.active
     _rtl(ws)
 
     if section == "sikar":
-        _write_sikar(ws, tikhnun)
-        ws.title = "סקירה - גפן"
+        _write_sikar(ws, tikhnun, stage_override)
+        ws.title = f"סקירה - {tikhnun.get('selected_budget_name') or 'גפן'}"[:31]
     elif section == "kvua":
-        _write_kvua(ws, tikhnun)
+        _write_kvua(ws, tikhnun, stage_override)
         ws.title = "מימוש תקציב קבוע"
     elif section == "partial":
         _write_partial(ws, tikhnun)
@@ -118,7 +136,7 @@ def _fmt_num(v):
         return v
 
 
-def _write_sikar(ws, tikhnun: dict):
+def _write_sikar(ws, tikhnun: dict, stage_override: str | None = None):
     ws.column_dimensions["A"].width = 34
     ws.column_dimensions["B"].width = 22
 
@@ -128,7 +146,11 @@ def _write_sikar(ws, tikhnun: dict):
     rows = [
         ("שם מוסד", tikhnun.get("school_name", "")),
         ("סמל מוסד", tikhnun.get("school_code", "")),
-        ("שלב מוסד", tikhnun.get("school_stage", "")),
+        ("שלב מוסד", _resolve_stage_label(tikhnun.get("school_stage", ""), stage_override)),
+    ]
+    if tikhnun.get("selected_budget_name"):
+        rows.append(("סוג תקציב", tikhnun["selected_budget_name"]))
+    rows += [
         None,
         ("תקציב גפן", _fmt_num(ov.get("budget"))),
         ("סכום שתוכנן", _fmt_num(ov.get("planned"))),
@@ -164,7 +186,7 @@ def _write_sikar(ws, tikhnun: dict):
         ri += 1
 
 
-def _write_kvua(ws, tikhnun: dict):
+def _write_kvua(ws, tikhnun: dict, stage_override: str | None = None):
     kvua_rows = tikhnun.get("kvua_rows", [])
     has_multi = tikhnun.get("has_multiple_budget_types", False)
 
@@ -184,7 +206,7 @@ def _write_kvua(ws, tikhnun: dict):
         ci = 1
         if has_multi:
             ws.cell(ri, ci, row.get("budget_type", "")).alignment = _ALIGN_R; ci += 1
-        ws.cell(ri, ci, row.get("stage", "")).alignment = _ALIGN_R; ci += 1
+        ws.cell(ri, ci, _resolve_stage_label(row.get("stage", ""), stage_override)).alignment = _ALIGN_R; ci += 1
         ws.cell(ri, ci, row.get("sal", "")).alignment = _ALIGN_R; ci += 1
         ws.cell(ri, ci, row.get("tatsub", "")).alignment = _ALIGN_R; ci += 1
         c = ws.cell(ri, ci, _fmt_num(row.get("kvua"))); c.number_format = _MONEY_FMT; c.alignment = _ALIGN_R; ci += 1
@@ -253,7 +275,9 @@ def _write_yozma(ws, tikhnun: dict, yozma_key: str):
     ws.column_dimensions["A"].width = 34
     ws.column_dimensions["B"].width = 18
     ws.column_dimensions["C"].width = 18
-    ws.column_dimensions["D"].width = 22
+    ws.column_dimensions["D"].width = 18
+    ws.column_dimensions["E"].width = 18
+    ws.column_dimensions["F"].width = 22
 
     title = ws.cell(1, 1, "יוזמות וצרכים ייחודיים")
     title.font = Font(name="Arial", bold=True, size=12)
@@ -277,16 +301,20 @@ def _write_yozma(ws, tikhnun: dict, yozma_key: str):
     if hefresh_val < 0:
         c.font = _RED_FONT
 
-    for ci, h in enumerate(["סעיף", "תקרה", "בתכנון", "הפרש שניתן לתכנון"], 1):
+    for ci, h in enumerate(["סעיף", "תקרה", "בתכנון", "משויך", "טרם שויך", "הפרש שניתן לתכנון"], 1):
         _hdr(ws, 7, ci, h)
 
     detail = yozma.get("detail", [])
     for ri, item in enumerate(detail, 8):
         ws.cell(ri, 1, item.get("label", "")).alignment = _ALIGN_R
         c = ws.cell(ri, 2, _fmt_num(item.get("cap"))); c.number_format = _MONEY_FMT; c.alignment = _ALIGN_R
-        c = ws.cell(ri, 3, _fmt_num(item.get("betikhnun"))); c.number_format = _MONEY_FMT; c.alignment = _ALIGN_R
+        betikhnun_val = item.get("betikhnun") or 0
+        c = ws.cell(ri, 3, _fmt_num(betikhnun_val)); c.number_format = _MONEY_FMT; c.alignment = _ALIGN_R
+        meshuyakh_val = item.get("meshuyakh") or 0
+        c = ws.cell(ri, 4, _fmt_num(meshuyakh_val)); c.number_format = _MONEY_FMT; c.alignment = _ALIGN_R
+        c = ws.cell(ri, 5, _fmt_num(betikhnun_val - meshuyakh_val)); c.number_format = _MONEY_FMT; c.alignment = _ALIGN_R
         h_val = item.get("hefresh", 0)
-        c = ws.cell(ri, 4, _fmt_num(h_val)); c.number_format = _MONEY_FMT; c.alignment = _ALIGN_R
+        c = ws.cell(ri, 6, _fmt_num(h_val)); c.number_format = _MONEY_FMT; c.alignment = _ALIGN_R
         if h_val < 0:
             c.font = _RED_FONT
 
@@ -368,8 +396,11 @@ def _write_nihul(ws, tikhnun: dict):
 # PDF export
 # ---------------------------------------------------------------------------
 
-def build_tikhnun_section_story(tikhnun: dict, section: str, multiplier: str = "03") -> list:
-    """Return ReportLab flowables for a single tikhnun section (used by combined exporter)."""
+def build_tikhnun_section_story(tikhnun: dict, section: str, multiplier: str = "03", stage_override: str | None = None) -> list:
+    """Return ReportLab flowables for a single tikhnun section (used by combined exporter).
+    stage_override: DB-resolved "יסודי"/"חטיבת ביניים" label (see _resolve_stage_label);
+    None keeps the raw tikhnun value, matching pre-existing behavior for any caller
+    that doesn't pass it."""
     from bidi.algorithm import get_display
     from reportlab.lib import colors
     from reportlab.lib.units import cm
@@ -420,7 +451,7 @@ def build_tikhnun_section_story(tikhnun: dict, section: str, multiplier: str = "
     story = []
 
     if section == "sikar":
-        story.append(Paragraph(rtl("סקירה - גפן"), style_title))
+        story.append(Paragraph(rtl(f"סקירה - {tikhnun.get('selected_budget_name') or 'גפן'}"), style_title))
         story.append(Spacer(1, 0.4*cm))
         ov = tikhnun.get("overview", {})
         has_doch = tikhnun.get("has_doch", False)
@@ -428,7 +459,11 @@ def build_tikhnun_section_story(tikhnun: dict, section: str, multiplier: str = "
             [rtl("שדה"), rtl("ערך")],
             [rtl("שם מוסד"), rtl(tikhnun.get("school_name", ""))],
             [rtl("סמל מוסד"), str(tikhnun.get("school_code", ""))],
-            [rtl("שלב מוסד"), rtl(tikhnun.get("school_stage", ""))],
+            [rtl("שלב מוסד"), rtl(_resolve_stage_label(tikhnun.get("school_stage", ""), stage_override))],
+        ]
+        if tikhnun.get("selected_budget_name"):
+            data.append([rtl("סוג תקציב"), rtl(tikhnun["selected_budget_name"])])
+        data += [
             [rtl("תקציב גפן"), fmt_money(ov.get("budget"))],
             [rtl("סכום שתוכנן"), fmt_money(ov.get("planned"))],
             [rtl("תקציב קבוע שנותר"), fmt_money(ov.get("fixed_gap_abs"))],
@@ -459,7 +494,7 @@ def build_tikhnun_section_story(tikhnun: dict, section: str, multiplier: str = "
         for row in kvua_rows:
             r = []
             if has_multi: r.append(rtl(row.get("budget_type", "")))
-            r += [rtl(row.get("stage", "")), rtl(row.get("sal", "")), rtl(row.get("tatsub", "")),
+            r += [rtl(_resolve_stage_label(row.get("stage", ""), stage_override)), rtl(row.get("sal", "")), rtl(row.get("tatsub", "")),
                   fmt_money(row.get("kvua")), fmt_money(row.get("tikhnun")), fmt_money(row.get("hefresh"))]
             data.append(r)
         total_h = sum(r.get("hefresh", 0) for r in kvua_rows)
@@ -509,14 +544,17 @@ def build_tikhnun_section_story(tikhnun: dict, section: str, multiplier: str = "
         tbl.setStyle(_tbl_style(2, 3))
         story.append(tbl)
         story.append(Spacer(1, 0.4*cm))
-        headers = ["סעיף", "תקרה", "בתכנון", "הפרש שניתן לתכנון"]
-        col_widths = [5*cm, 4*cm, 4*cm, 5*cm]
+        headers = ["סעיף", "תקרה", "בתכנון", "משויך", "טרם שויך", "הפרש שניתן לתכנון"]
+        col_widths = [4*cm, 2.8*cm, 2.8*cm, 2.8*cm, 2.8*cm, 3.6*cm]
         data = [[rtl(h) for h in headers]]
         for item in yozma.get("detail", []):
+            betikhnun_val = item.get("betikhnun") or 0
+            meshuyakh_val = item.get("meshuyakh") or 0
             data.append([rtl(item.get("label", "")), fmt_money(item.get("cap")),
-                         fmt_money(item.get("betikhnun")), fmt_money(item.get("hefresh"))])
+                         fmt_money(betikhnun_val), fmt_money(meshuyakh_val),
+                         fmt_money(betikhnun_val - meshuyakh_val), fmt_money(item.get("hefresh"))])
         tbl2 = Table(_rev(data), colWidths=list(reversed(col_widths)))
-        tbl2.setStyle(_tbl_style(4, len(data)))
+        tbl2.setStyle(_tbl_style(len(headers), len(data)))
         story.append(tbl2)
 
         # ---- supplier breakdown ----
@@ -617,8 +655,11 @@ def build_tikhnun_section_story(tikhnun: dict, section: str, multiplier: str = "
     return story
 
 
-def export_tikhnun_pdf(tikhnun: dict, section: str, multiplier: str = "03") -> bytes:
-    """Export a single tikhnun section to PDF bytes using ReportLab."""
+def export_tikhnun_pdf(tikhnun: dict, section: str, multiplier: str = "03", stage_override: str | None = None) -> bytes:
+    """Export a single tikhnun section to PDF bytes using ReportLab.
+    stage_override: DB-resolved "יסודי"/"חטיבת ביניים" label (see _resolve_stage_label);
+    None keeps the raw tikhnun value, matching pre-existing behavior for any caller
+    that doesn't pass it."""
     from io import BytesIO
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.units import cm
@@ -633,10 +674,10 @@ def export_tikhnun_pdf(tikhnun: dict, section: str, multiplier: str = "03") -> b
     story = []
     # Always prepend school info for non-sikar sections (sikar IS the school info)
     if section != "sikar":
-        story.extend(build_school_info_story(tikhnun))
+        story.extend(build_school_info_story(tikhnun, stage_override))
         story.append(PageBreak() if section in ("kvua", "partial", "yozma", "nihul") else __import__("reportlab.platypus", fromlist=["Spacer"]).Spacer(1, 0.3*__import__("reportlab.lib.units", fromlist=["cm"]).cm))
 
-    story.extend(build_tikhnun_section_story(tikhnun, section, multiplier))
+    story.extend(build_tikhnun_section_story(tikhnun, section, multiplier, stage_override))
     doc.build(story)
     return buf.getvalue()
 

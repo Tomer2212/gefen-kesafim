@@ -26,9 +26,23 @@ def _identify_xls(filename: str) -> str:
         d1 = parts[3].strip() if len(parts) > 3 else ""
         if a1 == "קוד גפן" and d1 == "סוג תקציב":
             return "kesafim2000"
+        if _is_kesafim2000_flat_header(parts):
+            return "kesafim2000"
     except Exception:
         pass
     return "unknown"
+
+
+def _is_kesafim2000_flat_header(parts: list) -> bool:
+    """Kesafim2000 is also exported (by some schools' software version) as a single
+    flat table instead of the block-per-report-code layout: one header row, then one
+    data row per invoice line, with the report code and budget type as regular columns
+    (6 and 7) instead of a per-block marker row. Signature: header row 0 is
+    'שובר הוצאה' / ... / 'קוד גפן' (col 6) / 'סוג תקציב' (col 7)."""
+    a0 = parts[0].strip() if len(parts) > 0 else ""
+    a6 = parts[6].strip() if len(parts) > 6 else ""
+    a7 = parts[7].strip() if len(parts) > 7 else ""
+    return a0 == "שובר הוצאה" and a6 == "קוד גפן" and a7 == "סוג תקציב"
 
 
 def _identify_xlsx(filename: str) -> str:
@@ -72,6 +86,9 @@ def _identify_xlsx(filename: str) -> str:
         ws = wb[sheet_name]
         row1 = _get_row(ws, 1)
         if _cell(row1, 0) == "קוד גפן" and _cell(row1, 3) == "סוג תקציב":
+            wb.close()
+            return "kesafim2000"
+        if _is_kesafim2000_flat_header([_cell(row1, i) for i in range(8)]):
             wb.close()
             return "kesafim2000"
 

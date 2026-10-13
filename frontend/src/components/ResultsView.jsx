@@ -125,6 +125,43 @@ const TIKHNUN_ONLY_TABS = ["kvua", "partial", "yozma", "nihul"];
 // tabs disabled when tikhnun-only (no gefen execution data)
 const GEFEN_ONLY_TABS = ["rejected", "nopdf", "partial"];
 
+// English transliterations for downloaded-file names (requested so a multi-budget
+// school's filename makes it unambiguous which budget/sections it covers without
+// opening it). Keyed by the same normalized budget names tikhnun.budgets[].name /
+// activeBudgetName already use, and the same section ids as TAB_LABELS_MAP.
+const SECTION_NAME_EN = {
+  hashva:   "Hashvaa divuach mul tochna kaspit",
+  sikar:    "Skira",
+  rejected: "Rejected",
+  nopdf:    "Hasera Srika",
+  partial:  "Divuach Haser",
+  yozma:    "Yozmot",
+  nihul:    "Nihul VeTiful",
+  kvua:     "Taktziv Kavua",
+};
+const BUDGET_NAME_EN = {
+  "גפן":             "Gefen",
+  "תקומה":           "Tkuma",
+  "תנופה":           "Tnufa",
+  "דוקאטי":          "Dukati",
+  'פל"ג':            "Peleg",
+  "גפן חירום":       "Gefen Herum",
+  "חינוך לסובלנות":  "Hinuch LeSovlanut",
+  "קולות קוראים":    "Kolot korim",
+};
+
+function buildDownloadFilename(activeBudgetName, sections, allPossibleTabs, ext) {
+  const budgetLabel = activeBudgetName ? (BUDGET_NAME_EN[activeBudgetName] ?? activeBudgetName) : null;
+  const isAll = allPossibleTabs.length > 0
+    && sections.length === allPossibleTabs.length
+    && allPossibleTabs.every(t => sections.includes(t));
+  const sectionsLabel = isAll
+    ? "Kol HaBdikot"
+    : sections.map(s => SECTION_NAME_EN[s] ?? s).join("+");
+  const name = budgetLabel ? `${budgetLabel} - ${sectionsLabel}` : sectionsLabel;
+  return `${name}.${ext}`;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -437,7 +474,7 @@ function Spinner({ dark }) {
   );
 }
 
-function TabDownloadBar({ activeTab, runId, hasTikhnun, tikhnunOnly, yozmaMultiplier, availableTabs, onNewRun }) {
+function TabDownloadBar({ activeTab, runId, hasTikhnun, tikhnunOnly, yozmaMultiplier, availableTabs, onNewRun, activeBudgetName }) {
   const [dlExcel, setDlExcel] = useState(false);
   const [dlPdf,   setDlPdf]   = useState(false);
   const [pdfErr,  setPdfErr]  = useState(false);
@@ -446,22 +483,26 @@ function TabDownloadBar({ activeTab, runId, hasTikhnun, tikhnunOnly, yozmaMultip
   const isTikhnunTab = TIKHNUN_ONLY_TABS.includes(activeTab);
 
   function resolveUrls(sections) {
+    const budgetParam = activeBudgetName ? `&budget=${encodeURIComponent(activeBudgetName)}` : "";
+    const allPossibleTabs = [activeTab, ...availableTabs];
+    const excelName = buildDownloadFilename(activeBudgetName, sections, allPossibleTabs, "xlsx");
+    const pdfName   = buildDownloadFilename(activeBudgetName, sections, allPossibleTabs, "pdf");
     if (sections.length === 1) {
       const s = sections[0];
       const isTk = TIKHNUN_ONLY_TABS.includes(s);
       return {
-        excelUrl:  isTk ? `/analyze/download-tikhnun/${runId}?section=${s}&multiplier=${yozmaMultiplier}` : `/analyze/download/${runId}`,
-        pdfUrl:    isTk ? `/analyze/pdf-tikhnun/${runId}?section=${s}&multiplier=${yozmaMultiplier}` : `/analyze/pdf/${runId}?section=${s}`,
-        excelName: isTk ? `tikhnun-${s}.xlsx` : "hashvaa-gefen-ksafim.xlsx",
-        pdfName:   isTk ? `tikhnun-${s}.pdf`  : "hashvaa-gefen-kesafim.pdf",
+        excelUrl: isTk ? `/analyze/download-tikhnun/${runId}?section=${s}&multiplier=${yozmaMultiplier}${budgetParam}` : `/analyze/download/${runId}${activeBudgetName ? `?budget=${encodeURIComponent(activeBudgetName)}` : ""}`,
+        pdfUrl:   isTk ? `/analyze/pdf-tikhnun/${runId}?section=${s}&multiplier=${yozmaMultiplier}${budgetParam}` : `/analyze/pdf/${runId}?section=${s}${budgetParam}`,
+        excelName,
+        pdfName,
       };
     }
     const sp = sections.join(",");
     return {
-      excelUrl:  `/analyze/excel-combined/${runId}?sections=${sp}&multiplier=${yozmaMultiplier}`,
-      pdfUrl:    `/analyze/pdf-combined/${runId}?sections=${sp}&multiplier=${yozmaMultiplier}`,
-      excelName: "gefen-combined.xlsx",
-      pdfName:   "gefen-combined.pdf",
+      excelUrl: `/analyze/excel-combined/${runId}?sections=${sp}&multiplier=${yozmaMultiplier}${budgetParam}`,
+      pdfUrl:   `/analyze/pdf-combined/${runId}?sections=${sp}&multiplier=${yozmaMultiplier}${budgetParam}`,
+      excelName,
+      pdfName,
     };
   }
 
@@ -720,18 +761,17 @@ function OverviewRow({ label, value, red, bold }) {
   );
 }
 
-function SikarTab({ tikhnun, activeBudgetIdx: propIdx, setActiveBudgetIdx: propSetter }) {
-  const [localIdx, setLocalIdx] = useState(0);
-  const activeBudgetIdx = propIdx !== undefined ? propIdx : localIdx;
-  const setActiveBudgetIdx = propSetter ?? setLocalIdx;
+function SikarTab({ tikhnun, activeBudgetName: propName, setActiveBudgetName: propSetter }) {
+  const [localName, setLocalName] = useState(null);
+  const activeBudgetName = propName !== undefined ? propName : localName;
+  const setActiveBudgetName = propSetter ?? setLocalName;
   if (!tikhnun) return <NoTikhnunNotice />;
 
   const budgets = tikhnun.budgets;
   const isMultiBudget = budgets && budgets.length > 1;
 
   if (isMultiBudget) {
-    const safeIdx = Math.min(activeBudgetIdx, budgets.length - 1);
-    const bud = budgets[safeIdx];
+    const bud = budgets.find(b => b.name === activeBudgetName) ?? budgets[0];
     const ov = bud.overview ?? {};
     return (
       <div className="flex flex-col gap-4">
@@ -740,15 +780,15 @@ function SikarTab({ tikhnun, activeBudgetIdx: propIdx, setActiveBudgetIdx: propS
           {budgets.map((b, i) => (
             <button
               key={i}
-              onClick={() => setActiveBudgetIdx(i)}
+              onClick={() => setActiveBudgetName(b.name)}
               style={{
-                fontWeight: safeIdx === i ? 700 : 500,
+                fontWeight: bud.name === b.name ? 700 : 500,
                 fontSize: "12px",
                 padding: "4px 14px",
                 borderRadius: "20px",
-                border: `1.5px solid ${safeIdx === i ? "#0070F3" : "#e2e8f0"}`,
-                background: safeIdx === i ? "#0070F3" : "transparent",
-                color: safeIdx === i ? "white" : "#64748b",
+                border: `1.5px solid ${bud.name === b.name ? "#0070F3" : "#e2e8f0"}`,
+                background: bud.name === b.name ? "#0070F3" : "transparent",
+                color: bud.name === b.name ? "white" : "#64748b",
                 cursor: "pointer",
                 transition: "all 0.15s",
               }}
@@ -772,6 +812,7 @@ function SikarTab({ tikhnun, activeBudgetIdx: propIdx, setActiveBudgetIdx: propS
             <div className="flex-1 px-5 py-4">
               <h3 className="text-xs font-700 text-slate-500 tracking-wide mb-3" style={{ fontWeight: 700 }}>תקציב {bud.name}</h3>
               <InfoGrid rows={[
+                { label: "סוג תקציב",   value: bud.name },
                 { label: "גובה תקציב",  value: fmtNum(ov.budget) },
                 { label: "סכום שתוכנן", value: fmtNum(ov.planned) },
                 { label: "אחוז תכנון",  value: fmtPct(ov.pct_plan, 2) },
@@ -845,15 +886,18 @@ function SikarTab({ tikhnun, activeBudgetIdx: propIdx, setActiveBudgetIdx: propS
   );
 }
 
-function KvuaTab({ tikhnun }) {
-  const [activeBudgetIdx, setActiveBudgetIdx] = useState(0);
+function KvuaTab({ tikhnun, activeBudgetName: propName, setActiveBudgetName: propSetter }) {
+  const [localName, setLocalName] = useState(null);
+  const activeBudgetName = propName !== undefined ? propName : localName;
+  const setActiveBudgetName = propSetter ?? setLocalName;
 
   if (!tikhnun) return <NoTikhnunNotice />;
   const allRows = tikhnun.kvua_rows ?? [];
   const budgets = tikhnun.budgets;
   const isMultiBudget = budgets && budgets.length > 1;
-  const safeIdx = isMultiBudget ? Math.min(activeBudgetIdx, budgets.length - 1) : 0;
-  const selectedBudget = isMultiBudget ? budgets[safeIdx]?.name : null;
+  const selectedBudget = isMultiBudget
+    ? (budgets.find(b => b.name === activeBudgetName)?.name ?? budgets[0]?.name)
+    : null;
   const rows = selectedBudget
     ? allRows.filter(r => (r.budget_norm ?? normalizeBudgetNameJS(r.budget_type)) === selectedBudget)
     : allRows;
@@ -867,15 +911,15 @@ function KvuaTab({ tikhnun }) {
       {budgets.map((b, i) => (
         <button
           key={i}
-          onClick={() => setActiveBudgetIdx(i)}
+          onClick={() => setActiveBudgetName(b.name)}
           style={{
-            fontWeight: safeIdx === i ? 700 : 500,
+            fontWeight: selectedBudget === b.name ? 700 : 500,
             fontSize: "12px",
             padding: "4px 14px",
             borderRadius: "20px",
-            border: `1.5px solid ${safeIdx === i ? "#0070F3" : "#e2e8f0"}`,
-            background: safeIdx === i ? "#0070F3" : "transparent",
-            color: safeIdx === i ? "white" : "#64748b",
+            border: `1.5px solid ${selectedBudget === b.name ? "#0070F3" : "#e2e8f0"}`,
+            background: selectedBudget === b.name ? "#0070F3" : "transparent",
+            color: selectedBudget === b.name ? "white" : "#64748b",
             cursor: "pointer",
             transition: "all 0.15s",
           }}
@@ -938,18 +982,19 @@ function KvuaTab({ tikhnun }) {
   );
 }
 
-function PartialTab({ tikhnun, activeBudgetIdx: propBudgetIdx, setActiveBudgetIdx: propSetBudgetIdx, schoolId, division = "main", currentUser }) {
+function PartialTab({ tikhnun, activeBudgetName: propName, setActiveBudgetName: propSetter, schoolId, division = "main", currentUser }) {
   const [updatesByRowKey, setUpdatesByRowKey] = useState({});
   const [openRowKey, setOpenRowKey] = useState(null);
-  const [localBudgetIdx, setLocalBudgetIdx] = useState(0);
-  const activeBudgetIdx = propBudgetIdx !== undefined ? propBudgetIdx : localBudgetIdx;
-  const setActiveBudgetIdx = propSetBudgetIdx !== undefined ? propSetBudgetIdx : setLocalBudgetIdx;
+  const [localName, setLocalName] = useState(null);
+  const activeBudgetName = propName !== undefined ? propName : localName;
+  const setActiveBudgetName = propSetter !== undefined ? propSetter : setLocalName;
 
   const allRows = tikhnun?.partial_rows ?? [];
   const budgets = tikhnun?.budgets;
   const isMultiBudget = budgets && budgets.length > 1;
-  const safeIdx = isMultiBudget ? Math.min(activeBudgetIdx, budgets.length - 1) : 0;
-  const selectedBudget = isMultiBudget ? budgets[safeIdx]?.name : null;
+  const selectedBudget = isMultiBudget
+    ? (budgets.find(b => b.name === activeBudgetName)?.name ?? budgets[0]?.name)
+    : null;
   const rows = selectedBudget ? allRows.filter(r => r.budget === selectedBudget) : allRows;
   const totalHefresh = rows.reduce((s, r) => s + (r.hefresh ?? 0), 0);
 
@@ -972,20 +1017,20 @@ function PartialTab({ tikhnun, activeBudgetIdx: propBudgetIdx, setActiveBudgetId
 
   if (!tikhnun) return <NoTikhnunNotice />;
 
-  const pillsEl = isMultiBudget && setActiveBudgetIdx ? (
+  const pillsEl = isMultiBudget && setActiveBudgetName ? (
     <div className="flex gap-2 flex-wrap" dir="rtl">
       {budgets.map((b, i) => (
         <button
           key={i}
-          onClick={() => setActiveBudgetIdx(i)}
+          onClick={() => setActiveBudgetName(b.name)}
           style={{
-            fontWeight: safeIdx === i ? 700 : 500,
+            fontWeight: selectedBudget === b.name ? 700 : 500,
             fontSize: "12px",
             padding: "4px 14px",
             borderRadius: "20px",
-            border: `1.5px solid ${safeIdx === i ? "#0070F3" : "#e2e8f0"}`,
-            background: safeIdx === i ? "#0070F3" : "transparent",
-            color: safeIdx === i ? "white" : "#64748b",
+            border: `1.5px solid ${selectedBudget === b.name ? "#0070F3" : "#e2e8f0"}`,
+            background: selectedBudget === b.name ? "#0070F3" : "transparent",
+            color: selectedBudget === b.name ? "white" : "#64748b",
             cursor: "pointer",
             transition: "all 0.15s",
           }}
@@ -1252,7 +1297,7 @@ function YozmaSupplierBreakdown({ breakdown, title = "פירוט ספקים שד
   );
 }
 
-function YozmaTab({ tikhnun, multiplier, autoSwitch, schoolId, academicYear, divisionType, onToggleMultiplier }) {
+function YozmaTab({ tikhnun, multiplier, autoSwitch, schoolId, academicYear, divisionType, onToggleMultiplier, activeBudgetName: propName, setActiveBudgetName: propSetter, onEffectiveMultiplierChange }) {
   const budgetsWithYozma = (tikhnun?.budgets || []).filter(b => b.yozma_03);
   const hasBudgetPills = budgetsWithYozma.length > 1;
 
@@ -1327,7 +1372,10 @@ function YozmaTab({ tikhnun, multiplier, autoSwitch, schoolId, academicYear, div
 
   const handlePillClick = (name) => {
     if (!budgetMultipliers[name]) setPendingDialogBudget(name);
-    else setLocalActiveBudget(name);
+    else {
+      setLocalActiveBudget(name);
+      propSetter?.(name);
+    }
   };
 
   const handlePerBudgetAnswer = (answer, budgetName) => {
@@ -1335,6 +1383,7 @@ function YozmaTab({ tikhnun, multiplier, autoSwitch, schoolId, academicYear, div
     const mult = answer === "yes" ? "04" : (bObj?.yozma_03?.is_negative ? "04" : "03");
     setBudgetMultipliers(prev => ({ ...prev, [budgetName]: mult }));
     setLocalActiveBudget(budgetName);
+    propSetter?.(budgetName);
     setPendingDialogBudget(null);
     if (schoolId && academicYear && divisionType) {
       axios.patch(`/schools/${schoolId}/incentive-model`, {
@@ -1359,7 +1408,18 @@ function YozmaTab({ tikhnun, multiplier, autoSwitch, schoolId, academicYear, div
     }
   };
 
-  const effectiveBudget = hasBudgetPills ? (localActiveBudget ?? budgetsWithYozma[0]?.name ?? null) : null;
+  // Trust the shared cross-tab selection directly (same "honor prop if valid for my
+  // own budget subset, else fall back to my own first" pattern every other tab uses) —
+  // whether or not its incentive-model answer happens to be resolved yet. This never
+  // auto-opens the yes/no dialog: that's only triggered by the mount effect above (for
+  // the first genuinely-unresolved budget) or by an explicit pill click in THIS tab
+  // (handlePillClick/handlePerBudgetAnswer) — effectiveBudget plays no part in it.
+  // budgetMultipliers[effectiveBudget] below already safely defaults to "03" when
+  // unresolved, so there's nothing to guard against here.
+  const rawActiveBudget = propName !== undefined ? propName : localActiveBudget;
+  const effectiveBudget = hasBudgetPills
+    ? (budgetsWithYozma.some(b => b.name === rawActiveBudget) ? rawActiveBudget : budgetsWithYozma[0]?.name ?? null)
+    : null;
   let yozmaData;
   let flexibleRemaining;
   let breakdownData = null;
@@ -1377,6 +1437,17 @@ function YozmaTab({ tikhnun, multiplier, autoSwitch, schoolId, academicYear, div
   }
 
   const hefreshTotal = yozmaData?.hefresh ?? 0;
+
+  // Surface the RESOLVED per-budget multiplier (30%/40%) to the shared download bar —
+  // without this, a download used the single global yozmaMultiplier state (meant only
+  // for single-budget schools), which is never updated by this tab's own per-budget
+  // toggle/dialog flow, so a multi-budget download could silently use the wrong % for
+  // whichever budget was selected.
+  useEffect(() => {
+    if (hasBudgetPills && effectiveBudget) {
+      onEffectiveMultiplierChange?.(budgetMultipliers[effectiveBudget] ?? "03");
+    }
+  }, [hasBudgetPills, effectiveBudget, budgetMultipliers, onEffectiveMultiplierChange]);
 
   const currentPctDisplay = hasBudgetPills && effectiveBudget
     ? ((budgetMultipliers[effectiveBudget] ?? "03") === "04" ? 40 : 30)
@@ -1522,11 +1593,15 @@ function YozmaTab({ tikhnun, multiplier, autoSwitch, schoolId, academicYear, div
 // Nihul (ניהול ותפעול) tab
 // ---------------------------------------------------------------------------
 
-function NihulTab({ tikhnun }) {
+function NihulTab({ tikhnun, activeBudgetName: propName, setActiveBudgetName: propSetter }) {
   const budgetsWithNihul = (tikhnun?.budgets || []).filter(b => b.nihul_breakdown?.length > 0);
   const hasBudgetPills   = budgetsWithNihul.length > 1;
-  const [activeBudget, setActiveBudget] = useState(null);
-  const effectiveBudget  = hasBudgetPills ? (activeBudget ?? budgetsWithNihul[0]?.name ?? null) : null;
+  const [localActiveBudget, setLocalActiveBudget] = useState(null);
+  const activeBudget = propName !== undefined ? propName : localActiveBudget;
+  const setActiveBudget = propSetter ?? setLocalActiveBudget;
+  const effectiveBudget  = hasBudgetPills
+    ? (budgetsWithNihul.some(b => b.name === activeBudget) ? activeBudget : budgetsWithNihul[0]?.name ?? null)
+    : null;
 
   let breakdownData;
   let bObj;
@@ -1558,8 +1633,8 @@ function NihulTab({ tikhnun }) {
             <button
               key={b.name}
               onClick={() => setActiveBudget(b.name)}
-              aria-pressed={(activeBudget ?? budgetsWithNihul[0]?.name) === b.name}
-              style={PILL_STYLE((activeBudget ?? budgetsWithNihul[0]?.name) === b.name)}
+              aria-pressed={effectiveBudget === b.name}
+              style={PILL_STYLE(effectiveBudget === b.name)}
             >
               {b.name}
             </button>
@@ -1636,8 +1711,10 @@ function GefenFilesDetail({ gefen_files, gefen_rows, gefen_merge_note, stageOver
   );
 }
 
-function HashvaTab({ result }) {
-  const [activeBudgetName, setActiveBudgetName] = useState(null);
+function HashvaTab({ result, activeBudgetName: propName, setActiveBudgetName: propSetter }) {
+  const [localName, setLocalName] = useState(null);
+  const activeBudgetName = propName !== undefined ? propName : localName;
+  const setActiveBudgetName = propSetter ?? setLocalName;
   const { summary, gefen_only } = result;
   const perComboResults = result.per_combo_results;
   const perCombos = perComboResults ? Object.values(perComboResults) : null;
@@ -1677,7 +1754,9 @@ function HashvaTab({ result }) {
     : perCombos ? [...new Set(perCombos.map(c => c.budget))] : [];
 
   const hasPills = pillBudgets.length > 1 || (pillBudgets.length === 1 && perCombos);
-  const effectiveBudget = hasPills ? (activeBudgetName ?? pillBudgets[0] ?? null) : null;
+  const effectiveBudget = hasPills
+    ? (pillBudgets.includes(activeBudgetName) ? activeBudgetName : pillBudgets[0] ?? null)
+    : null;
   const selectedCombos = (perCombos && effectiveBudget)
     ? perCombos.filter(c => c.budget === effectiveBudget)
     : perCombos ?? null;
@@ -1971,7 +2050,18 @@ function TikhnunOnlyBanner() {
 
 export default function ResultsView({ result, runId, onNewRun, onTikhnunUpdate = () => {}, schoolId, currentUser, academicYear, schoolStage }) {
   const [activeTab, setActiveTab]       = useState("hashva");
-  const [activeBudgetIdx, setActiveBudgetIdx] = useState(0);
+  // Single shared selection driving every multi-budget tikhnun tab (סקירה/תקציב קבוע/
+  // יוזמות/ניהול) and the download bar, so switching the pill in any one of them keeps
+  // the others (and the downloaded file) in sync. Keyed by budget NAME, not index,
+  // since YozmaTab/NihulTab already filter to a tab-specific subset of budgets (not
+  // every budget has yozma/nihul data) — a shared name degrades safely per-tab via
+  // "fall back to this tab's own first available budget" when absent from that subset.
+  const [activeBudgetName, setActiveBudgetName] = useState(null);
+  // Resolved 30%/40% multiplier for whichever budget is currently selected in a
+  // multi-budget school, reported up by YozmaTab (see onEffectiveMultiplierChange
+  // there). Stays null for single-budget schools, where yozmaMultiplier below is
+  // already correct on its own.
+  const [activeBudgetMultiplier, setActiveBudgetMultiplier] = useState(null);
   const [yozmaDialogShown, setYozmaDialogShown]             = useState(false);
   const [showYozmaDialog, setShowYozmaDialog]               = useState(false);
   const [yozmaDialogTargetYear, setYozmaDialogTargetYear]   = useState(null);
@@ -2229,7 +2319,7 @@ export default function ResultsView({ result, runId, onNewRun, onTikhnunUpdate =
                 <GefenOnlyNotice title="משויך בגפן, לא קיים בתוכנת הכספים" index={1} />
               </div>
             )
-            : <HashvaTab result={result} />
+            : <HashvaTab result={result} activeBudgetName={activeBudgetName} setActiveBudgetName={setActiveBudgetName} />
         )}
         {activeTab === "sikar" && !isDualTikhnun && (() => {
           const summary = result.summary;
@@ -2238,7 +2328,7 @@ export default function ResultsView({ result, runId, onNewRun, onTikhnunUpdate =
           const filtered = finance_rows_total !== finance_rows_checked;
           return (
             <div className="flex flex-col gap-4">
-              {hasTikhnun && <SikarTab tikhnun={tikhnun} activeBudgetIdx={activeBudgetIdx} setActiveBudgetIdx={setActiveBudgetIdx} />}
+              {hasTikhnun && <SikarTab tikhnun={tikhnun} activeBudgetName={activeBudgetName} setActiveBudgetName={setActiveBudgetName} />}
               {showBedika && (
                 <>
                   <div className="mt-6 mb-1">
@@ -2417,7 +2507,7 @@ export default function ResultsView({ result, runId, onNewRun, onTikhnunUpdate =
             </div>
           );
         })()}
-        {activeTab === "kvua" && !isDualTikhnun && <KvuaTab tikhnun={hasTikhnun ? tikhnun : null} />}
+        {activeTab === "kvua" && !isDualTikhnun && <KvuaTab tikhnun={hasTikhnun ? tikhnun : null} activeBudgetName={activeBudgetName} setActiveBudgetName={setActiveBudgetName} />}
         {activeTab === "kvua" && isDualTikhnun && (
           <div className="flex flex-col gap-24">
             {tikhnunTikkon   && <DualTikhnunSection label={tikhnunTikkon.school_stage}><KvuaTab tikhnun={tikhnunTikkon} /></DualTikhnunSection>}
@@ -2425,7 +2515,7 @@ export default function ResultsView({ result, runId, onNewRun, onTikhnunUpdate =
           </div>
         )}
         {activeTab === "partial" && !isDualTikhnun && (
-          <PartialTab tikhnun={hasTikhnun ? tikhnun : null} activeBudgetIdx={activeBudgetIdx} setActiveBudgetIdx={setActiveBudgetIdx}
+          <PartialTab tikhnun={hasTikhnun ? tikhnun : null} activeBudgetName={activeBudgetName} setActiveBudgetName={setActiveBudgetName}
             schoolId={schoolId} division="main" currentUser={currentUser} />
         )}
         {activeTab === "partial" && isDualTikhnun && (
@@ -2443,6 +2533,9 @@ export default function ResultsView({ result, runId, onNewRun, onTikhnunUpdate =
             academicYear={academicYear}
             divisionType={singleDivisionType}
             onToggleMultiplier={handleToggleMultiplierSingle}
+            activeBudgetName={activeBudgetName}
+            setActiveBudgetName={setActiveBudgetName}
+            onEffectiveMultiplierChange={setActiveBudgetMultiplier}
           />
         </div>
         <div className="flex flex-col gap-24" style={{ display: activeTab === "yozma" && isDualTikhnun ? undefined : "none" }}>
@@ -2450,7 +2543,7 @@ export default function ResultsView({ result, runId, onNewRun, onTikhnunUpdate =
           {tikhnunBeinayim && <DualTikhnunSection label={tikhnunBeinayim.school_stage}><YozmaTab tikhnun={tikhnunBeinayim} multiplier={yozmaMultiplierBeinayim} autoSwitch={yozmaAutoSwitchBeinayim} schoolId={schoolId} academicYear={academicYear} divisionType="beinayim" onToggleMultiplier={handleToggleMultiplierBeinayim} /></DualTikhnunSection>}
         </div>
         {activeTab === "nihul" && !isDualTikhnun && (
-          <NihulTab tikhnun={hasTikhnun ? tikhnun : null} />
+          <NihulTab tikhnun={hasTikhnun ? tikhnun : null} activeBudgetName={activeBudgetName} setActiveBudgetName={setActiveBudgetName} />
         )}
         {activeTab === "nihul" && isDualTikhnun && (
           <div className="flex flex-col gap-24">
@@ -2465,9 +2558,10 @@ export default function ResultsView({ result, runId, onNewRun, onTikhnunUpdate =
         runId={runId}
         hasTikhnun={hasTikhnun}
         tikhnunOnly={tikhnunOnly}
-        yozmaMultiplier={yozmaMultiplier}
+        yozmaMultiplier={activeBudgetMultiplier ?? yozmaMultiplier}
         availableTabs={availableTabs}
         onNewRun={onNewRun}
+        activeBudgetName={activeBudgetName}
       />
     </div>
   );
