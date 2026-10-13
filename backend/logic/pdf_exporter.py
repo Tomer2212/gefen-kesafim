@@ -140,17 +140,23 @@ def _make_summary_table(pairs: list[tuple[str, str]]) -> Table:
 # Story builders (return lists of flowables — used by combined exporter)
 # ---------------------------------------------------------------------------
 
-def build_school_info_story(tikhnun: dict) -> list:
-    """Small school-info block prepended to every PDF when tikhnun data is present."""
+def build_school_info_story(tikhnun: dict, stage_override: str | None = None) -> list:
+    """Small school-info block prepended to every PDF when tikhnun data is present.
+    stage_override: DB-resolved "יסודי"/"חטיבת ביניים" label
+    (see tikhnun_exporter._resolve_stage_label); None keeps the raw tikhnun value,
+    matching pre-existing behavior for any caller that doesn't pass it."""
     from reportlab.lib.styles import ParagraphStyle
     from reportlab.platypus import Paragraph, Spacer
+    from logic.tikhnun_exporter import _resolve_stage_label
     h3 = ParagraphStyle("si_h3", fontName=_FONT_BOLD, fontSize=9,
                          textColor=colors.HexColor("#334155"), alignment=2, spaceAfter=4)
     pairs = [
         ("שם מוסד:",  tikhnun.get("school_name",  "")),
         ("סמל מוסד:", str(tikhnun.get("school_code", ""))),
-        ("שלב מוסד:", tikhnun.get("school_stage", "")),
+        ("שלב מוסד:", _resolve_stage_label(tikhnun.get("school_stage", ""), stage_override)),
     ]
+    if tikhnun.get("selected_budget_name"):
+        pairs.append(("סוג תקציב:", tikhnun["selected_budget_name"]))
     return [Paragraph(_rtl("פרטי המוסד"), h3), Spacer(1, 0.2*cm),
             _make_summary_table(pairs), Spacer(1, 0.5*cm)]
 
@@ -179,6 +185,7 @@ def build_hashva_section_story(run_data: dict, section: str) -> list:
     division      = summary.get("division", "")
     division_lbl  = _DIVISION_LABELS.get(division, division)
     no_check_msg  = "לא בוצעה בדיקה — לא הועלה קובץ מתוכנת הכספים"
+    budget_suffix = f" — {run_data['selected_budget_name']}" if run_data.get("selected_budget_name") else ""
 
     story = []
 
@@ -200,7 +207,7 @@ def build_hashva_section_story(run_data: dict, section: str) -> list:
             Spacer(1, 0.4*cm),
             Paragraph(_rtl("השוואה גפן - תוכנת הכספים" if gefen_only else f"השוואה גפן - {finance_sw}"), sec),
             Spacer(1, 0.2*cm),
-            Paragraph(_rtl(f"קיים ב{finance_sw}, לא משויך בגפן" if not gefen_only else "קיים בתוכנת הכספים, לא משויך בגפן"), h2),
+            Paragraph(_rtl((f"קיים ב{finance_sw}, לא משויך בגפן" if not gefen_only else "קיים בתוכנת הכספים, לא משויך בגפן") + budget_suffix), h2),
         ]
         if gefen_only:
             story.append(Paragraph(_rtl(no_check_msg), nc))
@@ -210,7 +217,7 @@ def build_hashva_section_story(run_data: dict, section: str) -> list:
             story.append(Paragraph(_rtl("✓ לא נמצאו ליקויים"), ok))
 
         story += [Spacer(1, 0.5*cm),
-                  Paragraph(_rtl(f"משויך בגפן, לא קיים ב{finance_sw}" if not gefen_only else "משויך בגפן, לא קיים בתוכנת הכספים"), h2)]
+                  Paragraph(_rtl((f"משויך בגפן, לא קיים ב{finance_sw}" if not gefen_only else "משויך בגפן, לא קיים בתוכנת הכספים") + budget_suffix), h2)]
         if gefen_only:
             story.append(Paragraph(_rtl(no_check_msg), nc))
         elif rows_gefen:

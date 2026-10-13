@@ -596,13 +596,77 @@ def download_log_source_file(log_id: str, name: str, _user: dict = Depends(get_c
     )
 
 
+def _scope_run_to_budget_combo(run: dict, budget_name: str | None) -> dict:
+    """Narrows the hashva comparison data (rows_finance_not_gefen/rows_gefen_not_finance,
+    the ROOT-level fields covering ALL budgets combined) down to a single budget's combo,
+    for a budget-specific hashva download. No-op (returns run unchanged) when budget_name
+    is falsy, there's no per_combo_results at all, or the combo isn't found — so every
+    single-budget school's download is byte-for-byte identical to before this existed.
+    Reuses the existing _find_combo_for_budget (already used for live per-budget check
+    metrics) — division_type=None is safe here since a single-division school never has
+    more than one candidate combo per budget name, so the ambiguity-resolution branch in
+    _find_combo_for_budget is simply never reached."""
+    per_combo_results = run.get("per_combo_results")
+    if not budget_name or not per_combo_results:
+        return run
+    combo = _find_combo_for_budget(per_combo_results, budget_name, None)
+    if combo is None:
+        return run
+
+    scoped = dict(run)
+    scoped["rows_finance_not_gefen"] = combo.get("in_finance_not_gefen", [])
+    scoped["rows_gefen_not_finance"] = combo.get("in_gefen_not_finance", [])
+    scoped["selected_budget_name"] = budget_name
+    return scoped
+
+
+def _build_hashva_combo_excel(scoped_run: dict) -> bytes:
+    """Builds a small 2-sheet workbook for a single budget combo's hashva rows, for the
+    budget-scoped /download path. Reuses excel_exporter's existing private sheet-writing
+    helpers as-is (imported, not modified) so the sheet styling matches the regular
+    export exactly."""
+    from io import BytesIO
+    from openpyxl import Workbook
+    from logic.excel_exporter import _add_result_sheet, red_fill
+
+    finance_sw = (scoped_run.get("summary") or {}).get("finance_file", {}).get("software") or "כספים"
+    budget_name = scoped_run.get("selected_budget_name", "")
+
+    wb = Workbook()
+    wb.remove(wb.active)
+    # Excel sheet titles are hard-capped at 31 chars (openpyxl just warns and writes the
+    # full string anyway, which real Excel can then fail to open) — truncate explicitly.
+    _add_result_sheet(
+        wb, f"קיים ב{finance_sw} לא בגפן-{budget_name}"[:31],
+        pd.DataFrame(scoped_run.get("rows_finance_not_gefen") or []), red_fill,
+    )
+    _add_result_sheet(
+        wb, f"משויך בגפן לא ב{finance_sw}-{budget_name}"[:31],
+        pd.DataFrame(scoped_run.get("rows_gefen_not_finance") or []), red_fill,
+    )
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 @router.get("/download/{run_id}")
-def download(run_id: str, _user: dict = Depends(get_current_user)):
+def download(run_id: str, budget: str | None = None, _user: dict = Depends(get_current_user)):
     run = _get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     if run.get("status") != "done":
         raise HTTPException(status_code=400, detail="File not ready")
+
+    if budget and run.get("per_combo_results"):
+        scoped = _scope_run_to_budget_combo(run, budget)
+        if scoped is not run:
+            excel_bytes = _build_hashva_combo_excel(scoped)
+            return Response(
+                content=excel_bytes,
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={"Content-Disposition": 'attachment; filename="hashvaa-gefen-ksafim.xlsx"'},
+            )
+
     excel_key = run.get("excel_storage_key")
     if not excel_key:
         raise HTTPException(status_code=503, detail="הקובץ אינו זמין")
@@ -618,12 +682,13 @@ def download(run_id: str, _user: dict = Depends(get_current_user)):
 
 
 @router.get("/pdf/{run_id}")
-def download_pdf(run_id: str, section: str = "hashva", _user: dict = Depends(get_current_user)):
+def download_pdf(run_id: str, section: str = "hashva", budget: str | None = None, _user: dict = Depends(get_current_user)):
     run = _get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     if run.get("status") != "done":
         raise HTTPException(status_code=400, detail="Run not complete")
+    run = _scope_run_to_budget_combo(run, budget)
     pdf_bytes = export_pdf(run, section=section)
     return Response(
         content=pdf_bytes,
@@ -632,11 +697,59 @@ def download_pdf(run_id: str, section: str = "hashva", _user: dict = Depends(get
     )
 
 
+def _scope_tikhnun_to_budget(tikhnun: dict, budget_name: str | None) -> dict:
+    """Narrows a multi-budget tikhnun dict down to a single budget's view, for a
+    budget-specific download. No-op (returns tikhnun unchanged) when budget_name is
+    falsy, when there are fewer than 2 budgets, or when the name isn't found — so
+    every single-budget school's download is byte-for-byte identical to before this
+    existed, and a stale/bad budget param never breaks a download.
+
+    tikhnun["budgets"][i] already holds a fully-computed per-budget overview/
+    yozma_03/yozma_04/nihul_summary (see _compute_per_budget_yozma/
+    _compute_per_budget_nihul_summary) — this just promotes the selected entry's
+    data to the root keys the exporters read, and sets budgets=[entry] so
+    tikhnun_exporter._get_breakdown (and _get_supplier_breakdown/_get_nihul_breakdown,
+    which already pick "the first budget that has the breakdown") naturally resolve
+    to the selected budget without needing any change there."""
+    budgets = tikhnun.get("budgets") or []
+    if not budget_name or len(budgets) < 2:
+        return tikhnun
+    entry = next((b for b in budgets if b.get("name") == budget_name), None)
+    if entry is None:
+        return tikhnun
+
+    scoped = dict(tikhnun)
+    scoped["overview"] = entry.get("overview", tikhnun.get("overview"))
+    scoped["yozma_03"] = entry.get("yozma_03") or tikhnun.get("yozma_03")
+    scoped["yozma_04"] = entry.get("yozma_04") or tikhnun.get("yozma_04")
+    scoped["nihul_summary"] = entry.get("nihul_summary")
+    scoped["budgets"] = [entry]
+    scoped["has_multiple_budget_types"] = False
+    scoped["kvua_rows"] = [
+        r for r in (tikhnun.get("kvua_rows") or [])
+        if r.get("budget_norm") == budget_name
+    ]
+    # partial_rows (used by the "דיווח חסר" section) each carry their own "budget" key
+    # the same way kvua_rows carry "budget_norm" (see _extra_metrics's identical filter
+    # a few hundred lines up, used for the live per-budget check-metrics) — without this,
+    # the export would show ALL budgets' missing-report rows regardless of selection.
+    scoped_partial = [
+        r for r in (tikhnun.get("partial_rows") or [])
+        if r.get("budget") == budget_name
+    ]
+    scoped["partial_rows"] = scoped_partial
+    scoped["sum_hefresh_partial"] = sum(r.get("hefresh", 0) for r in scoped_partial)
+    scoped["partial_has_issues"] = bool(scoped_partial)
+    scoped["selected_budget_name"] = entry.get("name")
+    return scoped
+
+
 @router.get("/download-tikhnun/{run_id}")
 def download_tikhnun_excel(
     run_id: str,
     section: str = "sikar",
     multiplier: str = "03",
+    budget: str | None = None,
     _user: dict = Depends(get_current_user),
 ):
     run = _get_run(run_id)
@@ -647,7 +760,8 @@ def download_tikhnun_excel(
     tikhnun = run.get("tikhnun")
     if not tikhnun:
         raise HTTPException(status_code=400, detail="No tikhnun data for this run")
-    xlsx_bytes = export_tikhnun_excel(tikhnun, section, multiplier)
+    tikhnun = _scope_tikhnun_to_budget(tikhnun, budget)
+    xlsx_bytes = export_tikhnun_excel(tikhnun, section, multiplier, run.get("stage_override"))
     filename = f"tikhnun-{section}.xlsx"
     return Response(
         content=xlsx_bytes,
@@ -661,6 +775,7 @@ def download_tikhnun_pdf(
     run_id: str,
     section: str = "sikar",
     multiplier: str = "03",
+    budget: str | None = None,
     _user: dict = Depends(get_current_user),
 ):
     run = _get_run(run_id)
@@ -671,7 +786,8 @@ def download_tikhnun_pdf(
     tikhnun = run.get("tikhnun")
     if not tikhnun:
         raise HTTPException(status_code=400, detail="No tikhnun data for this run")
-    pdf_bytes = export_tikhnun_pdf(tikhnun, section, multiplier)
+    tikhnun = _scope_tikhnun_to_budget(tikhnun, budget)
+    pdf_bytes = export_tikhnun_pdf(tikhnun, section, multiplier, run.get("stage_override"))
     filename = f"tikhnun-{section}.pdf"
     return Response(
         content=pdf_bytes,
@@ -685,6 +801,7 @@ def download_combined_pdf(
     run_id: str,
     sections: str = "hashva",
     multiplier: str = "03",
+    budget: str | None = None,
     _user: dict = Depends(get_current_user),
 ):
     from logic.combined_exporter import export_combined_pdf
@@ -694,6 +811,12 @@ def download_combined_pdf(
     if run.get("status") != "done":
         raise HTTPException(status_code=400, detail="Run not complete")
     section_list = [s.strip() for s in sections.split(",") if s.strip()]
+    if budget:
+        if "hashva" in section_list:
+            run = _scope_run_to_budget_combo(run, budget)
+        if run.get("tikhnun"):
+            run = dict(run)
+            run["tikhnun"] = _scope_tikhnun_to_budget(run["tikhnun"], budget)
     pdf_bytes = export_combined_pdf(run, section_list, multiplier)
     return Response(
         content=pdf_bytes,
@@ -707,6 +830,7 @@ def download_combined_excel(
     run_id: str,
     sections: str = "hashva",
     multiplier: str = "03",
+    budget: str | None = None,
     _user: dict = Depends(get_current_user),
 ):
     from logic.combined_exporter import export_combined_excel
@@ -716,6 +840,12 @@ def download_combined_excel(
     if run.get("status") != "done":
         raise HTTPException(status_code=400, detail="Run not complete")
     section_list = [s.strip() for s in sections.split(",") if s.strip()]
+    if budget:
+        if "hashva" in section_list:
+            run = _scope_run_to_budget_combo(run, budget)
+        if run.get("tikhnun"):
+            run = dict(run)
+            run["tikhnun"] = _scope_tikhnun_to_budget(run["tikhnun"], budget)
     xlsx_bytes = export_combined_excel(run, section_list, multiplier)
     return Response(
         content=xlsx_bytes,
@@ -1377,6 +1507,45 @@ def _any_tikhnun_pending(run_dict: dict) -> bool:
     )
 
 
+def _kesafim_declared_budget_raw(rows: list) -> str | None:
+    """Returns the raw (un-normalized) "סוג תקציב" value declared for a Kesafim2000
+    export, regardless of layout:
+    - block layout: declared once, on the first "קוד גפן" block header row, at index 4.
+    - flat layout (see kesafim_processor._is_flat_layout): declared per data row, in
+      the column whose header is "סוג תקציב" — every row carries the same value for
+      a given export, same as the block layout's single declaration.
+    None if no declaration is found (caller decides how to fall back). Shared by
+    every kesafim2000 budget-detection call site (_kesafim_budget_scoped,
+    _build_finance_ichud_budget_map, _split_finance_kesafim) so a layout only needs
+    to be taught here once."""
+    from logic.kesafim_processor import _is_flat_layout, _FLAT_HEADER_TO_FIELD, _csv_unquote
+
+    if not rows:
+        return None
+
+    if _is_flat_layout(rows):
+        header = [_csv_unquote(c) for c in rows[0]]
+        budget_idx = None
+        for i, cell in enumerate(header):
+            if _FLAT_HEADER_TO_FIELD.get(cell.strip()) == "budget_type":
+                budget_idx = i
+                break
+        if budget_idx is None:
+            return None
+        for parts in rows[1:]:
+            if not parts or not parts[0].strip():
+                continue
+            raw = _csv_unquote(parts[budget_idx]) if budget_idx < len(parts) else ""
+            if raw:
+                return raw
+        return None
+
+    for parts in rows:
+        if parts[0] == "קוד גפן":
+            return parts[4].strip() if len(parts) > 4 else ""
+    return None
+
+
 def _build_finance_ichud_budget_map(
     finance_paths: list[Path], finance_type: str | None, plan_budgets: list[str]
 ) -> tuple[dict[str, str], list[str], list[str], str | None]:
@@ -1413,9 +1582,7 @@ def _build_finance_ichud_budget_map(
                 rows = _read_kesafim_rows(str(fpath))
                 if not rows:
                     continue
-                # Row 0 = header: E1 at index 4
-                header = rows[0]
-                e1_val = header[4].strip() if len(header) > 4 else ""
+                e1_val = _kesafim_declared_budget_raw(rows)
                 budget_norm = _norm_bname(e1_val) if e1_val else None
 
                 if not budget_norm:
@@ -1433,13 +1600,16 @@ def _build_finance_ichud_budget_map(
 
                 covered_set.add(budget_norm)
 
-                # Kesafim2000 is NOT a flat table — it's organized in blocks, each
-                # preceded by its own "קוד גפן X ..." header line and its own
-                # column-header row (report_code lives in that block header, not in
-                # a per-row column). Reading raw rows at fixed indices here (as this
-                # code used to) silently reads the wrong fields (e.g. row[1] is the
-                # supplier NAME, not the report code) and produces ichud keys that
-                # can never match a doch row's union_key. load_kesafim() already
+                # Kesafim2000's classic export is organized in blocks, each preceded
+                # by its own "קוד גפן X ..." header line and its own column-header
+                # row (report_code lives in that block header, not in a per-row
+                # column) — a newer flat-table export layout is also supported (see
+                # kesafim_processor._parse_flat), with report_code as a per-row
+                # column instead. Reading raw rows at fixed indices here (as this
+                # code used to) silently reads the wrong fields for the block layout
+                # (e.g. row[1] is the supplier NAME, not the report code) and
+                # produces ichud keys that can never match a doch row's union_key.
+                # load_kesafim() already
                 # parses the block structure correctly and builds the exact same
                 # "supplier-invoice-report_code-amount" ichud key doch rows use —
                 # reuse it instead of re-deriving it from raw rows (same pattern as
@@ -1880,8 +2050,7 @@ def _split_finance_kesafim(finance_paths: list, results_clean: list) -> dict:
             rows = _read_kesafim_rows(str(fpath))
             if not rows:
                 continue
-            header = rows[0]
-            e1_val = header[4].strip() if len(header) > 4 else ""
+            e1_val = _kesafim_declared_budget_raw(rows)
             budget_norm = _nb(e1_val) if e1_val else None
             if not budget_norm:
                 continue
@@ -3912,19 +4081,22 @@ def _kesafim_is_unreadable_binary(path: Path) -> bool:
 
 
 def _kesafim_budget_scoped(path: Path) -> bool:
-    """Checks the "סוג תקציב" value declared on the FIRST "קוד גפן" block header row
-    (this is a whole-file/export-level property, not per-block — verified against a
-    real 15-block sample where every block declared the same value) against the known
-    budget names. Fail-open (True) on any read error or if no block is found at all —
-    a genuinely broken file is the normal pipeline's problem to report, not this check's.
-    Uses the same _read_rows() as load_kesafim() so this works for both the classic
-    .xls export and a genuine .xlsx re-save of it."""
+    """Checks the "סוג תקציב" value declared for the file against the known budget
+    names. This is a whole-file/export-level property, not per-row/per-block —
+    verified against a real 15-block sample where every block declared the same
+    value, and likewise every row of a flat-layout export declares the same value.
+    Fail-open (True) on any read error or if no declaration is found at all — a
+    genuinely broken file is the normal pipeline's problem to report, not this
+    check's. Uses the same _read_rows() as load_kesafim() so this works for both
+    the classic .xls export and a genuine .xlsx re-save of it, in either the
+    block layout or the flat layout (see kesafim_processor._is_flat_layout)."""
     try:
         from zihuy_core import normalize_budget_name
-        for parts in _read_kesafim_rows(str(path)):
-            if parts[0] == "קוד גפן":
-                raw = parts[4].strip() if len(parts) > 4 else ""
-                return normalize_budget_name(raw) in _KNOWN_BUDGET_NAMES
+
+        rows = _read_kesafim_rows(str(path))
+        raw = _kesafim_declared_budget_raw(rows)
+        if raw is not None:
+            return normalize_budget_name(raw) in _KNOWN_BUDGET_NAMES
     except Exception as exc:
         logger.warning("Could not check budget scoping for kesafim file %s: %s", path, exc)
     return True
