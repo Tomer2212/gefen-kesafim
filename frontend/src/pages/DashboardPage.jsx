@@ -364,9 +364,15 @@ const CONTROL_LETTER_COLUMNS = [
 // (principal_chativa_name) for שש-שנתי schools where principal_same_person === false — see
 // computeFilterValues/renderCellValue/renderCellText.
 const CONTACT_COLUMNS = [
-  { key: "principal_name",       label: "מנהל/ת" },
-  { key: "secretary_name",       label: "מנהלנ/ית" },
-  { key: "finance_contact_name", label: "אחראי/ת כספים" },
+  { key: "principal_name",        label: "מנהל/ת" },
+  { key: "secretary_name",        label: "מנהלנ/ית" },
+  { key: "finance_contact_name",  label: "אחראי/ת כספים" },
+  { key: "principal_email",       label: "מייל מנהל/ת" },
+  { key: "secretary_email",       label: "מייל מנהלנ/ית" },
+  { key: "finance_contact_email", label: "מייל אחראי/ת כספים" },
+  { key: "principal_phone",       label: "טלפון מנהל/ת" },
+  { key: "secretary_phone",       label: "טלפון מנהלנ/ית" },
+  { key: "finance_contact_phone", label: "טלפון אחראי/ת כספים" },
 ];
 
 const DEFAULT_VISIBLE_MOVABLE_KEYS = ["symbol", "stage", "city", "meetings_completed", "authority", "meetings_hours"];
@@ -423,9 +429,15 @@ const FILTER_COLUMN_META = [
   { key: "advisor_district",label: "יועץ מלווה [מחוז]", fmt: "textMulti" },
   // "אנשי קשר" group — principal_name is textMulti since a שש-שנתי school with a separate
   // חט"ב principal (principal_same_person === false) surfaces two names for one column.
-  { key: "principal_name",       label: "מנהל/ת",        fmt: "textMulti" },
-  { key: "secretary_name",       label: "מנהלנ/ית",       fmt: "text" },
-  { key: "finance_contact_name", label: "אחראי/ת כספים",  fmt: "text" },
+  { key: "principal_name",        label: "מנהל/ת",        fmt: "textMulti" },
+  { key: "secretary_name",        label: "מנהלנ/ית",       fmt: "text" },
+  { key: "finance_contact_name",  label: "אחראי/ת כספים",  fmt: "text" },
+  { key: "principal_email",       label: "מייל מנהל/ת",        fmt: "text" },
+  { key: "secretary_email",       label: "מייל מנהלנ/ית",       fmt: "text" },
+  { key: "finance_contact_email", label: "מייל אחראי/ת כספים",  fmt: "text" },
+  { key: "principal_phone",       label: "טלפון מנהל/ת",        fmt: "text" },
+  { key: "secretary_phone",       label: "טלפון מנהלנ/ית",       fmt: "text" },
+  { key: "finance_contact_phone", label: "טלפון אחראי/ת כספים",  fmt: "text" },
 ];
 const FILTER_COLUMN_KEYS = new Set(FILTER_COLUMN_META.map(c => c.key));
 
@@ -614,6 +626,12 @@ function computeFilterValues(school, combo, meetingsStats, activeSummaryBudget, 
   out.principal_name = principalNames(school);
   out.secretary_name = school.secretary_name || null;
   out.finance_contact_name = school.finance_contact_name || null;
+  out.principal_email = school.principal_email || null;
+  out.secretary_email = school.secretary_email || null;
+  out.finance_contact_email = school.finance_contact_email || null;
+  out.principal_phone = school.principal_phone || null;
+  out.secretary_phone = school.secretary_phone || null;
+  out.finance_contact_phone = school.finance_contact_phone || null;
   return out;
 }
 
@@ -1285,6 +1303,18 @@ function renderCell(school, key, meetingsStats = {}, combo = null, activeSummary
       return school.secretary_name || "—";
     case "finance_contact_name":
       return school.finance_contact_name || "—";
+    case "principal_email":
+      return school.principal_email || "—";
+    case "secretary_email":
+      return school.secretary_email || "—";
+    case "finance_contact_email":
+      return school.finance_contact_email || "—";
+    case "principal_phone":
+      return school.principal_phone || "—";
+    case "secretary_phone":
+      return school.secretary_phone || "—";
+    case "finance_contact_phone":
+      return school.finance_contact_phone || "—";
     case "symbol":
       return <span className="font-mono">{school.symbol || "—"}</span>;
     case "city":
@@ -1380,6 +1410,18 @@ function renderCellText(school, key, meetingsStats = {}, combo = null, activeSum
       return school.secretary_name || "";
     case "finance_contact_name":
       return school.finance_contact_name || "";
+    case "principal_email":
+      return school.principal_email || "";
+    case "secretary_email":
+      return school.secretary_email || "";
+    case "finance_contact_email":
+      return school.finance_contact_email || "";
+    case "principal_phone":
+      return school.principal_phone || "";
+    case "secretary_phone":
+      return school.secretary_phone || "";
+    case "finance_contact_phone":
+      return school.finance_contact_phone || "";
     case "symbol":
       return school.symbol || "";
     case "city":

@@ -511,7 +511,11 @@ ichud = supplier_number + "-" + invoice_number + "-" + report_code + "-" + amoun
 ```
 
 ### Division Report Codes
+
+Report-code classification is **school-year-scoped** (see "Academic Year System" below). `backend/logic/reconciler.py` and `backend/zihuy_core.py` each hold two parallel sets — תשפ"ו (default/legacy) and תשפ"ז — selected automatically per check via the existing `academic_year` mechanism (`backend/academic_years.py`). `reconciler.reconcile()` / `_filter_by_division()` and `zihuy_core.resolve_stage()` / `get_stage_from_json()` / `get_stage_junior_ambiguous()` / `identify()` all take an optional `academic_year` parameter that defaults to the תשפ"ו lists when `None`/unrecognized, so any caller that omits it reproduces today's exact תשפ"ו behavior. `analyze_router.py` passes the live `academic_year`/`expected_year` value at every call site.
+
 ```python
+# תשפ"ו (default — used when academic_year is None/unrecognized)
 TIKKON_ONLY  = [48,54,55,58,59,61,62,66,76,87,91,92,94,95,96,97,98,99,100,
                 101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,
                 116,117,118,119,120,121,122,123,124,125,127,136,137,138,139,
@@ -522,7 +526,15 @@ BEINAYIM_ONLY = [43,44,45,46,47,49,50,51,52,53,56,57,60,63,64,65,67,68,69,
                  129,130,131,132,133,134,135,147,151,153,155,161,166,168]
 
 SHARED = [157, 159, 163]
+
+# תשפ"ז — code 149 is new, and codes 157/159/163 move from SHARED (all stages) to
+# being beinayim-only (יסודי + חטיבת ביניים, NOT תיכון) — confirmed against נספח ט"ז.
+# TIKKON_ONLY_TASHPAZ = TIKKON_ONLY (unchanged)
+BEINAYIM_ONLY_TASHPAZ = BEINAYIM_ONLY + [149, 157, 159, 163]
+SHARED_TASHPAZ = []  # no codes are shared across all stages in תשפ"ז
 ```
+
+**157/159/163 in תשפ"ז — confirmed, not a ministry-file error:** in תשפ"ו these three codes are shared across all three stages (`SHARED`, including תיכון). For תשפ"ז, נספח ט"ז was re-verified directly against the ministry guide and confirmed: these codes belong **only** to יסודי/חטיבת ביניים, not to תיכון. This is reflected by moving them into `BEINAYIM_ONLY_TASHPAZ` and leaving `SHARED_TASHPAZ` empty — תיכון no longer recognizes these codes at all in תשפ"ז. (An earlier version of this doc kept them shared with תיכון as a safety margin, before the ministry guide was re-checked — that is no longer the case; do not revert to the old "keep them shared" behavior.) `backend/zihuy_core.py`'s `CODES_JSON_TASHPAZ['תיכון']` is accordingly its own explicit 64-code list (not a reuse of `CODES_JSON['תיכון']`, which still has 67 for תשפ"ו).
 
 ### Amount Normalization
 ```python

@@ -1125,12 +1125,14 @@ function getLogFileCols(log) {
 // Shared by both persisted log rows and the just-finished "pending" row so the
 // two never drift apart — "present" (✓) / "absent" (+) / "not_checked" (✕).
 //
-// "tikhnun" (planning file) is genuinely optional — a check can run gefen-vs-
-// finance without it, so a missing planning file is a neutral "+" (add if you
-// want). "kasafim" (finance file) is not: without it the entire gefen-finance
-// comparison never ran, so it must always flag as "not_checked" (✕), never the
-// neutral "+" — otherwise a missing finance file looks like an optional extra
-// instead of an incomplete check.
+// "tikhnun" (planning file) is mandatory on every run as of the file-issues
+// pre-flight check in analyze_router.py (_collect_file_issues) — a check can no
+// longer complete without one. The neutral "+" here only ever shows up on logs
+// saved before that check existed; it's display-only history, not something a
+// current run can still produce. "kasafim" (finance file) is likewise required:
+// without it the entire gefen-finance comparison never ran, so it must always
+// flag as "not_checked" (✕), never the neutral "+" — otherwise a missing
+// finance file looks like an optional extra instead of an incomplete check.
 function getFileState(fc, budgetEntries, colKey) {
   if (colKey === "tikhnun") return fc.tikhnun ? "present" : "absent";
   if (colKey === "kasafim" && !fc.kasafim) return "not_checked";

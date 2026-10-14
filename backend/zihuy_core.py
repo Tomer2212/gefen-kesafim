@@ -8,6 +8,20 @@ CODES_JSON = {
     'תיכון': [48,54,55,58,59,61,62,66,76,87,91,92,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,127,136,137,138,139,140,141,142,148,150,152,154,156,157,158,159,160,162,163,164,165,167,169]
 }
 
+# תשפ"ז: לפי נספח ט"ז, קוד 149 חדש (יסודי + חטיבת ביניים בלבד), וקודים 157/159/163
+# שייכים אך ורק ליסודי/חטיבת ביניים (לא לתיכון כפי שהיה בתשפ"ו) — לכן רשימת 'תיכון'
+# כאן היא רשימה עצמאית (ללא 157/159/163), ולא שימוש חוזר ב-CODES_JSON['תיכון'].
+CODES_JSON_TASHPAZ = {
+    'יסודי': [43,44,45,46,47,51,52,53,56,57,60,63,64,65,67,68,69,70,71,72,73,74,75,77,78,80,81,83,84,85,88,89,90,126,128,129,130,131,132,133,134,147,149,151,153,155,157,159,161,163,166,168],
+    'חטיבת ביניים': [43,44,45,46,47,49,50,51,52,53,56,57,60,63,64,65,67,68,69,70,71,72,73,74,75,77,78,80,81,83,84,85,88,89,90,126,128,129,130,131,132,133,134,135,147,149,151,153,155,157,159,161,163,166,168],
+    'תיכון': [48,54,55,58,59,61,62,66,76,87,91,92,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,127,136,137,138,139,140,141,142,148,150,152,154,156,158,160,162,164,165,167,169],
+}
+
+_CODES_JSON_BY_YEAR = {
+    'תשפ"ו': CODES_JSON,
+    'תשפ"ז': CODES_JSON_TASHPAZ,
+}
+
 STAGE_FROM_PLAN = {
     'עליונה בלבד': 'תיכון',
     'חט"ב בלבד': 'חטיבת ביניים',
@@ -53,25 +67,27 @@ def normalize_budget_name(raw_name):
                 return normalized
     return name
 
-def get_stage_from_json(code):
+def get_stage_from_json(code, academic_year=None):
+    codes = _CODES_JSON_BY_YEAR.get(academic_year, CODES_JSON)
     try: c = int(code)
     except: return None
-    in_junior = c in CODES_JSON['חטיבת ביניים'] or c in CODES_JSON['יסודי']
-    in_senior = c in CODES_JSON['תיכון']
+    in_junior = c in codes['חטיבת ביניים'] or c in codes['יסודי']
+    in_senior = c in codes['תיכון']
     if in_senior and not in_junior: return 'תיכון'
     if in_junior and not in_senior: return 'חטיבת ביניים'
     return None
 
-def get_stage_junior_ambiguous(code):
+def get_stage_junior_ambiguous(code, academic_year=None):
+    codes = _CODES_JSON_BY_YEAR.get(academic_year, CODES_JSON)
     try: c = int(code)
     except: return False
-    return c in CODES_JSON['יסודי'] and c in CODES_JSON['חטיבת ביניים']
+    return c in codes['יסודי'] and c in codes['חטיבת ביניים']
 
-def resolve_stage(code, plan_stage_val):
-    json_stage = get_stage_from_json(code)
+def resolve_stage(code, plan_stage_val, academic_year=None):
+    json_stage = get_stage_from_json(code, academic_year)
     if json_stage == 'תיכון': return 'תיכון'
     if json_stage is None: return None
-    if get_stage_junior_ambiguous(code) and plan_stage_val:
+    if get_stage_junior_ambiguous(code, academic_year) and plan_stage_val:
         plan_resolved = STAGE_FROM_PLAN.get(str(plan_stage_val).strip())
         if plan_resolved: return plan_resolved
     return json_stage
@@ -139,7 +155,8 @@ def load_plan_file(fpath):
     return budgets, plan_num_to_budgets, code_to_budgets, plan_num_to_plan_stage, code_to_plan_stage, detected_level, type_name_to_budget
 
 def try_identify_row(r, results, plan_num_to_budgets, code_to_budgets,
-                     plan_num_to_plan_stage, code_to_plan_stage, type_name_to_budget):
+                     plan_num_to_plan_stage, code_to_plan_stage, type_name_to_budget,
+                     academic_year=None):
     col_code = r['orig'][1]
     col_type = r['orig'][2]
     plan_num = r['plan_num']
@@ -154,7 +171,7 @@ def try_identify_row(r, results, plan_num_to_budgets, code_to_budgets,
         psv = plan_num_to_plan_stage.get(plan_num)
         if len(bf) == 1:
             budget_result = list(bf)[0]
-            stage_result = resolve_stage(col_code, psv)
+            stage_result = resolve_stage(col_code, psv, academic_year)
         elif len(bf) > 1:
             last_budget_for_pn = None; last_idx_for_pn = None
             for idx, prev_r in enumerate(results[:cur_idx]):
@@ -167,7 +184,7 @@ def try_identify_row(r, results, plan_num_to_budgets, code_to_budgets,
                     remaining = bf - {last_budget_for_pn}
                     if len(remaining) == 1:
                         budget_result = list(remaining)[0]
-                        stage_result = resolve_stage(col_code, psv)
+                        stage_result = resolve_stage(col_code, psv, academic_year)
                 else:
                     has_certain_after = any(
                         results[k]['budget'] and results[k]['stage']
@@ -175,13 +192,13 @@ def try_identify_row(r, results, plan_num_to_budgets, code_to_budgets,
                     )
                     if has_certain_after:
                         budget_result = last_budget_for_pn
-                        stage_result = resolve_stage(col_code, psv)
+                        stage_result = resolve_stage(col_code, psv, academic_year)
 
     # שלב 2 - סוג מענה
     if budget_result is None and col_type in UNIQUE_TYPE:
         budget_result = UNIQUE_TYPE[col_type]
         psv = code_to_plan_stage.get(col_code)
-        stage_result = resolve_stage(col_code, psv)
+        stage_result = resolve_stage(col_code, psv, academic_year)
 
     # שלב 3 - קוד דיווח
     if budget_result is None and col_code:
@@ -189,7 +206,7 @@ def try_identify_row(r, results, plan_num_to_budgets, code_to_budgets,
         psv = code_to_plan_stage.get(col_code)
         if len(bf) == 1:
             budget_result = list(bf)[0]
-            stage_result = resolve_stage(col_code, psv)
+            stage_result = resolve_stage(col_code, psv, academic_year)
         elif len(bf) > 1:
             last_budget_for_code = None; last_idx_for_code = None
             for idx, prev_r in enumerate(results[:cur_idx]):
@@ -202,7 +219,7 @@ def try_identify_row(r, results, plan_num_to_budgets, code_to_budgets,
                     remaining = bf - {last_budget_for_code}
                     if len(remaining) == 1:
                         budget_result = list(remaining)[0]
-                        stage_result = resolve_stage(col_code, psv)
+                        stage_result = resolve_stage(col_code, psv, academic_year)
                 else:
                     has_certain_after = any(
                         results[k]['budget'] and results[k]['stage']
@@ -210,15 +227,15 @@ def try_identify_row(r, results, plan_num_to_budgets, code_to_budgets,
                     )
                     if has_certain_after:
                         budget_result = last_budget_for_code
-                        stage_result = resolve_stage(col_code, psv)
+                        stage_result = resolve_stage(col_code, psv, academic_year)
 
     if stage_result is None and col_code:
         psv = code_to_plan_stage.get(col_code)
-        stage_result = resolve_stage(col_code, psv)
+        stage_result = resolve_stage(col_code, psv, academic_year)
 
     return budget_result, stage_result
 
-def identify(doch_paths, plan_fpaths):
+def identify(doch_paths, plan_fpaths, academic_year=None):
     all_budgets = []
     plan_num_to_budgets = {}; code_to_budgets = {}
     plan_num_to_plan_stage = {}; code_to_plan_stage = {}
@@ -244,12 +261,12 @@ def identify(doch_paths, plan_fpaths):
     possible_combos = set()
     for code, bfs in code_to_budgets.items():
         psv = code_to_plan_stage.get(code)
-        stage = resolve_stage(code, psv)
+        stage = resolve_stage(code, psv, academic_year)
         if stage:
             for b in bfs: possible_combos.add((b, stage))
     dominant_stage = None
     for code, psv in code_to_plan_stage.items():
-        s = resolve_stage(code, psv)
+        s = resolve_stage(code, psv, academic_year)
         if s == 'תיכון': dominant_stage = 'תיכון'; break
         elif s == 'חטיבת ביניים': dominant_stage = 'חטיבת ביניים'
         elif s == 'יסודי' and dominant_stage is None: dominant_stage = 'יסודי'
@@ -286,13 +303,13 @@ def identify(doch_paths, plan_fpaths):
     plan_stages = set()
     for code in code_to_budgets:
         psv = code_to_plan_stage.get(code)
-        s = resolve_stage(code, psv)
+        s = resolve_stage(code, psv, academic_year)
         if s: plan_stages.add(s)
 
     doch_stages = set()
     for row in doch_rows_all[1:]:
         code = str(row[1]) if row[1] is not None else ''
-        s = get_stage_from_json(code)
+        s = get_stage_from_json(code, academic_year)
         if s: doch_stages.add(s)
 
     warnings = []
@@ -352,7 +369,8 @@ def identify(doch_paths, plan_fpaths):
         for r in results:
             if not r['budget'] or not r['stage']:
                 b, s = try_identify_row(r, results, plan_num_to_budgets, code_to_budgets,
-                                        plan_num_to_plan_stage, code_to_plan_stage, type_name_to_budget)
+                                        plan_num_to_plan_stage, code_to_plan_stage, type_name_to_budget,
+                                        academic_year)
                 if b:
                     r['budget'] = b; r['stage'] = s; changed = True
 
@@ -406,7 +424,7 @@ def identify(doch_paths, plan_fpaths):
             if len(open_combos) == 1:
                 combo = list(open_combos)[0]
                 psv = code_to_plan_stage.get(results[i]['orig'][1])
-                row_stage = resolve_stage(results[i]['orig'][1], psv)
+                row_stage = resolve_stage(results[i]['orig'][1], psv, academic_year)
                 if row_stage and row_stage != combo[1]: continue
                 results[i]['budget'] = combo[0]; results[i]['stage'] = combo[1]
 

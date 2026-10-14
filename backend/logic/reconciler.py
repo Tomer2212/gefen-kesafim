@@ -15,17 +15,35 @@ BEINAYIM_ONLY = [
 
 SHARED = [157, 159, 163]
 
+# תשפ"ז: לפי נספח ט"ז, הקודים 157/159/163 שייכים אך ורק ליסודי/חטיבת ביניים (לא לתיכון) —
+# בשונה מתשפ"ו, שם הם משותפים לכל השלבים כולל תיכון. בנוסף נוסף קוד 149 חדש (גם הוא
+# יסודי/חטיבת ביניים בלבד). ראו CLAUDE.md "Division Report Codes".
+TIKKON_ONLY_TASHPAZ = TIKKON_ONLY
+BEINAYIM_ONLY_TASHPAZ = BEINAYIM_ONLY + [149, 157, 159, 163]
+SHARED_TASHPAZ: list = []
+
+_YEAR_CODE_LISTS = {
+    "תשפ\"ו": (TIKKON_ONLY, BEINAYIM_ONLY, SHARED),
+    "תשפ\"ז": (TIKKON_ONLY_TASHPAZ, BEINAYIM_ONLY_TASHPAZ, SHARED_TASHPAZ),
+}
+
+
+def _lists_for_year(academic_year: str | None) -> tuple[list, list, list]:
+    """Defaults to the תשפ"ו lists (today's behavior) for None/unrecognized years."""
+    return _YEAR_CODE_LISTS.get(academic_year, (TIKKON_ONLY, BEINAYIM_ONLY, SHARED))
+
 
 def reconcile(
     df_gefen: pd.DataFrame,
     df_finance: pd.DataFrame,
+    academic_year: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, str, int]:
     """Returns (in_finance_not_gefen, in_gefen_not_finance, division, finance_rows_checked).
 
     division is one of: "tikkon", "beinayim", "both"
     finance_rows_checked is the count after division filtering.
     """
-    df_finance_filtered, division = _filter_by_division(df_gefen, df_finance)
+    df_finance_filtered, division = _filter_by_division(df_gefen, df_finance, academic_year)
 
     gefen_set = set(df_gefen["ichud"])
     finance_set = set(df_finance_filtered["ichud"])
@@ -36,17 +54,22 @@ def reconcile(
     return in_finance_not_gefen, in_gefen_not_finance, division, len(df_finance_filtered)
 
 
-def _filter_by_division(df_gefen: pd.DataFrame, df_finance: pd.DataFrame) -> tuple[pd.DataFrame, str]:
+def _filter_by_division(
+    df_gefen: pd.DataFrame,
+    df_finance: pd.DataFrame,
+    academic_year: str | None = None,
+) -> tuple[pd.DataFrame, str]:
+    tikkon_only, beinayim_only, shared = _lists_for_year(academic_year)
     gefen_codes = set(df_gefen["report_code"].dropna().astype(int).tolist())
 
-    has_tikkon = bool(gefen_codes & set(TIKKON_ONLY))
-    has_beinayim = bool(gefen_codes & set(BEINAYIM_ONLY))
+    has_tikkon = bool(gefen_codes & set(tikkon_only))
+    has_beinayim = bool(gefen_codes & set(beinayim_only))
 
     if has_tikkon and not has_beinayim:
-        keep = set(TIKKON_ONLY) | set(SHARED)
+        keep = set(tikkon_only) | set(shared)
         division = "tikkon"
     elif has_beinayim and not has_tikkon:
-        keep = set(BEINAYIM_ONLY) | set(SHARED)
+        keep = set(beinayim_only) | set(shared)
         division = "beinayim"
     else:
         return df_finance, "both"

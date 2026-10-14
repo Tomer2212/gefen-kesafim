@@ -150,7 +150,10 @@ const BUDGET_NAME_EN = {
   "קולות קוראים":    "Kolot korim",
 };
 
-function buildDownloadFilename(activeBudgetName, sections, allPossibleTabs, ext) {
+// divisionLabel ("Tichon"/"Beinayim") disambiguates a six-year school's two separate
+// per-division downloads, which could otherwise collide (e.g. both divisions named
+// "Gefen - Skira.xlsx" if downloaded separately) — appended last, after the budget.
+function buildDownloadFilename(activeBudgetName, sections, allPossibleTabs, ext, divisionLabel) {
   const budgetLabel = activeBudgetName ? (BUDGET_NAME_EN[activeBudgetName] ?? activeBudgetName) : null;
   const isAll = allPossibleTabs.length > 0
     && sections.length === allPossibleTabs.length
@@ -158,9 +161,12 @@ function buildDownloadFilename(activeBudgetName, sections, allPossibleTabs, ext)
   const sectionsLabel = isAll
     ? "Kol HaBdikot"
     : sections.map(s => SECTION_NAME_EN[s] ?? s).join("+");
-  const name = budgetLabel ? `${budgetLabel} - ${sectionsLabel}` : sectionsLabel;
+  let name = budgetLabel ? `${budgetLabel} - ${sectionsLabel}` : sectionsLabel;
+  if (divisionLabel) name = `${name} - ${divisionLabel}`;
   return `${name}.${ext}`;
 }
+
+const DIVISION_LABEL_EN = { tikkon: "Tichon", beinayim: "Beinayim" };
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -474,33 +480,39 @@ function Spinner({ dark }) {
   );
 }
 
-function TabDownloadBar({ activeTab, runId, hasTikhnun, tikhnunOnly, yozmaMultiplier, availableTabs, onNewRun, activeBudgetName }) {
+function TabDownloadBar({ activeTab, runId, hasTikhnun, tikhnunOnly, yozmaMultiplier, availableTabs, onNewRun, activeBudgetName, division, showNewRunButton = true }) {
   const [dlExcel, setDlExcel] = useState(false);
   const [dlPdf,   setDlPdf]   = useState(false);
   const [pdfErr,  setPdfErr]  = useState(false);
   const [modal,   setModal]   = useState(null); // null | "excel" | "pdf"
 
   const isTikhnunTab = TIKHNUN_ONLY_TABS.includes(activeTab);
+  const divisionLabel = division ? DIVISION_LABEL_EN[division] : null;
 
   function resolveUrls(sections) {
-    const budgetParam = activeBudgetName ? `&budget=${encodeURIComponent(activeBudgetName)}` : "";
+    // division is omitted entirely for a single-division school (undefined/null) — the
+    // backend's division param defaults to None there, identical to before this existed.
+    const extraParams = (activeBudgetName ? `budget=${encodeURIComponent(activeBudgetName)}` : "")
+      + (division ? `${activeBudgetName ? "&" : ""}division=${encodeURIComponent(division)}` : "");
+    const ampParams = extraParams ? `&${extraParams}` : "";
+    const qParams = extraParams ? `?${extraParams}` : "";
     const allPossibleTabs = [activeTab, ...availableTabs];
-    const excelName = buildDownloadFilename(activeBudgetName, sections, allPossibleTabs, "xlsx");
-    const pdfName   = buildDownloadFilename(activeBudgetName, sections, allPossibleTabs, "pdf");
+    const excelName = buildDownloadFilename(activeBudgetName, sections, allPossibleTabs, "xlsx", divisionLabel);
+    const pdfName   = buildDownloadFilename(activeBudgetName, sections, allPossibleTabs, "pdf", divisionLabel);
     if (sections.length === 1) {
       const s = sections[0];
       const isTk = TIKHNUN_ONLY_TABS.includes(s);
       return {
-        excelUrl: isTk ? `/analyze/download-tikhnun/${runId}?section=${s}&multiplier=${yozmaMultiplier}${budgetParam}` : `/analyze/download/${runId}${activeBudgetName ? `?budget=${encodeURIComponent(activeBudgetName)}` : ""}`,
-        pdfUrl:   isTk ? `/analyze/pdf-tikhnun/${runId}?section=${s}&multiplier=${yozmaMultiplier}${budgetParam}` : `/analyze/pdf/${runId}?section=${s}${budgetParam}`,
+        excelUrl: isTk ? `/analyze/download-tikhnun/${runId}?section=${s}&multiplier=${yozmaMultiplier}${ampParams}` : `/analyze/download/${runId}${qParams}`,
+        pdfUrl:   isTk ? `/analyze/pdf-tikhnun/${runId}?section=${s}&multiplier=${yozmaMultiplier}${ampParams}` : `/analyze/pdf/${runId}?section=${s}${ampParams}`,
         excelName,
         pdfName,
       };
     }
     const sp = sections.join(",");
     return {
-      excelUrl: `/analyze/excel-combined/${runId}?sections=${sp}&multiplier=${yozmaMultiplier}${budgetParam}`,
-      pdfUrl:   `/analyze/pdf-combined/${runId}?sections=${sp}&multiplier=${yozmaMultiplier}${budgetParam}`,
+      excelUrl: `/analyze/excel-combined/${runId}?sections=${sp}&multiplier=${yozmaMultiplier}${ampParams}`,
+      pdfUrl:   `/analyze/pdf-combined/${runId}?sections=${sp}&multiplier=${yozmaMultiplier}${ampParams}`,
       excelName,
       pdfName,
     };
@@ -578,12 +590,14 @@ function TabDownloadBar({ activeTab, runId, hasTikhnun, tikhnunOnly, yozmaMultip
           </button>
         )}
 
-        <button onClick={onNewRun} className="btn-ghost flex items-center gap-2 px-5 py-3 text-sm font-600" style={{ fontWeight: 600 }}>
-          <svg aria-hidden="true" width="15" height="15" viewBox="0 0 15 15" fill="none" className="flex-shrink-0">
-            <path d="M7.5 2v11M2 7.5h11" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
-          </svg>
-          בדיקה חדשה
-        </button>
+        {showNewRunButton && (
+          <button onClick={onNewRun} className="btn-ghost flex items-center gap-2 px-5 py-3 text-sm font-600" style={{ fontWeight: 600 }}>
+            <svg aria-hidden="true" width="15" height="15" viewBox="0 0 15 15" fill="none" className="flex-shrink-0">
+              <path d="M7.5 2v11M2 7.5h11" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
+            </svg>
+            בדיקה חדשה
+          </button>
+        )}
       </div>
     </>
   );
@@ -2062,6 +2076,15 @@ export default function ResultsView({ result, runId, onNewRun, onTikhnunUpdate =
   // there). Stays null for single-budget schools, where yozmaMultiplier below is
   // already correct on its own.
   const [activeBudgetMultiplier, setActiveBudgetMultiplier] = useState(null);
+  // Same two concepts as above, but split per division for a six-year (sheshshnati)
+  // school — תיכון and חטיבת ביניים render side by side simultaneously (not as
+  // switchable tabs), so each needs its own independent "currently selected budget"/
+  // "resolved multiplier" memory; a single shared pair (like above) would incorrectly
+  // couple the two divisions' selections together.
+  const [activeBudgetNameTikkon, setActiveBudgetNameTikkon] = useState(null);
+  const [activeBudgetNameBeinayim, setActiveBudgetNameBeinayim] = useState(null);
+  const [activeBudgetMultiplierTikkon, setActiveBudgetMultiplierTikkon] = useState(null);
+  const [activeBudgetMultiplierBeinayim, setActiveBudgetMultiplierBeinayim] = useState(null);
   const [yozmaDialogShown, setYozmaDialogShown]             = useState(false);
   const [showYozmaDialog, setShowYozmaDialog]               = useState(false);
   const [yozmaDialogTargetYear, setYozmaDialogTargetYear]   = useState(null);
@@ -2400,12 +2423,12 @@ export default function ResultsView({ result, runId, onNewRun, onTikhnunUpdate =
             <div className="flex flex-col gap-24">
               {tikhnunTikkon && (
                 <DualTikhnunSection label={tikhnunTikkon.school_stage}>
-                  <SikarTab tikhnun={tikhnunTikkon} />
+                  <SikarTab tikhnun={tikhnunTikkon} activeBudgetName={activeBudgetNameTikkon} setActiveBudgetName={setActiveBudgetNameTikkon} />
                 </DualTikhnunSection>
               )}
               {tikhnunBeinayim && (
                 <DualTikhnunSection label={tikhnunBeinayim.school_stage}>
-                  <SikarTab tikhnun={tikhnunBeinayim} />
+                  <SikarTab tikhnun={tikhnunBeinayim} activeBudgetName={activeBudgetNameBeinayim} setActiveBudgetName={setActiveBudgetNameBeinayim} />
                 </DualTikhnunSection>
               )}
               {showBedika && (
@@ -2510,8 +2533,8 @@ export default function ResultsView({ result, runId, onNewRun, onTikhnunUpdate =
         {activeTab === "kvua" && !isDualTikhnun && <KvuaTab tikhnun={hasTikhnun ? tikhnun : null} activeBudgetName={activeBudgetName} setActiveBudgetName={setActiveBudgetName} />}
         {activeTab === "kvua" && isDualTikhnun && (
           <div className="flex flex-col gap-24">
-            {tikhnunTikkon   && <DualTikhnunSection label={tikhnunTikkon.school_stage}><KvuaTab tikhnun={tikhnunTikkon} /></DualTikhnunSection>}
-            {tikhnunBeinayim && <DualTikhnunSection label={tikhnunBeinayim.school_stage}><KvuaTab tikhnun={tikhnunBeinayim} /></DualTikhnunSection>}
+            {tikhnunTikkon   && <DualTikhnunSection label={tikhnunTikkon.school_stage}><KvuaTab tikhnun={tikhnunTikkon} activeBudgetName={activeBudgetNameTikkon} setActiveBudgetName={setActiveBudgetNameTikkon} /></DualTikhnunSection>}
+            {tikhnunBeinayim && <DualTikhnunSection label={tikhnunBeinayim.school_stage}><KvuaTab tikhnun={tikhnunBeinayim} activeBudgetName={activeBudgetNameBeinayim} setActiveBudgetName={setActiveBudgetNameBeinayim} /></DualTikhnunSection>}
           </div>
         )}
         {activeTab === "partial" && !isDualTikhnun && (
@@ -2520,8 +2543,8 @@ export default function ResultsView({ result, runId, onNewRun, onTikhnunUpdate =
         )}
         {activeTab === "partial" && isDualTikhnun && (
           <div className="flex flex-col gap-24">
-            {tikhnunTikkon   && <DualTikhnunSection label={tikhnunTikkon.school_stage}><PartialTab tikhnun={tikhnunTikkon} schoolId={schoolId} division="tikkon" currentUser={currentUser} /></DualTikhnunSection>}
-            {tikhnunBeinayim && <DualTikhnunSection label={tikhnunBeinayim.school_stage}><PartialTab tikhnun={tikhnunBeinayim} schoolId={schoolId} division="beinayim" currentUser={currentUser} /></DualTikhnunSection>}
+            {tikhnunTikkon   && <DualTikhnunSection label={tikhnunTikkon.school_stage}><PartialTab tikhnun={tikhnunTikkon} schoolId={schoolId} division="tikkon" currentUser={currentUser} activeBudgetName={activeBudgetNameTikkon} setActiveBudgetName={setActiveBudgetNameTikkon} /></DualTikhnunSection>}
+            {tikhnunBeinayim && <DualTikhnunSection label={tikhnunBeinayim.school_stage}><PartialTab tikhnun={tikhnunBeinayim} schoolId={schoolId} division="beinayim" currentUser={currentUser} activeBudgetName={activeBudgetNameBeinayim} setActiveBudgetName={setActiveBudgetNameBeinayim} /></DualTikhnunSection>}
           </div>
         )}
         <div style={{ display: activeTab === "yozma" && !isDualTikhnun ? undefined : "none" }}>
@@ -2539,30 +2562,66 @@ export default function ResultsView({ result, runId, onNewRun, onTikhnunUpdate =
           />
         </div>
         <div className="flex flex-col gap-24" style={{ display: activeTab === "yozma" && isDualTikhnun ? undefined : "none" }}>
-          {tikhnunTikkon   && <DualTikhnunSection label={tikhnunTikkon.school_stage}><YozmaTab tikhnun={tikhnunTikkon} multiplier={yozmaMultiplierTikkon} autoSwitch={yozmaAutoSwitchTikkon} schoolId={schoolId} academicYear={academicYear} divisionType="tikkon" onToggleMultiplier={handleToggleMultiplierTikkon} /></DualTikhnunSection>}
-          {tikhnunBeinayim && <DualTikhnunSection label={tikhnunBeinayim.school_stage}><YozmaTab tikhnun={tikhnunBeinayim} multiplier={yozmaMultiplierBeinayim} autoSwitch={yozmaAutoSwitchBeinayim} schoolId={schoolId} academicYear={academicYear} divisionType="beinayim" onToggleMultiplier={handleToggleMultiplierBeinayim} /></DualTikhnunSection>}
+          {tikhnunTikkon   && <DualTikhnunSection label={tikhnunTikkon.school_stage}><YozmaTab tikhnun={tikhnunTikkon} multiplier={yozmaMultiplierTikkon} autoSwitch={yozmaAutoSwitchTikkon} schoolId={schoolId} academicYear={academicYear} divisionType="tikkon" onToggleMultiplier={handleToggleMultiplierTikkon} activeBudgetName={activeBudgetNameTikkon} setActiveBudgetName={setActiveBudgetNameTikkon} onEffectiveMultiplierChange={setActiveBudgetMultiplierTikkon} /></DualTikhnunSection>}
+          {tikhnunBeinayim && <DualTikhnunSection label={tikhnunBeinayim.school_stage}><YozmaTab tikhnun={tikhnunBeinayim} multiplier={yozmaMultiplierBeinayim} autoSwitch={yozmaAutoSwitchBeinayim} schoolId={schoolId} academicYear={academicYear} divisionType="beinayim" onToggleMultiplier={handleToggleMultiplierBeinayim} activeBudgetName={activeBudgetNameBeinayim} setActiveBudgetName={setActiveBudgetNameBeinayim} onEffectiveMultiplierChange={setActiveBudgetMultiplierBeinayim} /></DualTikhnunSection>}
         </div>
         {activeTab === "nihul" && !isDualTikhnun && (
           <NihulTab tikhnun={hasTikhnun ? tikhnun : null} activeBudgetName={activeBudgetName} setActiveBudgetName={setActiveBudgetName} />
         )}
         {activeTab === "nihul" && isDualTikhnun && (
           <div className="flex flex-col gap-24">
-            {tikhnunTikkon   && <DualTikhnunSection label={tikhnunTikkon.school_stage}><NihulTab tikhnun={tikhnunTikkon} /></DualTikhnunSection>}
-            {tikhnunBeinayim && <DualTikhnunSection label={tikhnunBeinayim.school_stage}><NihulTab tikhnun={tikhnunBeinayim} /></DualTikhnunSection>}
+            {tikhnunTikkon   && <DualTikhnunSection label={tikhnunTikkon.school_stage}><NihulTab tikhnun={tikhnunTikkon} activeBudgetName={activeBudgetNameTikkon} setActiveBudgetName={setActiveBudgetNameTikkon} /></DualTikhnunSection>}
+            {tikhnunBeinayim && <DualTikhnunSection label={tikhnunBeinayim.school_stage}><NihulTab tikhnun={tikhnunBeinayim} activeBudgetName={activeBudgetNameBeinayim} setActiveBudgetName={setActiveBudgetNameBeinayim} /></DualTikhnunSection>}
           </div>
         )}
       </div>
 
-      <TabDownloadBar
-        activeTab={activeTab}
-        runId={runId}
-        hasTikhnun={hasTikhnun}
-        tikhnunOnly={tikhnunOnly}
-        yozmaMultiplier={activeBudgetMultiplier ?? yozmaMultiplier}
-        availableTabs={availableTabs}
-        onNewRun={onNewRun}
-        activeBudgetName={activeBudgetName}
-      />
+      {isDualTikhnun ? (
+        <div className="flex flex-col gap-5">
+          {tikhnunTikkon && (
+            <DualTikhnunSection label={`הורדה - ${tikhnunTikkon.school_stage}`}>
+              <TabDownloadBar
+                activeTab={activeTab}
+                runId={runId}
+                hasTikhnun={!!tikhnunTikkon}
+                tikhnunOnly={tikhnunOnly}
+                yozmaMultiplier={activeBudgetMultiplierTikkon ?? yozmaMultiplierTikkon}
+                availableTabs={availableTabs}
+                onNewRun={onNewRun}
+                activeBudgetName={activeBudgetNameTikkon}
+                division="tikkon"
+              />
+            </DualTikhnunSection>
+          )}
+          {tikhnunBeinayim && (
+            <DualTikhnunSection label={`הורדה - ${tikhnunBeinayim.school_stage}`}>
+              <TabDownloadBar
+                activeTab={activeTab}
+                runId={runId}
+                hasTikhnun={!!tikhnunBeinayim}
+                tikhnunOnly={tikhnunOnly}
+                yozmaMultiplier={activeBudgetMultiplierBeinayim ?? yozmaMultiplierBeinayim}
+                availableTabs={availableTabs}
+                onNewRun={onNewRun}
+                activeBudgetName={activeBudgetNameBeinayim}
+                division="beinayim"
+                showNewRunButton={!tikhnunTikkon}
+              />
+            </DualTikhnunSection>
+          )}
+        </div>
+      ) : (
+        <TabDownloadBar
+          activeTab={activeTab}
+          runId={runId}
+          hasTikhnun={hasTikhnun}
+          tikhnunOnly={tikhnunOnly}
+          yozmaMultiplier={activeBudgetMultiplier ?? yozmaMultiplier}
+          availableTabs={availableTabs}
+          onNewRun={onNewRun}
+          activeBudgetName={activeBudgetName}
+        />
+      )}
     </div>
   );
 }

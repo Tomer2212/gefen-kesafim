@@ -47,6 +47,9 @@ function rowNote(row, selectedYear) {
   if (row.status === "unrecognized") {
     return "לא ניתן לזהות בבירור לאיזו שנת לימודים קובץ זה שייך.";
   }
+  if (row.status === "missing") {
+    return "לא צורף קובץ תכנון. אנא צרפו קובץ תכנון לביצוע הבדיקה.";
+  }
   return null;
 }
 
@@ -98,7 +101,7 @@ function RowItem({ row, index, selectedYear, selectedDivision, isSheshsSnati, on
           </div>
         ) : (
           note && (
-            <div className={`text-xs mt-1 ${INVALID_FILE_STATUSES.has(row.status) ? "text-red-600 font-semibold" : "text-amber-700"}`}>{note}</div>
+            <div className={`text-xs mt-1 ${INVALID_FILE_STATUSES.has(row.status) || row.status === "missing" ? "text-red-600 font-semibold" : "text-amber-700"}`}>{note}</div>
           )
         )}
         {divNote && (
@@ -116,7 +119,12 @@ function RowItem({ row, index, selectedYear, selectedDivision, isSheshsSnati, on
           </label>
         )}
       </div>
-      <SwapFileButton rowId={`swap-file-${index}`} disabled={row.checking} onPick={file => onSwap(index, file)} />
+      <SwapFileButton
+        rowId={`swap-file-${index}`}
+        disabled={row.checking}
+        onPick={file => onSwap(index, file)}
+        label={row.status === "missing" ? "צרף קובץ" : "החלף קובץ"}
+      />
       {REMOVABLE_ROLES.has(row.fileRole) && (
         <button
           type="button"
@@ -130,7 +138,7 @@ function RowItem({ row, index, selectedYear, selectedDivision, isSheshsSnati, on
   );
 }
 
-function SwapFileButton({ rowId, disabled, onPick }) {
+function SwapFileButton({ rowId, disabled, onPick, label = "החלף קובץ" }) {
   const inputRef = useRef(null);
   return (
     <>
@@ -149,7 +157,7 @@ function SwapFileButton({ rowId, disabled, onPick }) {
         htmlFor={rowId}
         className={`shrink-0 px-3 py-1.5 rounded-lg border border-slate-300 text-xs font-semibold text-slate-600 hover:bg-slate-50 cursor-pointer transition-colors ${disabled ? "opacity-50 pointer-events-none" : ""}`}
       >
-        החלף קובץ
+        {label}
       </label>
     </>
   );

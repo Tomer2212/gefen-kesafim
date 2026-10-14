@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { CallRow, computeEndTimeIso } from "./CallRow";
+import { CallRow } from "./CallRow";
 import { useRowVirtualizer } from "../../hooks/useRowVirtualizer";
 import { VirtualRows } from "../common/VirtualRows";
 
@@ -17,41 +17,7 @@ function SortableHeader({ field, sortField, sortDir, onSort, children }) {
   );
 }
 
-// Groups calls by (advisor, day), and — walking the list in the order it's actually
-// displayed on screen — inserts a "gap" marker between two consecutive calls that
-// belong to the same advisor and the same day, sized by how long the gap between them
-// was. Only meaningful when the list is sorted chronologically (desc by start_time,
-// the default) — a gap between two calls that aren't actually adjacent in time would
-// be misleading, so this reads directly off screen order rather than re-deriving it.
-function buildRowsWithGaps(sortedCalls, showGapRows) {
-  if (!showGapRows) return sortedCalls.map(c => ({ type: "call", call: c }));
-  const rows = [];
-  for (let i = 0; i < sortedCalls.length; i++) {
-    const curr = sortedCalls[i];
-    rows.push({ type: "call", call: curr });
-    const next = sortedCalls[i + 1];
-    if (!next) continue;
-    const sameAdvisor = curr.advisor_id && curr.advisor_id === next.advisor_id;
-    const sameDay = (curr.start_time || "").slice(0, 10) === (next.start_time || "").slice(0, 10);
-    if (!sameAdvisor || !sameDay) continue;
-    const nextEndIso = computeEndTimeIso(next.start_time, next.duration_seconds);
-    const gapMs = new Date(curr.start_time) - new Date(nextEndIso);
-    if (gapMs > 0) {
-      rows.push({ type: "gap", gapSeconds: gapMs / 1000, key: `gap-${curr.call_id}-${next.call_id}` });
-    }
-  }
-  return rows;
-}
-
-function gapHeightPx(gapSeconds) {
-  const minutes = gapSeconds / 60;
-  const MIN_PX = 3, MAX_PX = 28;
-  const clamped = Math.min(Math.max(minutes, 1), 8 * 60);
-  const t = Math.log(clamped) / Math.log(8 * 60);
-  return Math.round(MIN_PX + t * (MAX_PX - MIN_PX));
-}
-
-export function CallsTable({ calls, showGapRows, hideSchoolColumn, canManage = true, schoolId }) {
+export function CallsTable({ calls, hideSchoolColumn, canManage = true, schoolId }) {
   const [sortField, setSortField] = useState("start_time");
   const [sortDir, setSortDir] = useState("desc");
   const [removedIds, setRemovedIds] = useState(() => new Set());
@@ -75,13 +41,13 @@ export function CallsTable({ calls, showGapRows, hideSchoolColumn, canManage = t
     return sortDir === "asc" ? cmp : -cmp;
   });
 
-  const rows = buildRowsWithGaps(sortedCalls, showGapRows);
+  const rows = sortedCalls.map(c => ({ type: "call", call: c }));
 
   const handleRowDelete = useCallback(id => setRemovedIds(prev => new Set(prev).add(id)), []);
 
   const { scrollRef, virtualizer, items, padTop, padBottom } = useRowVirtualizer(rows, {
     estimateSize: 44,
-    getItemKey: r => (r.type === "gap" ? r.key : r.call.call_id),
+    getItemKey: r => r.call.call_id,
   });
 
   return (
@@ -123,15 +89,9 @@ export function CallsTable({ calls, showGapRows, hideSchoolColumn, canManage = t
             colSpan={numColumns}
             measureElement={virtualizer.measureElement}
             rows={rows}
-            rowKey={r => (r.type === "gap" ? r.key : r.call.call_id)}
+            rowKey={r => r.call.call_id}
           >
-            {row => row.type === "gap" ? (
-              <tr aria-hidden="true">
-                <td colSpan={numColumns} className="p-0">
-                  <div style={{ height: `${gapHeightPx(row.gapSeconds)}px`, background: "#16a34a", opacity: 0.5 }} />
-                </td>
-              </tr>
-            ) : (
+            {row => (
               <CallRow call={row.call} hideSchoolColumn={hideSchoolColumn} canManage={canManage} schoolId={schoolId}
                 onDelete={handleRowDelete} />
             )}

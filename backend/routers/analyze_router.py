@@ -34,7 +34,7 @@ from logic.gefen_processor import load_gefen, normalize_amount
 from logic.kesafim_processor import load_kesafim, _read_rows as _read_kesafim_rows
 from logic.payscool_processor import canonical_payscool_invoice, load_payscool
 from logic.schoolcash_processor import load_schoolcash
-from logic.reconciler import BEINAYIM_ONLY, TIKKON_ONLY, reconcile
+from logic.reconciler import BEINAYIM_ONLY, TIKKON_ONLY, reconcile, _lists_for_year
 from logic.tikhnun_processor import load_tikhnun, cross_reference_doch, build_tikhnun_result
 from logic.tikhnun_exporter import export_tikhnun_excel, export_tikhnun_pdf
 
@@ -297,7 +297,7 @@ async def detect_file_year(
             dates = _read_gefen_invoice_dates([dest])
             result = _classify_file_year(dates)
             try:
-                detected_division = _detect_gefen_division(load_gefen(str(dest))[0])
+                detected_division = _detect_gefen_division(load_gefen(str(dest))[0], eff_year)
             except Exception as exc:
                 logger.warning("detect_file_year: gefen division detection failed for %s: %s", dest, exc)
                 detected_division = None
@@ -596,20 +596,22 @@ def download_log_source_file(log_id: str, name: str, _user: dict = Depends(get_c
     )
 
 
-def _scope_run_to_budget_combo(run: dict, budget_name: str | None) -> dict:
+def _scope_run_to_budget_combo(run: dict, budget_name: str | None, division_type: str | None = None) -> dict:
     """Narrows the hashva comparison data (rows_finance_not_gefen/rows_gefen_not_finance,
     the ROOT-level fields covering ALL budgets combined) down to a single budget's combo,
     for a budget-specific hashva download. No-op (returns run unchanged) when budget_name
     is falsy, there's no per_combo_results at all, or the combo isn't found — so every
     single-budget school's download is byte-for-byte identical to before this existed.
     Reuses the existing _find_combo_for_budget (already used for live per-budget check
-    metrics) — division_type=None is safe here since a single-division school never has
-    more than one candidate combo per budget name, so the ambiguity-resolution branch in
-    _find_combo_for_budget is simply never reached."""
+    metrics). division_type disambiguates a six-year school's shared per_combo_results
+    (one dict covering both divisions' combos, told apart by stage) — None (the default,
+    used by every single-division caller) is safe there since a single-division school
+    never has more than one candidate combo per budget name, so the
+    ambiguity-resolution branch in _find_combo_for_budget is simply never reached."""
     per_combo_results = run.get("per_combo_results")
     if not budget_name or not per_combo_results:
         return run
-    combo = _find_combo_for_budget(per_combo_results, budget_name, None)
+    combo = _find_combo_for_budget(per_combo_results, budget_name, division_type)
     if combo is None:
         return run
 
@@ -650,7 +652,7 @@ def _build_hashva_combo_excel(scoped_run: dict) -> bytes:
 
 
 @router.get("/download/{run_id}")
-def download(run_id: str, budget: str | None = None, _user: dict = Depends(get_current_user)):
+def download(run_id: str, budget: str | None = None, division: str | None = None, _user: dict = Depends(get_current_user)):
     run = _get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
@@ -658,7 +660,7 @@ def download(run_id: str, budget: str | None = None, _user: dict = Depends(get_c
         raise HTTPException(status_code=400, detail="File not ready")
 
     if budget and run.get("per_combo_results"):
-        scoped = _scope_run_to_budget_combo(run, budget)
+        scoped = _scope_run_to_budget_combo(run, budget, division)
         if scoped is not run:
             excel_bytes = _build_hashva_combo_excel(scoped)
             return Response(
@@ -682,13 +684,13 @@ def download(run_id: str, budget: str | None = None, _user: dict = Depends(get_c
 
 
 @router.get("/pdf/{run_id}")
-def download_pdf(run_id: str, section: str = "hashva", budget: str | None = None, _user: dict = Depends(get_current_user)):
+def download_pdf(run_id: str, section: str = "hashva", budget: str | None = None, division: str | None = None, _user: dict = Depends(get_current_user)):
     run = _get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     if run.get("status") != "done":
         raise HTTPException(status_code=400, detail="Run not complete")
-    run = _scope_run_to_budget_combo(run, budget)
+    run = _scope_run_to_budget_combo(run, budget, division)
     pdf_bytes = export_pdf(run, section=section)
     return Response(
         content=pdf_bytes,
@@ -744,12 +746,27 @@ def _scope_tikhnun_to_budget(tikhnun: dict, budget_name: str | None) -> dict:
     return scoped
 
 
+def _tikhnun_for_division(run: dict, division: str | None) -> dict | None:
+    """Picks the right tikhnun dict for a download request. division is None for every
+    existing (single-division) caller — unchanged: returns run["tikhnun"] exactly as
+    before. "tikkon"/"beinayim" (six-year schools only) instead reads
+    run["tikhnun_tikkon"]/run["tikhnun_beinayim"] directly, since run["tikhnun"] for a
+    six-year school is only ever an ALIAS to one of the two (whichever exists, tikkon
+    preferred) — never a merge of both — so it can't serve a specific-division request."""
+    if division == "tikkon":
+        return run.get("tikhnun_tikkon")
+    if division == "beinayim":
+        return run.get("tikhnun_beinayim")
+    return run.get("tikhnun")
+
+
 @router.get("/download-tikhnun/{run_id}")
 def download_tikhnun_excel(
     run_id: str,
     section: str = "sikar",
     multiplier: str = "03",
     budget: str | None = None,
+    division: str | None = None,
     _user: dict = Depends(get_current_user),
 ):
     run = _get_run(run_id)
@@ -757,11 +774,20 @@ def download_tikhnun_excel(
         raise HTTPException(status_code=404, detail="Run not found")
     if run.get("status") != "done":
         raise HTTPException(status_code=400, detail="Run not complete")
-    tikhnun = run.get("tikhnun")
+    tikhnun = _tikhnun_for_division(run, division)
     if not tikhnun:
         raise HTTPException(status_code=400, detail="No tikhnun data for this run")
     tikhnun = _scope_tikhnun_to_budget(tikhnun, budget)
-    xlsx_bytes = export_tikhnun_excel(tikhnun, section, multiplier, run.get("stage_override"))
+    # stage_override only disambiguates a single-division school's "חטיבת ביניים"/"יסודי"
+    # ambiguity. A six-year division's own school_stage ("תיכון"/"חטיבת ביניים") is
+    # already unambiguous — but _resolve_stage_label still treats a raw "חטיבת ביניים"
+    # value as ambiguous whenever stage_override is falsy (it has no way to tell a
+    # genuinely-ambiguous single-division value apart from an already-correct dual-
+    # division one by the string alone), so pass the division's own label back in as
+    # the "override" to make it a no-op instead of downgrading it to the ambiguous
+    # "יסודי/חטיבת ביניים" placeholder.
+    stage_override = run.get("stage_override") if division is None else tikhnun.get("school_stage")
+    xlsx_bytes = export_tikhnun_excel(tikhnun, section, multiplier, stage_override)
     filename = f"tikhnun-{section}.xlsx"
     return Response(
         content=xlsx_bytes,
@@ -776,6 +802,7 @@ def download_tikhnun_pdf(
     section: str = "sikar",
     multiplier: str = "03",
     budget: str | None = None,
+    division: str | None = None,
     _user: dict = Depends(get_current_user),
 ):
     run = _get_run(run_id)
@@ -783,11 +810,13 @@ def download_tikhnun_pdf(
         raise HTTPException(status_code=404, detail="Run not found")
     if run.get("status") != "done":
         raise HTTPException(status_code=400, detail="Run not complete")
-    tikhnun = run.get("tikhnun")
+    tikhnun = _tikhnun_for_division(run, division)
     if not tikhnun:
         raise HTTPException(status_code=400, detail="No tikhnun data for this run")
     tikhnun = _scope_tikhnun_to_budget(tikhnun, budget)
-    pdf_bytes = export_tikhnun_pdf(tikhnun, section, multiplier, run.get("stage_override"))
+    # See the matching comment in download_tikhnun_excel above.
+    stage_override = run.get("stage_override") if division is None else tikhnun.get("school_stage")
+    pdf_bytes = export_tikhnun_pdf(tikhnun, section, multiplier, stage_override)
     filename = f"tikhnun-{section}.pdf"
     return Response(
         content=pdf_bytes,
@@ -802,6 +831,7 @@ def download_combined_pdf(
     sections: str = "hashva",
     multiplier: str = "03",
     budget: str | None = None,
+    division: str | None = None,
     _user: dict = Depends(get_current_user),
 ):
     from logic.combined_exporter import export_combined_pdf
@@ -811,9 +841,18 @@ def download_combined_pdf(
     if run.get("status") != "done":
         raise HTTPException(status_code=400, detail="Run not complete")
     section_list = [s.strip() for s in sections.split(",") if s.strip()]
+    if division is not None:
+        run = dict(run)
+        division_tikhnun = _tikhnun_for_division(run, division)
+        run["tikhnun"] = division_tikhnun
+        # See the comment in download_tikhnun_excel: a six-year division's own
+        # school_stage is already unambiguous, so pass it back in as the "override"
+        # to make _resolve_stage_label a no-op instead of downgrading it to the
+        # ambiguous "יסודי/חטיבת ביניים" placeholder.
+        run["stage_override"] = (division_tikhnun or {}).get("school_stage")
     if budget:
         if "hashva" in section_list:
-            run = _scope_run_to_budget_combo(run, budget)
+            run = _scope_run_to_budget_combo(run, budget, division)
         if run.get("tikhnun"):
             run = dict(run)
             run["tikhnun"] = _scope_tikhnun_to_budget(run["tikhnun"], budget)
@@ -831,6 +870,7 @@ def download_combined_excel(
     sections: str = "hashva",
     multiplier: str = "03",
     budget: str | None = None,
+    division: str | None = None,
     _user: dict = Depends(get_current_user),
 ):
     from logic.combined_exporter import export_combined_excel
@@ -840,9 +880,15 @@ def download_combined_excel(
     if run.get("status") != "done":
         raise HTTPException(status_code=400, detail="Run not complete")
     section_list = [s.strip() for s in sections.split(",") if s.strip()]
+    if division is not None:
+        run = dict(run)
+        division_tikhnun = _tikhnun_for_division(run, division)
+        run["tikhnun"] = division_tikhnun
+        # See the comment in download_combined_pdf above.
+        run["stage_override"] = (division_tikhnun or {}).get("school_stage")
     if budget:
         if "hashva" in section_list:
-            run = _scope_run_to_budget_combo(run, budget)
+            run = _scope_run_to_budget_combo(run, budget, division)
         if run.get("tikhnun"):
             run = dict(run)
             run["tikhnun"] = _scope_tikhnun_to_budget(run["tikhnun"], budget)
@@ -943,11 +989,12 @@ async def classify_rows(
     if gefen_paths_cl and finance_paths_cl and finance_type_cl:
         try:
             _cl_stage = _get_school_stage(run.get("_school_ctx", {}).get("gefen_account_id"))
-            df_gefen_cl, _, _ = _load_gefen_files(gefen_paths_cl)
+            df_gefen_cl, _, _ = _load_gefen_files(gefen_paths_cl, run.get("_school_ctx", {}).get("academic_year"))
             per_combo = _run_per_combo_reconciliation(
                 df_gefen_cl, finance_paths_cl, finance_type_cl,
                 results_clean, _get_finance_col_map(finance_type_cl),
                 school_stage=_cl_stage,
+                academic_year=run.get("_school_ctx", {}).get("academic_year"),
             )
             if per_combo:
                 run["per_combo_results"] = per_combo
@@ -1033,9 +1080,10 @@ async def retry_finance(
                             rc = int(str(r["orig"][1]).strip())
                         except Exception:
                             rc = 0
-                        if rc in TIKKON_ONLY:
+                        _tk_only, _bn_only, _ = _lists_for_year(run.get("_school_ctx", {}).get("academic_year"))
+                        if rc in _tk_only:
                             r["stage"] = "תיכון"
-                        elif rc in BEINAYIM_ONLY:
+                        elif rc in _bn_only:
                             r["stage"] = "חטיבת ביניים"
                         else:
                             r["stage"] = ""
@@ -1084,11 +1132,12 @@ async def retry_finance(
             if gefen_paths_rc and finance_paths_rc and finance_type_rc:
                 try:
                     _rc_stage = _get_school_stage(run.get("_school_ctx", {}).get("gefen_account_id"))
-                    df_gefen_rc, _, _ = _load_gefen_files(gefen_paths_rc)
+                    df_gefen_rc, _, _ = _load_gefen_files(gefen_paths_rc, run.get("_school_ctx", {}).get("academic_year"))
                     per_combo = _run_per_combo_reconciliation(
                         df_gefen_rc, finance_paths_rc, finance_type_rc,
                         results_clean, _get_finance_col_map(finance_type_rc),
                         school_stage=_rc_stage,
+                        academic_year=run.get("_school_ctx", {}).get("academic_year"),
                     )
                     if per_combo:
                         run["per_combo_results"] = per_combo
@@ -1514,10 +1563,18 @@ def _kesafim_declared_budget_raw(rows: list) -> str | None:
     - flat layout (see kesafim_processor._is_flat_layout): declared per data row, in
       the column whose header is "סוג תקציב" — every row carries the same value for
       a given export, same as the block layout's single declaration.
-    None if no declaration is found (caller decides how to fall back). Shared by
-    every kesafim2000 budget-detection call site (_kesafim_budget_scoped,
-    _build_finance_ichud_budget_map, _split_finance_kesafim) so a layout only needs
-    to be taught here once."""
+    Returns "" (not None) when the declaration mechanism exists but is empty — a
+    block header with a blank budget cell, or a flat export whose "סוג תקציב" column
+    has no value in any data row (i.e. a "general" export not filtered by budget).
+    This must match between layouts: _kesafim_budget_scoped treats "" as "unscoped"
+    (blocking) but None as "couldn't determine" (fail-open), so a flat export with no
+    budget declared anywhere has to come back as "" too, or that export silently
+    skips the unscoped-budget block.
+    Returns None only when there's no way to tell at all — the block marker/flat
+    budget column isn't present, or there are no data rows to read (caller decides
+    how to fall back in that case). Shared by every kesafim2000 budget-detection call
+    site (_kesafim_budget_scoped, _build_finance_ichud_budget_map,
+    _split_finance_kesafim) so a layout only needs to be taught here once."""
     from logic.kesafim_processor import _is_flat_layout, _FLAT_HEADER_TO_FIELD, _csv_unquote
 
     if not rows:
@@ -1532,13 +1589,15 @@ def _kesafim_declared_budget_raw(rows: list) -> str | None:
                 break
         if budget_idx is None:
             return None
+        found_data_row = False
         for parts in rows[1:]:
             if not parts or not parts[0].strip():
                 continue
+            found_data_row = True
             raw = _csv_unquote(parts[budget_idx]) if budget_idx < len(parts) else ""
             if raw:
                 return raw
-        return None
+        return "" if found_data_row else None
 
     for parts in rows:
         if parts[0] == "קוד גפן":
@@ -2015,16 +2074,16 @@ def _split_gefen_by_combo(df_gefen, combo_map: dict) -> dict:
     }
 
 
-def _stage_from_report_code(report_code, fallback_stage: str | None) -> str | None:
+def _stage_from_report_code(report_code, fallback_stage: str | None, academic_year: str | None = None) -> str | None:
     """TIKKON_ONLY codes → 'תיכון'; BEINAYIM_ONLY → fallback_stage (resolved from doch)."""
-    from logic.reconciler import TIKKON_ONLY, BEINAYIM_ONLY
+    tikkon_only, beinayim_only, _ = _lists_for_year(academic_year)
     try:
         c = int(str(report_code).strip())
     except (ValueError, TypeError):
         return fallback_stage
-    if c in set(TIKKON_ONLY):
+    if c in set(tikkon_only):
         return "תיכון"
-    if c in set(BEINAYIM_ONLY):
+    if c in set(beinayim_only):
         return fallback_stage
     return fallback_stage  # SHARED or unknown → defer to doch identification
 
@@ -2038,7 +2097,7 @@ def _get_fallback_stage(results_clean: list, budget_norm: str) -> str | None:
     return None
 
 
-def _split_finance_kesafim(finance_paths: list, results_clean: list) -> dict:
+def _split_finance_kesafim(finance_paths: list, results_clean: list, academic_year: str | None = None) -> dict:
     """Returns {(budget_norm, stage): df} for Kesafim2000 files (either the classic
     .xls export or a genuine .xlsx re-save of it — see _read_kesafim_rows)."""
     import pandas as pd
@@ -2057,7 +2116,7 @@ def _split_finance_kesafim(finance_paths: list, results_clean: list) -> dict:
             fallback = _get_fallback_stage(results_clean, budget_norm)
             df = load_kesafim(str(fpath))
             df["_stage"] = df["report_code"].apply(
-                lambda rc: _stage_from_report_code(rc, fallback)
+                lambda rc: _stage_from_report_code(rc, fallback, academic_year)
             )
             for stage_val, sub_df in df.groupby("_stage"):
                 if stage_val:
@@ -2119,7 +2178,7 @@ def _load_payscool_sheet_df(fpath, sheet_name: str):
         return None
 
 
-def _split_finance_payscool(finance_paths: list, results_clean: list) -> dict:
+def _split_finance_payscool(finance_paths: list, results_clean: list, academic_year: str | None = None) -> dict:
     """Returns {(budget_norm, stage): df} for PaySchool files (one sheet per budget)."""
     import pandas as pd
     from zihuy_core import normalize_budget_name as _nb
@@ -2139,7 +2198,7 @@ def _split_finance_payscool(finance_paths: list, results_clean: list) -> dict:
                     continue
                 fallback = _get_fallback_stage(results_clean, budget_norm)
                 df["_stage"] = df["report_code"].apply(
-                    lambda rc: _stage_from_report_code(rc, fallback)
+                    lambda rc: _stage_from_report_code(rc, fallback, academic_year)
                 )
                 for stage_val, sub_df in df.groupby("_stage"):
                     if stage_val:
@@ -2154,7 +2213,7 @@ def _split_finance_payscool(finance_paths: list, results_clean: list) -> dict:
     }
 
 
-def _split_finance_schoolcash(finance_paths: list, results_clean: list) -> dict:
+def _split_finance_schoolcash(finance_paths: list, results_clean: list, academic_year: str | None = None) -> dict:
     """Returns {(budget_norm, stage): df} for SchoolCash files (budget in column index 8)."""
     import pandas as pd
     from zihuy_core import normalize_budget_name as _nb
@@ -2184,6 +2243,7 @@ def _split_finance_schoolcash(finance_paths: list, results_clean: list) -> dict:
                 lambda row: _stage_from_report_code(
                     row["report_code"],
                     _get_fallback_stage(results_clean, row["_budget_norm"]) if row["_budget_norm"] else None,
+                    academic_year,
                 ),
                 axis=1,
             )
@@ -2296,6 +2356,7 @@ def _run_per_combo_reconciliation(
     results_clean: list,
     finance_col_map: list,
     school_stage: str | None = None,
+    academic_year: str | None = None,
 ) -> dict | None:
     """Splits doch + finance by (budget, stage) and reconciles each combo separately.
     Returns None when fewer than 2 combos are found or identification is incomplete.
@@ -2334,11 +2395,11 @@ def _run_per_combo_reconciliation(
     gefen_splits  = _split_gefen_by_combo(df_gefen, combo_map)
 
     if finance_type == "kesafim2000":
-        finance_splits = _split_finance_kesafim(finance_paths, results_clean)
+        finance_splits = _split_finance_kesafim(finance_paths, results_clean, academic_year)
     elif finance_type == "payscool":
-        finance_splits = _split_finance_payscool(finance_paths, results_clean)
+        finance_splits = _split_finance_payscool(finance_paths, results_clean, academic_year)
     else:
-        finance_splits = _split_finance_schoolcash(finance_paths, results_clean)
+        finance_splits = _split_finance_schoolcash(finance_paths, results_clean, academic_year)
 
     # Build global ichud sets once for cross-budget mismatch filtering.
     # A finance/gefen row that is globally matched but under a different budget
@@ -2380,7 +2441,7 @@ def _run_per_combo_reconciliation(
             continue
 
         try:
-            in_fng, in_gnf, division, fin_checked = reconcile(doch_sub, fin_sub)
+            in_fng, in_gnf, division, fin_checked = reconcile(doch_sub, fin_sub, academic_year)
 
             # Remove cross-budget attribution rows: ichud present globally but assigned to a
             # different budget/stage in the other system. Not real discrepancies.
@@ -2809,6 +2870,7 @@ def _compute_multi_budget_tikhnun(
     doch_paths: list,
     finance_paths: list | None = None,
     finance_type: str | None = None,
+    academic_year: str | None = None,
 ) -> tuple[dict, list | None]:
     """
     Extract per-budget metrics from a planning file.
@@ -2965,7 +3027,7 @@ def _compute_multi_budget_tikhnun(
         results_clean: list = []
         try:
             doch_str = [str(p) for p in doch_paths]
-            results_clean, _warn, _miss, _all = _zihuy_identify(doch_str, [plan_fpath])
+            results_clean, _warn, _miss, _all = _zihuy_identify(doch_str, [plan_fpath], academic_year)
         except Exception as exc:
             logger.error("Zihuy identification failed: %s", exc)
             _finalize_tikhnun_metrics(tikhnun_result, [], budgets_raw, perut_rows)
@@ -2988,9 +3050,10 @@ def _compute_multi_budget_tikhnun(
                             rc = int(str(r["orig"][1]).strip())
                         except Exception:
                             rc = 0
-                        if rc in TIKKON_ONLY:
+                        _tk_only, _bn_only, _ = _lists_for_year(academic_year)
+                        if rc in _tk_only:
                             r["stage"] = "תיכון"
-                        elif rc in BEINAYIM_ONLY:
+                        elif rc in _bn_only:
                             r["stage"] = "חטיבת ביניים"
                         else:
                             r["stage"] = ""
@@ -3007,7 +3070,7 @@ def _compute_multi_budget_tikhnun(
         if unidentified and len(doch_paths) >= 2:
             try:
                 doch_str_rev = list(reversed(doch_str))
-                results_clean_rev, _warn_rev, _miss_rev, _all_rev = _zihuy_identify(doch_str_rev, [plan_fpath])
+                results_clean_rev, _warn_rev, _miss_rev, _all_rev = _zihuy_identify(doch_str_rev, [plan_fpath], academic_year)
                 unidentified_rev = [r for r in results_clean_rev if not r.get("budget")]
                 if not unidentified_rev:
                     logger.info(
@@ -3147,6 +3210,7 @@ def _build_division_run_data(
     tikhnun_paths: list[Path],
     run_dir: Path,
     storage_run_id: str,
+    academic_year: str | None = None,
 ) -> dict:
     """Builds one division's run_data dict + exports its own standalone Excel file.
 
@@ -3183,7 +3247,7 @@ def _build_division_run_data(
                 "gefen_rows": len(df_gefen),
                 "in_gefen_rejected": len(in_gefen_rejected),
                 "in_gefen_no_pdf": len(in_gefen_no_pdf),
-                "division": _detect_gefen_division(df_gefen),
+                "division": _detect_gefen_division(df_gefen, academic_year),
                 "gefen_files": [gefen_stat],
                 "gefen_merge_note": None,
             },
@@ -3191,7 +3255,7 @@ def _build_division_run_data(
             "rows_gefen_no_pdf": _build_display_records(in_gefen_no_pdf, _GEFEN_COL_MAP),
         }
 
-    in_finance_not_gefen, in_gefen_not_finance, division, finance_rows_checked = reconcile(df_gefen, df_finance_raw)
+    in_finance_not_gefen, in_gefen_not_finance, division, finance_rows_checked = reconcile(df_gefen, df_finance_raw, academic_year)
 
     if finance_type == "kesafim2000":
         df_finance = df_finance_raw.rename(columns=_KESAFIM_RENAME)
@@ -3223,6 +3287,7 @@ def _build_division_run_data(
                 df_gefen, finance_paths, finance_type,
                 results_clean_for_recon, finance_col_map,
                 school_stage=school_stage,
+                academic_year=academic_year,
             )
         except Exception as exc:
             logger.warning("per_combo_results failed in division split (%s): %s", storage_run_id, exc)
@@ -3285,7 +3350,7 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
         # pre-flight file-issues check below (per-file division) AND, further down,
         # by the six-year division-split detection. Loading it here (once) avoids
         # loading every gefen file twice.
-        gefen_dfs, _gefen_dedup_flags, gefen_file_stats = _load_gefen_files_unmerged(gefen_paths)
+        gefen_dfs, _gefen_dedup_flags, gefen_file_stats = _load_gefen_files_unmerged(gefen_paths, academic_year)
 
         # ── Verify tikhnun file(s) belong to this school (סמל מוסד) ──────────
         if tikhnun_paths and school_id:
@@ -3345,9 +3410,9 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
                 tikkon_result   = build_tikhnun_result(tikkon_data)   if tikkon_data   else None
                 beinayim_result = build_tikhnun_result(beinayim_data) if beinayim_data else None
                 if tikkon_result:
-                    tikkon_result, _   = _compute_multi_budget_tikhnun(tikkon_result,   tikkon_fpath,   [])
+                    tikkon_result, _   = _compute_multi_budget_tikhnun(tikkon_result,   tikkon_fpath,   [], academic_year=academic_year)
                 if beinayim_result:
-                    beinayim_result, _ = _compute_multi_budget_tikhnun(beinayim_result, beinayim_fpath, [])
+                    beinayim_result, _ = _compute_multi_budget_tikhnun(beinayim_result, beinayim_fpath, [], academic_year=academic_year)
                 run_data = {
                     "status": "done",
                     "tikhnun_only": True,
@@ -3363,7 +3428,7 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
                 tikhnun_data = load_tikhnun(str(tikhnun_paths[0]))
                 tikhnun_data["filename"] = tikhnun_paths[0].name
                 tikhnun_result_only = build_tikhnun_result(tikhnun_data)
-                tikhnun_result_only, _ = _compute_multi_budget_tikhnun(tikhnun_result_only, str(tikhnun_paths[0]), [])
+                tikhnun_result_only, _ = _compute_multi_budget_tikhnun(tikhnun_result_only, str(tikhnun_paths[0]), [], academic_year=academic_year)
                 run_data = {
                     "status": "done",
                     "tikhnun_only": True,
@@ -3429,6 +3494,7 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
                 tikhnun_result, results_clean_for_recon = _compute_multi_budget_tikhnun(
                     tikhnun_result, str(tikhnun_paths[0]), gefen_paths,
                     finance_paths=finance_paths, finance_type=finance_type,
+                    academic_year=academic_year,
                 )
             except Exception as exc:
                 logger.error("Tikhnun processing error for run %s: %s", run_id, exc)
@@ -3451,6 +3517,7 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
                         tikhnun_tikkon_result, tikkon_fpath,
                         [tikkon_gpath] if tikkon_gpath else gefen_paths,
                         finance_paths=finance_paths, finance_type=finance_type,
+                        academic_year=academic_year,
                     )
                 if beinayim_data:
                     beinayim_gpath = _find_gefen_path_for_division(gefen_paths, gefen_file_stats, "beinayim")
@@ -3461,6 +3528,7 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
                         tikhnun_beinayim_result, beinayim_fpath,
                         [beinayim_gpath] if beinayim_gpath else gefen_paths,
                         finance_paths=finance_paths, finance_type=finance_type,
+                        academic_year=academic_year,
                     )
                 results_clean_for_recon = (rc_t or []) + (rc_b or []) or None
                 tikhnun_result = tikhnun_tikkon_result or tikhnun_beinayim_result
@@ -3504,6 +3572,7 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
                     tikhnun_beinayim_result if division_type == "beinayim" else None,
                     rc_t if division_type == "tikkon" else rc_b,
                     school_stage, stage_override, stored_file_paths, tikhnun_paths, run_dir, storage_run_id,
+                    academic_year=academic_year,
                 )
                 # Shared key (the original, un-suffixed run_id) so the frontend can find this
                 # row's sibling division from the same upload batch and switch between them
@@ -3562,7 +3631,7 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
                     "gefen_rows": len(df_gefen),
                     "in_gefen_rejected": len(in_gefen_rejected),
                     "in_gefen_no_pdf": len(in_gefen_no_pdf),
-                    "division": _detect_gefen_division(df_gefen),
+                    "division": _detect_gefen_division(df_gefen, academic_year),
                     "gefen_files": gefen_file_stats,
                     "gefen_merge_note": gefen_merge_note,
                 },
@@ -3579,7 +3648,7 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
         # Load raw finance df — kesafim2000 still has English column names here
         # so that reconciler._filter_by_division can access "report_code"
         df_finance_raw, finance_label, finance_file_stats = _load_finance_raw(finance_paths, finance_type)
-        in_finance_not_gefen, in_gefen_not_finance, division, finance_rows_checked = reconcile(df_gefen, df_finance_raw)
+        in_finance_not_gefen, in_gefen_not_finance, division, finance_rows_checked = reconcile(df_gefen, df_finance_raw, academic_year)
 
         # Rename report_code → קוד דיווח for all finance types after reconciliation.
         # Kesafim also renames its other English columns to Hebrew display names.
@@ -3616,6 +3685,7 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
                     df_gefen, finance_paths, finance_type,
                     results_clean_for_recon, finance_col_map,
                     school_stage=school_stage,
+                    academic_year=academic_year,
                 )
             except Exception as exc:
                 logger.warning("per_combo_results failed in _process: %s", exc)
@@ -4033,6 +4103,8 @@ def _entry_severity(entry: dict, expected_year: str) -> str:
     resolved by the user explicitly acknowledging it (see acknowledged_roles in
     _collect_file_issues) — reserved for the two cases where we genuinely can't tell
     if the file is wrong, vs. it just legitimately has very little data."""
+    if entry["status"] == "missing":
+        return "block"
     if entry["status"] in ("unscoped_budget", "unreadable_raw_file", "unrecognized"):
         return "block"
     if entry["status"] == "recognized":
@@ -4181,14 +4253,21 @@ def _collect_file_issues(
 ) -> list[dict]:
     """Builds one entry per uploaded tikhnun/gefen/finance file (or file group) —
     unconditionally, whether it matches expected_year/requested_division or not. If at
-    least one entry is actually a problem (year mismatch OR division mismatch),
-    returns the FULL list (so the frontend's unified file-issues modal can show every
-    uploaded file's status together, not just the offenders). If everything matches,
-    returns an empty list and the check proceeds normally. Finance files are grouped
-    into a single entry (multiple kesafim2000/schoolcash files already get merged into
-    one logical ledger elsewhere in the app) and never carry division keys — division
-    only applies to gefen/tikhnun files. Replaces the former year-only, same-named
-    helper that didn't account for division."""
+    least one entry is actually a problem (year mismatch OR division mismatch OR a
+    missing tikhnun file), returns the FULL list (so the frontend's unified
+    file-issues modal can show every uploaded file's status together, not just the
+    offenders). If everything matches, returns an empty list and the check proceeds
+    normally. Finance files are grouped into a single entry (multiple
+    kesafim2000/schoolcash files already get merged into one logical ledger elsewhere
+    in the app) and never carry division keys — division only applies to
+    gefen/tikhnun files. Replaces the former year-only, same-named helper that didn't
+    account for division.
+
+    A tikhnun file is mandatory on every run (not just the first one for a division) —
+    callers only ever reach here with tikhnun_paths empty in the normal gefen/finance
+    flow; the separate tikhnun-only run mode (_classify_files's early return) always
+    has tikhnun_paths non-empty, so the synthetic "missing" entry below never fires
+    there."""
     tikhnun_divisions = [_detect_tikhnun_division(p) for p in tikhnun_paths]
     # Exactly 2 tikhnun files, one of each division — a legitimate "both divisions at
     # once" upload (mirrors the gefen split_divisions case below); never flag either
@@ -4219,6 +4298,12 @@ def _collect_file_issues(
             entries.append({"file_role": finance_type, "filenames": filenames, "status": "unscoped_budget", "detected_academic_year": None})
         else:
             entries.append(_dated_file_entry(finance_type, filenames, _read_finance_invoice_dates(finance_paths, finance_type)))
+
+    if not tikhnun_paths:
+        entries.append({
+            "file_role": "tikhnun", "filenames": [], "status": "missing",
+            "detected_academic_year": None, "detected_division": None, "division_status": None,
+        })
 
     acknowledged_roles = acknowledged_roles or set()
     blocking = False
@@ -4297,10 +4382,11 @@ def _find_gefen_path_for_division(
     return None
 
 
-def _detect_gefen_division(df: pd.DataFrame) -> str:
+def _detect_gefen_division(df: pd.DataFrame, academic_year: str | None = None) -> str:
+    tikkon_only, beinayim_only, _ = _lists_for_year(academic_year)
     codes = set(df["report_code"].dropna().astype(int).tolist())
-    has_tikkon   = bool(codes & set(TIKKON_ONLY))
-    has_beinayim = bool(codes & set(BEINAYIM_ONLY))
+    has_tikkon   = bool(codes & set(tikkon_only))
+    has_beinayim = bool(codes & set(beinayim_only))
     if has_tikkon and not has_beinayim:
         return "tikkon"
     if has_beinayim and not has_tikkon:
@@ -4308,7 +4394,7 @@ def _detect_gefen_division(df: pd.DataFrame) -> str:
     return "both"
 
 
-def _load_gefen_files_unmerged(paths: list[Path]) -> tuple[list[pd.DataFrame], list[bool], list[dict]]:
+def _load_gefen_files_unmerged(paths: list[Path], academic_year: str | None = None) -> tuple[list[pd.DataFrame], list[bool], list[dict]]:
     """Loads each gefen file individually, WITHOUT merging — used both by
     _load_gefen_files() (which merges afterwards, for the legacy/default path) and by
     _process()'s six-year division-split detection, which needs per-file division
@@ -4319,7 +4405,7 @@ def _load_gefen_files_unmerged(paths: list[Path]) -> tuple[list[pd.DataFrame], l
     per_file_stats = [
         {
             "filename": p.name,
-            "division": _detect_gefen_division(df),
+            "division": _detect_gefen_division(df, academic_year),
             "rows": len(df),
             "was_deduplicated": was_dedup,
         }
@@ -4369,8 +4455,8 @@ def _merge_gefen_dfs(dfs: list[pd.DataFrame]) -> tuple[pd.DataFrame, dict | None
     return merged, merge_note
 
 
-def _load_gefen_files(paths: list[Path]) -> tuple[pd.DataFrame, list[dict], dict | None]:
-    dfs, _dedup_flags, per_file_stats = _load_gefen_files_unmerged(paths)
+def _load_gefen_files(paths: list[Path], academic_year: str | None = None) -> tuple[pd.DataFrame, list[dict], dict | None]:
+    dfs, _dedup_flags, per_file_stats = _load_gefen_files_unmerged(paths, academic_year)
     merged, merge_note = _merge_gefen_dfs(dfs)
     return merged, per_file_stats, merge_note
 

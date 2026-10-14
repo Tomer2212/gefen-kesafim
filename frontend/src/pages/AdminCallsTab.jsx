@@ -20,7 +20,6 @@ export default function AdminCallsTab({ users }) {
   const [dateTo, setDateTo] = useState(TODAY);
   const [advisorId, setAdvisorId] = useState("");
   const [direction, setDirection] = useState("");
-  const [showGapRows, setShowGapRows] = useState(false);
 
   const advisors = (users || []).filter(u => u.role === "advisor" || u.role === "manager" || u.role === "owner");
 
@@ -103,11 +102,6 @@ export default function AdminCallsTab({ users }) {
           <button type="button" onClick={clearFilters} className="text-xs text-slate-400 hover:text-slate-600 transition-colors px-1 py-1.5 self-end">
             נקה סינון
           </button>
-          <div className="flex items-center gap-2 self-end mr-auto">
-            <input type="checkbox" id="show-gap-rows" checked={showGapRows}
-              onChange={e => setShowGapRows(e.target.checked)} className="w-3.5 h-3.5 rounded accent-green-600" />
-            <label htmlFor="show-gap-rows" className="text-xs font-medium text-slate-500">הצג פערים בין שיחות</label>
-          </div>
         </div>
       </div>
 
@@ -127,7 +121,7 @@ export default function AdminCallsTab({ users }) {
           <p className="text-slate-400 text-sm mb-4">נסה לשנות את טווח התאריכים או הסינון</p>
         </div>
       ) : (
-        <CallsTable calls={displayedCalls} showGapRows={showGapRows} />
+        <CallsTable calls={displayedCalls} />
       )}
     </div>
   );

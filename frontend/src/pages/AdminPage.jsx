@@ -5222,17 +5222,23 @@ export default function AdminPage() {
                           </div>
                         </td>
                         )}
-                        {voicenterEnabled && isUserColVisible("voicenter") && (
-                          <td className="px-5 py-3">
-                            <MultiSelectChips compact
-                              options={voicenterKnownReps.map(r => ({ value: r.representative_code, label: r.representative_name || r.representative_code }))}
-                              className={voicenterMappings.filter(m => m.advisor_id === u.id).length === 0 ? "flex justify-center" : ""}
-                              selected={voicenterMappings.filter(m => m.advisor_id === u.id).map(m => m.representative_code)}
-                              onChange={codes => saveUserVoicenterMapping(u, codes)}
-                              placeholder="בחר קו/נציג"
-                              emptyIcon />
-                          </td>
-                        )}
+                        {voicenterEnabled && isUserColVisible("voicenter") && (() => {
+                          const takenByOthers = new Set(
+                            voicenterMappings.filter(m => m.advisor_id !== u.id).map(m => m.representative_code)
+                          );
+                          const availableReps = voicenterKnownReps.filter(r => !takenByOthers.has(r.representative_code));
+                          return (
+                            <td className="px-5 py-3">
+                              <MultiSelectChips compact
+                                options={availableReps.map(r => ({ value: r.representative_code, label: r.representative_name || r.representative_code }))}
+                                className={voicenterMappings.filter(m => m.advisor_id === u.id).length === 0 ? "flex justify-center" : ""}
+                                selected={voicenterMappings.filter(m => m.advisor_id === u.id).map(m => m.representative_code)}
+                                onChange={codes => saveUserVoicenterMapping(u, codes)}
+                                placeholder="בחר קו/נציג"
+                                emptyIcon />
+                            </td>
+                          );
+                        })()}
                         {isUserColVisible("gefen_support_count") && (
                           <td className="px-5 py-3 text-center whitespace-nowrap text-slate-600">
                             {u.gefen_support_count ?? 0}
