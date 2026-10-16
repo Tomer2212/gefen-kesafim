@@ -39,11 +39,19 @@ def hp_failed_numeric_parse(value) -> bool:
 
 def payscool_relaxed_key(df: pd.DataFrame) -> pd.Series:
     """Relaxed ichud-style key dropping the ח.פ (supplier number) component:
-    invoice_number + "-" + report_code + "-" + amount. `df` must already have
-    report_code/amount columns and the raw "מספר חשבונית" column, as produced
-    by load_payscool (or a row-filtered copy of its output)."""
-    canon_invoice = df["מספר חשבונית"].apply(canonical_payscool_invoice).apply(normalize_amount)
-    return canon_invoice + "-" + df["report_code"].astype(str) + "-" + df["amount"]
+    the invoice+report_code+amount tail of the existing "ichud" column. Derived
+    by stripping the leading "<normalized ח.פ>-" prefix off each "ichud" value
+    (ichud is always built as that normalized ח.פ value + "-" + this exact
+    tail), rather than depending on an "amount" column — "amount" is only
+    present on load_payscool()'s own output and NOT on the per-budget sheet
+    loader (analyze_router._load_payscool_sheet_df) used for multi-budget
+    schools, which builds "ichud" the same way but never persists "amount".
+    `df` must have "ichud" and raw "ח.פ" — present on both loaders' output."""
+    hp_norm = df["ח.פ"].apply(normalize_amount)
+    return pd.Series(
+        [ichud[len(hp) + 1:] for ichud, hp in zip(df["ichud"], hp_norm)],
+        index=df.index,
+    )
 
 
 def load_payscool(filepath: str) -> tuple[pd.DataFrame, int]:
