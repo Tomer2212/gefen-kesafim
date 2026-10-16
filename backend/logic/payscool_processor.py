@@ -24,6 +24,28 @@ def canonical_payscool_invoice(value) -> str:
     return m.group(2) if m else s
 
 
+def hp_failed_numeric_parse(value) -> bool:
+    """True when `value` (a raw "ח.פ" cell) is literal non-numeric text — e.g.
+    "עמלות בנק" — rather than a real supplier number. Empty/NaN -> False."""
+    s = normalize_amount(value)
+    if s == "":
+        return False
+    try:
+        float(s)
+        return False
+    except ValueError:
+        return True
+
+
+def payscool_relaxed_key(df: pd.DataFrame) -> pd.Series:
+    """Relaxed ichud-style key dropping the ח.פ (supplier number) component:
+    invoice_number + "-" + report_code + "-" + amount. `df` must already have
+    report_code/amount columns and the raw "מספר חשבונית" column, as produced
+    by load_payscool (or a row-filtered copy of its output)."""
+    canon_invoice = df["מספר חשבונית"].apply(canonical_payscool_invoice).apply(normalize_amount)
+    return canon_invoice + "-" + df["report_code"].astype(str) + "-" + df["amount"]
+
+
 def load_payscool(filepath: str) -> tuple[pd.DataFrame, int]:
     import openpyxl
     wb = openpyxl.load_workbook(filepath, read_only=True)

@@ -1,5 +1,8 @@
 import pandas as pd
 
+from logic.gefen_processor import build_relaxed_key as _gefen_relaxed_key
+from logic.payscool_processor import hp_failed_numeric_parse, payscool_relaxed_key as _payscool_relaxed_key
+
 TIKKON_ONLY = [
     48,54,55,58,59,61,62,66,76,87,91,92,94,95,96,97,98,99,100,
     101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,
@@ -51,7 +54,48 @@ def reconcile(
     in_finance_not_gefen = df_finance_filtered[~df_finance_filtered["ichud"].isin(gefen_set)].copy()
     in_gefen_not_finance = df_gefen[~df_gefen["ichud"].isin(finance_set)].copy()
 
+    in_finance_not_gefen, in_gefen_not_finance = _resolve_payscool_hp_mismatches(
+        df_finance_filtered, in_finance_not_gefen, in_gefen_not_finance,
+    )
+
     return in_finance_not_gefen, in_gefen_not_finance, division, len(df_finance_filtered)
+
+
+def _resolve_payscool_hp_mismatches(
+    df_finance_filtered: pd.DataFrame,
+    in_finance_not_gefen: pd.DataFrame,
+    in_gefen_not_finance: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Second-pass, additive-only fix for PaySchool rows whose "ח.פ" column
+    holds literal text (e.g. "עמלות בנק") instead of a supplier number, while
+    the matching Gefen row carries a numeric placeholder (e.g. "201") in the
+    same position. Gated so it is a no-op for every other caller/case:
+      1. Only runs when df_finance_filtered has a "ח.פ" column (PaySchool only).
+      2. Only runs when at least one "ח.פ" value fails numeric parsing.
+      3. Only runs when both leftover frames are non-empty.
+    When triggered, restricted ONLY to the leftover frames: builds a relaxed
+    key (invoice + report_code + amount, no supplier number) per side and
+    drops any leftover row from BOTH sides whose relaxed key appears on the
+    other side (treated as a resolved true match). Remaining leftovers stay
+    genuine mismatches.
+    """
+    if "ח.פ" not in df_finance_filtered.columns:
+        return in_finance_not_gefen, in_gefen_not_finance
+    if in_finance_not_gefen.empty or in_gefen_not_finance.empty:
+        return in_finance_not_gefen, in_gefen_not_finance
+    if not df_finance_filtered["ח.פ"].apply(hp_failed_numeric_parse).any():
+        return in_finance_not_gefen, in_gefen_not_finance
+
+    finance_relaxed = _payscool_relaxed_key(in_finance_not_gefen)
+    gefen_relaxed = _gefen_relaxed_key(in_gefen_not_finance)
+
+    finance_resolved = finance_relaxed.isin(set(gefen_relaxed))
+    gefen_resolved = gefen_relaxed.isin(set(finance_relaxed))
+
+    return (
+        in_finance_not_gefen[~finance_resolved].copy(),
+        in_gefen_not_finance[~gefen_resolved].copy(),
+    )
 
 
 def _filter_by_division(

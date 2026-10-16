@@ -44,6 +44,20 @@ def _build_ichud(df: pd.DataFrame) -> pd.Series:
     )
 
 
+def build_relaxed_key(df: pd.DataFrame) -> pd.Series:
+    """Relaxed ichud-style key dropping supplier_number entirely:
+    invoice_number + "-" + report_code + "-" + amount, mirroring _build_ichud.
+    `df` must have report_code and the raw "מספר חשבונית"/"סכום פריט" columns,
+    as produced by load_gefen (or a row-filtered copy of its output)."""
+    return (
+        df["מספר חשבונית"].apply(normalize_amount)
+        + "-"
+        + df["report_code"].astype(str)
+        + "-"
+        + df["סכום פריט"].apply(normalize_amount)
+    )
+
+
 def normalize_amount(val) -> str:
     if pd.isna(val) or str(val).strip() == "":
         return ""

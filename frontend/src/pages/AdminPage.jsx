@@ -5229,7 +5229,7 @@ export default function AdminPage() {
                           const availableReps = voicenterKnownReps.filter(r => !takenByOthers.has(r.representative_code));
                           return (
                             <td className="px-5 py-3">
-                              <MultiSelectChips compact
+                              <MultiSelectChips compact plainTrigger stackedTrigger
                                 options={availableReps.map(r => ({ value: r.representative_code, label: r.representative_name || r.representative_code }))}
                                 className={voicenterMappings.filter(m => m.advisor_id === u.id).length === 0 ? "flex justify-center" : ""}
                                 selected={voicenterMappings.filter(m => m.advisor_id === u.id).map(m => m.representative_code)}

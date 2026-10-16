@@ -27,6 +27,12 @@ import { createPortal } from "react-dom";
 // click while just trying to open the list can't silently delete a selection. Opt-in; other
 // call sites keep the chip+"×" trigger.
 //
+// `stackedTrigger`: opt-in, only meaningful together with `plainTrigger` — when more than one
+// value is selected, each renders on its own line (flex-col, no joining commas) instead of the
+// default single comma-separated line. Used for AdminPage's "שיוך קו שיחות" column, where a user
+// can have several phone lines and they should read as a stacked list, not a run-on sentence.
+// Other `plainTrigger` consumers (e.g. "תחומי ידע") keep the inline comma-separated look.
+//
 // `checkIcon`: opt-in — a checked option's box shows a green checkmark instead of the plain
 // gray-filled square. Used everywhere "תחומי ידע" is picked (AdminPage table + invite form,
 // AdvisorFinderModal, ProfilePage "אזור אישי"); other MultiSelectChips consumers (weekdays,
@@ -50,7 +56,7 @@ import { createPortal } from "react-dom";
 // it regardless of z-index).
 const MISSING_LEVEL_MSG = "נא לבחור רמה לתחום הידע שהוגדר.";
 
-export function MultiSelectChips({ options, selected, onChange, placeholder = "בחר", className = "", compact = false, neutral = false, emptyIcon = false, placeholderClassName = "text-slate-400", boxClassName = null, showChevron = false, searchable = false, onConfirm = null, onCancel = null, cancelLabel = "ביטול", levels = false, levelOptions = [], levelValues = {}, onLevelChange = null, invalidLevelValues = [], title = null, plainTrigger = false, checkIcon = false, deferChanges = false }) {
+export function MultiSelectChips({ options, selected, onChange, placeholder = "בחר", className = "", compact = false, neutral = false, emptyIcon = false, placeholderClassName = "text-slate-400", boxClassName = null, showChevron = false, searchable = false, onConfirm = null, onCancel = null, cancelLabel = "ביטול", levels = false, levelOptions = [], levelValues = {}, onLevelChange = null, invalidLevelValues = [], title = null, plainTrigger = false, checkIcon = false, deferChanges = false, stackedTrigger = false }) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState(null);
   const [search, setSearch] = useState("");
@@ -77,7 +83,9 @@ export function MultiSelectChips({ options, selected, onChange, placeholder = "�
   }, [open]);
 
   const boxCls = boxClassName ?? (plainTrigger
-    ? "text-sm text-slate-900 bg-transparent flex flex-wrap items-center gap-1 min-h-[26px] cursor-pointer hover:text-blue-600"
+    ? (stackedTrigger
+      ? "text-sm text-slate-900 bg-transparent flex flex-col items-start gap-0.5 min-h-[26px] cursor-pointer hover:text-blue-600"
+      : "text-sm text-slate-900 bg-transparent flex flex-wrap items-center gap-1 min-h-[26px] cursor-pointer hover:text-blue-600")
     : compact
     ? "w-full text-sm border border-slate-300 rounded-md px-2 py-0.5 bg-transparent flex flex-wrap items-center gap-1 min-h-[26px] cursor-pointer focus-within:border-blue-400 focus-within:ring-1 focus-within:ring-blue-100"
     : "input-field flex flex-wrap items-center gap-1.5 min-h-[38px] cursor-pointer");
@@ -180,7 +188,7 @@ export function MultiSelectChips({ options, selected, onChange, placeholder = "�
               const invalid = levels && effInvalidLevelValues.includes(v);
               return (
                 <span key={v} className={`relative ${invalid ? "group text-red-500 font-semibold" : ""}`}>
-                  {opt ? opt.label : v}{i < sel.length - 1 ? "," : ""}
+                  {opt ? opt.label : v}{!stackedTrigger && i < sel.length - 1 ? "," : ""}
                   {invalid && (
                     <span role="tooltip" className="pointer-events-none absolute bottom-full right-1/2 translate-x-1/2 mb-1.5 hidden group-hover:block whitespace-nowrap text-xs font-medium text-slate-900 bg-yellow-300 border border-yellow-400 rounded-md px-2 py-1 shadow-lg z-[10000]">
                       {MISSING_LEVEL_MSG}

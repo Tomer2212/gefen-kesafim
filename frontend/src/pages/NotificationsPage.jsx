@@ -51,13 +51,35 @@ const TYPE_ICON = {
   voicenter_rep_unmapped:   "☎️",
 };
 
+// Mirrors the editable fields in SchoolPage.jsx's `editForm` (everything `submitFullRequest`
+// can send as a proposed change) plus the profile self-service fields from ProfilePage.jsx.
+// Any field missing here falls back to showing its raw code name to the approver — keep in sync.
 const FIELD_LABEL = {
-  name: "שם בית ספר", symbol: "סמל מוסד", city: "עיר", authority: "רשות",
-  stage: "שלב", finance_software: "תוכנת כספים",
-  address: "כתובת", district: "מחוז", notes: "הערות", school_phone: "טלפון בית ספר",
+  name: "שם מוסד", symbol: "סמל מוסד", city: "עיר", authority: "בעלות",
+  stage: "שלב מוסד", finance_software: "תוכנת כספים",
+  address: "כתובת", district: "מחוז", notes: "הערות", school_phone: "טלפון בית הספר",
+  education_authority: "רשות חינוך", sector: "מגזר", supervision: "פיקוח",
+  grade_levels: "שכבות לימוד", study_days: "ימי לימוד", student_count: "מס' תלמידים",
+  restrict_access_to: "הרשאת גישה",
+  // principal
   principal_name: "שם מנהל/ת", principal_phone: "טלפון מנהל/ת", principal_email: "מייל מנהל/ת",
-  secretary_name: "שם מזכיר/ה", secretary_phone: "טלפון מזכיר/ה", secretary_email: "מייל מזכיר/ה",
-  finance_contact_name: "איש קשר כספים", finance_contact_phone: "טלפון כספים", finance_contact_email: "מייל כספים",
+  principal_day_off: "יום חופשי (מנהל/ת)", principal_same_person: "אותו מנהל/ת לשתי החטיבות",
+  principal_chativa_name: "שם מנהל/ת חט\"ב", principal_chativa_phone: "טלפון מנהל/ת חט\"ב",
+  principal_chativa_email: "מייל מנהל/ת חט\"ב", principal_chativa_day_off: "יום חופשי (מנהל/ת חט\"ב)",
+  // secretary
+  secretary_name: "שם מנהלנ/ית", secretary_phone: "טלפון מנהלנ/ית", secretary_email: "מייל מנהלנ/ית",
+  secretary_day_off: "יום חופשי (מנהלנ/ית)", secretary_same_person: "אות/ה מנהלנ/ית לשתי החטיבות",
+  secretary_chativa_name: "שם מנהלנ/ית חט\"ב", secretary_chativa_phone: "טלפון מנהלנ/ית חט\"ב",
+  secretary_chativa_email: "מייל מנהלנ/ית חט\"ב", secretary_chativa_day_off: "יום חופשי (מנהלנ/ית חט\"ב)",
+  // finance contact
+  finance_contact_name: "שם אחראי/ת כספים", finance_contact_phone: "טלפון אחראי/ת כספים",
+  finance_contact_email: "מייל אחראי/ת כספים", finance_contact_day_off: "יום חופשי (אחראי/ת כספים)",
+  finance_same_person: "אות/ה אחראי/ת כספים לשתי החטיבות",
+  finance_contact_chativa_name: "שם אחראי/ת כספים חט\"ב", finance_contact_chativa_phone: "טלפון אחראי/ת כספים חט\"ב",
+  finance_contact_chativa_email: "מייל אחראי/ת כספים חט\"ב", finance_contact_chativa_day_off: "יום חופשי (אחראי/ת כספים חט\"ב)",
+  // extra contacts / meeting coordination
+  extra_contacts: "אנשי קשר נוספים", meeting_coordinator: "מתאם פגישות",
+  meeting_coordinators: "מתאמי פגישות",
   // profile self-service fields
   work_phone: "טלפון עבודה", control_domains: "תחומי ידע",
 };
@@ -66,17 +88,74 @@ const VALUE_LABEL = {
   // stage
   yesodi: "יסודי", beinayim: "חטיבת ביניים", tikkon: "תיכון",
   sheshshnati: "שש-שנתי", other: "אחר",
-  // finance_software
+  // finance_software / control_domains
   kesafim2000: "כספים 2000", payscool: "פייסקול", schoolcash: "סקולקאש",
-  // knowledge areas (control_domains)
   gefen: "גפן",
 };
 
-function formatValue(val) {
+const WEEKDAY_LABEL = { sun: "א", mon: "ב", tue: "ג", wed: "ד", thu: "ה", fri: "ו", sat: "ש" };
+
+const COORD_ROLE_LABEL = {
+  principal: "מנהל/ת", principal_chativa: "מנהל/ת חט\"ב",
+  secretary: "מנהלנ/ית", secretary_chativa: "מנהלנ/ית חט\"ב",
+  finance_contact: "אחראי/ת כספים", finance_contact_chativa: "אחראי/ת כספים חט\"ב",
+};
+
+const COORD_SLOT_LABEL = {
+  gefen: "גפן", gefen_tichon: "גפן - תיכון", gefen_beinayim: "גפן - חט\"ב",
+  current: "שוטף", current_tichon: "שוטף - תיכון", current_beinayim: "שוטף - חט\"ב",
+  district: "מחוז",
+};
+
+function coordRoleLabel(ref) {
+  if (!ref) return "—";
+  if (typeof ref === "string" && ref.startsWith("extra:")) {
+    return `איש קשר נוסף ${Number(ref.split(":")[1]) + 1}`;
+  }
+  return COORD_ROLE_LABEL[ref] || String(ref);
+}
+
+// Per-field custom formatters for values that aren't plain scalars/enums
+// (arrays of weekdays, contact objects, coordinator maps, etc.).
+const FIELD_FORMATTERS = {
+  principal_day_off: formatWeekdays, secretary_day_off: formatWeekdays, finance_contact_day_off: formatWeekdays,
+  principal_chativa_day_off: formatWeekdays, secretary_chativa_day_off: formatWeekdays, finance_contact_chativa_day_off: formatWeekdays,
+  study_days: formatWeekdays,
+  grade_levels: (val) => (Array.isArray(val) && val.length ? val.join(", ") : "—"),
+  principal_same_person: formatBool, secretary_same_person: formatBool, finance_same_person: formatBool,
+  restrict_access_to: (val) => (val == null ? "כולם" : `${val.length} יועצים נבחרו`),
+  extra_contacts: (val) => {
+    if (!Array.isArray(val) || val.length === 0) return "—";
+    return val.map(ec => `${ec?.role || "איש קשר נוסף"}: ${ec?.name || "—"}`).join("; ");
+  },
+  meeting_coordinator: coordRoleLabel,
+  meeting_coordinators: (val) => {
+    if (!val || typeof val !== "object" || Object.keys(val).length === 0) return "—";
+    return Object.entries(val)
+      .filter(([, ref]) => ref)
+      .map(([slot, ref]) => `${COORD_SLOT_LABEL[slot] || slot}: ${coordRoleLabel(ref)}`)
+      .join("; ") || "—";
+  },
+};
+
+function formatWeekdays(val) {
+  if (!Array.isArray(val) || val.length === 0) return "—";
+  return val.map(v => WEEKDAY_LABEL[v] ?? String(v)).join(", ");
+}
+
+function formatBool(val) {
+  if (val === null || val === undefined || val === "") return "—";
+  return val ? "כן" : "לא";
+}
+
+function formatValue(val, field) {
+  if (field && FIELD_FORMATTERS[field]) return FIELD_FORMATTERS[field](val);
   if (Array.isArray(val)) {
     return val.length ? val.map(v => VALUE_LABEL[v] ?? String(v)).join(", ") : "—";
   }
   if (val === null || val === undefined || val === "") return "—";
+  if (typeof val === "object") return "—";
+  if (typeof val === "boolean") return formatBool(val);
   return VALUE_LABEL[val] ?? String(val);
 }
 
@@ -109,9 +188,9 @@ function ProposedChangesDiff({ changes, currentValues, fieldDecisions, onDecide 
           >
             <span className={`text-slate-500 ${isRejected ? "line-through" : ""}`}>{FIELD_LABEL[k] || k}</span>
             {hasCurrentValues && (
-              <span className="text-slate-400">{formatValue(currentValues[k])}</span>
+              <span className="text-slate-400">{formatValue(currentValues[k], k)}</span>
             )}
-            <span className={`text-slate-800 font-medium ${isRejected ? "line-through" : ""}`}>{formatValue(v)}</span>
+            <span className={`text-slate-800 font-medium ${isRejected ? "line-through" : ""}`}>{formatValue(v, k)}</span>
             {isInteractive && (
               <div className="flex gap-1 justify-end">
                 <button
@@ -161,7 +240,7 @@ function RequestResultDiff({ changes, approvedFields, status }) {
               {FIELD_LABEL[k] || k}
             </span>
             <span className={`font-medium ${isApproved ? "text-green-800" : isRejected ? "text-red-700 line-through opacity-70" : "text-slate-800"}`}>
-              {formatValue(v)}
+              {formatValue(v, k)}
             </span>
           </div>
         );
