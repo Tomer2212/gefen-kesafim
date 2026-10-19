@@ -33,6 +33,19 @@ def get_academic_year_date_range(academic_year: str) -> tuple[date, date]:
     return date(start_year, 9, 1), date(start_year + 1, 8, 31)
 
 
+def get_closure_window(academic_year: str) -> tuple[date, date]:
+    """The date range during which "סגירת שנה" (year closure, both the finance-software
+    toggles and the per-division/budget Gefen-system ones) may be marked for this academic
+    year: Jun 1 through Dec 31 of the Gregorian year the academic year ENDS in (start + 1).
+    Falls back to DEFAULT_ACADEMIC_YEAR for unknown labels, same as get_academic_year_date_range.
+    Enforcement of this window is client-side only (SchoolPage.jsx disables the toggle +
+    shows a tooltip) — it's a UX guard against the common mistake of closing the wrong
+    year, not a security boundary, so there's no corresponding server-side check."""
+    start_year = _ACADEMIC_YEAR_START_GREGORIAN.get(academic_year) or _ACADEMIC_YEAR_START_GREGORIAN[DEFAULT_ACADEMIC_YEAR]
+    closing_year = start_year + 1
+    return date(closing_year, 6, 1), date(closing_year, 12, 31)
+
+
 def get_previous_academic_year(academic_year: str) -> str | None:
     """The academic year immediately preceding `academic_year` (e.g. תשפ"ז -> תשפ"ו).
     Manually maintained — extend _ACADEMIC_YEAR_PREVIOUS when ACADEMIC_YEARS grows.

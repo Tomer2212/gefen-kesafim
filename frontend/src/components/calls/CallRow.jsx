@@ -65,7 +65,7 @@ function buildWindowTitle(call, advisorLabel) {
   return parts.join(" - ");
 }
 
-function CallRowBase({ call, onDelete, hideSchoolColumn, canManage = true, schoolId }) {
+function CallRowBase({ call, onDelete, hideSchoolColumn, hideAdvisorColumn, canManage = true, schoolId }) {
   const { openCallNote } = useCallNoteWindows();
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -133,7 +133,9 @@ function CallRowBase({ call, onDelete, hideSchoolColumn, canManage = true, schoo
       <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap" dir="ltr">{formatTime(call.start_time)}</td>
       <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap" dir="ltr">{formatTime(endIso)}</td>
       <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap" dir="ltr">{formatDuration(call.duration_seconds)}</td>
-      <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap">{advisorLabel}</td>
+      {!hideAdvisorColumn && (
+        <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap">{advisorLabel}</td>
+      )}
       <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap">
         {call.direction === "outgoing" ? (
           <span className="inline-flex items-center gap-1">יוצאת<ArrowIcon pointing="left" color="#16a34a" /></span>

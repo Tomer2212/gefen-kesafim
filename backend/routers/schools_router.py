@@ -285,6 +285,14 @@ class GoalStatusIn(BaseModel):
     met: bool | None = None
 
 
+class GefenClosureIn(BaseModel):
+    division_type: str
+    budget_name: str
+    academic_year: str
+    status: bool | None = None
+    notes: str | None = None
+
+
 class IncentiveModelIn(BaseModel):
     division_type: str
     budget_name: str
@@ -870,6 +878,23 @@ def list_schools(
         except Exception as exc:
             logger.warning("year-admin ליווי enrichment failed (non-fatal): %s", exc)
 
+    # Enrich Q9 (gefen_year_closures — per-division/budget "מערכת גפן" closure status, used by
+    # the dashboard's dynamic "סגירת שנה <budget>" columns). Non-fatal.
+    gefen_closures_by_school: dict = {}
+    if school_ids:
+        try:
+            gc_rows = (
+                db.table("gefen_year_closures")
+                .select("school_id, division_type, budget_name, status")
+                .eq("academic_year", academic_year)
+                .in_("school_id", school_ids)
+                .execute()
+            )
+            for r in (gc_rows.data or []):
+                gefen_closures_by_school.setdefault(r["school_id"], []).append(r)
+        except Exception as exc:
+            logger.warning("gefen_year_closures enrichment failed (non-fatal): %s", exc)
+
     # Enrich Q7b ("מכתב בקרה" — control letters, one fixed row per division_type) for the
     # dashboard and admin schools tables.
     control_letters_by_school: dict = {}
@@ -921,6 +946,7 @@ def list_schools(
 
     for school in schools:
         school["check_metrics"] = metrics_by_school.get(school["id"], [])
+        school["gefen_closures"] = gefen_closures_by_school.get(school["id"], [])
         school["goal_statuses"] = goals_by_school.get(school["id"], [])
         school["year_closure"] = closure_by_school.get(school["id"]) or {}
         school["service_type"] = service_type_by_school.get(school["id"])
@@ -2044,6 +2070,114 @@ def set_goal_status(
             },
             on_conflict="school_id,division_type,budget_name,goal_key,academic_year",
         )
+        .execute()
+    )
+    return row.data[0]
+
+
+# ---------------------------------------------------------------------------
+# "סגירת שנה" — Gefen-system closure per (division, budget) — see gefen_year_closures.
+# Combos are discovered dynamically from check_metrics (the same source the dashboard and
+# "בדיקות" tab already use), never hard-coded — a school/year with no checks yet has no
+# combos and the frontend hides the "מערכת גפן" section entirely.
+# ---------------------------------------------------------------------------
+
+_DIVISION_ORDER = {"yesodi": 0, "beinayim": 1, "tikkon": 2, "other": 3}
+
+
+@router.get("/{school_id}/gefen-closures")
+def list_gefen_closures(
+    school_id: str,
+    academic_year: str,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            if user["role"] not in ("owner", "manager") and not _advisor_has_school_access(db, user, school_id):
+                raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
+
+            metric_rows = (
+                db.table("check_metrics")
+                .select("division_type, budget_name")
+                .eq("school_id", school_id)
+                .eq("academic_year", academic_year)
+                .execute()
+                .data
+            ) or []
+            combos = sorted(
+                {(r["division_type"], r["budget_name"]) for r in metric_rows if r.get("division_type") and r.get("budget_name")}
+            )
+
+            accounts = (
+                db.table("gefen_accounts")
+                .select("division_type, custom_label")
+                .eq("school_id", school_id)
+                .execute()
+                .data
+            ) or []
+            label_by_division = {a["division_type"]: a.get("custom_label") or DIVISION_LABELS.get(a["division_type"], a["division_type"]) for a in accounts}
+
+            closure_rows = (
+                db.table("gefen_year_closures")
+                .select("division_type, budget_name, status, notes")
+                .eq("school_id", school_id)
+                .eq("academic_year", academic_year)
+                .execute()
+                .data
+            ) or []
+            closure_by_combo = {(r["division_type"], r["budget_name"]): r for r in closure_rows}
+
+            result = [
+                {
+                    "division_type": division_type,
+                    "division_label": label_by_division.get(division_type, DIVISION_LABELS.get(division_type, division_type)),
+                    "budget_name": budget_name,
+                    "status": closure_by_combo.get((division_type, budget_name), {}).get("status"),
+                    "notes": closure_by_combo.get((division_type, budget_name), {}).get("notes"),
+                }
+                for division_type, budget_name in combos
+            ]
+            result.sort(key=lambda r: (_DIVISION_ORDER.get(r["division_type"], 99), r["budget_name"]))
+            return result
+        except HTTPException:
+            raise
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("list_gefen_closures attempt 1 failed: %s — resetting client and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.error("list_gefen_closures failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+
+@router.patch("/{school_id}/gefen-closures")
+def set_gefen_closure(
+    school_id: str,
+    body: GefenClosureIn,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    db = get_admin_client()
+    if user["role"] not in ("owner", "manager") and not _advisor_has_school_access(db, user, school_id):
+        raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
+
+    # Only "status"/"notes" are partial-updatable (one toggle, one textarea blur) — build
+    # the upsert payload from exclude_unset so an update to one never nulls out the other
+    # (a postgrest upsert only SETs the columns present in the payload on conflict).
+    update_data = body.model_dump(include={"status", "notes"}, exclude_unset=True)
+    update_data.update({
+        "school_id": school_id,
+        "division_type": body.division_type,
+        "budget_name": body.budget_name,
+        "academic_year": body.academic_year,
+        "updated_by": user["id"],
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    })
+
+    row = (
+        db.table("gefen_year_closures")
+        .upsert(update_data, on_conflict="school_id,division_type,budget_name,academic_year")
         .execute()
     )
     return row.data[0]

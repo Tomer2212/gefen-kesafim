@@ -383,8 +383,10 @@ const DEFAULT_COL_ORDER = ALL_COLUMNS.map(c => c.key);
 // Goal columns ("goal_<goalKey>") are built dynamically from an async-loaded endpoint, so
 // they can never be part of the static DEFAULT_COL_ORDER — saved col_order/col_visible
 // validation accepts them by prefix instead of requiring an exact DEFAULT_COL_ORDER match.
+// Same for "gefen_closure_<budgetName>" — built dynamically from the real budget_name values
+// seen across check_metrics (see gefenClosureColumns below).
 function isKnownColumnKey(k) {
-  return DEFAULT_COL_ORDER.includes(k) || (typeof k === "string" && k.startsWith("goal_"));
+  return DEFAULT_COL_ORDER.includes(k) || (typeof k === "string" && (k.startsWith("goal_") || k.startsWith("gefen_closure_")));
 }
 
 // Columns that get the Excel-style header filter/sort icon — every SUMMARY_COLUMNS entry
@@ -502,9 +504,15 @@ function fmtInt(v) {
 // Resolves which check_metrics row backs a summary column for a given school row —
 // the combo itself when the row is already split by division/budget, otherwise the
 // entry matching the active budget (default "גפן", or the single selected filter budget).
+// A combo with budget_name === null is a "division-only" row (a visible gefen-closure
+// column forced the split by division alone, not division+budget) — combo isn't itself a
+// real check_metrics row in that case, so look one up by (division, activeSummaryBudget).
 function getSummaryMetricsRow(school, combo, activeSummaryBudget) {
-  if (combo) return combo;
-  return (school.check_metrics || []).find(m => m.budget_name === activeSummaryBudget) || null;
+  if (!combo) return (school.check_metrics || []).find(m => m.budget_name === activeSummaryBudget) || null;
+  if (combo.budget_name != null) return combo;
+  return (school.check_metrics || []).find(
+    m => m.division_type === combo.division_type && m.budget_name === activeSummaryBudget
+  ) || null;
 }
 
 function renderSummaryValue(school, colDef, combo, activeSummaryBudget, emptyValue) {
@@ -528,6 +536,7 @@ function formatFilterValueLabel(raw, fmt) {
   if (fmt === "text" || fmt === "textMulti") return raw === null || raw === undefined ? "" : String(raw);
   if (fmt === "goal") return raw === 2 ? "כן" : raw === 1 ? "לא" : "טרם הוגדר";
   if (fmt === "closure") return raw === 2 ? "סגור" : raw === 1 ? "לא סגור" : "טרם סומן";
+  if (fmt === "gefenClosure") return raw === 2 ? "סגור" : raw === 1 ? "לא סגור" : "לא רלוונטי";
   if (fmt === "controlLetterStatus") {
     const value = CONTROL_LETTER_STATUS_FILTER_ORDER[raw - 1];
     return CONTROL_LETTER_STATUS_MAP[value]?.label || "";
@@ -544,7 +553,10 @@ function formatFilterValueLabel(raw, fmt) {
 // so goal columns stay consistent with the existing "סינון לפי יעד" advanced-filter behavior
 // and with the manually-toggled "כן"/"לא" values from the school's "יעדים" tab.
 function getGoalStatus(school, combo, goalKey, activeSummaryBudget) {
-  const budgetName = combo ? combo.budget_name : activeSummaryBudget;
+  // A division-only combo (budget_name === null — see getSummaryMetricsRow) carries no
+  // fixed budget of its own; fall back to the globally-selected summary budget, same as
+  // the unsplit (combo === null) case.
+  const budgetName = (combo && combo.budget_name != null) ? combo.budget_name : activeSummaryBudget;
   const divisionType = combo ? combo.division_type : null;
   const statuses = school.goal_statuses || [];
   const findWithBudget = want => statuses.find(g =>
@@ -557,6 +569,35 @@ function getGoalStatus(school, combo, goalKey, activeSummaryBudget) {
   // back to that legacy blank value so goals saved before the fix still display correctly.
   const entry = findWithBudget(budgetName) || findWithBudget("");
   return entry ? entry.met : null;
+}
+
+// Resolves a dynamic "סגירת שנה <budget>" dashboard column's value for a school row —
+// relevant = whether this division ever ran a check for this budget this academic year
+// (check_metrics existence, same source the "סגירת שנה" tab's own "מערכת גפן" section uses
+// to discover its combos) — if not, the cell is "לא רלוונטי" regardless of gefen_year_closures.
+// status mirrors gefen_year_closures.status as-is (null/false both read as "לא סגור", same
+// as the "?? false" default on the toggle itself in SchoolYearClosureTab.jsx).
+function getGefenClosureState(school, divisionType, budgetName) {
+  if (!divisionType) return { relevant: false, status: null };
+  const relevant = (school.check_metrics || []).some(
+    m => m.division_type === divisionType && m.budget_name === budgetName
+  );
+  if (!relevant) return { relevant: false, status: null };
+  const entry = (school.gefen_closures || []).find(
+    c => c.division_type === divisionType && c.budget_name === budgetName
+  );
+  return { relevant: true, status: entry ? entry.status : null };
+}
+
+function renderGefenClosureBadge(relevant, status) {
+  if (!relevant) return <span className="text-slate-400">לא רלוונטי</span>;
+  if (status === true) return <span className="text-green-600 font-semibold">סגור</span>;
+  return <span className="text-red-600 font-semibold">לא סגור</span>;
+}
+
+function gefenClosureStateText(relevant, status) {
+  if (!relevant) return "לא רלוונטי";
+  return status === true ? "סגור" : "לא סגור";
 }
 
 // One raw numeric value per filterable column, uniformly (school.check_metrics/combo
@@ -574,7 +615,7 @@ function principalNames(school) {
   ].filter(Boolean);
 }
 
-function computeFilterValues(school, combo, meetingsStats, activeSummaryBudget, goalColumns = []) {
+function computeFilterValues(school, combo, meetingsStats, activeSummaryBudget, goalColumns = [], gefenClosureColumns = []) {
   const out = {};
   const stats = meetingsStats[school.id];
   out.meetings_completed = stats ? stats.completed ?? null : null;
@@ -591,6 +632,12 @@ function computeFilterValues(school, combo, meetingsStats, activeSummaryBudget, 
   for (const gc of goalColumns) {
     const met = getGoalStatus(school, combo, gc.goalKey, activeSummaryBudget);
     out[gc.key] = met === true ? 2 : met === false ? 1 : 0;
+  }
+  // 0=לא רלוונטי, 1=לא סגור, 2=סגור — deliberately different ordinal meaning than the goal/
+  // closure columns above (there 0="טרם הוגדר"); here 0 is a genuine third state, not "unset".
+  for (const gc of gefenClosureColumns) {
+    const { relevant, status } = getGefenClosureState(school, combo?.division_type, gc.budgetName);
+    out[gc.key] = !relevant ? 0 : status === true ? 2 : 1;
   }
   const closure = school.year_closure || {};
   out.closure_parents_status = closure.closure_parents_status === true ? 2 : closure.closure_parents_status === false ? 1 : 0;
@@ -1230,7 +1277,7 @@ function meetingBreakdownValue(school, key, meetingsStats, emptyText) {
     : formatMeetingHours(bucket.total_minutes ?? 0);
 }
 
-function renderCell(school, key, meetingsStats = {}, combo = null, activeSummaryBudget = "גפן", goalColumnsByKey = {}) {
+function renderCell(school, key, meetingsStats = {}, combo = null, activeSummaryBudget = "גפן", goalColumnsByKey = {}, gefenClosureColumnsByKey = {}) {
   const summaryCol = SUMMARY_COLUMNS.find(c => c.key === key);
   if (summaryCol) return renderSummaryValue(school, summaryCol, combo, activeSummaryBudget, "—");
   const breakdown = meetingBreakdownValue(school, key, meetingsStats, "—");
@@ -1238,6 +1285,10 @@ function renderCell(school, key, meetingsStats = {}, combo = null, activeSummary
   if (goalColumnsByKey[key]) {
     const met = getGoalStatus(school, combo, goalColumnsByKey[key], activeSummaryBudget);
     return met === true ? "כן" : met === false ? "לא" : "טרם הוגדר";
+  }
+  if (gefenClosureColumnsByKey[key]) {
+    const { relevant, status } = getGefenClosureState(school, combo?.division_type, gefenClosureColumnsByKey[key]);
+    return renderGefenClosureBadge(relevant, status);
   }
   const closure = school.year_closure || {};
   switch (key) {
@@ -1352,7 +1403,7 @@ function renderCell(school, key, meetingsStats = {}, combo = null, activeSummary
   }
 }
 
-function renderCellText(school, key, meetingsStats = {}, combo = null, activeSummaryBudget = "גפן", goalColumnsByKey = {}) {
+function renderCellText(school, key, meetingsStats = {}, combo = null, activeSummaryBudget = "גפן", goalColumnsByKey = {}, gefenClosureColumnsByKey = {}) {
   const summaryCol = SUMMARY_COLUMNS.find(c => c.key === key);
   if (summaryCol) return renderSummaryValue(school, summaryCol, combo, activeSummaryBudget, "");
   const breakdown = meetingBreakdownValue(school, key, meetingsStats, "");
@@ -1360,6 +1411,10 @@ function renderCellText(school, key, meetingsStats = {}, combo = null, activeSum
   if (goalColumnsByKey[key]) {
     const met = getGoalStatus(school, combo, goalColumnsByKey[key], activeSummaryBudget);
     return met === true ? "כן" : met === false ? "לא" : "טרם הוגדר";
+  }
+  if (gefenClosureColumnsByKey[key]) {
+    const { relevant, status } = getGefenClosureState(school, combo?.division_type, gefenClosureColumnsByKey[key]);
+    return gefenClosureStateText(relevant, status);
   }
   const closure = school.year_closure || {};
   switch (key) {
@@ -1735,7 +1790,7 @@ function BulkAccessModal({ schools, users, loadingUsers, onClose, onSaved }) {
 // don't re-render on unrelated parent state changes (e.g. a filter popover opening).
 const DashboardSchoolRow = memo(function DashboardSchoolRow({
   school, combo, isSelected, selectMode, canOpenSchoolCard, advancedFilterActive,
-  visibleColOrder, meetingsStats, activeSummaryBudget, goalColumnsByKey, onOpen, onToggleSelect,
+  visibleColOrder, meetingsStats, activeSummaryBudget, goalColumnsByKey, gefenClosureColumnsByKey, onOpen, onToggleSelect,
 }) {
   return (
     <tr
@@ -1780,7 +1835,7 @@ const DashboardSchoolRow = memo(function DashboardSchoolRow({
         <td className="px-4 py-3 border-l border-slate-100 text-slate-600">
           <div className="flex flex-col gap-0.5 text-xs">
             <span className="font-medium text-slate-700">
-              {combo.budget_name} · {DIVISION_LABEL[combo.division_type] || combo.division_type}
+              {combo.budget_name ? `${combo.budget_name} · ` : ""}{DIVISION_LABEL[combo.division_type] || combo.division_type}
             </span>
           </div>
         </td>
@@ -1788,7 +1843,7 @@ const DashboardSchoolRow = memo(function DashboardSchoolRow({
       {visibleColOrder.map((key, i) => (
         <td key={key}
           className={`px-5 py-3 text-slate-600${(i < visibleColOrder.length - 1 || selectMode) ? " border-l border-slate-100" : ""}`}>
-          {renderCell(school, key, meetingsStats, combo, activeSummaryBudget, goalColumnsByKey)}
+          {renderCell(school, key, meetingsStats, combo, activeSummaryBudget, goalColumnsByKey, gefenClosureColumnsByKey)}
         </td>
       ))}
     </tr>
@@ -2061,18 +2116,37 @@ export default function DashboardPage() {
     fmt: "goal",
   })), [goalDefinitions]);
   const goalColumnsByKey = useMemo(() => Object.fromEntries(goalColumns.map(c => [c.key, c.goalKey])), [goalColumns]);
-  const dynamicAllColumns = useMemo(() => [...ALL_COLUMNS, ...goalColumns], [goalColumns]);
-  const allFilterColumnMeta = useMemo(() => [...FILTER_COLUMN_META, ...goalColumns], [goalColumns]);
+  // One dashboard column per real budget_name seen across all loaded schools' check_metrics
+  // (not DEFAULT_BUDGET_TYPES — real data only, per what was confirmed) — mirrors "סגירת
+  // שנה" > "מערכת גפן" on the school card, just reflected here, never a new value of its own.
+  const gefenClosureColumns = useMemo(() => uniq(
+    schools.flatMap(s => (s.check_metrics || []).map(m => m.budget_name))
+  ).filter(Boolean).sort().map(budgetName => ({
+    key: `gefen_closure_${budgetName}`,
+    label: `סגירת שנה ${budgetName}`,
+    budgetName,
+    fmt: "gefenClosure",
+  })), [schools]);
+  const gefenClosureColumnsByKey = useMemo(
+    () => Object.fromEntries(gefenClosureColumns.map(c => [c.key, c.budgetName])),
+    [gefenClosureColumns]
+  );
+  const dynamicAllColumns = useMemo(() => [...ALL_COLUMNS, ...goalColumns, ...gefenClosureColumns], [goalColumns, gefenClosureColumns]);
+  const allFilterColumnMeta = useMemo(() => [...FILTER_COLUMN_META, ...goalColumns, ...gefenClosureColumns], [goalColumns, gefenClosureColumns]);
   const allFilterColumnKeys = useMemo(() => new Set(allFilterColumnMeta.map(c => c.key)), [allFilterColumnMeta]);
   const columnCategories = useMemo(() => [
     { title: "כללי", cols: GENERAL_COLUMNS },
     { title: "הקצאות", cols: ALLOCATION_COLUMNS },
     { title: "פגישות שבוצעו", cols: MEETINGS_DONE_COLUMNS },
-    { title: "בדיקות", cols: [...SUMMARY_COLUMNS, ...CLOSURE_COLUMNS] },
+    { title: "בדיקות", cols: SUMMARY_COLUMNS },
     { title: "יעדים", cols: goalColumns },
     { title: "מכתב בקרה", cols: CONTROL_LETTER_COLUMNS },
     { title: "אנשי קשר", cols: CONTACT_COLUMNS },
-  ], [goalColumns]);
+    // "סגירת שנה" — deliberately last/bottom-most, and the one place the pre-existing flat
+    // closure_parents_status/closure_authority_status columns and the new dynamic
+    // per-budget gefen_closure_* columns are grouped together.
+    { title: "סגירת שנה", cols: [...CLOSURE_COLUMNS, ...gefenClosureColumns] },
+  ], [goalColumns, gefenClosureColumns]);
 
   // Goal columns only become known once goalDefinitions loads (after mount); CLOSURE_COLUMNS
   // are static but a user with previously-saved col_order/col_visible (from before this
@@ -2083,7 +2157,7 @@ export default function DashboardPage() {
   // also re-runs once right after restoration overwrites them — the missing-check guard makes
   // this converge after one extra render instead of looping.
   useEffect(() => {
-    const candidates = [...NEWLY_ADDED_MOVABLE_COLUMNS, ...MEETING_TYPE_BREAKDOWN_COLUMNS, ...CLOSURE_COLUMNS, ...CONTROL_LETTER_COLUMNS, ...CONTACT_COLUMNS, ...goalColumns];
+    const candidates = [...NEWLY_ADDED_MOVABLE_COLUMNS, ...MEETING_TYPE_BREAKDOWN_COLUMNS, ...CLOSURE_COLUMNS, ...CONTROL_LETTER_COLUMNS, ...CONTACT_COLUMNS, ...goalColumns, ...gefenClosureColumns];
     const missingOrder = candidates.map(c => c.key).filter(k => !colOrder.includes(k));
     const missingVisible = candidates.filter(c => !(c.key in colVisible));
     if (missingOrder.length === 0 && missingVisible.length === 0) return;
@@ -2094,7 +2168,7 @@ export default function DashboardPage() {
     setColOrder(nextOrder);
     setColVisible(nextVisible);
     saveColPrefs(nextOrder, nextVisible);
-  }, [goalColumns, colOrder, colVisible]);
+  }, [goalColumns, gefenClosureColumns, colOrder, colVisible]);
 
   useEffect(() => {
     async function init() {
@@ -2215,7 +2289,8 @@ export default function DashboardPage() {
   // (shown in the toolbar whenever a summary/goal column is visible).
   const activeSummaryBudget = summaryBudget;
   const hasVisibleSummaryCol = SUMMARY_COLUMNS.some(c => colVisible[c.key]) || goalColumns.some(c => colVisible[c.key]);
-  const advancedFilterActive = goalConditions.length > 0 || hasVisibleSummaryCol;
+  const hasVisibleGefenClosureCol = gefenClosureColumns.some(c => colVisible[c.key]);
+  const advancedFilterActive = goalConditions.length > 0 || hasVisibleSummaryCol || hasVisibleGefenClosureCol;
 
   const columnFilterActiveCount = Object.keys(columnFilters).length + sortSpecs.length;
   const activeFilterCount = columnFilterActiveCount + goalConditions.length;
@@ -2232,40 +2307,63 @@ export default function DashboardPage() {
     return matchName || matchSymbol || matchAdvisor;
   }), [schools, searchQuery]);
 
-  // When a goals filter (or a visible summary column) is active, split each school into one
-  // row per division+budget combination that matches — otherwise keep one row per school.
-  // When only a summary column forced the split, narrow combos down to the active summary
-  // budget so turning on a column alone doesn't explode a school into one row per unrelated
-  // budget — only per division (e.g. six-year schools running "גפן" separately for each
-  // division).
+  // When a goals filter (or a visible summary/closure column) is active, split each school
+  // into rows — otherwise keep one row per school. Three cases, in priority order:
+  // 1. A goal filter (goalConditions) is active: split by (division, budget) from
+  //    check_metrics, filtered by evalGoalConditions — the one case that can legitimately
+  //    produce more than one row per division (pre-existing behavior, unrelated to closure
+  //    columns).
+  // 2. No goal filter, but a gefen-closure column ("סגירת שנה <budget>") is visible: always
+  //    exactly one row per PHYSICAL division (gefen_accounts), regardless of whether a
+  //    summary column is also visible — a closure column owns a fixed budget of its own
+  //    (not the row's), so it never needs a finer split. A division with zero checks this
+  //    year still gets a row (every one of its closure columns reads "לא רלוונטי").
+  // 3. No goal filter, no closure column, only a summary column: narrow check_metrics combos
+  //    down to the active summary budget — already one row per division (not per budget).
   const baseDisplayRows = useMemo(() => (!advancedFilterActive
     ? filteredSchools.map(school => ({
         school, combo: null, rowKey: school.id,
-        filterValues: computeFilterValues(school, null, meetingsStats, activeSummaryBudget, goalColumns),
+        filterValues: computeFilterValues(school, null, meetingsStats, activeSummaryBudget, goalColumns, gefenClosureColumns),
       }))
     : filteredSchools.flatMap(school => {
-        let combos = (school.check_metrics && school.check_metrics.length
-          ? school.check_metrics
-          : [{ division_type: school.stage, budget_name: "כללי" }]
-        );
-        if (hasVisibleSummaryCol) {
-          const narrowed = combos.filter(combo => combo.budget_name === activeSummaryBudget);
-          // No real goal filter is driving the split — a school without any "גפן" check
-          // yet must still show up (with "—" summary values), not disappear from the list.
-          combos = narrowed.length > 0
-            ? narrowed
-            : (goalConditions.length > 0 ? [] : [{ division_type: school.stage, budget_name: activeSummaryBudget }]);
+        let combos;
+        if (goalConditions.length > 0) {
+          combos = (school.check_metrics && school.check_metrics.length
+            ? school.check_metrics
+            : [{ division_type: school.stage, budget_name: "כללי" }]
+          );
+          if (hasVisibleSummaryCol) {
+            const narrowed = combos.filter(combo => combo.budget_name === activeSummaryBudget);
+            combos = narrowed.length > 0 ? narrowed : [];
+          }
+          combos = combos.filter(combo => evalGoalConditions(school, combo, goalConditions));
+        } else if (hasVisibleGefenClosureCol) {
+          combos = (school.gefen_accounts && school.gefen_accounts.length
+            ? school.gefen_accounts.map(acc => ({ division_type: acc.division_type, budget_name: null }))
+            : [{ division_type: school.stage, budget_name: null }]
+          );
+        } else {
+          // hasVisibleSummaryCol only — narrow to the active summary budget so turning on a
+          // column alone doesn't explode a school into one row per unrelated budget, only
+          // per division (e.g. six-year schools running "גפן" separately for each division).
+          const allCombos = (school.check_metrics && school.check_metrics.length
+            ? school.check_metrics
+            : [{ division_type: school.stage, budget_name: "כללי" }]
+          );
+          const narrowed = allCombos.filter(combo => combo.budget_name === activeSummaryBudget);
+          // A school without any check for the active budget yet must still show up (with
+          // "—" summary values), not disappear from the list.
+          combos = narrowed.length > 0 ? narrowed : [{ division_type: school.stage, budget_name: activeSummaryBudget }];
         }
-        combos = combos.filter(combo => evalGoalConditions(school, combo, goalConditions));
         return combos.map(combo => ({
           school,
           combo,
           rowKey: `${school.id}:${combo.division_type}:${combo.budget_name}`,
-          filterValues: computeFilterValues(school, combo, meetingsStats, activeSummaryBudget, goalColumns),
+          filterValues: computeFilterValues(school, combo, meetingsStats, activeSummaryBudget, goalColumns, gefenClosureColumns),
         }));
       })
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  ), [filteredSchools, advancedFilterActive, meetingsStats, activeSummaryBudget, goalColumns, hasVisibleSummaryCol, goalConditions]);
+  ), [filteredSchools, advancedFilterActive, meetingsStats, activeSummaryBudget, goalColumns, gefenClosureColumns, hasVisibleSummaryCol, hasVisibleGefenClosureCol, goalConditions]);
 
   // Excel-style per-column header filters/sort, layered on top of baseDisplayRows — all
   // active column filters combine with AND (order-independent), then the stacked
@@ -2343,7 +2441,7 @@ export default function DashboardPage() {
     ];
     const rows = selected.map(school => [
       school.name || "",
-      ...visibleColOrder.map(key => renderCellText(school, key, meetingsStats, null, activeSummaryBudget, goalColumnsByKey)),
+      ...visibleColOrder.map(key => renderCellText(school, key, meetingsStats, null, activeSummaryBudget, goalColumnsByKey, gefenClosureColumnsByKey)),
     ]);
     const wsData = [colLabels, ...rows];
     const ws = XLSX.utils.aoa_to_sheet(wsData);
@@ -2363,7 +2461,7 @@ export default function DashboardPage() {
     ];
     const rows = selected.map(school => [
       school.name || "",
-      ...visibleColOrder.map(key => renderCellText(school, key, meetingsStats, null, activeSummaryBudget, goalColumnsByKey)),
+      ...visibleColOrder.map(key => renderCellText(school, key, meetingsStats, null, activeSummaryBudget, goalColumnsByKey, gefenClosureColumnsByKey)),
     ]);
     try {
       const res = await axios.post(
@@ -2389,7 +2487,7 @@ export default function DashboardPage() {
     ];
     const rows = displayedSchools.map(school => [
       school.name || "",
-      ...visibleColOrder.map(key => renderCellText(school, key, meetingsStats, null, activeSummaryBudget, goalColumnsByKey)),
+      ...visibleColOrder.map(key => renderCellText(school, key, meetingsStats, null, activeSummaryBudget, goalColumnsByKey, gefenClosureColumnsByKey)),
     ]);
     const wsData = [colLabels, ...rows];
     const ws = XLSX.utils.aoa_to_sheet(wsData);
@@ -2825,6 +2923,7 @@ export default function DashboardPage() {
                                     meetingsStats={meetingsStats}
                                     activeSummaryBudget={activeSummaryBudget}
                                     goalColumnsByKey={goalColumnsByKey}
+                                    gefenClosureColumnsByKey={gefenClosureColumnsByKey}
                                     onOpen={openSchoolCard}
                                     onToggleSelect={toggleSelectOne}
                                   />

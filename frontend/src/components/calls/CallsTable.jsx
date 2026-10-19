@@ -17,12 +17,12 @@ function SortableHeader({ field, sortField, sortDir, onSort, children }) {
   );
 }
 
-export function CallsTable({ calls, hideSchoolColumn, canManage = true, schoolId }) {
+export function CallsTable({ calls, hideSchoolColumn, hideAdvisorColumn, canManage = true, schoolId }) {
   const [sortField, setSortField] = useState("start_time");
   const [sortDir, setSortDir] = useState("desc");
   const [removedIds, setRemovedIds] = useState(() => new Set());
   const visibleCalls = calls.filter(c => !removedIds.has(c.call_id));
-  const numColumns = 14 - (hideSchoolColumn ? 1 : 0);
+  const numColumns = 14 - (hideSchoolColumn ? 1 : 0) - (hideAdvisorColumn ? 1 : 0);
 
   function handleSort(field) {
     if (sortField !== field) { setSortField(field); setSortDir("asc"); }
@@ -64,7 +64,9 @@ export function CallsTable({ calls, hideSchoolColumn, canManage = true, schoolId
               <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">
                 <SortableHeader field="duration_seconds" sortField={sortField} sortDir={sortDir} onSort={handleSort}>משך שיחה</SortableHeader>
               </th>
-              <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">יועץ</th>
+              {!hideAdvisorColumn && (
+                <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">יועץ</th>
+              )}
               <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500">
                 <SortableHeader field="direction" sortField={sortField} sortDir={sortDir} onSort={handleSort}>סוג שיחה</SortableHeader>
               </th>
@@ -92,8 +94,8 @@ export function CallsTable({ calls, hideSchoolColumn, canManage = true, schoolId
             rowKey={r => r.call.call_id}
           >
             {row => (
-              <CallRow call={row.call} hideSchoolColumn={hideSchoolColumn} canManage={canManage} schoolId={schoolId}
-                onDelete={handleRowDelete} />
+              <CallRow call={row.call} hideSchoolColumn={hideSchoolColumn} hideAdvisorColumn={hideAdvisorColumn}
+                canManage={canManage} schoolId={schoolId} onDelete={handleRowDelete} />
             )}
           </VirtualRows>
         </table>

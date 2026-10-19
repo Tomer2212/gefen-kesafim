@@ -5,6 +5,7 @@ import { supabase } from "../lib/supabase";
 import Sidebar from "../components/Sidebar";
 import PersonalMeetingsTab from "./PersonalMeetingsTab";
 import PersonalTasksSection from "../components/personTasks/PersonalTasksSection";
+import PersonalCallsTab from "./PersonalCallsTab";
 import PersonalAttendanceTab from "./PersonalAttendanceTab";
 import ConnectionsTab from "./ConnectionsTab";
 import { MultiSelectChips } from "../components/MultiSelectChips";
@@ -25,6 +26,7 @@ function formatWorkPhone(p) {
 const BASE_TABS = [
   { id: "meetings", label: "פגישות" },
   { id: "tasks", label: "משימות" },
+  { id: "calls", label: "שיחות" },
   { id: "attendance", label: "שעון נוכחות" },
   { id: "connections", label: "חיבורים" },
   { id: "personal", label: "פרטים אישיים" },
@@ -51,6 +53,9 @@ export default function ProfilePage() {
   const [userId, setUserId] = useState(null);
   const [userRole, setUserRole] = useState(null);
   const [loading, setLoading] = useState(true);
+  // Default false so the tab never flashes briefly before we know whether the org has a
+  // calls integration configured at all.
+  const [callsTabEnabled, setCallsTabEnabled] = useState(false);
 
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
@@ -154,6 +159,18 @@ export default function ProfilePage() {
     }
     load();
   }, [navigate]);
+
+  useEffect(() => {
+    async function loadCallsIntegrationStatus() {
+      try {
+        const res = await axios.get("/calls/integration-status");
+        setCallsTabEnabled(!!res.data?.enabled);
+      } catch {
+        setCallsTabEnabled(false);
+      }
+    }
+    loadCallsIntegrationStatus();
+  }, []);
 
   useEffect(() => {
     if (editingName) nameInputRef.current?.focus();
@@ -369,7 +386,7 @@ export default function ProfilePage() {
           <h1 className="text-2xl font-bold text-slate-900 mb-8">אזור אישי</h1>
 
           <div className="flex items-end border-b border-slate-200 mb-6 gap-1">
-            {BASE_TABS.filter(t => t.id !== "attendance" || canSeeAttendance(userRole)).map(t => (
+            {BASE_TABS.filter(t => (t.id !== "attendance" || canSeeAttendance(userRole)) && (t.id !== "calls" || callsTabEnabled)).map(t => (
               <button
                 key={t.id}
                 onClick={() => setActiveTab(t.id)}
@@ -403,6 +420,8 @@ export default function ProfilePage() {
               )}
 
               {activeTab === "tasks" && <PersonalTasksSection />}
+
+              {activeTab === "calls" && callsTabEnabled && <PersonalCallsTab />}
 
               {activeTab === "connections" && <ConnectionsTab />}
 

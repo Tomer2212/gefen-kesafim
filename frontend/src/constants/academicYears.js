@@ -33,6 +33,23 @@ export function getAcademicYearForDate(dateStr) {
   return null;
 }
 
+// The date range during which "סגירת שנה" (year closure — both the finance-software
+// toggles and the per-division/budget Gefen-system ones) may be marked for this academic
+// year: Jun 1 through Dec 31 of the Gregorian year the academic year ENDS in (start + 1).
+// Exact mirror of backend's academic_years.get_closure_window. Enforcement is purely
+// client-side (a UX guard against closing the wrong year, not a security boundary).
+export function getClosureWindow(academicYear) {
+  const y = ACADEMIC_YEAR_START_GREGORIAN[academicYear] ?? ACADEMIC_YEAR_START_GREGORIAN[DEFAULT_ACADEMIC_YEAR];
+  const closingYear = y + 1;
+  return { start: `${closingYear}-06-01`, end: `${closingYear}-12-31` };
+}
+
+export function isClosureWindowOpen(academicYear, today = new Date()) {
+  const { start, end } = getClosureWindow(academicYear);
+  const t = today.toISOString().slice(0, 10);
+  return t >= start && t <= end;
+}
+
 // The academic-year "seam" (01.08–31.10) — a meeting scheduled in this window might
 // reasonably need files from both the outgoing and the incoming academic year. Used to
 // decide whether MeetingRow's date picker should offer the multi-year request prompt.

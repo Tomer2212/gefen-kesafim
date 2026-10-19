@@ -2804,6 +2804,40 @@ export default function SchoolPage() {
     if (v !== (yearAdminData.order_amount_gefen ?? null)) saveYearAdminField("order_amount_gefen", v);
   }
 
+  // "סגירת שנה" tab — Gefen-system closure per (division, budget) combo, discovered
+  // dynamically from check_metrics (same source "בדיקות" already uses). Refetched whenever
+  // the "סגירת שנה" tab is open and academicYear changes, so a check run elsewhere (adding
+  // or removing a budget) is reflected next time the tab is viewed.
+  const [gefenClosures, setGefenClosures] = useState([]);
+
+  function fetchGefenClosures() {
+    if (!schoolId) return;
+    axios.get(`/schools/${schoolId}/gefen-closures`, { params: { academic_year: academicYear } })
+      .then(res => setGefenClosures(Array.isArray(res.data) ? res.data : []))
+      .catch(() => setGefenClosures([]));
+  }
+
+  useEffect(() => {
+    if (activeTab === "closure") fetchGefenClosures();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [schoolId, academicYear, activeTab]);
+
+  async function saveGefenClosure(divisionType, budgetName, field, value) {
+    setGefenClosures(prev => prev.map(c =>
+      c.division_type === divisionType && c.budget_name === budgetName ? { ...c, [field]: value } : c
+    ));
+    try {
+      await axios.patch(`/schools/${schoolId}/gefen-closures`, {
+        division_type: divisionType,
+        budget_name: budgetName,
+        academic_year: academicYear,
+        [field]: value,
+      });
+    } catch {
+      fetchGefenClosures(); // revert on failure
+    }
+  }
+
   // Meetings state
   const [meetings, setMeetings] = useState([]);
   const [meetingsLoading, setMeetingsLoading] = useState(true);
@@ -5185,6 +5219,8 @@ export default function SchoolPage() {
             <SchoolYearClosureTab
               yearAdminData={yearAdminData}
               saveYearAdminField={saveYearAdminField}
+              gefenClosures={gefenClosures}
+              saveGefenClosure={saveGefenClosure}
               academicYear={academicYear}
             />
           )}

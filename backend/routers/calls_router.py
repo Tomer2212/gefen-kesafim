@@ -617,6 +617,33 @@ def list_calls(
     return result
 
 
+@router.get("/integration-status")
+def get_calls_integration_status(user: Annotated[dict, Depends(get_current_user)]):
+    """Lightweight check (no provider API call) used by the personal area to decide
+    whether to show the "שיחות" tab at all — available to every role, not just managers."""
+    cfg = _get_integration_config(user["org_id"])
+    return {"enabled": bool(cfg and cfg.get("enabled"))}
+
+
+@router.get("/my-calls")
+def list_my_calls(
+    user: Annotated[dict, Depends(get_current_user)],
+    date_from: str,
+    date_to: str,
+):
+    """Personal-area variant of /calls — any authenticated user, scoped to their own calls
+    only (advisor_id resolved server-side from the JWT, same friendly-empty-state pattern
+    as schools_router.list_school_calls)."""
+    try:
+        result = _pull_org_calls(user["org_id"], date_from, date_to)
+    except HTTPException as exc:
+        if exc.status_code == 400:
+            return {"calls": [], "calls_enabled": False}
+        raise
+    calls = [c for c in result["calls"] if c["advisor_id"] == user["id"]]
+    return {"calls": calls, "calls_enabled": True}
+
+
 class LinkCallSchoolIn(BaseModel):
     school_id: str
 
