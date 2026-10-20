@@ -42,6 +42,18 @@ DIVISION_LABELS = {
 
 FINANCE_SOFTWARE_ONLY_KINDS = ("kesafim2000", "payscool", "schoolcash")
 
+FINANCE_SOFTWARE_LABELS = {
+    "kesafim2000": "כספים2000",
+    "payscool": "פייסקול",
+    "schoolcash": "סקולקאש",
+}
+
+
+def _finance_label(fs: str, budget_names: list[str]) -> str:
+    fs_label = FINANCE_SOFTWARE_LABELS.get(fs, fs)
+    budgets_part = f" {', '.join(budget_names)}" if budget_names else ""
+    return f"קובץ פירוט הוצאות{budgets_part} מתוכנת הכספים ({fs_label})"
+
 
 def build_upload_checklist(db, school: dict, academic_year: str | None = None) -> dict:
     """Builds the checklist of expected files for a school's meeting-upload
@@ -73,7 +85,7 @@ def build_upload_checklist(db, school: dict, academic_year: str | None = None) -
         ]
         if finance_softwares:
             for fs in finance_softwares:
-                items.append({"label": f"קובץ כספים לפי תקציב וחטיבה ({fs})", "kind": "finance", "division_type": None, "budget_name": None, "finance_software": fs})
+                items.append({"label": _finance_label(fs, []), "kind": "finance", "division_type": None, "budget_name": None, "finance_software": fs})
         else:
             # Neither gefen_accounts nor the school itself has a finance_software on record —
             # still ask for *something*, generically, rather than silently dropping the
@@ -88,27 +100,21 @@ def build_upload_checklist(db, school: dict, academic_year: str | None = None) -
     for div in divisions:
         suffix = f" - {DIVISION_LABELS.get(div, div)}" if show_suffix else ""
         budgets = sorted({m["budget_name"] for m in metrics if m.get("division_type") == div and m.get("budget_name")})
+        items.append({"label": f"תכנון{suffix}", "kind": "tikhnun", "division_type": div, "budget_name": None})
         for b in budgets:
-            items.append({"label": f"תכנון {b}{suffix}", "kind": "tikhnun", "division_type": div, "budget_name": b})
-        items.append({"label": f"דיווח ביצוע{suffix}", "kind": "gefen", "division_type": div, "budget_name": None})
+            items.append({"label": f"דיווח ביצוע {b}{suffix}", "kind": "gefen", "division_type": div, "budget_name": b})
 
+    all_budgets = sorted({m["budget_name"] for m in metrics if m.get("budget_name")})
     finance_softwares = {a["finance_software"] for a in accounts if a.get("division_type") in divisions and a.get("finance_software")}
     if not finance_softwares and school.get("finance_software"):
         finance_softwares = {school["finance_software"]}
     if finance_softwares:
         for fs in sorted(finance_softwares):
-            items.append({"label": f"קובץ כספים ({fs})", "kind": "finance", "division_type": None, "budget_name": None, "finance_software": fs})
+            items.append({"label": _finance_label(fs, all_budgets), "kind": "finance", "division_type": None, "budget_name": None, "finance_software": fs})
     else:
         items.append({"label": "קובץ מתוכנת הכספים", "kind": "finance", "division_type": None, "budget_name": None, "finance_software": None})
 
     return {"items": items, "no_baseline_this_year": False, "divisions": divisions}
-
-
-FINANCE_SOFTWARE_LABELS = {
-    "kesafim2000": "כספים2000",
-    "payscool": "פייסקול",
-    "schoolcash": "סקולקאש",
-}
 
 
 def file_type_label(identified_type: str | None, division_type: str | None, budgets: list[str] | None) -> str:
@@ -151,11 +157,6 @@ def compute_upload_comparison(checklist: dict, received_files: list[dict]) -> di
             gefen_unclear = True
 
     tikhnun_received_count = sum(1 for f in received_files if f.get("identified_type") == "tikhnun")
-    tikhnun_budgets_received = set()
-    for f in received_files:
-        if f.get("identified_type") == "tikhnun":
-            for b in (f.get("budgets") or []):
-                tikhnun_budgets_received.add(b)
     finance_types_received = {
         f["identified_type"] for f in received_files
         if f.get("identified_type") in FINANCE_SOFTWARE_ONLY_KINDS
@@ -165,17 +166,33 @@ def compute_upload_comparison(checklist: dict, received_files: list[dict]) -> di
     for item in checklist["items"]:
         kind = item["kind"]
         if kind == "tikhnun":
-            budget = item.get("budget_name")
-            if budget:
-                received = budget in tikhnun_budgets_received and tikhnun_received_count >= tikhnun_needed
-            else:
-                received = tikhnun_received_count >= tikhnun_needed
+            # One tikhnun item per division now (never per-budget) — matches the
+            # pre-existing coarse behavior (count only, never actually division-specific).
+            received = tikhnun_received_count >= tikhnun_needed
         elif kind == "gefen":
             div = item.get("division_type")
-            if not div or not is_multi_division:
-                received = len(gefen_files) >= tikhnun_needed
+            budget = item.get("budget_name")
+            matching_div_files = [
+                f for f in gefen_files
+                if not div or not is_multi_division or f.get("division_type") in (div, "both")
+            ]
+            confirmed_budgets = {b for f in matching_div_files for b in (f.get("budgets") or [])}
+            if budget and budget in confirmed_budgets:
+                received = True
             else:
-                received = div in gefen_divisions_received
+                # Interim fallback until real per-file budget identification lands
+                # (see zihuy_core.identify integration): an uploaded gefen file whose
+                # budget couldn't be confirmed can provisionally satisfy at most one
+                # still-missing budget item in its division, picked deterministically
+                # (lowest budget name first) so one file is never double-counted.
+                unconfirmed_count = sum(1 for f in matching_div_files if not f.get("budgets"))
+                claimed_by_earlier_items = sum(
+                    1 for i in checklist["items"]
+                    if i["kind"] == "gefen" and i.get("division_type") == div
+                    and i.get("budget_name") and budget and i["budget_name"] < budget
+                    and i["budget_name"] not in confirmed_budgets
+                )
+                received = unconfirmed_count > claimed_by_earlier_items
         elif kind == "finance":
             fs = item.get("finance_software")
             received = (fs in finance_types_received) if fs else len(finance_types_received) > 0

@@ -46,6 +46,7 @@ from meeting_labels import (
     CANONICAL_LABELS,
     MEETING_SERVICE_TYPE_LABELS,
     MEETING_SERVICE_TYPE_VALUES,
+    MEETING_STATUS_LABELS,
     MEETING_STATUS_VALUES,
     MEETING_TYPE_VALUES,
     NORMALIZERS,
@@ -217,6 +218,7 @@ class SchoolIn(BaseModel):
     finance_contact_day_off: list[str] | None = None
     meeting_coordinator: str | None = None  # deprecated — retained for backfill/rollback only, use meeting_coordinators
     meeting_coordinators: dict[str, str] | None = None
+    gefen_files_responsible: dict[str, str] | None = None  # {slot: ref} — who gets the file-upload-request email, independent of meeting participants
     principal_chativa_name: str | None = None
     principal_chativa_phone: str | None = None
     principal_chativa_email: str | None = None
@@ -669,6 +671,57 @@ def _resolve_all_meeting_coordinators(school: dict, service_type: str | None) ->
     }
 
 
+# ---------------------------------------------------------------------------
+# "אחראי/ת קבצי גפן" (schools.gefen_files_responsible) — who receives the day-before
+# file-upload-request email for a גפן/מחוז/תקומה meeting, independent of whoever is
+# listed as a meeting participant. Deliberately NOT built on top of _slots_for_school:
+# here the split is driven ONLY by stage == 'sheshshnati' (district DOES split, unlike
+# meeting coordinators, and service_type never gates whether the column/slots exist —
+# only whether the "missing contact" warning is shown).
+# ---------------------------------------------------------------------------
+
+_GEFEN_FILES_SLOT_LABELS = {"default": "אחראי/ת קבצי גפן", "tichon": "תיכון", "beinayim": 'חט"ב'}
+
+
+def _gefen_files_slots_for_school(school: dict) -> list[str]:
+    return ["tichon", "beinayim"] if school.get("stage") == "sheshshnati" else ["default"]
+
+
+def _resolve_gefen_files_ref(school: dict, ref: str | None) -> dict | None:
+    """Like _resolve_coordinator_ref, but ALSO requires a non-empty email — this field
+    exists specifically to know who to email for Gefen files, so a contact with no email
+    cannot be a valid resolution even if their name is filled in."""
+    contact = _resolve_coordinator_ref(school, ref)
+    if not contact or not (contact.get("email") or "").strip():
+        return None
+    return contact
+
+
+def _resolve_gefen_files_responsible_for_slot(school: dict, slot: str) -> dict | None:
+    refs = school.get("gefen_files_responsible") or {}
+    return _resolve_gefen_files_ref(school, refs.get(slot))
+
+
+def _resolve_all_gefen_files_responsible(school: dict) -> dict:
+    return {
+        slot: _resolve_gefen_files_responsible_for_slot(school, slot)
+        for slot in _gefen_files_slots_for_school(school)
+    }
+
+
+def _gefen_files_slots_for_meeting(school: dict, normalized_stage_scope: str | None) -> list[str]:
+    """Which gefen_files_responsible slot(s) apply to one specific meeting. `normalized_stage_scope`
+    is the meeting's own stage_scope, already run through _normalize_stage_scope (expects
+    'tichon' | 'chativa' | 'both' | None)."""
+    if school.get("stage") != "sheshshnati":
+        return ["default"]
+    if normalized_stage_scope == "tichon":
+        return ["tichon"]
+    if normalized_stage_scope == "chativa":
+        return ["beinayim"]
+    return ["tichon", "beinayim"]  # "both" or unrecognized/missing — best-effort union, never skip
+
+
 @router.get("/")
 def list_schools(
     user: Annotated[dict, Depends(get_current_user)],
@@ -957,6 +1010,7 @@ def list_schools(
         school["control_letters"] = control_letters_by_school.get(school["id"], [])
         school["meeting_coordinator_contact"] = _resolve_meeting_coordinator(school)
         school["meeting_coordinators_resolved"] = _resolve_all_meeting_coordinators(school, school["service_type"])
+        school["gefen_files_responsible_resolved"] = _resolve_all_gefen_files_responsible(school)
         for service_type in ("gefen", "current", "district"):
             advisor_ids = typed_advisors_by_school[service_type].get(school["id"], [])
             school[f"advisors_{service_type}"] = [profiles_map[aid] for aid in advisor_ids if aid in profiles_map]
@@ -1143,13 +1197,18 @@ def delete_school(
     # (recycle-bin flow) re-creates them; the meeting DB rows themselves are untouched.
     try:
         today = datetime.now(timezone.utc).date().isoformat()
-        future = db.table("meetings").select("id, calendar_sync").eq("school_id", school_id).gte("meeting_date", today).eq("status", "scheduled").execute()
+        future = db.table("meetings").select("*").eq("school_id", school_id).gte("meeting_date", today).eq("status", "scheduled").execute()
         for m in (future.data or []):
             if m.get("calendar_sync"):
                 with graph_client.calendar_sync_lock(db, m["id"]) as acquired:
                     if acquired:
-                        graph_client.sync_meeting_cancel(db, user["org_id"], m["calendar_sync"])
-                        graph_client.persist_calendar_sync(db, m["id"], {})
+                        subject = _build_meeting_subject(db, school_id, m.get("participants"), m.get("primary_contact_key"), m.get("meeting_service_type"))
+                        subject = f"[{MEETING_STATUS_LABELS.get('cancelled', 'בוטלה')}] {subject}"
+                        sync_map = graph_client.sync_meeting_update(
+                            db, user["org_id"], m, m["calendar_sync"], subject,
+                            show_as="free", clear_attendees=True,
+                        )
+                        graph_client.persist_calendar_sync(db, m["id"], sync_map)
     except Exception as exc:
         logger.warning("calendar cancel-sync failed for deleted school %s (non-fatal): %s", school_id, exc)
 
@@ -1218,19 +1277,25 @@ def restore_school(
     except Exception as exc:
         logger.warning("restore_school advisor notification failed (non-fatal): %s", exc)
 
-    # Re-create Outlook events for this school's future meetings that were cancelled
-    # when the school was deleted (calendar_sync was cleared to {} at that point).
+    # Restore Outlook events for this school's future meetings that were soft-cancelled
+    # (marked "[בוטלה]" + showAs=free) when the school was deleted — reviving the same
+    # event rather than creating a duplicate, same as any cancelled->scheduled transition.
     try:
         from datetime import datetime, timezone
         today = datetime.now(timezone.utc).date().isoformat()
         future = db.table("meetings").select("*").eq("school_id", school_id).gte("meeting_date", today).eq("status", "scheduled").execute()
         for m in (future.data or []):
-            if m.get("calendar_sync"):
-                continue  # already synced (wasn't touched by the delete flow)
+            calendar_sync = m.get("calendar_sync") or {}
+            was_soft_cancelled = any(v.get("status") == "soft_cancelled" for v in calendar_sync.values())
+            if calendar_sync and not was_soft_cancelled:
+                continue  # already synced normally (wasn't touched by the delete flow)
             with graph_client.calendar_sync_lock(db, m["id"]) as acquired:
                 if acquired:
                     subject = _build_meeting_subject(db, school_id, m.get("participants"), m.get("primary_contact_key"), m.get("meeting_service_type"))
-                    sync_map = graph_client.sync_meeting_create(db, user["org_id"], m, subject)
+                    if was_soft_cancelled:
+                        sync_map = graph_client.sync_meeting_update(db, user["org_id"], m, calendar_sync, subject, show_as="busy", clear_attendees=False)
+                    else:
+                        sync_map = graph_client.sync_meeting_create(db, user["org_id"], m, subject)
                     if sync_map:
                         graph_client.persist_calendar_sync(db, m["id"], sync_map)
     except Exception as exc:
@@ -4079,11 +4144,16 @@ def _send_reminder_email(to_email: str, subject: str, html: str):
 
 
 @router.post("/meetings/send-due-reminders")
-def send_due_reminders(request: Request):
+def send_due_reminders(request: Request, school_id: str | None = None):
     """Cron-triggered (GitHub Actions, daily Sun-Thu). Sends a reminder email
     to each participant of meetings scheduled for the relevant 'due' date(s),
     per _due_meeting_dates(). Tracked per-recipient in meeting_reminders so a
-    meeting is only ever attempted once and per-recipient failures are visible."""
+    meeting is only ever attempted once and per-recipient failures are visible.
+
+    `school_id` is an optional manual-testing filter (NOT used by the real cron
+    trigger, which never passes it): when set, only that school's due meetings
+    are considered, so a manual test run never touches other real schools'
+    meetings/participants."""
     if not CRON_SECRET or request.headers.get("X-Cron-Secret") != CRON_SECRET:
         raise HTTPException(status_code=401, detail="unauthorized")
 
@@ -4097,13 +4167,15 @@ def send_due_reminders(request: Request):
     for attempt in range(2):
         try:
             db = get_admin_client()
-            res = (
+            query = (
                 db.table("meetings")
                 .select("id, school_id, meeting_date, start_time, end_time, status, participants, advisor_ids, meeting_service_type, meeting_type, reminder_enabled, academic_year, requested_upload_years")
                 .eq("status", "scheduled")
                 .in_("meeting_date", due_dates)
-                .execute()
             )
+            if school_id:
+                query = query.eq("school_id", school_id)
+            res = query.execute()
             meetings = res.data or []
             break
         except Exception as exc:
@@ -4161,10 +4233,22 @@ def send_due_reminders(request: Request):
     # reminders — fetched unconditionally since either use needs it regardless of whether
     # anyone has actually opted out yet.
     import task_logic  # local import — task_logic imports from this module at module level
-    all_participant_emails = list({
+    all_participant_emails = {
         (p.get("email") or "").strip().lower()
         for m in meetings for p in (m.get("participants") or []) if (p.get("email") or "").strip()
-    })
+    }
+    # Resolved gefen_files_responsible contacts are folded in as synthetic participants per
+    # meeting below (even when absent from meeting.participants) — they must be included here
+    # too, or an opted-out contact reachable ONLY via this new field would bypass suppression.
+    for m in meetings:
+        if (m.get("meeting_service_type") or "gefen") == "current":
+            continue
+        school = schools_map.get(m["school_id"], {})
+        for slot in _gefen_files_slots_for_meeting(school, _normalize_stage_scope(m.get("stage_scope"))):
+            contact = _resolve_gefen_files_responsible_for_slot(school, slot)
+            if contact and contact.get("email"):
+                all_participant_emails.add(contact["email"].strip().lower())
+    all_participant_emails = list(all_participant_emails)
     client_status_map = {}
     opted_out_emails = set()
     try:
@@ -4181,6 +4265,37 @@ def send_due_reminders(request: Request):
     for m in meetings:
         try:
             participants = [p for p in (m.get("participants") or []) if (p.get("email") or "").strip()]
+            school = schools_map.get(m["school_id"], {})
+
+            # Round 16 — a שוטף meeting needs no files, so its secretary/finance reminder uses
+            # the plain template (same as the principal's) instead of the file-upload-request one.
+            meeting_service_type = m.get("meeting_service_type") or "gefen"
+
+            # "אחראי/ת קבצי גפן" — who gets the file-upload-request email, resolved directly from
+            # the school record (schools.gefen_files_responsible), completely independent of
+            # meeting.participants. Replaces the old participant-key-based detection, which
+            # silently sent no upload email at all for any meeting created without a
+            # secretary/finance participant — confirmed possible via several different
+            # meeting-creation paths (quick-add, bulk import, direct coordination, task wizard,
+            # self-service booking links).
+            upload_contacts_by_email: dict[str, dict] = {}
+            if meeting_service_type != "current":
+                gefen_slots = _gefen_files_slots_for_meeting(school, _normalize_stage_scope(m.get("stage_scope")))
+                for slot in gefen_slots:
+                    contact = _resolve_gefen_files_responsible_for_slot(school, slot)
+                    if contact and contact.get("email"):
+                        upload_contacts_by_email[contact["email"].strip().lower()] = contact
+
+            # Fold any resolved gefen-files contact not already in participants into the list as
+            # a synthetic participant, so the existing per-participant send/log logic below
+            # handles them identically — no duplicated sending code needed.
+            participant_emails_lower = {p["email"].strip().lower() for p in participants}
+            participants = participants + [
+                {"name": c.get("name"), "email": c["email"], "key": "gefen_files_responsible"}
+                for email_lower, c in upload_contacts_by_email.items()
+                if email_lower not in participant_emails_lower
+            ]
+
             if not participants:
                 continue
 
@@ -4193,30 +4308,24 @@ def send_due_reminders(request: Request):
             when_lamed, when_bet = _day_phrases(m["meeting_date"], today_il)
             advisor_name = _hebrew_join([advisor_names_map.get(aid) for aid in (m.get("advisor_ids") or [])])
             subject = f"תזכורת: פגישה {when_bet}"
-            school = schools_map.get(m["school_id"], {})
 
-            # Round 16 — a שוטף meeting needs no files, so its secretary/finance reminder uses
-            # the plain template (same as the principal's) instead of the file-upload-request one.
-            meeting_service_type = m.get("meeting_service_type") or "gefen"
             org_settings = org_settings_map.get(school.get("org_id"), {})
             upload_request_on = org_settings.get("secretary_upload_request_enabled", True)
 
             # Two independent send triggers:
             #  - row_on (meeting.reminder_enabled) → regular participants get a reminder.
-            #  - upload_request_on (automation 2) → secretary/finance on a גפן/מחוז meeting get
-            #    the file-upload request, EVEN IF row_on is false.
+            #  - upload_request_on (automation 2) → the resolved גפן-files contact(s) get the
+            #    file-upload request, EVEN IF row_on is false.
             # Automation 1 is intentionally not consulted here.
             row_on = bool(m.get("reminder_enabled"))
-            has_upload_contact = meeting_service_type != "current" and any(
-                p.get("key") in ("secretary", "finance") for p in participants
-            )
+            has_upload_contact = bool(upload_contacts_by_email)
             if not row_on and not (upload_request_on and has_upload_contact):
                 # Nothing to send for this meeting — skip before touching meeting_reminders.
                 continue
 
             for p in participants:
                 email_addr = p["email"].strip()
-                is_upload_contact = p.get("key") in ("secretary", "finance") and meeting_service_type != "current"
+                is_upload_contact = email_addr.lower() in upload_contacts_by_email
 
                 # Decide what (if anything) this recipient gets. Skipped recipients are still
                 # logged as "skipped" in meeting_reminders — the same table the "already
@@ -4687,6 +4796,7 @@ def get_school(
         logger.warning("get_school service_type lookup for coordinators failed (non-fatal): %s", exc)
         _service_type_for_coord = None
     school_data["meeting_coordinators_resolved"] = _resolve_all_meeting_coordinators(school_data, _service_type_for_coord)
+    school_data["gefen_files_responsible_resolved"] = _resolve_all_gefen_files_responsible(school_data)
 
     # Per-service-type advisor lists ("יועץ מלווה [גפן/שוטף/מחוז]") — needed by every role (not
     # just manager+) since meetings-tab default-advisor logic reads these regardless of who's
@@ -5672,7 +5782,7 @@ def cancel_user_future_meetings(user_id: str, user: Annotated[dict, Depends(get_
     today = datetime.now(timezone.utc).date().isoformat()
     rows = (
         db.table("meetings")
-        .select("id, calendar_sync")
+        .select("*")
         .gte("meeting_date", today)
         .eq("status", "scheduled")
         .filter("advisor_ids", "cs", json.dumps([user_id]))
@@ -5684,9 +5794,18 @@ def cancel_user_future_meetings(user_id: str, user: Annotated[dict, Depends(get_
             if m.get("calendar_sync"):
                 with graph_client.calendar_sync_lock(db, m["id"]) as acquired:
                     if acquired:
-                        graph_client.sync_meeting_cancel(db, user["org_id"], m["calendar_sync"])
+                        subject = _build_meeting_subject(db, m.get("school_id"), m.get("participants"), m.get("primary_contact_key"), m.get("meeting_service_type"))
+                        subject = f"[{MEETING_STATUS_LABELS.get('cancelled', 'בוטלה')}] {subject}"
+                        graph_client.sync_meeting_update(
+                            db, user["org_id"], m, m["calendar_sync"], subject,
+                            show_as="free", clear_attendees=True,
+                        )
         except Exception as exc:
             logger.warning("cancel meeting %s failed (non-fatal): %s", m["id"], exc)
+        try:
+            db.table("calendar_event_index").delete().eq("meeting_id", m["id"]).execute()
+        except Exception as exc:
+            logger.warning("calendar_event_index cleanup failed for meeting %s (non-fatal): %s", m["id"], exc)
         db.table("meetings").delete().eq("id", m["id"]).execute()
     return {"cancelled": len(meetings)}
 
@@ -8412,12 +8531,14 @@ def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annot
             if acquired:
                 existing = db.table("meetings").select("calendar_sync").eq("id", meeting_id).execute()
                 previous_sync = (existing.data[0].get("calendar_sync") or {}) if existing.data else {}
-                if meeting.get("status") in ("cancelled", "postponed"):
-                    graph_client.sync_meeting_cancel(db, user["org_id"], previous_sync)
-                    sync_map = {}
-                else:
-                    subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"), meeting.get("meeting_service_type"))
-                    sync_map = graph_client.sync_meeting_update(db, user["org_id"], {**meeting, "id": meeting_id}, previous_sync, subject)
+                subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"), meeting.get("meeting_service_type"))
+                is_cancelled_like = meeting.get("status") in ("cancelled", "postponed")
+                if is_cancelled_like:
+                    subject = f"[{MEETING_STATUS_LABELS.get(meeting['status'], 'בוטלה')}] {subject}"
+                sync_map = graph_client.sync_meeting_update(
+                    db, user["org_id"], {**meeting, "id": meeting_id}, previous_sync, subject,
+                    show_as=("free" if is_cancelled_like else "busy"), clear_attendees=is_cancelled_like,
+                )
                 graph_client.persist_calendar_sync(db, meeting_id, sync_map)
                 meeting["calendar_sync"] = sync_map
     except Exception as exc:
@@ -8445,12 +8566,14 @@ def _apply_meeting_patch(db, org_id: str, school_id: str, meeting_id: str, patch
                 meeting = row.data[0] if row.data else None
                 if meeting:
                     previous_sync = meeting.get("calendar_sync") or {}
-                    if meeting.get("status") in ("cancelled", "postponed"):
-                        graph_client.sync_meeting_cancel(db, org_id, previous_sync)
-                        sync_map = {}
-                    else:
-                        subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"), meeting.get("meeting_service_type"))
-                        sync_map = graph_client.sync_meeting_update(db, org_id, meeting, previous_sync, subject)
+                    subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"), meeting.get("meeting_service_type"))
+                    is_cancelled_like = meeting.get("status") in ("cancelled", "postponed")
+                    if is_cancelled_like:
+                        subject = f"[{MEETING_STATUS_LABELS.get(meeting['status'], 'בוטלה')}] {subject}"
+                    sync_map = graph_client.sync_meeting_update(
+                        db, org_id, meeting, previous_sync, subject,
+                        show_as=("free" if is_cancelled_like else "busy"), clear_attendees=is_cancelled_like,
+                    )
                     graph_client.persist_calendar_sync(db, meeting_id, sync_map)
     except Exception as exc:
         logger.warning("calendar sync failed for patched meeting %s (non-fatal): %s", meeting_id, exc)
@@ -8510,11 +8633,21 @@ def delete_meeting(school_id: str, meeting_id: str, user: Annotated[dict, Depend
     try:
         with graph_client.calendar_sync_lock(db, meeting_id) as acquired:
             if acquired:
-                row = db.table("meetings").select("calendar_sync").eq("id", meeting_id).execute()
-                previous_sync = (row.data[0].get("calendar_sync") or {}) if row.data else {}
-                graph_client.sync_meeting_cancel(db, user["org_id"], previous_sync)
+                row = db.table("meetings").select("*").eq("id", meeting_id).execute()
+                meeting = row.data[0] if row.data else {}
+                previous_sync = meeting.get("calendar_sync") or {}
+                subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"), meeting.get("meeting_service_type"))
+                subject = f"[{MEETING_STATUS_LABELS.get('cancelled', 'בוטלה')}] {subject}"
+                graph_client.sync_meeting_update(
+                    db, user["org_id"], {**meeting, "id": meeting_id}, previous_sync, subject,
+                    show_as="free", clear_attendees=True,
+                )
     except Exception as exc:
-        logger.warning("calendar cancel-sync failed before deleting meeting %s (non-fatal): %s", meeting_id, exc)
+        logger.warning("calendar soft-cancel-sync failed before deleting meeting %s (non-fatal): %s", meeting_id, exc)
+    try:
+        db.table("calendar_event_index").delete().eq("meeting_id", meeting_id).execute()
+    except Exception as exc:
+        logger.warning("calendar_event_index cleanup failed for deleted meeting %s (non-fatal): %s", meeting_id, exc)
     db.table("meetings").delete().eq("id", meeting_id).eq("school_id", school_id).execute()
     return {"ok": True}
 

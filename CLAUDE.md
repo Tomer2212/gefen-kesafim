@@ -956,6 +956,30 @@ Adding a new entry to the `server.proxy` map in `frontend/vite.config.js` (e.g. 
 
 ---
 
+## Manual Testing — Secretary/Finance File-Upload Request Email
+
+Whenever the user wants to test the "request files from school before a Gefen/מחוז meeting" flow (the automated email sent to the secretary/finance contact asking them to upload files ahead of a meeting), use this exact workflow — do not re-derive it from scratch, and always remind the user of these steps when they ask to test this flow.
+
+**Test school (fixed):** "לדוגמא" — `school_id = e044d506-0152-49f9-a737-e83c0d4e397c`
+
+**Why this is safe:** `POST /schools/meetings/send-due-reminders` ([schools_router.py](backend/routers/schools_router.py)) is the cron-triggered endpoint (GitHub Actions, daily) that emails every participant of every school's meeting due "tomorrow" (or Sat/Sun on a Thursday run). It takes an optional `school_id` query param — **not used by the real cron trigger** — that, when set, limits it to only that school's due meetings. This makes it safe to run manually against real production data without emailing any other real school.
+
+**Steps, every time:**
+1. In the school card for "לדוגמא", delete any existing test meeting and create a new one (new meeting each time — this sidesteps the "already sent" per-`meeting_id` dedupe in the `meeting_reminders` table, so no DB cleanup step is needed):
+   - `meeting_date` = tomorrow (or Sat/Sun if today is Thursday — the cron absorbs those on its Thursday run)
+   - type = גפן or מחוז (NOT שוטף — the upload-request email only fires for these)
+   - secretary or finance contact's email = the user's own test inbox
+2. Make sure the local backend (`uvicorn`, port 8000) has picked up any recent code changes — watch for the orphaned `--reload` worker issue (separate section above).
+3. Run this exact command in PowerShell (always against `localhost:8000`, never the live site — the live site hasn't necessarily deployed the `school_id` filter):
+   ```powershell
+   Invoke-WebRequest -Method POST `
+     -Uri "http://localhost:8000/schools/meetings/send-due-reminders?school_id=e044d506-0152-49f9-a737-e83c0d4e397c" `
+     -Headers @{ "X-Cron-Secret" = "<CRON_SECRET from .env>" }
+   ```
+4. Check the JSON response (`sent`/`failed`/`skipped_meetings`/`total_due` — `total_due` should be `1`) and the test inbox.
+
+---
+
 ## External File Storage — Cloudflare R2 (large files served outside Supabase)
 
 For large binary assets that shouldn't live in Supabase Storage or on Render's ephemeral disk (e.g. training videos), this project uses a private **Cloudflare R2** bucket (`gefenai-tutorial`), accessed server-side via the S3-compatible API (`boto3`), with short-lived **presigned URLs** handed to the authenticated frontend. See `backend/routers/training_videos_router.py` and the `training_videos` table for the reference implementation (nullable `org_id` column — `null` = visible to all orgs, otherwise scoped to one org, filtered server-side using the requesting user's `org_id`).

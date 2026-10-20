@@ -288,7 +288,7 @@ def get_event(db, org_id: str, advisor_id: str, event_id: str) -> dict | str | N
     return {"start": e["start"]["dateTime"], "end": e["end"]["dateTime"], "subject": e.get("subject")}
 
 
-def _event_payload(meeting: dict, subject: str | None) -> dict:
+def _event_payload(meeting: dict, subject: str | None, show_as: str | None = None, clear_attendees: bool = False) -> dict:
     subject = subject or "פגישת ליווי כלכלי"
     date = meeting.get("meeting_date")
     start_time = meeting.get("start_time") or "09:00"
@@ -299,17 +299,25 @@ def _event_payload(meeting: dict, subject: str | None) -> dict:
         "start": {"dateTime": f"{date}T{start_time}:00", "timeZone": "Israel Standard Time"},
         "end": {"dateTime": f"{date}T{end_time}:00", "timeZone": "Israel Standard Time"},
     }
+    if show_as:
+        payload["showAs"] = show_as
     # meeting["participants"] is already the full contact objects the frontend selects
     # from (schoolContacts.js's {key, label, name, email}) — no extra lookup needed here.
     # A real Outlook meeting invite (with attendees) gets sent by Graph/Exchange
     # automatically on create/update; no separate Mail.Send permission required for this.
-    attendees = [
-        {"emailAddress": {"address": p["email"].strip(), "name": p.get("name") or p["email"]}, "type": "required"}
-        for p in (meeting.get("participants") or [])
-        if (p.get("email") or "").strip()
-    ]
-    if attendees:
-        payload["attendees"] = attendees
+    if clear_attendees:
+        # Removing attendees from an existing event via PATCH triggers Exchange's standard
+        # cancellation notice to them, without deleting the event itself for the organizer —
+        # used for soft-cancel (status cancelled/postponed) so the event survives as a record.
+        payload["attendees"] = []
+    else:
+        attendees = [
+            {"emailAddress": {"address": p["email"].strip(), "name": p.get("name") or p["email"]}, "type": "required"}
+            for p in (meeting.get("participants") or [])
+            if (p.get("email") or "").strip()
+        ]
+        if attendees:
+            payload["attendees"] = attendees
     return payload
 
 
@@ -798,7 +806,7 @@ def find_bounce_for_subject(db, org_id: str, advisor_id: str, original_subject: 
         return None
 
 
-def sync_meeting_create(db, org_id: str, meeting: dict, subject: str | None = None) -> dict:
+def sync_meeting_create(db, org_id: str, meeting: dict, subject: str | None = None, show_as: str | None = None, clear_attendees: bool = False) -> dict:
     """Creates one event per advisor in meeting['advisor_ids']. Returns the calendar_sync map."""
     sync_map: dict = {}
     if not meeting.get("meeting_date"):
@@ -810,14 +818,14 @@ def sync_meeting_create(db, org_id: str, meeting: dict, subject: str | None = No
         return sync_map
 
     for advisor_id in meeting.get("advisor_ids") or []:
-        entry = _create_event_for_advisor(db, org_id, token, advisor_id, meeting, subject)
-        if entry.get("status") == "synced":
+        entry = _create_event_for_advisor(db, org_id, token, advisor_id, meeting, subject, show_as, clear_attendees)
+        if entry.get("status") == "synced" and show_as != "free":
             entry["conflict"] = _check_meeting_conflict(db, org_id, advisor_id, meeting, entry.get("external_event_id"))
         sync_map[advisor_id] = entry
     return sync_map
 
 
-def _create_event_for_advisor(db, org_id: str, token: str, advisor_id: str, meeting: dict, subject: str | None) -> dict:
+def _create_event_for_advisor(db, org_id: str, token: str, advisor_id: str, meeting: dict, subject: str | None, show_as: str | None = None, clear_attendees: bool = False) -> dict:
     email = _resolve_advisor_email(db, advisor_id)
     if not email:
         return {"provider": "microsoft", "status": "not_connected"}
@@ -825,7 +833,7 @@ def _create_event_for_advisor(db, org_id: str, token: str, advisor_id: str, meet
         resp = _request_with_retry(
             "POST", f"{GRAPH_BASE}/users/{email}/events",
             headers=_headers(token),
-            json=_event_payload(meeting, subject),
+            json=_event_payload(meeting, subject, show_as, clear_attendees),
             timeout=15,
         )
         resp.raise_for_status()
@@ -834,7 +842,7 @@ def _create_event_for_advisor(db, org_id: str, token: str, advisor_id: str, meet
         return {
             "provider": "microsoft",
             "external_event_id": event_id,
-            "status": "synced",
+            "status": "soft_cancelled" if show_as == "free" else "synced",
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
     except Exception as exc:
@@ -842,7 +850,7 @@ def _create_event_for_advisor(db, org_id: str, token: str, advisor_id: str, meet
         return {"provider": "microsoft", "status": "error"}
 
 
-def sync_meeting_update(db, org_id: str, meeting: dict, previous_sync: dict, subject: str | None = None) -> dict:
+def sync_meeting_update(db, org_id: str, meeting: dict, previous_sync: dict, subject: str | None = None, show_as: str | None = None, clear_attendees: bool = False) -> dict:
     """Reconciles calendar events against the current advisor_ids: updates existing,
     creates for newly-added advisors, deletes for removed ones."""
     if not meeting.get("meeting_date"):
@@ -865,10 +873,10 @@ def sync_meeting_update(db, org_id: str, meeting: dict, previous_sync: dict, sub
         prior = previous_sync.get(advisor_id)
         email = _resolve_advisor_email(db, advisor_id)
         if prior and prior.get("external_event_id") and email:
-            entry = _update_event_for_advisor(db, org_id, token, advisor_id, email, prior["external_event_id"], meeting, subject)
+            entry = _update_event_for_advisor(db, org_id, token, advisor_id, email, prior["external_event_id"], meeting, subject, show_as, clear_attendees)
         else:
-            entry = _create_event_for_advisor(db, org_id, token, advisor_id, meeting, subject)
-        if entry.get("status") == "synced":
+            entry = _create_event_for_advisor(db, org_id, token, advisor_id, meeting, subject, show_as, clear_attendees)
+        if entry.get("status") == "synced" and show_as != "free":
             entry["conflict"] = _check_meeting_conflict(db, org_id, advisor_id, meeting, entry.get("external_event_id"))
         sync_map[advisor_id] = entry
 
@@ -881,12 +889,12 @@ def sync_meeting_update(db, org_id: str, meeting: dict, previous_sync: dict, sub
     return sync_map
 
 
-def _update_event_for_advisor(db, org_id: str, token: str, advisor_id: str, email: str, event_id: str, meeting: dict, subject: str | None) -> dict:
+def _update_event_for_advisor(db, org_id: str, token: str, advisor_id: str, email: str, event_id: str, meeting: dict, subject: str | None, show_as: str | None = None, clear_attendees: bool = False) -> dict:
     try:
         resp = _request_with_retry(
             "PATCH", f"{GRAPH_BASE}/users/{email}/events/{event_id}",
             headers=_headers(token),
-            json=_event_payload(meeting, subject),
+            json=_event_payload(meeting, subject, show_as, clear_attendees),
             timeout=15,
         )
         if resp.status_code == 404:
@@ -900,7 +908,7 @@ def _update_event_for_advisor(db, org_id: str, token: str, advisor_id: str, emai
             check = get_event(db, org_id, advisor_id, event_id)
             if check is None:
                 logger.info("calendar event %s confirmed gone on re-check — recreating", event_id)
-                return _create_event_for_advisor(db, org_id, token, advisor_id, meeting, subject)
+                return _create_event_for_advisor(db, org_id, token, advisor_id, meeting, subject, show_as, clear_attendees)
             logger.warning(
                 "calendar event %s returned 404 on PATCH but still exists (or check was inconclusive) on "
                 "re-check — treating as transient, not recreating to avoid a duplicate", event_id,
@@ -911,7 +919,7 @@ def _update_event_for_advisor(db, org_id: str, token: str, advisor_id: str, emai
         return {
             "provider": "microsoft",
             "external_event_id": event_id,
-            "status": "synced",
+            "status": "soft_cancelled" if show_as == "free" else "synced",
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
     except Exception as exc:
@@ -926,21 +934,3 @@ def _delete_event_for_advisor(token: str, email: str, event_id: str) -> None:
             resp.raise_for_status()
     except Exception as exc:
         logger.warning("calendar event delete failed (event %s): %s", event_id, exc)
-
-
-def sync_meeting_cancel(db, org_id: str, previous_sync: dict) -> None:
-    """Deletes all calendar events tied to a meeting (used on meeting delete / status=cancelled)."""
-    if not previous_sync:
-        return
-    try:
-        token = _get_app_only_token(db, org_id)
-    except Exception as exc:
-        logger.info("calendar cancel sync skipped: %s", exc)
-        return
-    for advisor_id, entry in previous_sync.items():
-        event_id = entry.get("external_event_id")
-        if not event_id:
-            continue
-        email = _resolve_advisor_email(db, advisor_id)
-        if email:
-            _delete_event_for_advisor(token, email, event_id)

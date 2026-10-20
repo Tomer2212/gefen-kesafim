@@ -49,6 +49,8 @@ import { TimeInput } from "../components/meetings/TimeInput";
 import { AcademicYearSelector } from "../components/AcademicYearSelector";
 import { ACADEMIC_YEARS, DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
 import { SLOT_LABELS, slotsForSchool } from "../components/meetings/meetingCoordinatorSlots";
+import { GEFEN_FILES_SLOT_LABELS, gefenFilesSlotsForSchool, resolveGefenFilesResponsibleForSlot } from "../components/meetings/gefenFilesResponsibleSlots";
+import { QuestionTooltip } from "../components/QuestionTooltip";
 
 const DIVISION_LABEL = {
   tikkon: "חטיבה עליונה",
@@ -461,39 +463,6 @@ function editFieldCls(hasErr, isEmpty = false) {
   const base = "w-full text-sm font-semibold text-slate-800 border rounded-md px-2 py-0.5 bg-transparent focus:outline-none focus:ring-1";
   if (hasErr) return `${base} border-red-400 focus:border-red-400 focus:ring-red-100`;
   return `${base} border-slate-300 focus:border-blue-400 focus:ring-blue-100`;
-}
-
-function QuestionTooltip({ text }) {
-  const [visible, setVisible] = useState(false);
-  return (
-    <div className="relative inline-flex">
-      <button
-        type="button"
-        className="w-4 h-4 rounded-full border border-slate-300 text-slate-400 text-xs flex items-center justify-center cursor-help"
-        aria-label="מידע על הגדרת גישה"
-        onMouseEnter={() => setVisible(true)}
-        onMouseLeave={() => setVisible(false)}
-        onFocus={() => setVisible(true)}
-        onBlur={() => setVisible(false)}
-      >?</button>
-      {visible && (
-        <div
-          role="tooltip"
-          className="absolute z-40 text-sm text-slate-800 leading-relaxed p-3 rounded-lg shadow-md"
-          style={{
-            background: "#FEF08A",
-            border: "1px solid #EAB308",
-            bottom: "calc(100% + 6px)",
-            right: 0,
-            width: 230,
-            whiteSpace: "normal",
-          }}
-        >
-          {text}
-        </div>
-      )}
-    </div>
-  );
 }
 
 function UnsavedChangesModal({ onSave, onDiscard, onCancel, saving }) {
@@ -2916,6 +2885,7 @@ export default function SchoolPage() {
     principal_day_off: [], secretary_day_off: [], finance_contact_day_off: [],
     meeting_coordinator: null,
     meeting_coordinators: {},
+    gefen_files_responsible: {},
     principal_chativa_name: "", principal_chativa_phone: "", principal_chativa_email: "",
     principal_chativa_day_off: [], principal_same_person: true,
     secretary_chativa_name: "", secretary_chativa_phone: "", secretary_chativa_email: "",
@@ -3439,6 +3409,7 @@ export default function SchoolPage() {
       finance_contact_day_off: school.finance_contact_day_off || [],
       meeting_coordinator: school.meeting_coordinator || null,
       meeting_coordinators: school.meeting_coordinators || {},
+      gefen_files_responsible: school.gefen_files_responsible || {},
       principal_chativa_name: school.principal_chativa_name || "",
       principal_chativa_phone: school.principal_chativa_phone || "",
       principal_chativa_email: school.principal_chativa_email || "",
@@ -3690,11 +3661,15 @@ export default function SchoolPage() {
       const coordinators = Object.fromEntries(
         Object.entries(p.meeting_coordinators || {}).map(([slot, ref]) => [slot, remapRef(ref)])
       );
+      const gefenFilesResponsible = Object.fromEntries(
+        Object.entries(p.gefen_files_responsible || {}).map(([slot, ref]) => [slot, remapRef(ref)])
+      );
       return {
         ...p,
         extra_contacts: (p.extra_contacts || []).filter((_, idx) => idx !== i),
         meeting_coordinator: coord,
         meeting_coordinators: coordinators,
+        gefen_files_responsible: gefenFilesResponsible,
       };
     });
   }
@@ -4333,7 +4308,7 @@ export default function SchoolPage() {
                       {(role === "owner" || role === "manager") && (
                         <div className={`${tileCls} col-span-2`}>
                           <span className={`${tileLabelCls} inline-flex items-center gap-1`}>
-                            <QuestionTooltip text="בחר למי תהיה גישה לנתוני בית הספר." />
+                            <QuestionTooltip text="בחר למי תהיה גישה לנתוני בית הספר." label="מידע על הגדרת גישה" />
                             גישה
                           </span>
                           <AccessSelector compact restrictTo={editForm.restrict_access_to} users={users}
@@ -4358,6 +4333,7 @@ export default function SchoolPage() {
                   <div className={sectionBodyCls}>
                     {(() => {
                       const activeSlots = slotsForSchool(editForm, yearAdminData.service_type);
+                      const gefenFilesSlots = gefenFilesSlotsForSchool(editForm);
                       const contactRows = [
                         editForm.stage === "sheshshnati" ? PRINCIPAL_TICHON_ROW : PRINCIPAL_SINGLE_ROW,
                         ...(editForm.stage === "sheshshnati" && !editForm.principal_same_person ? [PRINCIPAL_CHATIVA_ROW] : []),
@@ -4367,7 +4343,11 @@ export default function SchoolPage() {
                         ...(editForm.stage === "sheshshnati" && !editForm.finance_same_person ? [FINANCE_CHATIVA_ROW] : []),
                       ];
                       const missingSlots = activeSlots.filter(slot => !editForm.meeting_coordinators?.[slot]);
-                      const colCount = 5 + activeSlots.length;
+                      const gefenRelatedServiceTypes = ["gefen", "gefen_current", "district", "takuma"];
+                      const missingGefenFilesSlots = gefenRelatedServiceTypes.includes(yearAdminData.service_type)
+                        ? gefenFilesSlots.filter(slot => !resolveGefenFilesResponsibleForSlot(editForm, slot))
+                        : [];
+                      const colCount = 5 + activeSlots.length + gefenFilesSlots.length;
                       return (
                       <>
                     <table className="w-full text-sm border border-slate-200 border-collapse font-sans">
@@ -4381,10 +4361,28 @@ export default function SchoolPage() {
                               <th rowSpan={2} scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700 align-bottom">מייל</th>
                               <th rowSpan={2} scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700 align-bottom">יום חופשי</th>
                               <th colSpan={activeSlots.length} scope="colgroup" className="text-center py-2 px-2 text-xs font-semibold text-gray-700 border-b border-slate-200">מתאם פגישות</th>
+                              {gefenFilesSlots.length > 1 ? (
+                                <th colSpan={gefenFilesSlots.length} scope="colgroup" className="text-center py-2 px-2 text-xs font-semibold text-gray-700 border-b border-slate-200">
+                                  <span className="inline-flex items-center justify-center gap-1">
+                                    אחראי/ת קבצי גפן
+                                    <QuestionTooltip text="נא לסמן למי לשלוח בקשה להעלאת קבצים יום לפני פגישת גפן." label="מידע על אחראי/ת קבצי גפן" />
+                                  </span>
+                                </th>
+                              ) : (
+                                <th rowSpan={2} scope="col" className="text-center py-3 px-2 text-xs font-semibold text-gray-700 whitespace-nowrap align-bottom">
+                                  <span className="inline-flex items-center justify-center gap-1">
+                                    אחראי/ת קבצי גפן
+                                    <QuestionTooltip text="נא לסמן למי לשלוח בקשה להעלאת קבצים יום לפני פגישת גפן." label="מידע על אחראי/ת קבצי גפן" />
+                                  </span>
+                                </th>
+                              )}
                             </tr>
                             <tr className="bg-slate-100 divide-x divide-slate-200">
                               {activeSlots.map(slot => (
                                 <th key={slot} scope="col" className="text-center py-2 px-2 text-xs font-semibold text-gray-700 whitespace-nowrap">{SLOT_LABELS[slot]}</th>
+                              ))}
+                              {gefenFilesSlots.length > 1 && gefenFilesSlots.map(slot => (
+                                <th key={slot} scope="col" className="text-center py-2 px-2 text-xs font-semibold text-gray-700 whitespace-nowrap">{GEFEN_FILES_SLOT_LABELS[slot]}</th>
                               ))}
                             </tr>
                           </>
@@ -4397,6 +4395,14 @@ export default function SchoolPage() {
                             <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700">יום חופשי</th>
                             {activeSlots.map(slot => (
                               <th key={slot} scope="col" className="text-center py-3 px-2 text-xs font-semibold text-gray-700 whitespace-nowrap">{SLOT_LABELS[slot]}</th>
+                            ))}
+                            {gefenFilesSlots.map((slot, idx) => (
+                              <th key={slot} scope="col" className="text-center py-3 px-2 text-xs font-semibold text-gray-700 whitespace-nowrap">
+                                <span className="inline-flex items-center justify-center gap-1">
+                                  {GEFEN_FILES_SLOT_LABELS[slot]}
+                                  {idx === 0 && <QuestionTooltip text="נא לסמן למי לשלוח בקשה להעלאת קבצים יום לפני פגישת גפן." label="מידע על אחראי/ת קבצי גפן" />}
+                                </span>
+                              </th>
                             ))}
                           </tr>
                         )}
@@ -4449,6 +4455,19 @@ export default function SchoolPage() {
                                     }))} />
                                 </td>
                               ))}
+                              {gefenFilesSlots.map(slot => (
+                                <td key={slot} className="py-3 px-2 text-center">
+                                  <label htmlFor={`gefen-files-${slot}-${row.slotRoleKey}`} className="sr-only">{row.label} — אחראי/ת קבצי גפן {GEFEN_FILES_SLOT_LABELS[slot]}</label>
+                                  <input id={`gefen-files-${slot}-${row.slotRoleKey}`} type="checkbox"
+                                    className="w-4 h-4 accent-sky-600"
+                                    checked={editForm.gefen_files_responsible?.[slot] === row.slotRoleKey}
+                                    disabled={!editForm[row.nameField] || !editForm[row.emailField]}
+                                    onChange={e => setEditForm(p => ({
+                                      ...p,
+                                      gefen_files_responsible: { ...p.gefen_files_responsible, [slot]: e.target.checked ? row.slotRoleKey : null },
+                                    }))} />
+                                </td>
+                              ))}
                             </tr>
                           );
                         })}
@@ -4456,7 +4475,7 @@ export default function SchoolPage() {
                         {editForm.stage === "sheshshnati" && (
                           <tr className={`divide-x divide-slate-200 ${rowStripeCls}`}>
                             <td></td>
-                            <td colSpan={4 + activeSlots.length} className="py-2 px-2">
+                            <td colSpan={4 + activeSlots.length + gefenFilesSlots.length} className="py-2 px-2">
                               <div className="flex flex-col gap-1.5">
                                 <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
                                   <input type="checkbox" className="w-3.5 h-3.5 rounded accent-blue-600"
@@ -4529,6 +4548,19 @@ export default function SchoolPage() {
                                   }))} />
                               </td>
                             ))}
+                            {gefenFilesSlots.map(slot => (
+                              <td key={slot} className="py-3 px-2 text-center">
+                                <label htmlFor={`gefen-files-${slot}-extra-${i}`} className="sr-only">איש קשר נוסף {i + 1} — אחראי/ת קבצי גפן {GEFEN_FILES_SLOT_LABELS[slot]}</label>
+                                <input id={`gefen-files-${slot}-extra-${i}`} type="checkbox"
+                                  className="w-4 h-4 accent-sky-600"
+                                  checked={editForm.gefen_files_responsible?.[slot] === `extra:${i}`}
+                                  disabled={!ec.name || !ec.email}
+                                  onChange={e => setEditForm(p => ({
+                                    ...p,
+                                    gefen_files_responsible: { ...p.gefen_files_responsible, [slot]: e.target.checked ? `extra:${i}` : null },
+                                  }))} />
+                              </td>
+                            ))}
                           </tr>
                         ))}
 
@@ -4547,6 +4579,11 @@ export default function SchoolPage() {
                     </table>
                     {triedSave && missingSlots.length > 0 && (
                       <p className="text-xs text-red-500 mt-1.5" role="alert">יש לבחור אחראי/ת לתיאום פגישות עבור: {missingSlots.map(s => SLOT_LABELS[s]).join(", ")}</p>
+                    )}
+                    {missingGefenFilesSlots.length > 0 && (
+                      <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-sm text-amber-800 mt-2">
+                        לא הוגדר/ה אחראי/ת קבצי גפן (עם כתובת מייל) עבור: {missingGefenFilesSlots.map(s => GEFEN_FILES_SLOT_LABELS[s]).join(", ")}. פגישות גפן/מחוז/תקומה עתידיות לא ישלחו בקשת קבצים אוטומטית לאיש קשר זה.
+                      </div>
                     )}
                       </>
                       );
@@ -4745,7 +4782,7 @@ export default function SchoolPage() {
 
                       <div className={`${tileCls} col-span-2`}>
                         <p className={`${tileLabelCls} inline-flex items-center gap-1`}>
-                          <QuestionTooltip text="בחר למי תהיה גישה לנתוני בית הספר." />
+                          <QuestionTooltip text="בחר למי תהיה גישה לנתוני בית הספר." label="מידע על הגדרת גישה" />
                           גישה
                         </p>
                         <div className="flex flex-wrap gap-1">
@@ -4778,6 +4815,7 @@ export default function SchoolPage() {
                     <div className={sectionBodyCls}>
                     {(() => {
                       const activeSlots = slotsForSchool(school, yearAdminData.service_type);
+                      const gefenFilesSlots = gefenFilesSlotsForSchool(school);
                       const displayRows = [
                         school?.stage === "sheshshnati"
                           ? { ...PRINCIPAL_TICHON_ROW, label: school?.principal_same_person === false ? PRINCIPAL_TICHON_ROW.label : "מנהל/ת חט\"ע וחט\"ב" }
@@ -4802,6 +4840,12 @@ export default function SchoolPage() {
                           <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700 w-[29%]">מייל</th>
                           <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700 w-[15%]">יום חופשי</th>
                           <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700 w-[15%]">מתאם פגישות</th>
+                          <th scope="col" className="text-right py-3 px-3 text-xs font-semibold text-gray-700 w-[15%]">
+                            <span className="inline-flex items-center gap-1">
+                              אחראי/ת קבצי גפן
+                              <QuestionTooltip text="נא לסמן למי לשלוח בקשה להעלאת קבצים יום לפני פגישת גפן." label="מידע על אחראי/ת קבצי גפן" />
+                            </span>
+                          </th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-200">
@@ -4845,6 +4889,18 @@ export default function SchoolPage() {
                                 return (
                                   <span className="text-xs font-medium text-emerald-700" title="אחראי/ת לתיאום פגישות">
                                     מתאם/ת: {mySlots.map(s => SLOT_LABELS[s]).join(", ")}
+                                  </span>
+                                );
+                              })()}
+                            </td>
+                            <td className="py-3 px-2 text-center">
+                              {(() => {
+                                const myGefenSlots = gefenFilesSlots.filter(slot => school?.gefen_files_responsible?.[slot] === row.slotRoleKey);
+                                if (myGefenSlots.length === 0) return null;
+                                const isDefaultOnly = myGefenSlots.length === 1 && myGefenSlots[0] === "default";
+                                return (
+                                  <span className="text-xs font-medium text-sky-700" title="אחראי/ת קבצי גפן">
+                                    {isDefaultOnly ? GEFEN_FILES_SLOT_LABELS.default : `אחראי/ת: ${myGefenSlots.map(s => GEFEN_FILES_SLOT_LABELS[s]).join(", ")}`}
                                   </span>
                                 );
                               })()}
@@ -4895,6 +4951,18 @@ export default function SchoolPage() {
                                 return (
                                   <span className="text-xs font-medium text-emerald-700" title="אחראי/ת לתיאום פגישות">
                                     מתאם/ת: {mySlots.map(s => SLOT_LABELS[s]).join(", ")}
+                                  </span>
+                                );
+                              })()}
+                            </td>
+                            <td className="py-3 px-2 text-center">
+                              {(() => {
+                                const myGefenSlots = gefenFilesSlots.filter(slot => school?.gefen_files_responsible?.[slot] === `extra:${i}`);
+                                if (myGefenSlots.length === 0) return null;
+                                const isDefaultOnly = myGefenSlots.length === 1 && myGefenSlots[0] === "default";
+                                return (
+                                  <span className="text-xs font-medium text-sky-700" title="אחראי/ת קבצי גפן">
+                                    {isDefaultOnly ? GEFEN_FILES_SLOT_LABELS.default : `אחראי/ת: ${myGefenSlots.map(s => GEFEN_FILES_SLOT_LABELS[s]).join(", ")}`}
                                   </span>
                                 );
                               })()}
