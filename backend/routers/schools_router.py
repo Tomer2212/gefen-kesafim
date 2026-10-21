@@ -11,7 +11,7 @@ from datetime import date, datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import uuid4
 
 import httpx
@@ -271,6 +271,37 @@ class SchoolYearAdminDataIn(BaseModel):
     invoice_numbers: list[str] | None = None
     deposit_dates: list[str] | None = None
     amount_paid: float | None = None
+
+
+class BulkYearAdminFieldItem(BaseModel):
+    school_id: str
+    value: Any = None
+
+
+class BulkYearAdminDataIn(BaseModel):
+    field: str
+    academic_year: str
+    items: list[BulkYearAdminFieldItem]
+
+
+class BulkSchoolFieldItem(BaseModel):
+    school_id: str
+    value: Any = None
+
+
+class BulkSchoolFieldIn(BaseModel):
+    field: str
+    items: list[BulkSchoolFieldItem]
+
+
+class BulkAdvisorAssignIn(BaseModel):
+    advisor_id: str
+    school_ids: list[str]
+
+
+class BulkAdvisorUnassignIn(BaseModel):
+    advisor_id: str
+    school_ids: list[str]
 
 
 class GefenAccountIn(BaseModel):
@@ -1102,6 +1133,58 @@ def create_school(
     return new_school
 
 
+# NOTE: this literal route must stay registered before `PUT /{school_id}` below — otherwise
+# that dynamic path param would swallow requests to "/schools/bulk-field" first.
+@router.put("/bulk-field")
+def bulk_update_school_field(
+    body: BulkSchoolFieldIn,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    """Applies one field+value to many `schools` rows in a single upsert call. Used by
+    AdminPage's bulk-edit for columns that live directly on `schools` (currently just
+    finance_software) rather than on `school_year_admin_data`. Only a fixed allowlist of
+    safe fields may be targeted — never identity fields like symbol/name — as defense in
+    depth beyond the frontend's own restrictions."""
+    _require_manager(user)
+    allowed_bulk_fields = {"finance_software"}
+    if body.field not in allowed_bulk_fields:
+        raise HTTPException(status_code=400, detail="שדה לא תקין לעריכה מרובה")
+    if not body.items:
+        raise HTTPException(status_code=400, detail="לא נבחרו בתי ספר")
+
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            school_ids = [item.school_id for item in body.items]
+            existing = (
+                db.table("schools")
+                .select("id")
+                .eq("org_id", user["org_id"])
+                .in_("id", school_ids)
+                .execute()
+            )
+            allowed_ids = {r["id"] for r in (existing.data or [])}
+            failed = [{"school_id": sid, "error": "בית הספר לא נמצא"} for sid in school_ids if sid not in allowed_ids]
+            ok_items = [item for item in body.items if item.school_id in allowed_ids]
+            if not ok_items:
+                return {"field": body.field, "updated": [], "failed": failed}
+
+            rows = [{"id": item.school_id, body.field: item.value} for item in ok_items]
+            res = db.table("schools").upsert(rows, on_conflict="id").execute()
+            updated = [{"school_id": r["id"], "data": r} for r in (res.data or [])]
+            return {"field": body.field, "updated": updated, "failed": failed}
+        except HTTPException:
+            raise
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("bulk_update_school_field attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("bulk_update_school_field failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+
 @router.put("/{school_id}")
 def update_school(
     school_id: str,
@@ -1440,6 +1523,26 @@ def get_year_admin_data(
     return data
 
 
+# Advisors (non-manager) may only update the Gefen order amount and the "סגירת שנה" fields
+# from the school card — every other admin-table field is manager+ only. Shared by the
+# single-row and bulk year-admin-data endpoints so there is one source of truth for this gate.
+_YEAR_ADMIN_ADVISOR_ALLOWED_FIELDS = {
+    "order_amount_gefen",
+    "closure_parents_status", "closure_parents_notes",
+    "closure_authority_status", "closure_authority_notes",
+}
+
+
+def _check_year_admin_field_access(db, user: dict, school_id: str, fields: set[str]) -> None:
+    """Raises HTTPException(403) if `user` may not write `fields` on this school's year-admin-data row."""
+    if user["role"] in ("owner", "manager"):
+        return
+    if not _advisor_has_school_access(db, user, school_id):
+        raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
+    if fields - _YEAR_ADMIN_ADVISOR_ALLOWED_FIELDS:
+        raise HTTPException(status_code=403, detail="אין הרשאה לעדכן שדות אלו")
+
+
 @router.put("/{school_id}/year-admin-data")
 def upsert_year_admin_data(
     school_id: str,
@@ -1452,21 +1555,7 @@ def upsert_year_admin_data(
     for attempt in range(2):
         try:
             db = get_admin_client()
-            is_manager = user["role"] in ("owner", "manager")
-            if not is_manager:
-                if not _advisor_has_school_access(db, user, school_id):
-                    raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
-                # Advisors (non-manager) may only update the Gefen order amount and the
-                # "סגירת שנה" fields from the school card — every other admin-table field is
-                # manager+ only.
-                allowed_fields = {
-                    "order_amount_gefen",
-                    "closure_parents_status", "closure_parents_notes",
-                    "closure_authority_status", "closure_authority_notes",
-                }
-                submitted_fields = set(body.model_fields_set)
-                if submitted_fields - allowed_fields:
-                    raise HTTPException(status_code=403, detail="אין הרשאה לעדכן שדות אלו")
+            _check_year_admin_field_access(db, user, school_id, set(body.model_fields_set))
 
             update_data = body.model_dump(exclude_unset=True)
 
@@ -1504,6 +1593,66 @@ def upsert_year_admin_data(
                 time.sleep(0.1)
             else:
                 logger.error("upsert_year_admin_data failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+
+@router.put("/year-admin-data/bulk")
+def bulk_upsert_year_admin_data(
+    body: BulkYearAdminDataIn,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    """Applies one field+value to many schools' year-admin-data rows in a single upsert call.
+    Each item carries its own `value` (not a single shared value) so the exact same endpoint
+    serves both the forward bulk-apply (same new value for everyone) and the undo/revert
+    (each school's own previous value) used by AdminPage's bulk-edit feature."""
+    if body.field not in SchoolYearAdminDataIn.model_fields:
+        raise HTTPException(status_code=400, detail="שדה לא תקין")
+    if not body.items:
+        raise HTTPException(status_code=400, detail="לא נבחרו בתי ספר")
+
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            ok_items: list[BulkYearAdminFieldItem] = []
+            failed: list[dict] = []
+            for item in body.items:
+                try:
+                    _check_year_admin_field_access(db, user, item.school_id, {body.field})
+                    ok_items.append(item)
+                except HTTPException as exc:
+                    failed.append({"school_id": item.school_id, "error": exc.detail})
+
+            if not ok_items:
+                return {"field": body.field, "academic_year": body.academic_year, "updated": [], "failed": failed}
+
+            now = datetime.now(timezone.utc).isoformat()
+            rows = [
+                {
+                    "school_id": item.school_id,
+                    "academic_year": body.academic_year,
+                    body.field: item.value,
+                    "updated_at": now,
+                }
+                for item in ok_items
+            ]
+            res = (
+                db.table("school_year_admin_data")
+                .upsert(rows, on_conflict="school_id,academic_year")
+                .execute()
+            )
+            data_by_school = {r["school_id"]: r for r in (res.data or [])}
+            _attach_updater_names(db, list(data_by_school.values()))
+            updated = [{"school_id": sid, "data": d} for sid, d in data_by_school.items()]
+            return {"field": body.field, "academic_year": body.academic_year, "updated": updated, "failed": failed}
+        except HTTPException:
+            raise
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("bulk_upsert_year_admin_data attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("bulk_upsert_year_admin_data failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
 
@@ -2833,6 +2982,103 @@ def unassign_typed_advisor(
     return {"ok": True}
 
 
+# NOTE: these two literal routes are safe to register in any order relative to
+# `/{school_id}/advisors/{service_type}` above — different segment counts/literals, no overlap.
+@router.post("/advisors/{service_type}/bulk-assign")
+def bulk_assign_typed_advisor(
+    service_type: str,
+    body: BulkAdvisorAssignIn,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    """Adds one advisor to many schools' typed advisor list in a single call — ADDITIVE only,
+    never removes other advisors already assigned there. Returns which schools were newly
+    assigned vs. already had this advisor, so the frontend's Undo can revert only the former
+    (schools that already had the advisor before this bulk action must be left untouched)."""
+    _require_manager(user)
+    table = _typed_advisor_table(service_type)
+    if not body.school_ids:
+        raise HTTPException(status_code=400, detail="לא נבחרו בתי ספר")
+
+    db = get_admin_client()
+    existing = (
+        db.table(table)
+        .select("school_id")
+        .eq("advisor_id", body.advisor_id)
+        .in_("school_id", body.school_ids)
+        .execute()
+    )
+    already_assigned = {r["school_id"] for r in (existing.data or [])}
+    newly_assigned = [sid for sid in body.school_ids if sid not in already_assigned]
+
+    if newly_assigned:
+        rows = [{"advisor_id": body.advisor_id, "school_id": sid} for sid in newly_assigned]
+        db.table(table).upsert(rows).execute()
+        db.table("advisor_schools").upsert(rows).execute()
+        try:
+            school_rows = db.table("schools").select("id, name").in_("id", newly_assigned).execute()
+            names = {r["id"]: r["name"] for r in (school_rows.data or [])}
+            _create_notifications(db, [{
+                "recipient_id": body.advisor_id,
+                "type": "advisor_assigned",
+                "school_id": sid,
+                "data": {
+                    "title": f"שויכת לבית הספר {names.get(sid, 'בית ספר')}",
+                    "school_name": names.get(sid, "בית ספר"),
+                    "sender_name": user.get("full_name", ""),
+                    "deeplink": f"/school/{sid}",
+                },
+            } for sid in newly_assigned], pref_key="notify_advisor_assignment")
+        except Exception as exc:
+            logger.warning("advisor_assigned (bulk typed) notification failed (non-fatal): %s", exc)
+
+    return {
+        "advisor_id": body.advisor_id,
+        "service_type": service_type,
+        "newly_assigned": newly_assigned,
+        "already_assigned": sorted(already_assigned),
+    }
+
+
+@router.post("/advisors/{service_type}/bulk-unassign")
+def bulk_unassign_typed_advisor(
+    service_type: str,
+    body: BulkAdvisorUnassignIn,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    """Used exclusively by the Undo of bulk_assign_typed_advisor — removes the advisor from
+    exactly the given school_ids (the ones a prior bulk-assign newly added, never schools that
+    already had this advisor beforehand), mirroring the same 'drop from advisor_schools only if
+    not left in any other typed list' guard as the single-school unassign endpoint."""
+    _require_manager(user)
+    table = _typed_advisor_table(service_type)
+    if not body.school_ids:
+        raise HTTPException(status_code=400, detail="לא נבחרו בתי ספר")
+
+    db = get_admin_client()
+    db.table(table).delete().eq("advisor_id", body.advisor_id).in_("school_id", body.school_ids).execute()
+
+    for school_id in body.school_ids:
+        still_typed = False
+        for other_table in _TYPED_ADVISOR_TABLES.values():
+            rows = (
+                db.table(other_table)
+                .select("advisor_id")
+                .eq("school_id", school_id)
+                .eq("advisor_id", body.advisor_id)
+                .execute()
+            )
+            if rows.data:
+                still_typed = True
+                break
+        if not still_typed:
+            existing = db.table("advisor_schools").select("advisor_id").eq("school_id", school_id).execute()
+            current_ids = [r["advisor_id"] for r in (existing.data or [])]
+            if body.advisor_id in current_ids and len(current_ids) > 1:
+                db.table("advisor_schools").delete().eq("advisor_id", body.advisor_id).eq("school_id", school_id).execute()
+
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------------------
 # Update requests (advisors submit → owner/manager approve)
 # ---------------------------------------------------------------------------
@@ -4080,7 +4326,7 @@ def _build_reminder_email_html(recipient_name: str, when_lamed: str, when_bet: s
 
 
 def _build_secretary_upload_email_html(recipient_name: str, when_bet: str, school_name: str,
-                                        checklist_items: list[str], upload_url: str, no_baseline: bool,
+                                        year_groups: list[tuple[str, list[str]]], upload_url: str, no_baseline: bool,
                                         meeting_date: str, start_time: str | None, advisor_name: str,
                                         opt_out_link: str | None = None) -> str:
     from datetime import date
@@ -4089,7 +4335,17 @@ def _build_secretary_upload_email_html(recipient_name: str, when_bet: str, schoo
     date_fmt = date.fromisoformat(meeting_date).strftime("%d/%m/%y")
     time_clause = f", בשעה {start_time}" if start_time else ""
     advisor_clause = f" עם {advisor_name}" if advisor_name else ""
-    items_html = "".join(f"<li style='margin-bottom:4px'>{item}</li>" for item in checklist_items)
+    # Grouped by academic year — a header line per year followed by that year's own file
+    # list, rather than suffixing the year onto every single line (friendlier to read,
+    # especially when several academic years' files are requested in the same email).
+    items_html = "".join(
+        "<p style='margin:0 0 6px 0; font-weight:700; color:#1e293b;'>"
+        f"עבור שנת הלימודים {year}:</p>"
+        "<ul style='margin:0 0 16px 0; padding-inline-start:20px; color:#334155;'>"
+        + "".join(f"<li style='margin-bottom:4px'>{item}</li>" for item in items)
+        + "</ul>"
+        for year, items in year_groups
+    )
     baseline_note = (
         "<p style='margin:0 0 16px 0; color:#b45309; background:#fffbeb; border:1px solid #fde68a; "
         "border-radius:8px; padding:10px 14px; font-size:13px;'>"
@@ -4113,7 +4369,7 @@ def _build_secretary_upload_email_html(recipient_name: str, when_bet: str, schoo
         נשמח <b>שתעלי עוד היום</b> את הקבצים הבאים בקישור המצורף כדי שנוכל להיערך בהתאם:
       </p>
       {baseline_note}
-      <ul style="margin: 0 0 20px 0; padding-inline-start: 20px; color: #334155;">{items_html}</ul>
+      {items_html}
       <div style="text-align: center; margin-bottom: 8px;">
         <a href="{upload_url}"
            style="display: inline-block; background: #0070F3; color: white;
@@ -4200,7 +4456,16 @@ def send_due_reminders(request: Request, school_id: str | None = None):
     schools_map = {}
     try:
         db = get_admin_client()
-        s_res = db.table("schools").select("id, name, stage, finance_software, org_id").in_("id", school_ids).execute()
+        s_res = db.table("schools").select(
+            "id, name, stage, finance_software, org_id, "
+            "principal_name, principal_phone, principal_email, "
+            "principal_chativa_name, principal_chativa_phone, principal_chativa_email, "
+            "secretary_name, secretary_phone, secretary_email, "
+            "secretary_chativa_name, secretary_chativa_phone, secretary_chativa_email, "
+            "finance_contact_name, finance_contact_phone, finance_contact_email, "
+            "finance_contact_chativa_name, finance_contact_chativa_phone, finance_contact_chativa_email, "
+            "extra_contacts, gefen_files_responsible"
+        ).in_("id", school_ids).execute()
         schools_map = {s["id"]: s for s in (s_res.data or [])}
     except Exception as exc:
         logger.warning("send_due_reminders: school name lookup failed (non-fatal): %s", exc)
@@ -4373,19 +4638,16 @@ def send_due_reminders(request: Request, school_id: str | None = None):
                         token = get_or_create_upload_token(db, m["id"], m["meeting_date"])
                         upload_years = resolve_requested_upload_years(m)
                         year_checklists = [(y, build_upload_checklist(db, school, y)) for y in upload_years]
-                        # Multi-year meetings: prefix each item with its academic year so the
-                        # email is still informative even though the rich per-year split UI
-                        # only lives on the /upload/{token} page itself.
-                        checklist_items = [
-                            (f'{i["label"]} — {y}' if len(year_checklists) > 1 else i["label"])
-                            for y, cl in year_checklists for i in cl["items"]
-                        ]
+                        # Grouped by academic year — each year gets its own "עבור שנת הלימודים
+                        # X:" header followed by that year's own file list, rather than
+                        # suffixing the year onto every single line.
+                        year_groups = [(y, [i["label"] for i in cl["items"]]) for y, cl in year_checklists]
                         upload_url = f"{os.getenv('APP_URL', '')}/upload/{token}"
                         html = _build_secretary_upload_email_html(
                             recipient_name=p.get("name") or "",
                             when_bet=when_bet,
                             school_name=school.get("name", ""),
-                            checklist_items=checklist_items,
+                            year_groups=year_groups,
                             upload_url=upload_url,
                             no_baseline=any(cl["no_baseline_this_year"] for _, cl in year_checklists),
                             meeting_date=m["meeting_date"],

@@ -435,6 +435,33 @@ const ADMIN_ALL_COLUMNS = [
   ...ADMIN_IDENTITY_COLUMNS, ...ADMIN_ALLOCATION_COLUMNS, ...ADMIN_MEETINGS_DONE_COLUMNS,
   ...ADMIN_DATA_COLUMNS, ...ADMIN_CONTROL_LETTER_COLUMNS,
 ];
+
+// Columns eligible for bulk-edit (ניהול → בתי ספר). Never symbol/name (not part of any set
+// below — those two are display-only in this table to begin with) and never quarterly_notes_1-4
+// (no single scalar value to replace — see dev-log). Two different semantics:
+//  - "overwrite" fields: editing one selected cell replaces the value on all other selected
+//    cells in that column (school_year_admin_data fields, or finance_software on `schools`).
+//  - "advisor" fields: additive only — adding an advisor on one selected cell adds that same
+//    advisor to the other selected cells' lists, without touching advisors already there.
+const BULK_OVERWRITE_YEAR_ADMIN_FIELDS = new Set([
+  "service_type", "requested_price", "order_method", "order_method_other_text",
+  "order_amount_gefen", "hours_ordered", "rate", "payment_received", "payment_requests_sent",
+  "receipts_sent", "contract_sent", "contract_received",
+  "closure_parents_status", "closure_parents_notes", "closure_authority_status", "closure_authority_notes",
+  "meeting_allocation_gefen", "meeting_allocation_current", "meeting_allocation_district",
+  "meeting_duration_gefen", "meeting_duration_current", "meeting_duration_district",
+]);
+const BULK_OVERWRITE_SCHOOL_FIELDS = new Set(["finance_software"]);
+const BULK_ADVISOR_FIELDS = new Set(["advisor_gefen", "advisor_current", "advisor_district"]);
+
+function bulkFieldKind(key) {
+  if (BULK_ADVISOR_FIELDS.has(key)) return "advisor";
+  if (BULK_OVERWRITE_YEAR_ADMIN_FIELDS.has(key) || BULK_OVERWRITE_SCHOOL_FIELDS.has(key)) return "overwrite";
+  return null;
+}
+
+const ADVISOR_FIELD_TO_SERVICE_TYPE = { advisor_gefen: "gefen", advisor_current: "current", advisor_district: "district" };
+const ADVISOR_FIELD_TO_LIST_FIELD = { advisor_gefen: "advisors_gefen", advisor_current: "advisors_current", advisor_district: "advisors_district" };
 // Stable empty-object reference for schools with no year-admin row yet — keeps `SchoolRow`
 // props referentially stable so React.memo can skip re-renders.
 const EMPTY_OBJ = {};
@@ -1798,11 +1825,33 @@ const NUMERIC_ADMIN_FIELDS = new Set([
 
 // One row of the admin schools table. Memoized: with virtualization only ~40 of these are
 // mounted, and this keeps them from re-rendering when unrelated parent state changes.
+// Wraps a column cell with the small bulk-select checkbox (ניהול → בתי ספר "עריכה מרובה").
+// `eligible` columns are the only ones that ever render the checkbox — symbol/name (not part
+// of ADMIN_DATA_COLUMNS/ADMIN_ALLOCATION_COLUMNS at all) and quarterly_notes never get one.
+const BulkCell = memo(function BulkCell({ className, eligible, bulkEditMode, selected, onToggle, ariaLabel, children }) {
+  const showCheckbox = eligible && bulkEditMode;
+  return (
+    <td className={`${className} ${showCheckbox ? "relative" : ""}`}>
+      {showCheckbox && (
+        <label className="absolute top-0.5 right-0.5 z-10 cursor-pointer">
+          <span className="sr-only">{ariaLabel ? `בחר לעריכה מרובה: ${ariaLabel}` : "בחר תא לעריכה מרובה"}</span>
+          <input type="checkbox" checked={selected} onChange={onToggle}
+            className="w-3.5 h-3.5 rounded accent-blue-600 bg-white border border-slate-300" />
+        </label>
+      )}
+      {children}
+    </td>
+  );
+});
+
 const SchoolRow = memo(function SchoolRow({
   school, yad, academicYear, visibleAdminColOrder, expanded,
   editingNotesKey, setEditingNotesKey, quarterlyForSchool, handlers,
+  bulkEditMode, bulkSelection, users, loadingUsers,
 }) {
   const rowKey = `${school.id}-${academicYear}`;
+  const isBulkSelected = (key) => bulkSelection.field === key && bulkSelection.schoolIds.has(school.id);
+  const toggleBulk = (key) => () => handlers.onToggleBulkCell(key, school.id);
   return (
     <tr className="group border-b border-slate-100 hover:bg-slate-50 transition-colors">
       <td className="px-5 py-3 border-l border-slate-100 bg-white group-hover:bg-slate-50 whitespace-nowrap"
@@ -1812,25 +1861,43 @@ const SchoolRow = memo(function SchoolRow({
       {visibleAdminColOrder.map((key, i) => {
         const isLast = i === visibleAdminColOrder.length - 1;
         const tdClass = `px-4 py-2 text-slate-600 ${isLast ? "" : "border-l border-slate-100"}`;
-        if (key === "symbol") return <td key={key} className={tdClass}><span className="font-mono">{school.symbol || "—"}</span></td>;
-        if (key === "city") return <td key={key} className={tdClass}>{school.city || "—"}</td>;
-        if (key === "authority") return <td key={key} className={tdClass}>{school.authority || "—"}</td>;
-        if (key === "district") return <td key={key} className={tdClass}>{school.district || "—"}</td>;
-        if (key === "finance_software") return <td key={key} className={tdClass}>{FINANCE_SOFTWARE_OPTIONS.find(o => o.value === school.finance_software)?.label || school.finance_software || "—"}</td>;
-        if (key === "stage") return <td key={key} className={tdClass}>{ADMIN_SCHOOL_STAGE_LABEL[school.stage] || school.stage || "—"}</td>;
-        if (key === "meetings_completed") return <td key={key} className={tdClass}>{school.meetings_stats ? String(school.meetings_stats.completed) : "—"}</td>;
-        if (key === "meetings_hours") return <td key={key} className={tdClass}>{school.meetings_stats ? formatAdminMeetingHours(school.meetings_stats.total_minutes) : "—"}</td>;
+        const colLabel = ADMIN_ALL_COLUMNS.find(c => c.key === key)?.label;
+        const eligible = bulkFieldKind(key) !== null;
+        const bc = (children) => (
+          <BulkCell key={key} className={tdClass} eligible={eligible} bulkEditMode={bulkEditMode}
+            selected={isBulkSelected(key)} onToggle={toggleBulk(key)} ariaLabel={colLabel}>
+            {children}
+          </BulkCell>
+        );
+        if (key === "symbol") return bc(<span className="font-mono">{school.symbol || "—"}</span>);
+        if (key === "city") return bc(school.city || "—");
+        if (key === "authority") return bc(school.authority || "—");
+        if (key === "district") return bc(school.district || "—");
+        if (key === "finance_software") return bc(
+          <>
+            <label htmlFor={`fin-${rowKey}`} className="sr-only">תוכנת כספים</label>
+            <select id={`fin-${rowKey}`} className={`${ADMIN_FIELD_CLS} w-28`}
+              value={school.finance_software || ""}
+              onChange={e => handlers.onSaveSchoolField(school.id, "finance_software", e.target.value || null)}>
+              <option value="">בחר</option>
+              {FINANCE_SOFTWARE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </>
+        );
+        if (key === "stage") return bc(ADMIN_SCHOOL_STAGE_LABEL[school.stage] || school.stage || "—");
+        if (key === "meetings_completed") return bc(school.meetings_stats ? String(school.meetings_stats.completed) : "—");
+        if (key === "meetings_hours") return bc(school.meetings_stats ? formatAdminMeetingHours(school.meetings_stats.total_minutes) : "—");
         if (MEETING_TYPE_BREAKDOWN_COL_META[key]) {
-          const bc = MEETING_TYPE_BREAKDOWN_COL_META[key];
-          const bucket = school.meetings_stats?.by_type?.[bc.breakdownType];
-          return <td key={key} className={tdClass}>{
+          const bcMeta = MEETING_TYPE_BREAKDOWN_COL_META[key];
+          const bucket = school.meetings_stats?.by_type?.[bcMeta.breakdownType];
+          return bc(
             !bucket ? "—"
-              : bc.breakdownMetric === "completed" ? String(bucket.completed ?? 0)
+              : bcMeta.breakdownMetric === "completed" ? String(bucket.completed ?? 0)
               : formatAdminMeetingHours(bucket.total_minutes ?? 0)
-          }</td>;
+          );
         }
-        if (key === "service_type") return (
-          <td key={key} className={tdClass}>
+        if (key === "service_type") return bc(
+          <>
             <label htmlFor={`svc-${rowKey}`} className="sr-only">סוג שירות</label>
             <select id={`svc-${rowKey}`} className={`${ADMIN_FIELD_CLS} w-28`}
               value={yad.service_type || ""}
@@ -1838,10 +1905,10 @@ const SchoolRow = memo(function SchoolRow({
               <option value="">בחר</option>
               {SERVICE_TYPE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
-          </td>
+          </>
         );
-        if (key === "order_method") return (
-          <td key={key} className={tdClass}>
+        if (key === "order_method") return bc(
+          <>
             <MultiSelectChips key={rowKey} compact className="w-36" options={FUNDING_METHOD_OPTIONS}
               selected={yad.order_method || []}
               onChange={v => handlers.onSaveField(school.id, "order_method", v.length ? v : null)} />
@@ -1855,63 +1922,52 @@ const SchoolRow = memo(function SchoolRow({
                 className={`${ADMIN_FIELD_CLS} w-36 mt-1`}
               />
             )}
-          </td>
+          </>
         );
-        if (key === "order_amount_gefen") return (
-          <td key={key} className={tdClass}>
-            <AdminAutosaveInput
-              key={rowKey}
-              type="text"
-              inputMode="numeric"
-              value={yad.order_amount_gefen ?? null}
-              format={formatAmount}
-              parse={parseAmount}
-              onCommit={v => handlers.onSaveField(school.id, "order_amount_gefen", v)}
-              title={yad.order_amount_gefen_updated_by_name ? `${yad.order_amount_gefen_updated_by_name} - ${formatUpdatedAt(yad.order_amount_gefen_updated_at)}` : ""}
-              ariaLabel='מחיר כולל מע"מ'
-              className={`${ADMIN_FIELD_CLS} w-24`}
-            />
-          </td>
+        if (key === "order_amount_gefen") return bc(
+          <AdminAutosaveInput
+            key={rowKey}
+            type="text"
+            inputMode="numeric"
+            value={yad.order_amount_gefen ?? null}
+            format={formatAmount}
+            parse={parseAmount}
+            onCommit={v => handlers.onSaveField(school.id, "order_amount_gefen", v)}
+            title={yad.order_amount_gefen_updated_by_name ? `${yad.order_amount_gefen_updated_by_name} - ${formatUpdatedAt(yad.order_amount_gefen_updated_at)}` : ""}
+            ariaLabel='מחיר כולל מע"מ'
+            className={`${ADMIN_FIELD_CLS} w-24`}
+          />
         );
-        if (NUMERIC_ADMIN_FIELDS.has(key)) return (
-          <td key={key} className={tdClass}>
-            <AdminAutosaveInput
-              key={rowKey}
-              type="number"
-              value={yad[key] ?? null}
-              parse={raw => (raw === "" ? null : Number(raw))}
-              onCommit={v => handlers.onSaveField(school.id, key, v)}
-              ariaLabel={ADMIN_DATA_COLUMNS.find(c => c.key === key)?.label}
-              className={`${ADMIN_FIELD_CLS} no-spinner w-24`}
-            />
-          </td>
+        if (NUMERIC_ADMIN_FIELDS.has(key)) return bc(
+          <AdminAutosaveInput
+            key={rowKey}
+            type="number"
+            value={yad[key] ?? null}
+            parse={raw => (raw === "" ? null : Number(raw))}
+            onCommit={v => handlers.onSaveField(school.id, key, v)}
+            ariaLabel={colLabel}
+            className={`${ADMIN_FIELD_CLS} no-spinner w-24`}
+          />
         );
-        if (key === "meeting_duration_gefen" || key === "meeting_duration_current" || key === "meeting_duration_district") return (
-          <td key={key} className={tdClass}>
-            <HourMinuteInput idPrefix={`${key}-${rowKey}`} label={ADMIN_DATA_COLUMNS.find(c => c.key === key)?.label}
-              minutes={yad[key] ?? null}
-              onChange={v => handlers.onSaveField(school.id, key, v)} />
-          </td>
+        if (key === "meeting_duration_gefen" || key === "meeting_duration_current" || key === "meeting_duration_district") return bc(
+          <HourMinuteInput idPrefix={`${key}-${rowKey}`} label={colLabel}
+            minutes={yad[key] ?? null}
+            onChange={v => handlers.onSaveField(school.id, key, v)} />
         );
         if (key === "advisor_gefen" || key === "advisor_current" || key === "advisor_district") {
-          const list = school[key === "advisor_gefen" ? "advisors_gefen" : key === "advisor_current" ? "advisors_current" : "advisors_district"] || [];
-          return (
-            <td key={key} className={tdClass}>
-              {list.length === 0 ? "—" : (
-                <div className="flex flex-wrap gap-1">
-                  {list.map(a => (
-                    <span key={a.id} className="inline-flex items-center text-xs font-medium px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 border border-slate-200">
-                      {a.full_name || a.email}
-                    </span>
-                  ))}
-                </div>
-              )}
-            </td>
+          const serviceType = ADVISOR_FIELD_TO_SERVICE_TYPE[key];
+          const listField = ADVISOR_FIELD_TO_LIST_FIELD[key];
+          const list = school[listField] || [];
+          return bc(
+            <AdvisorSearch compact schoolId={school.id} selectedIds={list.map(a => a.id)} users={users}
+              loadingUsers={loadingUsers}
+              onChange={ids => handlers.onAdvisorSearchChange(school.id, serviceType, ids)}
+              onRetry={handlers.onRetryLoadUsers} />
           );
         }
-        if (key === "contract_sent" || key === "contract_received") return (
-          <td key={key} className={tdClass}>
-            <label htmlFor={`${key}-${rowKey}`} className="sr-only">{ADMIN_DATA_COLUMNS.find(c => c.key === key)?.label}</label>
+        if (key === "contract_sent" || key === "contract_received") return bc(
+          <>
+            <label htmlFor={`${key}-${rowKey}`} className="sr-only">{colLabel}</label>
             <select id={`${key}-${rowKey}`} className={`${ADMIN_FIELD_CLS} w-20`}
               value={yad[key] === true ? "yes" : yad[key] === false ? "no" : ""}
               onChange={e => handlers.onSaveField(school.id, key, e.target.value === "yes" ? true : e.target.value === "no" ? false : null)}>
@@ -1919,28 +1975,26 @@ const SchoolRow = memo(function SchoolRow({
               <option value="yes">כן</option>
               <option value="no">לא</option>
             </select>
-          </td>
+          </>
         );
-        if (key === "contract_file") return (
-          <td key={key} className={tdClass}>
-            {yad.contract_file_name ? (
-              <div className="flex items-center gap-2">
-                <button type="button" onClick={() => handlers.onDownloadContractFile(school.id)} className="text-xs text-blue-600 hover:underline truncate max-w-[100px]">
-                  {yad.contract_file_name}
-                </button>
-                <button type="button" onClick={() => handlers.onOpenContractUpload(school.id)} className="text-xs text-slate-400 hover:text-slate-600">החלף</button>
-              </div>
-            ) : (
-              <button type="button" onClick={() => handlers.onOpenContractUpload(school.id)} className="btn-ghost text-xs px-2 py-1">העלה קובץ</button>
-            )}
-          </td>
+        if (key === "contract_file") return bc(
+          yad.contract_file_name ? (
+            <div className="flex items-center gap-2">
+              <button type="button" onClick={() => handlers.onDownloadContractFile(school.id)} className="text-xs text-blue-600 hover:underline truncate max-w-[100px]">
+                {yad.contract_file_name}
+              </button>
+              <button type="button" onClick={() => handlers.onOpenContractUpload(school.id)} className="text-xs text-slate-400 hover:text-slate-600">החלף</button>
+            </div>
+          ) : (
+            <button type="button" onClick={() => handlers.onOpenContractUpload(school.id)} className="btn-ghost text-xs px-2 py-1">העלה קובץ</button>
+          )
         );
         if (key === "closure_parents_status" || key === "closure_authority_status") {
           const val = yad[key];
           const colorCls = val === true ? "text-green-600" : val === false ? "text-red-600" : "text-slate-400";
-          return (
-            <td key={key} className={tdClass}>
-              <label htmlFor={`${key}-${rowKey}`} className="sr-only">{ADMIN_DATA_COLUMNS.find(c => c.key === key)?.label}</label>
+          return bc(
+            <>
+              <label htmlFor={`${key}-${rowKey}`} className="sr-only">{colLabel}</label>
               <select id={`${key}-${rowKey}`} className={`${ADMIN_FIELD_CLS} w-24 font-semibold ${colorCls}`}
                 value={val === true ? "yes" : val === false ? "no" : ""}
                 onChange={e => handlers.onSaveField(school.id, key, e.target.value === "yes" ? true : e.target.value === "no" ? false : null)}>
@@ -1948,33 +2002,31 @@ const SchoolRow = memo(function SchoolRow({
                 <option value="yes">סגור</option>
                 <option value="no">לא סגור</option>
               </select>
-            </td>
+            </>
           );
         }
         if (key === "closure_parents_notes" || key === "closure_authority_notes") {
           const notesKey = `${school.id}:${key}`;
           const isEditing = editingNotesKey === notesKey;
           const text = yad[key] || "";
-          return (
-            <td key={key} className={tdClass}>
-              {isEditing ? (
-                <AdminNotesTextarea
-                  initialValue={text}
-                  ariaLabel={ADMIN_DATA_COLUMNS.find(c => c.key === key)?.label}
-                  className={`${ADMIN_FIELD_CLS} w-48 resize-y`}
-                  onCommit={(raw) => {
-                    const v = raw.trim() || null;
-                    setEditingNotesKey(null);
-                    if (v !== (text || null)) handlers.onSaveField(school.id, key, v);
-                  }}
-                />
-              ) : (
-                <button type="button" onClick={() => setEditingNotesKey(notesKey)}
-                  className="text-right text-slate-600 hover:text-blue-600 truncate max-w-[160px] block">
-                  {text ? (text.length > 30 ? `${text.slice(0, 30)}…` : text) : "—"}
-                </button>
-              )}
-            </td>
+          return bc(
+            isEditing ? (
+              <AdminNotesTextarea
+                initialValue={text}
+                ariaLabel={colLabel}
+                className={`${ADMIN_FIELD_CLS} w-48 resize-y`}
+                onCommit={(raw) => {
+                  const v = raw.trim() || null;
+                  setEditingNotesKey(null);
+                  if (v !== (text || null)) handlers.onSaveField(school.id, key, v);
+                }}
+              />
+            ) : (
+              <button type="button" onClick={() => setEditingNotesKey(notesKey)}
+                className="text-right text-slate-600 hover:text-blue-600 truncate max-w-[160px] block">
+                {text ? (text.length > 30 ? `${text.slice(0, 30)}…` : text) : "—"}
+              </button>
+            )
           );
         }
         if (key === "quarterly_notes_1" || key === "quarterly_notes_2" || key === "quarterly_notes_3" || key === "quarterly_notes_4") {
@@ -1984,96 +2036,86 @@ const SchoolRow = memo(function SchoolRow({
           const isEditing = editingNotesKey === notesKey;
 
           if (summary.count >= 2) {
-            return (
-              <td key={key} className={tdClass}>
-                <button type="button"
-                  onClick={() => handlers.onOpenNotesModal({ schoolId: school.id, quarter: Number(q) })}
-                  className="text-slate-400 hover:text-blue-600 transition-colors text-base leading-none" aria-label="פתח הערות">
-                  📝
-                </button>
-              </td>
+            return bc(
+              <button type="button"
+                onClick={() => handlers.onOpenNotesModal({ schoolId: school.id, quarter: Number(q) })}
+                className="text-slate-400 hover:text-blue-600 transition-colors text-base leading-none" aria-label="פתח הערות">
+                📝
+              </button>
             );
           }
 
           const text = summary.latest_segment?.content || "";
-          return (
-            <td key={key} className={tdClass}>
-              {isEditing ? (
-                <AdminNotesTextarea
-                  initialValue={text}
-                  ariaLabel={ADMIN_DATA_COLUMNS.find(c => c.key === key)?.label}
-                  className={`${ADMIN_FIELD_CLS} w-48 resize-y`}
-                  onCommit={(raw) => {
-                    const v = raw.trim();
-                    setEditingNotesKey(null);
-                    if (v === text) return;
-                    if (summary.count === 1) {
-                      if (v) handlers.onSaveQuarterlyNoteEdit(school.id, summary.latest_segment.id, q, v);
-                    } else if (v) {
-                      handlers.onCreateQuarterlyNote(school.id, q, v);
-                    }
-                  }}
-                />
-              ) : (
-                <button type="button" onClick={() => setEditingNotesKey(notesKey)}
-                  className="text-right text-slate-600 hover:text-blue-600 truncate max-w-[160px] block">
-                  {text ? (text.length > 30 ? `${text.slice(0, 30)}…` : text) : "—"}
-                </button>
-              )}
-            </td>
+          return bc(
+            isEditing ? (
+              <AdminNotesTextarea
+                initialValue={text}
+                ariaLabel={colLabel}
+                className={`${ADMIN_FIELD_CLS} w-48 resize-y`}
+                onCommit={(raw) => {
+                  const v = raw.trim();
+                  setEditingNotesKey(null);
+                  if (v === text) return;
+                  if (summary.count === 1) {
+                    if (v) handlers.onSaveQuarterlyNoteEdit(school.id, summary.latest_segment.id, q, v);
+                  } else if (v) {
+                    handlers.onCreateQuarterlyNote(school.id, q, v);
+                  }
+                }}
+              />
+            ) : (
+              <button type="button" onClick={() => setEditingNotesKey(notesKey)}
+                className="text-right text-slate-600 hover:text-blue-600 truncate max-w-[160px] block">
+                {text ? (text.length > 30 ? `${text.slice(0, 30)}…` : text) : "—"}
+              </button>
+            )
           );
         }
         if (key === "control_letter_received_date" || key === "control_letter_target_date") {
           const iso = controlLetterFieldValue(school, key === "control_letter_target_date" ? "target_date" : "received_date");
-          return <td key={key} className={tdClass}>{iso ? formatDDMMYY(iso) : "—"}</td>;
+          return bc(iso ? formatDDMMYY(iso) : "—");
         }
         if (key === "control_letter_days_to_answer") {
           const v = controlLetterFieldValue(school, "days_to_answer");
-          return <td key={key} className={tdClass}>{v ?? "—"}</td>;
+          return bc(v ?? "—");
         }
         if (key === "control_letter_status") {
           const v = controlLetterFieldValue(school, "status");
           const s = CONTROL_LETTER_STATUS_MAP[v || ""] || CONTROL_LETTER_STATUS_MAP[""];
-          return (
-            <td key={key} className={tdClass}>
-              {v ? (
-                <span className="inline-flex items-center gap-1.5 text-xs font-semibold px-2 py-0.5 rounded-full" style={{ background: s.bg, color: s.color }}>
-                  <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: s.dot }} aria-hidden="true" />
-                  {s.label}
-                </span>
-              ) : "—"}
-            </td>
+          return bc(
+            v ? (
+              <span className="inline-flex items-center gap-1.5 text-xs font-semibold px-2 py-0.5 rounded-full" style={{ background: s.bg, color: s.color }}>
+                <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: s.dot }} aria-hidden="true" />
+                {s.label}
+              </span>
+            ) : "—"
           );
         }
         if (key === "control_letter_notes") {
           const text = controlLetterFieldValue(school, "notes") || "";
-          return (
-            <td key={key} className={tdClass}>
-              <span title={text} className="truncate max-w-[160px] block">
-                {text ? (text.length > 30 ? `${text.slice(0, 30)}…` : text) : "—"}
-              </span>
-            </td>
+          return bc(
+            <span title={text} className="truncate max-w-[160px] block">
+              {text ? (text.length > 30 ? `${text.slice(0, 30)}…` : text) : "—"}
+            </span>
           );
         }
         if (key === "control_letter_original_file" || key === "control_letter_response_file") {
           const kind = key === "control_letter_original_file" ? "original" : "response";
           const fileName = controlLetterFieldValue(school, `${kind}_letter_file_name`);
           const primary = pickPrimaryControlLetter(school.control_letters);
-          return (
-            <td key={key} className={tdClass}>
-              {fileName && primary ? (
-                <button
-                  type="button"
-                  onClick={() => handlers.onDownloadControlLetterFile(school.id, primary.division_type, kind, fileName)}
-                  className="text-xs text-blue-600 hover:underline truncate max-w-[100px]"
-                >
-                  {fileName}
-                </button>
-              ) : "—"}
-            </td>
+          return bc(
+            fileName && primary ? (
+              <button
+                type="button"
+                onClick={() => handlers.onDownloadControlLetterFile(school.id, primary.division_type, kind, fileName)}
+                className="text-xs text-blue-600 hover:underline truncate max-w-[100px]"
+              >
+                {fileName}
+              </button>
+            ) : "—"
           );
         }
-        return <td key={key} className={tdClass}>—</td>;
+        return bc("—");
       })}
       <td className="px-4 py-2">
         <div className="flex gap-2">
@@ -2144,6 +2186,17 @@ export default function AdminPage() {
   const [editingAdminNotesKey, setEditingAdminNotesKey] = useState(null); // `${schoolId}:${field}` of the notes cell currently in edit mode
   const [quarterlyNotesSummary, setQuarterlyNotesSummary] = useState({}); // school_id -> {"1":{count,latest_segment}, "2":..., "3":..., "4":...}
   const [showSchoolNotesModalFor, setShowSchoolNotesModalFor] = useState(null); // {schoolId, quarter} | null — focused-quarter notes modal
+  // Excel-style bulk column edit (ניהול → בתי ספר): select several cells in ONE column, edit
+  // one of them, confirm, and the value (or — for advisor columns — an additive assignment)
+  // applies to the rest. bulkSelection.field gates which column is currently selectable;
+  // picking a cell in a different column replaces the whole selection.
+  const [bulkEditMode, setBulkEditMode] = useState(false);
+  const [bulkSelection, setBulkSelection] = useState({ field: null, schoolIds: new Set() });
+  const [bulkConfirm, setBulkConfirm] = useState(null); // pending "apply to N more schools?" confirmation
+  const [bulkApplying, setBulkApplying] = useState(false);
+  // Single-slot undo buffer (not a stack) — only the most recent bulk action is undoable.
+  // kind: "overwrite" (year-admin-data or schools field) | "advisor_add" (additive typed-advisor assignment).
+  const [bulkUndo, setBulkUndo] = useState(null);
   const [myFullName, setMyFullName] = useState("");
   const adminContractInputRef = useRef(null);
   const adminColPickerRef = useRef(null);
@@ -2404,7 +2457,10 @@ export default function AdminPage() {
       }).catch(() => {});
     });
   }, []);
-  useEffect(() => { if ((activeTab === "users" || activeTab === "billing" || activeTab === "connections") && users.length === 0) loadUsers(); }, [activeTab]);
+  // "schools" added so the inline <AdvisorSearch> advisor-assignment editors in the admin
+  // schools table (ניהול → בתי ספר) have a user list to pick from, lazily, the same way the
+  // other tabs that embed AdvisorSearch/this picker already do.
+  useEffect(() => { if ((activeTab === "schools" || activeTab === "users" || activeTab === "billing" || activeTab === "connections") && users.length === 0) loadUsers(); }, [activeTab]);
   useEffect(() => { if (activeTab === "users" && users.length > 0) refreshCallsMappingData(); }, [activeTab]);
   useEffect(() => { if (activeTab === "permissions" && !permDefaults && !permLoading) loadPermDefaults(); }, [activeTab]);
   // Advisors must not access the admin area — redirect immediately once role is confirmed
@@ -2537,6 +2593,261 @@ export default function AdminPage() {
       loadYearAdminData(adminAcademicYear);
     }
   }
+
+  // Single-cell save for `schools`-table fields exposed in the admin table (currently just
+  // finance_software) — same optimistic/revert-on-error shape as saveYearAdminField, just
+  // targeting PUT /schools/{id} instead of the year-admin-data endpoint.
+  async function saveSchoolField(schoolId, field, value) {
+    setSchools(prev => prev.map(s => (s.id === schoolId ? { ...s, [field]: value } : s)));
+    try {
+      const res = await axios.put(`/schools/${schoolId}`, { [field]: value });
+      setSchools(prev => prev.map(s => (s.id === schoolId ? { ...s, ...res.data } : s)));
+    } catch {
+      loadSchools();
+    }
+  }
+
+  // Single-cell advisor assignment diff+save for the admin table's inline <AdvisorSearch> —
+  // mirrors the add/remove diff SchoolPage.jsx sends on its own "ליווי" save.
+  async function saveTypedAdvisorIds(schoolId, serviceType, newIds) {
+    const listField = ADVISOR_FIELD_TO_LIST_FIELD[`advisor_${serviceType}`];
+    const school = schools.find(s => s.id === schoolId);
+    const oldIds = (school?.[listField] || []).map(a => a.id);
+    const added = newIds.filter(id => !oldIds.includes(id));
+    const removed = oldIds.filter(id => !newIds.includes(id));
+    if (added.length === 0 && removed.length === 0) return;
+    setSchools(prev => prev.map(s => (s.id === schoolId
+      ? { ...s, [listField]: newIds.map(id => users.find(u => u.id === id)).filter(Boolean) }
+      : s)));
+    try {
+      await Promise.all([
+        ...added.map(id => axios.post(`/schools/${schoolId}/advisors/${serviceType}`, { advisor_id: id })),
+        ...removed.map(id => axios.delete(`/schools/${schoolId}/advisors/${serviceType}/${id}`)),
+      ]);
+    } catch {
+      loadSchools();
+    }
+  }
+
+  // --- Bulk column edit (ניהול → בתי ספר) -----------------------------------------------
+  // Selection clears whenever bulk-edit mode is turned off, the academic year changes, or the
+  // user leaves the schools tab — a stale selection/undo referencing a different year or an
+  // unmounted table would be confusing, not useful.
+  useEffect(() => {
+    if (!bulkEditMode) {
+      setBulkSelection({ field: null, schoolIds: new Set() });
+      setBulkConfirm(null);
+      setBulkUndo(null);
+    }
+  }, [bulkEditMode]);
+  useEffect(() => {
+    setBulkSelection({ field: null, schoolIds: new Set() });
+    setBulkConfirm(null);
+    setBulkUndo(null);
+  }, [adminAcademicYear]);
+  useEffect(() => {
+    if (activeTab !== "schools") {
+      setBulkSelection({ field: null, schoolIds: new Set() });
+      setBulkConfirm(null);
+      setBulkUndo(null);
+    }
+  }, [activeTab]);
+
+  function toggleBulkCell(field, schoolId) {
+    if (bulkSelection.field && bulkSelection.field !== field) {
+      setBulkSelection({ field, schoolIds: new Set([schoolId]) });
+      return;
+    }
+    setBulkSelection(prev => {
+      const next = new Set(prev.schoolIds);
+      if (next.has(schoolId)) next.delete(schoolId); else next.add(schoolId);
+      return { field, schoolIds: next };
+    });
+  }
+
+  function selectAllInBulkColumn(field, schoolIds) {
+    setBulkSelection({ field, schoolIds: new Set(schoolIds) });
+  }
+
+  function clearBulkSelection() {
+    setBulkSelection({ field: null, schoolIds: new Set() });
+  }
+
+  // Wraps the existing single-cell saves: the cell's own autosave always fires normally and
+  // immediately; if bulk-edit mode is on and other cells are selected in this same column, a
+  // short confirmation is offered before propagating the same value to them too.
+  function onSaveFieldBulkAware(schoolId, field, value) {
+    const prevValue = (yearAdminData[schoolId] || {})[field] ?? null;
+    saveYearAdminField(schoolId, field, value);
+    if (!bulkEditMode || bulkSelection.field !== field) return;
+    const otherSchoolIds = [...bulkSelection.schoolIds].filter(id => id !== schoolId);
+    if (otherSchoolIds.length === 0) return;
+    setBulkConfirm({ domain: "year_admin", field, value, editedSchoolId: schoolId, editedPrevValue: prevValue, otherSchoolIds });
+  }
+
+  function onSaveSchoolFieldBulkAware(schoolId, field, value) {
+    const prevValue = schools.find(s => s.id === schoolId)?.[field] ?? null;
+    saveSchoolField(schoolId, field, value);
+    if (!bulkEditMode || bulkSelection.field !== field) return;
+    const otherSchoolIds = [...bulkSelection.schoolIds].filter(id => id !== schoolId);
+    if (otherSchoolIds.length === 0) return;
+    setBulkConfirm({ domain: "school", field, value, editedSchoolId: schoolId, editedPrevValue: prevValue, otherSchoolIds });
+  }
+
+  // Advisor cells are additive-only in bulk mode: only a newly-ADDED advisor (not a removal)
+  // offers to propagate, and only the other selected cells actually missing that advisor get
+  // touched server-side (the bulk-assign endpoint itself also no-ops on ones that already have it).
+  function onAdvisorSearchChangeBulkAware(schoolId, serviceType, newIds) {
+    const advisorKey = `advisor_${serviceType}`;
+    const listField = ADVISOR_FIELD_TO_LIST_FIELD[advisorKey];
+    const school = schools.find(s => s.id === schoolId);
+    const oldIds = (school?.[listField] || []).map(a => a.id);
+    const addedIds = newIds.filter(id => !oldIds.includes(id));
+    saveTypedAdvisorIds(schoolId, serviceType, newIds);
+    if (!bulkEditMode || bulkSelection.field !== advisorKey || addedIds.length !== 1) return;
+    const otherSchoolIds = [...bulkSelection.schoolIds].filter(id => id !== schoolId);
+    if (otherSchoolIds.length === 0) return;
+    setBulkConfirm({
+      domain: "advisor", serviceType, advisorId: addedIds[0], advisorListField: listField,
+      editedSchoolId: schoolId, otherSchoolIds,
+    });
+  }
+
+  function bulkConfirmMessage(confirm) {
+    const n = confirm.otherSchoolIds.length;
+    if (confirm.domain === "advisor") return `להוסיף יועץ זה גם ל-${n} בתי ספר נוספים (בנוסף ליועצים הקיימים)?`;
+    return `להחיל שינוי זה גם על ${n} בתי ספר נוספים?`;
+  }
+
+  async function applyBulkConfirm() {
+    if (!bulkConfirm) return;
+    const confirm = bulkConfirm;
+    setBulkConfirm(null);
+    setBulkApplying(true);
+    try {
+      if (confirm.domain === "advisor") {
+        const { serviceType, advisorId, advisorListField, otherSchoolIds } = confirm;
+        const res = await axios.post(`/schools/advisors/${serviceType}/bulk-assign`, { advisor_id: advisorId, school_ids: otherSchoolIds });
+        const newlyAssigned = res.data.newly_assigned || [];
+        const advisorUser = users.find(u => u.id === advisorId);
+        if (newlyAssigned.length > 0) {
+          setSchools(prev => prev.map(s => {
+            if (!newlyAssigned.includes(s.id)) return s;
+            const current = s[advisorListField] || [];
+            if (current.some(a => a.id === advisorId)) return s;
+            return { ...s, [advisorListField]: [...current, advisorUser || { id: advisorId }] };
+          }));
+        }
+        setBulkUndo({
+          kind: "advisor_add", serviceType, advisorId, advisorListField,
+          newlyAssignedSchoolIds: newlyAssigned,
+          message: newlyAssigned.length > 0 ? `יועץ נוסף ל-${newlyAssigned.length + 1} בתי ספר — בטל` : null,
+        });
+        return;
+      }
+
+      const { domain, field, value, editedSchoolId, editedPrevValue, otherSchoolIds } = confirm;
+      const previousValues = [
+        { school_id: editedSchoolId, value: editedPrevValue },
+        ...otherSchoolIds.map(id => ({
+          school_id: id,
+          value: domain === "year_admin" ? ((yearAdminData[id] || {})[field] ?? null) : (schools.find(s => s.id === id)?.[field] ?? null),
+        })),
+      ];
+
+      if (domain === "year_admin") {
+        setYearAdminData(prev => {
+          const next = { ...prev };
+          for (const id of otherSchoolIds) next[id] = { ...(next[id] || {}), school_id: id, [field]: value };
+          return next;
+        });
+        const res = await axios.put("/schools/year-admin-data/bulk", {
+          field, academic_year: adminAcademicYear, items: otherSchoolIds.map(id => ({ school_id: id, value })),
+        });
+        const failedIds = new Set((res.data.failed || []).map(f => f.school_id));
+        if (failedIds.size > 0) {
+          setYearAdminData(prev => {
+            const next = { ...prev };
+            for (const pv of previousValues) if (failedIds.has(pv.school_id)) next[pv.school_id] = { ...(next[pv.school_id] || {}), [field]: pv.value };
+            return next;
+          });
+        }
+        const succeededIds = otherSchoolIds.filter(id => !failedIds.has(id));
+        setBulkUndo({
+          kind: "overwrite", domain, field, academic_year: adminAcademicYear,
+          previousValues: previousValues.filter(pv => pv.school_id === editedSchoolId || succeededIds.includes(pv.school_id)),
+          message: failedIds.size > 0
+            ? `עודכן ב-${succeededIds.length + 1} בתי ספר, ${failedIds.size} נכשלו — בטל`
+            : `עודכן ב-${succeededIds.length + 1} בתי ספר — בטל`,
+        });
+      } else {
+        setSchools(prev => prev.map(s => (otherSchoolIds.includes(s.id) ? { ...s, [field]: value } : s)));
+        const res = await axios.put("/schools/bulk-field", { field, items: otherSchoolIds.map(id => ({ school_id: id, value })) });
+        const failedIds = new Set((res.data.failed || []).map(f => f.school_id));
+        if (failedIds.size > 0) {
+          setSchools(prev => prev.map(s => {
+            const pv = previousValues.find(p => p.school_id === s.id);
+            return failedIds.has(s.id) && pv ? { ...s, [field]: pv.value } : s;
+          }));
+        }
+        const succeededIds = otherSchoolIds.filter(id => !failedIds.has(id));
+        setBulkUndo({
+          kind: "overwrite", domain, field,
+          previousValues: previousValues.filter(pv => pv.school_id === editedSchoolId || succeededIds.includes(pv.school_id)),
+          message: failedIds.size > 0
+            ? `עודכן ב-${succeededIds.length + 1} בתי ספר, ${failedIds.size} נכשלו — בטל`
+            : `עודכן ב-${succeededIds.length + 1} בתי ספר — בטל`,
+        });
+      }
+    } catch {
+      if (confirm.domain === "year_admin") loadYearAdminData(adminAcademicYear);
+      else loadSchools();
+    } finally {
+      setBulkApplying(false);
+    }
+  }
+
+  async function undoBulkAction() {
+    if (!bulkUndo) return;
+    const undo = bulkUndo;
+    setBulkUndo(null);
+    if (undo.kind === "overwrite") {
+      if (undo.domain === "year_admin") {
+        setYearAdminData(prev => {
+          const next = { ...prev };
+          for (const pv of undo.previousValues) next[pv.school_id] = { ...(next[pv.school_id] || {}), [undo.field]: pv.value };
+          return next;
+        });
+        try {
+          await axios.put("/schools/year-admin-data/bulk", { field: undo.field, academic_year: undo.academic_year, items: undo.previousValues });
+        } catch {
+          loadYearAdminData(adminAcademicYear);
+        }
+      } else {
+        setSchools(prev => prev.map(s => {
+          const pv = undo.previousValues.find(p => p.school_id === s.id);
+          return pv ? { ...s, [undo.field]: pv.value } : s;
+        }));
+        try {
+          await axios.put("/schools/bulk-field", { field: undo.field, items: undo.previousValues });
+        } catch {
+          loadSchools();
+        }
+      }
+    } else if (undo.kind === "advisor_add" && undo.newlyAssignedSchoolIds.length > 0) {
+      setSchools(prev => prev.map(s => (undo.newlyAssignedSchoolIds.includes(s.id)
+        ? { ...s, [undo.advisorListField]: (s[undo.advisorListField] || []).filter(a => a.id !== undo.advisorId) }
+        : s)));
+      try {
+        await axios.post(`/schools/advisors/${undo.serviceType}/bulk-unassign`, {
+          advisor_id: undo.advisorId, school_ids: undo.newlyAssignedSchoolIds,
+        });
+      } catch {
+        loadSchools();
+      }
+    }
+  }
+  // --- End bulk column edit --------------------------------------------------------------
 
   async function loadQuarterlyNotesSummary(schoolIds) {
     if (!schoolIds || schoolIds.length === 0) return;
@@ -3925,11 +4236,12 @@ export default function AdminPage() {
   // object identity never changes and React.memo on the row stays effective.
   const rowFnRef = useRef({});
   rowFnRef.current = {
-    saveYearAdminField, toggleExpand, startEdit, downloadContractFile, openContractUpload,
+    onSaveFieldBulkAware, toggleExpand, startEdit, downloadContractFile, openContractUpload,
     downloadControlLetterFile, createQuarterlyNote, saveQuarterlyNoteEdit, setShowSchoolNotesModalFor,
+    onSaveSchoolFieldBulkAware, onAdvisorSearchChangeBulkAware, toggleBulkCell, loadUsers,
   };
   const rowHandlers = useMemo(() => ({
-    onSaveField: (...a) => rowFnRef.current.saveYearAdminField(...a),
+    onSaveField: (...a) => rowFnRef.current.onSaveFieldBulkAware(...a),
     onToggleExpand: (...a) => rowFnRef.current.toggleExpand(...a),
     onStartEdit: (...a) => rowFnRef.current.startEdit(...a),
     onDownloadContractFile: (...a) => rowFnRef.current.downloadContractFile(...a),
@@ -3938,6 +4250,10 @@ export default function AdminPage() {
     onCreateQuarterlyNote: (...a) => rowFnRef.current.createQuarterlyNote(...a),
     onSaveQuarterlyNoteEdit: (...a) => rowFnRef.current.saveQuarterlyNoteEdit(...a),
     onOpenNotesModal: (...a) => rowFnRef.current.setShowSchoolNotesModalFor(...a),
+    onSaveSchoolField: (...a) => rowFnRef.current.onSaveSchoolFieldBulkAware(...a),
+    onAdvisorSearchChange: (...a) => rowFnRef.current.onAdvisorSearchChangeBulkAware(...a),
+    onToggleBulkCell: (...a) => rowFnRef.current.toggleBulkCell(...a),
+    onRetryLoadUsers: (...a) => rowFnRef.current.loadUsers(...a),
   }), []);
 
   // Row virtualization for the admin schools table — only ~40 <SchoolRow>s are mounted at a
@@ -4045,6 +4361,13 @@ export default function AdminPage() {
           {activeTab === "schools" && (
             <div>
               <div className="flex justify-end gap-2 mb-4">
+                <button type="button" onClick={() => setBulkEditMode(o => !o)}
+                  aria-pressed={bulkEditMode}
+                  className={`text-sm px-4 py-2 rounded-lg border transition-colors ${
+                    bulkEditMode ? "bg-blue-600 border-blue-600 text-white" : "btn-ghost"
+                  }`}>
+                  עריכה מרובה{bulkEditMode && bulkSelection.schoolIds.size > 0 ? ` (${bulkSelection.schoolIds.size} נבחרו)` : ""}
+                </button>
                 <input ref={importRef} type="file" accept=".xlsx,.xls" className="hidden" onChange={handleImport} aria-label="ייבוא בתי ספר מאקסל" />
                 <button onClick={() => importRef.current?.click()} disabled={importing} className="btn-ghost text-sm px-4 py-2">
                   {importing ? (importProgressMsg || "מייבא...") : "ייבוא מאקסל"}
@@ -4062,6 +4385,27 @@ export default function AdminPage() {
                   )}
                 </div>
               </div>
+
+              {/* Bulk-edit confirmation + undo — fixed-position so they stay visible
+                  regardless of scroll position in the (potentially long/virtualized) table. */}
+              {bulkConfirm && (
+                <div role="alertdialog" aria-modal="true" aria-labelledby="bulk-confirm-text"
+                  className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 bg-white border border-slate-200 rounded-xl shadow-lg px-5 py-3 flex items-center gap-3">
+                  <span id="bulk-confirm-text" className="text-sm text-slate-800">{bulkConfirmMessage(bulkConfirm)}</span>
+                  <button type="button" onClick={applyBulkConfirm} disabled={bulkApplying} className="btn-blue text-xs px-3 py-1.5">
+                    {bulkApplying ? "מחיל..." : "כן, החל"}
+                  </button>
+                  <button type="button" onClick={() => setBulkConfirm(null)} className="btn-ghost text-xs px-3 py-1.5">ביטול</button>
+                </div>
+              )}
+              {!bulkConfirm && bulkUndo?.message && (
+                <div role="status" className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 bg-slate-900 text-white rounded-xl shadow-lg px-5 py-3 flex items-center gap-3">
+                  <span className="text-sm">{bulkUndo.message}</span>
+                  <button type="button" onClick={undoBulkAction} className="text-xs font-semibold text-blue-300 hover:text-blue-200 underline">בטל</button>
+                  <button type="button" onClick={() => setBulkUndo(null)} aria-label="סגור הודעה" className="text-slate-400 hover:text-white">✕</button>
+                </div>
+              )}
+
               {importResult && (
                 <div className={`glass-card rounded-xl p-4 mb-4 border ${importResult.errors.length > 0 ? "border-orange-200" : "border-green-200"}`}>
                   <p className="font-medium text-slate-800 text-sm">
@@ -4815,10 +5159,23 @@ export default function AdminPage() {
                             const isSorted = adminSortKey === key;
                             const filterType = getAdminColumnFilterType(key);
                             const isFiltered = adminColumnFilterActiveKeys.includes(key);
+                            const bulkEligible = bulkFieldKind(key) !== null;
+                            const isBulkColumn = bulkEditMode && bulkSelection.field === key;
                             return (
                               <th key={key} scope="col"
-                                className={`text-right px-4 py-3 font-semibold select-none text-slate-900 whitespace-nowrap ${isLast ? "" : "border-l border-slate-200"}`}>
+                                className={`text-right px-4 py-3 font-semibold select-none text-slate-900 whitespace-nowrap ${isLast ? "" : "border-l border-slate-200"} ${isBulkColumn ? "bg-blue-50" : ""}`}>
                                 <div className="flex items-center gap-1">
+                                  {bulkEditMode && bulkEligible && (
+                                    <label className="flex items-center cursor-pointer" title="בחר הכל בעמודה">
+                                      <span className="sr-only">בחר הכל בעמודה {col.label}</span>
+                                      <input type="checkbox" className="w-3.5 h-3.5 rounded accent-blue-600"
+                                        checked={isBulkColumn && bulkSelection.schoolIds.size === sortedAdminSchools.length && sortedAdminSchools.length > 0}
+                                        onChange={() => {
+                                          if (isBulkColumn && bulkSelection.schoolIds.size === sortedAdminSchools.length) clearBulkSelection();
+                                          else selectAllInBulkColumn(key, sortedAdminSchools.map(s => s.id));
+                                        }} />
+                                    </label>
+                                  )}
                                   <button type="button" onClick={() => toggleAdminSort(key)}
                                     className={`flex items-center gap-1 hover:text-blue-600 ${isSorted ? "text-blue-600" : ""}`}>
                                     <span className="whitespace-nowrap">{col.label}</span>
@@ -4892,6 +5249,10 @@ export default function AdminPage() {
                                     setEditingNotesKey={setEditingAdminNotesKey}
                                     quarterlyForSchool={quarterlyNotesSummary[school.id]}
                                     handlers={rowHandlers}
+                                    bulkEditMode={bulkEditMode}
+                                    bulkSelection={bulkSelection}
+                                    users={users}
+                                    loadingUsers={loadingUsers}
                                   />
                                   {isExpanded && (
                                 <tr className="border-b border-slate-100 bg-slate-50/70">
