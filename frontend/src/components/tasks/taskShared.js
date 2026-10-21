@@ -55,7 +55,10 @@ export function formatDateDMY(iso) {
 }
 
 function meetingDateRange(cond) {
-  const range = [cond.date_from, cond.date_to].filter(Boolean).map(formatDateDMY).join(" – ") || "כל התאריכים";
+  const segments = (cond.date_segments || []).filter(s => s.date_from && s.date_to);
+  const range = segments.length > 0
+    ? segments.map(s => `${formatDateDMY(s.date_from)} – ${formatDateDMY(s.date_to)}`).join(" או ")
+    : [cond.date_from, cond.date_to].filter(Boolean).map(formatDateDMY).join(" – ") || "כל התאריכים";
   // ⁦/⁩ (LRI/PDI) isolate the LTR date range from the surrounding RTL text so
   // the browser's bidi algorithm can't visually reorder date_from/date_to relative to
   // the Hebrew sentence around them.
@@ -122,10 +125,17 @@ export function describeCondition(cond, meta) {
       : "";
     return `מכתב בקרה${divisionSuffix}: ${fieldDef?.label || cond.field} ${opLabel} ${valueLabel}`;
   }
-  const label = FIELD_LABELS[cond.field] || cond.field;
+  // Prefer the live field-options label (meta.fieldOptions — the exact same data that
+  // populates FieldPickerButton's dropdown, see GET /tasks/field-options) over the hardcoded
+  // FIELD_LABELS mirror below: the mirror is kept in sync "by hand" and can silently drift out
+  // of date with backend/task_logic.py's own FIELD_LABELS (e.g. it was missing "name" ->
+  // "שם בית ספר", which showed the raw field key "name" here even though the picker itself
+  // correctly showed "שם בית ספר"). FIELD_LABELS stays as a fallback for callers that don't
+  // pass fieldOptions in `meta`.
+  const opt = fieldOptions.find(f => f.field === cond.field);
+  const label = opt?.label || FIELD_LABELS[cond.field] || cond.field;
   if (cond.type === "field") {
     const opLabel = NUMBER_OP_LABELS[cond.op] || "=";
-    const opt = fieldOptions.find(f => f.field === cond.field);
     const valueLabel = opt?.options
       ? toValueArray(cond.value).map(v => opt.options.find(o => o.value === v)?.label ?? v).join(" או ")
       : (typeof cond.value === "boolean" ? (cond.value ? "כן" : "לא") : cond.value);

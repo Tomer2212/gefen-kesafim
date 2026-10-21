@@ -189,6 +189,14 @@ def _format_range_date(iso: str) -> str:
     return f"{d}.{m}.{y}"
 
 
+def _format_range_span(r: dict) -> str:
+    """The date-span label for one meeting range — every OR'd segment joined by "או" when the
+    range has multiple (the multi-date-range feature), falling back to the single start_date/
+    end_date pair for older ranges that predate it."""
+    segments = r.get("segments") or [{"start_date": r["start_date"], "end_date": r["end_date"]}]
+    return " או ".join(f'{_format_range_date(s["start_date"])} עד {_format_range_date(s["end_date"])}' for s in segments)
+
+
 def _format_duration_he(minutes: int) -> str:
     if not minutes:
         return ""
@@ -210,7 +218,7 @@ def format_ranges_html(ranges: list[dict]) -> str:
         location_label = _MEETING_TYPE_LABEL_HE.get(r.get("meeting_type"), "מרחוק")
         range_rows += f"""
       <li style="margin-bottom: 10px;">
-        <b>{type_label}</b> — {_format_range_date(r["start_date"])} עד {_format_range_date(r["end_date"])}
+        <b>{type_label}</b> — {_format_range_span(r)}
         {f' · משך: {duration_label}' if duration_label else ""}
         <br/><span style="color: #64748b; font-size: 12px;">מיקום הפגישה: {location_label}</span>
         {f'<br/><span style="color: #64748b; font-size: 12px;">משתתפים: {participants_label}</span>' if participants_label else ""}
@@ -227,7 +235,7 @@ def format_ranges_text(ranges: list[dict]) -> str:
         duration_label = _format_duration_he(r.get("duration_minutes"))
         participants_label = ", ".join(p.get("name", "") for p in (r.get("participants") or []) if p.get("name"))
         location_label = _MEETING_TYPE_LABEL_HE.get(r.get("meeting_type"), "מרחוק")
-        line = f"• {type_label} — {_format_range_date(r['start_date'])} עד {_format_range_date(r['end_date'])}"
+        line = f"• {type_label} — {_format_range_span(r)}"
         if duration_label:
             line += f" · משך: {duration_label}"
         line += f"\n  מיקום הפגישה: {location_label}"

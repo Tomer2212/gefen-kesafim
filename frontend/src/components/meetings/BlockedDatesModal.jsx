@@ -1,6 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import axios from "axios";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
+import { useRowVirtualizer } from "../../hooks/useRowVirtualizer";
 import DirectStyleDateInput from "../tasks/DirectStyleDateInput";
 
 // Same option values used on the school card (AdminPage.jsx / SchoolPage.jsx) for these
@@ -27,44 +29,165 @@ function formatRange(startDate, endDate) {
   return startDate === endDate ? f(startDate) : `${f(startDate)} – ${f(endDate)}`;
 }
 
-function ScopeValuesPicker({ field, values, onChange }) {
+// Distinct, sorted values for a school field (e.g. "city"/"authority"), mirroring the
+// dedupe + Hebrew-locale sort used by DashboardPage.jsx's advanced-filter distinctValues.
+function distinctSchoolValues(schools, field) {
+  const seen = new Map();
+  for (const s of schools) {
+    const v = (s?.[field] || "").trim();
+    if (v && !seen.has(v)) seen.set(v, v);
+  }
+  return [...seen.values()].sort((a, b) => a.localeCompare(b, "he"));
+}
+
+// Searchable multi-select for free-text scope fields (city/authority), sourced from the
+// distinct values present across the org's schools. Mirrors AdvisorSearch.jsx's pattern:
+// closed trigger box with chips, portal-rendered dropdown with a live-filtering search
+// input, list virtualized via the shared useRowVirtualizer hook since the distinct-value
+// list can get long.
+const SCOPE_ROW_HEIGHT = 36;
+const SCOPE_LIST_MAX_HEIGHT = 176; // matches the old max-h-44
+
+function FreeTextScopePicker({ label, allValues, values, onChange }) {
+  const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState(null);
+  const triggerRef = useRef(null);
+  const dropdownRef = useRef(null);
+  const scrollRef = useRef(null);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return q ? allValues.filter(v => v.toLowerCase().includes(q)) : allValues;
+  }, [allValues, query]);
+
+  const { virtualizer, items, padTop, padBottom } = useRowVirtualizer(filtered, {
+    estimateSize: SCOPE_ROW_HEIGHT, scrollRef, getItemKey: v => v,
+  });
+
+  // The scroll container's height must come from `filtered.length` (known synchronously),
+  // not from its own rendered content via max-height + overflow-auto: with no items painted
+  // yet, that would collapse the container to 0px, which the virtualizer would then measure
+  // as a 0-height viewport, computing zero visible items and keeping it collapsed forever.
+  const listHeight = filtered.length === 0 ? 56 : Math.min(filtered.length * SCOPE_ROW_HEIGHT, SCOPE_LIST_MAX_HEIGHT);
+
+  function toggle(v) {
+    onChange(values.includes(v) ? values.filter(x => x !== v) : [...values, v]);
+  }
+
+  useLayoutEffect(() => {
+    if (!open || !triggerRef.current) return;
+    const rect = triggerRef.current.getBoundingClientRect();
+    setPos({ top: rect.bottom + 4, left: rect.left, width: rect.width });
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    function handler(e) {
+      if (triggerRef.current?.contains(e.target)) return;
+      if (dropdownRef.current?.contains(e.target)) return;
+      setOpen(false);
+    }
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = e => { if (!dropdownRef.current?.contains(e.target)) setOpen(false); };
+    window.addEventListener("scroll", handler, { capture: true, passive: true });
+    return () => window.removeEventListener("scroll", handler, { capture: true });
+  }, [open]);
+
+  return (
+    <div>
+      <label htmlFor={`blocked-date-scope-trigger-${label}`} className="block text-xs font-medium text-slate-500 mb-1">
+        {`ערכים חסומים עבור "${label}"`}
+      </label>
+      <div
+        id={`blocked-date-scope-trigger-${label}`}
+        ref={triggerRef}
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        onClick={() => setOpen(o => !o)}
+        onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setOpen(o => !o); } }}
+        className="w-full min-h-[34px] flex flex-wrap items-center gap-1.5 text-sm border border-slate-300 rounded-lg px-3 py-1.5 cursor-pointer bg-white"
+      >
+        {values.length === 0 && <span className="text-slate-400">לחץ לבחירת ערכים...</span>}
+        {values.map(v => (
+          <span key={v} className="inline-flex items-center gap-1 text-xs bg-slate-100 text-slate-700 rounded-full px-2.5 py-1">
+            {v}
+            <button
+              type="button"
+              onMouseDown={e => { e.preventDefault(); e.stopPropagation(); toggle(v); }}
+              aria-label={`הסר ${v}`}
+              className="text-slate-400 hover:text-red-600"
+            >×</button>
+          </span>
+        ))}
+      </div>
+      {open && pos && createPortal(
+        <div ref={dropdownRef} className="fixed z-[9999] border border-slate-200 rounded-xl bg-white shadow-lg"
+          style={{ top: pos.top, left: pos.left, width: Math.max(pos.width, 220) }}>
+          <div className="p-2 border-b border-slate-100">
+            <label htmlFor={`blocked-date-scope-search-${label}`} className="sr-only">{`חיפוש ${label}`}</label>
+            <input
+              id={`blocked-date-scope-search-${label}`}
+              type="search"
+              autoFocus
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              autoComplete="off"
+              placeholder={`חפש ${label}...`}
+              className="w-full text-sm border border-slate-300 rounded-lg px-3 py-1.5"
+            />
+          </div>
+          <div ref={scrollRef} style={{ height: listHeight }} className="overflow-y-auto" role="listbox" aria-multiselectable="true">
+            {filtered.length === 0 ? (
+              <div className="px-4 py-3 text-sm text-slate-400">לא נמצאו ערכים</div>
+            ) : (
+              <div style={{ height: padTop }} />
+            )}
+            {items.map(item => {
+              const v = filtered[item.index];
+              const checked = values.includes(v);
+              return (
+                <button
+                  key={item.key}
+                  ref={virtualizer.measureElement}
+                  data-index={item.index}
+                  type="button"
+                  role="option"
+                  aria-selected={checked}
+                  onMouseDown={e => { e.preventDefault(); toggle(v); }}
+                  className="w-full text-right px-4 py-2 text-sm text-slate-700 hover:bg-blue-50 transition-colors flex items-center gap-2"
+                >
+                  <span className={`w-4 h-4 rounded border flex-shrink-0 ${checked ? "bg-blue-500 border-blue-500" : "border-slate-300"}`} aria-hidden="true" />
+                  <span>{v}</span>
+                </button>
+              );
+            })}
+            {filtered.length > 0 && <div style={{ height: padBottom }} />}
+          </div>
+          <div className="p-2 border-t border-slate-100 flex justify-end">
+            <button type="button" onMouseDown={e => { e.preventDefault(); setOpen(false); }} className="btn-blue text-xs px-3 py-1.5">אישור</button>
+          </div>
+        </div>,
+        document.body,
+      )}
+    </div>
+  );
+}
+
+function ScopeValuesPicker({ field, values, onChange, schools }) {
   const def = SCOPE_FIELDS.find(f => f.value === field);
-  const [freeTextInput, setFreeTextInput] = useState("");
   if (!def) return null;
 
   if (def.freeText) {
-    return (
-      <div>
-        <label htmlFor="blocked-date-scope-value-input" className="block text-xs font-medium text-slate-500 mb-1">
-          {`ערכים חסומים עבור "${def.label}"`}
-        </label>
-        <div className="flex gap-2">
-          <input
-            id="blocked-date-scope-value-input" type="text" value={freeTextInput}
-            onChange={e => setFreeTextInput(e.target.value)}
-            onKeyDown={e => {
-              if (e.key !== "Enter") return;
-              e.preventDefault();
-              const v = freeTextInput.trim();
-              if (v && !values.includes(v)) onChange([...values, v]);
-              setFreeTextInput("");
-            }}
-            placeholder="הקלד ערך ולחץ Enter"
-            className="flex-1 text-sm border border-slate-300 rounded-lg px-3 py-1.5"
-          />
-        </div>
-        {values.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 mt-2">
-            {values.map(v => (
-              <span key={v} className="inline-flex items-center gap-1 text-xs bg-slate-100 text-slate-700 rounded-full px-2.5 py-1">
-                {v}
-                <button type="button" onClick={() => onChange(values.filter(x => x !== v))} aria-label={`הסר ${v}`} className="text-slate-400 hover:text-red-600">×</button>
-              </span>
-            ))}
-          </div>
-        )}
-      </div>
-    );
+    const allValues = distinctSchoolValues(schools || [], field);
+    return <FreeTextScopePicker label={def.label} allValues={allValues} values={values} onChange={onChange} />;
   }
 
   const opts = def.options.map(o => (typeof o === "string" ? { value: o, label: o } : o));
@@ -88,7 +211,7 @@ function ScopeValuesPicker({ field, values, onChange }) {
   );
 }
 
-function AddBlockedDateForm({ onCreated, onCancel }) {
+function AddBlockedDateForm({ onCreated, onCancel, schools }) {
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [reason, setReason] = useState("");
@@ -159,7 +282,7 @@ function AddBlockedDateForm({ onCreated, onCancel }) {
               {SCOPE_FIELDS.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
             </select>
           </div>
-          <ScopeValuesPicker field={scopeField} values={scopeValues} onChange={setScopeValues} />
+          <ScopeValuesPicker field={scopeField} values={scopeValues} onChange={setScopeValues} schools={schools} />
         </div>
       )}
       <div className="flex justify-end gap-2 mt-1">
@@ -172,7 +295,7 @@ function AddBlockedDateForm({ onCreated, onCancel }) {
   );
 }
 
-export default function BlockedDatesModal({ onClose }) {
+export default function BlockedDatesModal({ onClose, schools }) {
   const { ref, handleKeyDown } = useFocusTrap(onClose);
   const [rows, setRows] = useState(null);
   const [error, setError] = useState("");
@@ -251,6 +374,7 @@ export default function BlockedDatesModal({ onClose }) {
           <AddBlockedDateForm
             onCreated={row => { setRows(prev => [...(prev || []), row].sort((a, b) => a.start_date < b.start_date ? -1 : 1)); setShowAddForm(false); }}
             onCancel={() => setShowAddForm(false)}
+            schools={schools}
           />
         ) : (
           <button type="button" onClick={() => setShowAddForm(true)} className="btn-ghost text-sm px-4 py-2 self-start">

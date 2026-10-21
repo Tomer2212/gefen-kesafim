@@ -175,6 +175,7 @@ const FUNDING_METHOD_OPTIONS = [
   { value: "private", label: "פרטי" },
   { value: "authority", label: "רשות" },
   { value: "district", label: "מחוז" },
+  { value: "other", label: "אחר" },
 ];
 
 // The per-service-type "יועץ מלווה" sub-sections (גפן/שוטף/מחוז) below the ליווי grid.
@@ -4302,6 +4303,20 @@ export default function SchoolPage() {
                           <MultiSelectChips compact options={FUNDING_METHOD_OPTIONS}
                             selected={yearAdminData.order_method || []}
                             onChange={v => saveYearAdminField("order_method", v.length ? v : null)} />
+                          {(yearAdminData.order_method || []).includes("other") && (
+                            <input
+                              type="text"
+                              aria-label="אמצעי הזמנה - אחר, פירוט"
+                              placeholder="פירוט (לא חובה)"
+                              key={`${schoolId}-${academicYear}-order-method-other`}
+                              defaultValue={yearAdminData.order_method_other_text || ""}
+                              onBlur={e => {
+                                const v = e.target.value.trim();
+                                saveYearAdminField("order_method_other_text", v || null);
+                              }}
+                              className={`${editFieldCls(false, false)} mt-1`}
+                            />
+                          )}
                         </div>
                       )}
 
@@ -4778,6 +4793,9 @@ export default function SchoolPage() {
                             </span>
                           ))}
                         </div>
+                        {(yearAdminData.order_method || []).includes("other") && yearAdminData.order_method_other_text && (
+                          <p className="text-xs text-slate-500 mt-1">{yearAdminData.order_method_other_text}</p>
+                        )}
                       </div>
 
                       <div className={`${tileCls} col-span-2`}>

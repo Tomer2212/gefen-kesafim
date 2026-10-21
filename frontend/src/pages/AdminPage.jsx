@@ -332,6 +332,7 @@ const FUNDING_METHOD_OPTIONS = [
   { value: "private", label: "פרטי" },
   { value: "authority", label: "רשות" },
   { value: "district", label: "מחוז" },
+  { value: "other", label: "אחר" },
 ];
 
 const CLIENT_STATUS_OPTIONS = [
@@ -1206,10 +1207,10 @@ function RecycleBinInfoModal({ schoolName, onClose }) {
           <h2 id="recycle-modal-title" className="text-lg font-bold text-slate-900">הועבר לסל המחזור</h2>
         </div>
         <p className="text-sm text-slate-700 leading-relaxed">
-          בית הספר <span className="font-semibold">{schoolName}</span> הועבר לסל המחזור ונתוניו יימחקו לחלוטין מהמערכת תוך 30 יום.
+          בית הספר <span className="font-semibold">{schoolName}</span> הועבר לסל המחזור והוסתר מהרשימות הפעילות.
         </p>
         <p className="text-sm text-slate-700 leading-relaxed">
-          אם תרצו לשחזר את בית הספר, ניתן לבצע זאת בפרק הזמן הזה בלבד דרך אזור <span className="font-medium">ניהול ← בתי ספר ← סל מחזור</span>.
+          ניתן לשחזר את בית הספר בחזרה למצב פעיל בכל עת דרך אזור <span className="font-medium">ניהול ← בתי ספר ← סל מחזור</span>.
         </p>
         <div className="flex justify-end pt-1">
           <button
@@ -1844,6 +1845,16 @@ const SchoolRow = memo(function SchoolRow({
             <MultiSelectChips key={rowKey} compact className="w-36" options={FUNDING_METHOD_OPTIONS}
               selected={yad.order_method || []}
               onChange={v => handlers.onSaveField(school.id, "order_method", v.length ? v : null)} />
+            {(yad.order_method || []).includes("other") && (
+              <AdminAutosaveInput
+                key={`${rowKey}-other`}
+                type="text"
+                value={yad.order_method_other_text ?? null}
+                onCommit={v => handlers.onSaveField(school.id, "order_method_other_text", v)}
+                ariaLabel="אמצעי הזמנה - אחר, פירוט"
+                className={`${ADMIN_FIELD_CLS} w-36 mt-1`}
+              />
+            )}
           </td>
         );
         if (key === "order_amount_gefen") return (
@@ -2164,7 +2175,7 @@ export default function AdminPage() {
   // existing school, sent as one PUT .../year-admin-data on save (not per-field, unlike
   // SchoolPage.jsx's own ליווי tab which saves each field immediately on change).
   const EMPTY_YEAR_ADMIN_FORM = {
-    client_status: null, service_type: null, order_method: [], order_amount_gefen: null,
+    client_status: null, service_type: null, order_method: [], order_method_other_text: null, order_amount_gefen: null,
     meeting_allocation_gefen: null, meeting_allocation_current: null, meeting_allocation_district: null,
     meeting_duration_gefen: null, meeting_duration_current: null, meeting_duration_district: null,
   };
@@ -4631,6 +4642,18 @@ export default function AdminPage() {
                         <MultiSelectChips compact options={FUNDING_METHOD_OPTIONS}
                           selected={yearAdminForm.order_method || []}
                           onChange={v => setYearAdminForm(p => ({ ...p, order_method: v.length ? v : [] }))} />
+                        {(yearAdminForm.order_method || []).includes("other") && (
+                          <input
+                            type="text"
+                            aria-label="אמצעי הזמנה - אחר, פירוט"
+                            placeholder="פירוט (לא חובה)"
+                            className="input-field text-sm mt-1"
+                            defaultValue={yearAdminForm.order_method_other_text || ""}
+                            onBlur={e => {
+                              const v = e.target.value.trim();
+                              setYearAdminForm(p => ({ ...p, order_method_other_text: v || null }));
+                            }} />
+                        )}
                       </div>
 
                       <div className={`${TILE_CLS} col-span-2`}>
@@ -5001,15 +5024,13 @@ export default function AdminPage() {
                         {recycleBinOpen && (
                           <div className="flex flex-col gap-3">
                             {trueDeleted.map(school => {
-                              const daysLeft = Math.max(0, 30 - Math.floor((Date.now() - new Date(school.deleted_at)) / 86400000));
                               return (
                                 <div key={school.id} className="glass-card rounded-2xl overflow-hidden opacity-50 grayscale">
                                   <div className="flex items-center justify-between px-6 py-4 gap-4">
                                     <div className="flex-1 min-w-0">
                                       <div className="flex items-center gap-3 flex-wrap">
                                         <IdentityRow school={school} />
-                                        <span className="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-medium">מיועד למחיקה</span>
-                                        <span className="text-xs text-slate-500">{daysLeft} ימים נותרו</span>
+                                        <span className="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-medium">בסל מחזור</span>
                                       </div>
                                     </div>
                                     <RestoreBtn school={school} />

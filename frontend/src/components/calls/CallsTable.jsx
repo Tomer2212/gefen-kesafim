@@ -43,6 +43,10 @@ export function CallsTable({ calls, hideSchoolColumn, hideAdvisorColumn, canMana
 
   const rows = sortedCalls.map(c => ({ type: "call", call: c }));
 
+  const totalDurationSeconds = visibleCalls.reduce((sum, c) => sum + (c.duration_seconds || 0), 0);
+  const totalHours = Math.floor(totalDurationSeconds / 3600);
+  const totalMinutes = Math.floor((totalDurationSeconds % 3600) / 60);
+
   const handleRowDelete = useCallback(id => setRemovedIds(prev => new Set(prev).add(id)), []);
 
   const { scrollRef, virtualizer, items, padTop, padBottom } = useRowVirtualizer(rows, {
@@ -61,24 +65,24 @@ export function CallsTable({ calls, hideSchoolColumn, hideAdvisorColumn, canMana
                 <SortableHeader field="start_time" sortField={sortField} sortDir={sortDir} onSort={handleSort}>שעת התחלה</SortableHeader>
               </th>
               <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">שעת סיום</th>
+              <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500">
+                <SortableHeader field="direction" sortField={sortField} sortDir={sortDir} onSort={handleSort}>סוג שיחה</SortableHeader>
+              </th>
+              <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">
+                <SortableHeader field="status" sortField={sortField} sortDir={sortDir} onSort={handleSort}>סטטוס</SortableHeader>
+              </th>
               <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">
                 <SortableHeader field="duration_seconds" sortField={sortField} sortDir={sortDir} onSort={handleSort}>משך שיחה</SortableHeader>
               </th>
               {!hideAdvisorColumn && (
                 <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">יועץ</th>
               )}
-              <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500">
-                <SortableHeader field="direction" sortField={sortField} sortDir={sortDir} onSort={handleSort}>סוג שיחה</SortableHeader>
-              </th>
               <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">מספר צד שני</th>
               <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">שם צד שני</th>
               <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">תפקיד</th>
               {!hideSchoolColumn && (
                 <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">שם מוסד</th>
               )}
-              <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">
-                <SortableHeader field="status" sortField={sortField} sortDir={sortDir} onSort={handleSort}>סטטוס</SortableHeader>
-              </th>
               <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">סיכום AI</th>
               <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">תמלול</th>
               <th scope="col" className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap"><span className="sr-only">פעולות</span></th>
@@ -100,9 +104,12 @@ export function CallsTable({ calls, hideSchoolColumn, hideAdvisorColumn, canMana
           </VirtualRows>
         </table>
       </div>
-      <div className="border-t border-slate-200 bg-slate-50/80 px-4 py-2.5 flex items-center gap-6 flex-shrink-0 rounded-b-2xl" dir="rtl">
+      <div className="border-t border-slate-200 bg-slate-50/80 px-4 py-2.5 flex items-center gap-12 flex-shrink-0 rounded-b-2xl" dir="rtl">
         <span className="text-sm text-slate-500">
-          סה"כ שיחות: <strong className="text-slate-800 font-semibold">{visibleCalls.length}</strong>
+          <strong className="text-slate-800 font-semibold">סה"כ שיחות:</strong> <span className="text-black">{visibleCalls.length}</span>
+        </span>
+        <span className="text-sm text-slate-500">
+          <strong className="text-slate-800 font-semibold">משך שיחות כולל:</strong> <span className="text-black">{totalHours} שעות ו-{totalMinutes} דקות</span>
         </span>
       </div>
     </div>

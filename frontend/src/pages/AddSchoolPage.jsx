@@ -124,6 +124,7 @@ const FUNDING_METHOD_OPTIONS = [
   { value: "private", label: "פרטי" },
   { value: "authority", label: "רשות" },
   { value: "district", label: "מחוז" },
+  { value: "other", label: "אחר" },
 ];
 
 const TYPED_SERVICE_TYPES = [
@@ -344,7 +345,7 @@ export default function AddSchoolPage() {
   const [customDivisions, setCustomDivisions] = useState(DEFAULT_CUSTOM_DIVISIONS);
   const [typedAdvisorIds, setTypedAdvisorIds] = useState({ gefen: [], current: [], district: [] });
   const [yearAdminForm, setYearAdminForm] = useState({
-    client_status: null, service_type: null, order_method: [], order_amount_gefen: null,
+    client_status: null, service_type: null, order_method: [], order_method_other_text: null, order_amount_gefen: null,
     meeting_allocation_gefen: null, meeting_allocation_current: null, meeting_allocation_district: null,
     meeting_duration_gefen: null, meeting_duration_current: null, meeting_duration_district: null,
   });
@@ -1083,6 +1084,18 @@ export default function AddSchoolPage() {
                     <MultiSelectChips compact options={FUNDING_METHOD_OPTIONS}
                       selected={yearAdminForm.order_method || []}
                       onChange={v => setYearAdminForm(p => ({ ...p, order_method: v.length ? v : [] }))} />
+                    {(yearAdminForm.order_method || []).includes("other") && (
+                      <input
+                        type="text"
+                        aria-label="אמצעי הזמנה - אחר, פירוט"
+                        placeholder="פירוט (לא חובה)"
+                        className="input-field text-sm mt-1"
+                        defaultValue={yearAdminForm.order_method_other_text || ""}
+                        onBlur={e => {
+                          const v = e.target.value.trim();
+                          setYearAdminForm(p => ({ ...p, order_method_other_text: v || null }));
+                        }} />
+                    )}
                   </div>
                 )}
 

@@ -1684,9 +1684,15 @@ def _build_meeting_ranges(
     for c in valid_conditions:
         service_type = c["meeting_service_type"]
         override = school_overrides.get(service_type) or {}
-        start_date, end_date = c.get("date_from"), c.get("date_to")
-        if not start_date or not end_date:
+        segments = [
+            {"start_date": s["date_from"], "end_date": s["date_to"]}
+            for s in (c.get("date_segments") or [])
+            if s.get("date_from") and s.get("date_to")
+        ]
+        if not segments:
             continue
+        start_date = min(s["start_date"] for s in segments)
+        end_date = max(s["end_date"] for s in segments)
         if c.get("advisor_mode") == "manual":
             advisor_ids = c.get("advisor_ids")
         else:
@@ -1704,7 +1710,24 @@ def _build_meeting_ranges(
         # Round 16 — "separate" builds TWO independent ranges (one per principal) instead of one
         # merged range with both principals as participants, mirroring StageScopeModal.jsx's
         # existing "שתי פגישות נפרדות" option for the general (non-task) scheduling flow.
-        split_scopes = ["tichon", "chativa"] if (stage_scope == "separate" and "principal" in roles) else [stage_scope]
+        #
+        # BUG FIX: a meeting-requirement condition is defined ONCE for the whole task, shared by
+        # every matched school — but stage_scope (tichon/chativa/both/separate) only means
+        # anything for a six-year school. Without the `school.get("stage") == "sheshshnati"`
+        # guard below, a task with stage_scope="separate" used to split into two ranges
+        # (tichon + chativa) for EVERY matched school, including plain יסודי/other schools that
+        # have only one principal — _role_slots_for_school already collapses stage_scope to a
+        # single slot for those (same contact either way), so the result was two separate
+        # booking requests sent to the SAME person for the SAME meeting. For a non-six-year
+        # school, stage_scope is meaningless — always exactly one merged range, regardless of
+        # what was selected at the condition level.
+        is_six_year = school.get("stage") == "sheshshnati"
+        if not is_six_year:
+            split_scopes = [None]
+        elif stage_scope == "separate" and "principal" in roles:
+            split_scopes = ["tichon", "chativa"]
+        else:
+            split_scopes = [stage_scope]
 
         for split_scope in split_scopes:
             participants = _build_school_contacts(school, roles, split_scope)
@@ -1722,7 +1745,7 @@ def _build_meeting_ranges(
                 label = f"{base_label} ({type_seen[service_type]})"
             ranges_data.append({
                 "key": f"r{len(ranges_data)}-{secrets.token_urlsafe(6)}",
-                "start_date": start_date, "end_date": end_date,
+                "start_date": start_date, "end_date": end_date, "segments": segments,
                 "service_type": service_type, "duration_minutes": duration_minutes,
                 "label": label, "participants": participants, "advisor_ids": advisor_ids,
                 "meeting_type": c.get("meeting_type") or "remote",
@@ -1730,6 +1753,12 @@ def _build_meeting_ranges(
                 # blocks saving until this is explicitly answered, so bool(...) here is a defensive
                 # fallback for a legacy/malformed condition, not a real UX path.
                 "allow_time_range_search": bool(c.get("allow_time_range_search")),
+                # "בקש לקבוע פגישה נוספת" — when true, meeting_booking_router.py must not treat
+                # a pre-existing meeting as already satisfying this range (the school still gets
+                # offered "בחר מועד"), and task_logic.compute_task_progress must not count a
+                # pre-existing meeting as fulfilling it either — only one booked through this
+                # range's own token counts (see booking_token_id/task_id threading).
+                "require_additional_meeting": bool(c.get("require_additional_meeting")),
                 # Mirrors DirectCoordinationRangeIn.requested_upload_years — set via
                 # ConditionGroupsEditor.jsx when service_type != "current"; null otherwise
                 # (resolved lazily from the booked meeting's date, see academic_years.py).
@@ -1750,12 +1779,14 @@ def _build_meeting_ranges(
     return ranges_data
 
 
-def _mint_meeting_booking_link(db, org_id: str, school_id: str, ranges_data: list[dict]) -> tuple[str, str]:
+def _mint_meeting_booking_link(db, org_id: str, school_id: str, ranges_data: list[dict], task_id: str) -> tuple[str, str]:
     """Mints a booking token covering exactly the given ranges (a subset of a school's full
     range list when split across multiple coordinators — see _group_ranges_by_coordinator) and
-    returns (booking_link, booking_token_id)."""
+    returns (booking_link, booking_token_id). task_id tags the token so
+    task_logic.compute_task_progress can recognize meetings booked through it — see
+    require_additional_meeting in _build_meeting_ranges above."""
     advisor_ids_union = list(dict.fromkeys(aid for r in ranges_data for aid in r.get("advisor_ids") or []))
-    token_row = booking_token_logic.create_direct_booking_token(db, org_id, school_id, advisor_ids_union, ranges_data)
+    token_row = booking_token_logic.create_direct_booking_token(db, org_id, school_id, advisor_ids_union, ranges_data, task_id=task_id)
     return f"{os.getenv('APP_URL', '')}/book/{token_row['token']}", token_row["id"]
 
 
@@ -2042,7 +2073,7 @@ def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[st
 
             booking_link, booking_token_id = None, None
             if send_ranges:
-                booking_link, booking_token_id = _mint_meeting_booking_link(db, org_id, school["id"], send_ranges)
+                booking_link, booking_token_id = _mint_meeting_booking_link(db, org_id, school["id"], send_ranges, task["id"])
             elif needs_booking_link and not meeting_conditions:
                 booking_link, booking_token_id = _build_booking_link(db, org_id, task, school["id"]), None
 

@@ -89,6 +89,7 @@ const ORDER_METHOD_LABEL = {
   private:   "פרטי",
   authority: "רשות",
   district:  "מחוז",
+  other:     "אחר",
 };
 
 function uniq(arr) {

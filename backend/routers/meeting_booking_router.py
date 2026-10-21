@@ -44,6 +44,13 @@ def _range_is_booked(token_row: dict, range_key: str) -> bool:
     return range_key in set(token_row.get("booked_ranges") or [])
 
 
+def _range_segments(range_row: dict) -> list[dict]:
+    """A range's OR'd date segments — `segments` for ranges created after the multi-range
+    feature; falls back to the single start_date/end_date pair for older tokens that predate
+    it, so they keep working unchanged."""
+    return range_row.get("segments") or [{"start_date": range_row["start_date"], "end_date": range_row["end_date"]}]
+
+
 def _local_meeting_busy_blocks(db, advisor_ids: list[str], start_iso: str, end_iso: str) -> list[dict]:
     """Round 9 — the local counterpart to graph_client.get_freebusy: meetings already written to
     our own `meetings` table (status="scheduled") for any of these advisors, overlapping the
@@ -97,6 +104,18 @@ def _find_existing_meeting(db, school_id: str, service_type: str, start_date: st
         query = query.or_(f"stage_scope.eq.{stage_scope},stage_scope.eq.both,stage_scope.is.null")
     rows = query.limit(1).execute().data or []
     return rows[0] if rows else None
+
+
+def _find_existing_meeting_any_segment(db, school_id: str, service_type: str, segments: list[dict],
+                                        stage_scope: str | None = None) -> dict | None:
+    """OR's _find_existing_meeting across every one of a range's date segments — a school
+    already has a real scheduled meeting for this range if ANY of the offered "או" windows
+    already has one."""
+    for seg in segments:
+        m = _find_existing_meeting(db, school_id, service_type, seg["start_date"], seg["end_date"], stage_scope)
+        if m:
+            return m
+    return None
 
 
 def _time_overlaps(s1: str, e1: str, s2: str, e2: str) -> bool:
@@ -225,15 +244,23 @@ def get_booking_info(token: str):
         for r in (token_row.get("date_ranges") or []):
             is_booked = r["key"] in booked
             existing = None
+            existing_fyi = None
             if not is_booked:
-                existing = _find_existing_meeting(db, token_row["school_id"], r["service_type"], r["start_date"], r["end_date"], r.get("stage_scope"))
+                found = _find_existing_meeting_any_segment(db, token_row["school_id"], r["service_type"], _range_segments(r), r.get("stage_scope"))
+                # "בקש לקבוע פגישה נוספת" — a pre-existing meeting must not block offering a
+                # NEW slot for this range; surfaced as a non-blocking FYI instead (the frontend
+                # still shows "בחר מועד").
+                if found and r.get("require_additional_meeting"):
+                    existing_fyi = found
+                else:
+                    existing = found
             # Round 9 fix: show which specific advisor(s) THIS meeting is with — previously
             # only the token-wide union was shown once at the top of the page, so a school with
             # e.g. a "גפן" meeting with advisor A and a "שוטף" meeting with advisor B saw both
             # names lumped together with no indication of which meeting was with whom.
             range_advisor_ids = r.get("advisor_ids") or advisor_ids
             range_advisor_names = [advisor_names_by_id[aid] for aid in range_advisor_ids if aid in advisor_names_by_id]
-            ranges.append({**r, "booked": is_booked, "existing_meeting": existing, "advisor_names": range_advisor_names})
+            ranges.append({**r, "booked": is_booked, "existing_meeting": existing, "existing_meeting_fyi": existing_fyi, "advisor_names": range_advisor_names})
         return {
             "mode": "ranges",
             "school_name": school["name"],
@@ -273,7 +300,8 @@ def get_booking_freebusy(token: str, month: str | None = None, range_key: str | 
         range_row = _range_by_key(token_row, range_key)
         if _range_is_booked(token_row, range_key):
             raise HTTPException(status_code=400, detail="הפגישה הזו כבר נקבעה")
-        if _find_existing_meeting(db, token_row["school_id"], range_row["service_type"], range_row["start_date"], range_row["end_date"], range_row.get("stage_scope")):
+        segments = _range_segments(range_row)
+        if not range_row.get("require_additional_meeting") and _find_existing_meeting_any_segment(db, token_row["school_id"], range_row["service_type"], segments, range_row.get("stage_scope")):
             raise HTTPException(status_code=400, detail="כבר קיימת פגישה מסוג זה בטווח התאריכים הזה")
 
         sched = token_row["scheduling_window"]
@@ -293,7 +321,9 @@ def get_booking_freebusy(token: str, month: str | None = None, range_key: str | 
             return {"days": [], "ok": True}
 
         window = {"days_of_week": sched["days_of_week"], "start_minute": start_minute, "end_minute": end_minute, "duration_minutes": range_row["duration_minutes"]}
-        dates = _range_dates_in_window(range_row["start_date"], range_row["end_date"], window["days_of_week"])
+        # Union of dates across every OR'd segment (deduped + sorted) — a date is offerable if
+        # it falls in ANY of the range's date segments.
+        dates = sorted({d for seg in segments for d in _range_dates_in_window(seg["start_date"], seg["end_date"], window["days_of_week"])})
         dates = _filter_blocked_dates(db, token_row["org_id"], token_row["school_id"], dates)
         if not dates:
             return {"days": [], "ok": True}
@@ -403,6 +433,7 @@ def book_meeting_slot(token: str, body: dict):
         # Same default as every other meeting-creation path — editable afterward like any
         # other meeting_type value, but should never land unset.
         "meeting_type": "remote",
+        "booking_token_id": token_row["id"],
     }
     try:
         res = db.table("meetings").insert(meeting_data).execute()
@@ -455,7 +486,7 @@ def _book_range_slot(db, token_row: dict, range_key: str, body: dict) -> dict:
     # below. Also the actual safety net behind round-7's booked_ranges write becoming best-
     # effort (see the retry block at the end of this function): even if that write silently
     # failed for a prior booking, this live check against `meetings` itself still catches it.
-    if _find_existing_meeting(db, token_row["school_id"], range_row["service_type"], range_row["start_date"], range_row["end_date"], range_row.get("stage_scope")):
+    if not range_row.get("require_additional_meeting") and _find_existing_meeting_any_segment(db, token_row["school_id"], range_row["service_type"], _range_segments(range_row), range_row.get("stage_scope")):
         raise HTTPException(status_code=400, detail="כבר קיימת פגישה מסוג זה בטווח התאריכים הזה")
 
     meeting_date = body.get("meeting_date")
@@ -510,6 +541,7 @@ def _book_range_slot(db, token_row: dict, range_key: str, body: dict) -> dict:
         # "current" range) — left null otherwise, resolved lazily from the actual meeting
         # date by academic_years.resolve_requested_upload_years.
         "requested_upload_years": range_row.get("requested_upload_years"),
+        "booking_token_id": token_row["id"],
     }
     try:
         res = db.table("meetings").insert(meeting_data).execute()

@@ -247,6 +247,7 @@ class SchoolYearAdminDataIn(BaseModel):
     client_status: str | None = None
     requested_price: float | None = None
     order_method: list[str] | None = None
+    order_method_other_text: str | None = None
     order_amount_gefen: float | None = None
     hours_ordered: float | None = None
     rate: float | None = None
@@ -431,9 +432,13 @@ class DirectCoordinationParticipantIn(BaseModel):
     email: str | None = None
 
 
-class DirectCoordinationRangeIn(BaseModel):
+class DirectCoordinationSegmentIn(BaseModel):
     start_date: str
     end_date: str
+
+
+class DirectCoordinationRangeIn(BaseModel):
+    date_segments: list[DirectCoordinationSegmentIn]  # 1-5 OR'd date ranges the school may pick a slot from
     meeting_service_type: str  # "gefen" | "current" | "gefen_current" | "district" | "takuma"
     duration_minutes: int      # 30..180, step 15
     advisor_ids: list[str] = []  # this specific meeting's performing advisor(s) — see send_direct_coordination_request
@@ -900,7 +905,7 @@ def list_schools(
                         "closure_authority_status, closure_authority_notes, "
                         "meeting_allocation_gefen, meeting_allocation_current, meeting_allocation_district, "
                         "meeting_duration_gefen, meeting_duration_current, meeting_duration_district, "
-                        "order_method, order_amount_gefen")
+                        "order_method, order_method_other_text, order_amount_gefen")
                 .eq("academic_year", academic_year)
                 .in_("school_id", school_ids)
                 .execute()
@@ -1006,6 +1011,7 @@ def list_schools(
         school["client_status"] = client_status_by_school.get(school["id"])
         _year_row = closure_by_school.get(school["id"]) or {}
         school["order_method"] = _year_row.get("order_method")
+        school["order_method_other_text"] = _year_row.get("order_method_other_text")
         school["order_amount_gefen"] = _year_row.get("order_amount_gefen")
         school["control_letters"] = control_letters_by_school.get(school["id"], [])
         school["meeting_coordinator_contact"] = _resolve_meeting_coordinator(school)
@@ -8320,8 +8326,11 @@ def send_direct_coordination_request(
     advisor_ids_union: list[str] = []
     range_slots: list[str] = []
     for r in body.ranges:
-        if r.start_date > r.end_date:
-            raise HTTPException(status_code=400, detail="טווח תאריכים לא תקין: תאריך ההתחלה מאוחר מתאריך הסיום")
+        if not (1 <= len(r.date_segments) <= 5):
+            raise HTTPException(status_code=400, detail="ניתן להוסיף בין 1 ל-5 טווחי תאריכים לכל פגישה")
+        for seg in r.date_segments:
+            if seg.start_date > seg.end_date:
+                raise HTTPException(status_code=400, detail="טווח תאריכים לא תקין: תאריך ההתחלה מאוחר מתאריך הסיום")
         if r.meeting_service_type not in _DIRECT_COORDINATION_SERVICE_TYPES:
             raise HTTPException(status_code=400, detail="יש לבחור סוג פגישה (גפן/שוטף/גפן+שוטף/מחוז/תקומה) לכל טווח")
         if r.duration_minutes not in _DIRECT_COORDINATION_DURATIONS:
@@ -8395,10 +8404,15 @@ def send_direct_coordination_request(
         type_seen[r.meeting_service_type] = type_seen.get(r.meeting_service_type, 0) + 1
         base_label = f"פגישת {_DIRECT_COORDINATION_SERVICE_TYPES[r.meeting_service_type]}"
         label = base_label if type_counts[r.meeting_service_type] == 1 else f"{base_label} ({type_seen[r.meeting_service_type]})"
+        segments = [s.model_dump() for s in r.date_segments]
         ranges_data.append({
             "key": f"r{i}-{secrets.token_urlsafe(6)}",
-            "start_date": r.start_date,
-            "end_date": r.end_date,
+            # start_date/end_date kept as the overall min/max span — consumed as-is by code
+            # that only needs the outer window (advisor-access check, token expiry calc), while
+            # availability/freebusy computation in meeting_booking_router.py reads `segments`.
+            "start_date": min(s["start_date"] for s in segments),
+            "end_date": max(s["end_date"] for s in segments),
+            "segments": segments,
             "service_type": r.meeting_service_type,
             "duration_minutes": r.duration_minutes,
             "label": label,

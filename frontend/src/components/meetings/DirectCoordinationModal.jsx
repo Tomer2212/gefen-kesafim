@@ -6,6 +6,7 @@ import { resolveMeetingCoordinatorForSlot, slotForMeetingServiceType } from "./m
 import { DirectCoordinationResolutionModal } from "./DirectCoordinationResolutionModal";
 import AdvisorAccessGrantModal from "./AdvisorAccessGrantModal";
 import DirectStyleDateInput from "../tasks/DirectStyleDateInput";
+import { formatDateDMY } from "../tasks/taskShared";
 import { ACADEMIC_YEARS, DEFAULT_ACADEMIC_YEAR } from "../../constants/academicYears";
 import { MEETING_TYPE_OPTIONS } from "./constants";
 
@@ -34,14 +35,24 @@ function formatDuration(minutes) {
 }
 
 let rangeIdCounter = 0;
+let segmentIdCounter = 0;
+function newDateSegment() {
+  segmentIdCounter += 1;
+  return { localId: segmentIdCounter, start: "", end: "" };
+}
+const MAX_DATE_SEGMENTS = 5;
+
+function segmentsOverlap(a, b) {
+  return !!(a.start && a.end && b.start && b.end && a.start <= b.end && b.start <= a.end);
+}
+
 function newRange() {
   rangeIdCounter += 1;
   return {
     localId: rangeIdCounter,
     serviceType: "",
     stageScope: "",
-    startDate: "",
-    endDate: "",
+    dateSegments: [newDateSegment()],
     duration: 60,
     participantKeys: [],
     advisorMode: "default",
@@ -133,6 +144,24 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
     setRanges(prev => prev.map(r => r.localId === localId ? { ...r, ...patch } : r));
   }
 
+  function updateDateSegment(rangeLocalId, segmentLocalId, patch) {
+    setRanges(prev => prev.map(r => r.localId !== rangeLocalId ? r : {
+      ...r, dateSegments: r.dateSegments.map(s => s.localId === segmentLocalId ? { ...s, ...patch } : s),
+    }));
+  }
+
+  function addDateSegment(rangeLocalId) {
+    setRanges(prev => prev.map(r => r.localId !== rangeLocalId || r.dateSegments.length >= MAX_DATE_SEGMENTS ? r : {
+      ...r, dateSegments: [...r.dateSegments, newDateSegment()],
+    }));
+  }
+
+  function removeDateSegment(rangeLocalId, segmentLocalId) {
+    setRanges(prev => prev.map(r => r.localId !== rangeLocalId || r.dateSegments.length <= 1 ? r : {
+      ...r, dateSegments: r.dateSegments.filter(s => s.localId !== segmentLocalId),
+    }));
+  }
+
   function toggleParticipant(localId, key) {
     setRanges(prev => prev.map(r => {
       if (r.localId !== localId) return r;
@@ -149,8 +178,10 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
     for (const r of ranges) {
       if (!r.serviceType) return "יש לבחור סוג פגישה (גפן/שוטף/מחוז/תקומה) לכל טווח";
       if (resolveRangeAdvisorIds(r, school).length === 0) return "יש לבחור יועץ מבצע לכל פגישה";
-      if (!r.startDate || !r.endDate) return "יש למלא תאריך תקין לכל פגישה";
-      if (r.startDate > r.endDate) return "תאריך ההתחלה מאוחר מתאריך הסיום באחד הטווחים";
+      for (const seg of r.dateSegments) {
+        if (!seg.start || !seg.end) return "יש למלא תאריך תקין לכל טווח תאריכים";
+        if (seg.start > seg.end) return "תאריך ההתחלה מאוחר מתאריך הסיום באחד הטווחים";
+      }
       if (r.participantKeys.length === 0) return "יש לבחור לפחות משתתף אחד לכל פגישה";
       if (r.allowTimeRangeSearch === null) return 'יש לענות על השאלה "האם לאפשר לבית הספר אפשרויות נוספות לשעת הפגישה?" (שדה חובה) לכל פגישה';
       if (slotForMeetingServiceType(school, r.serviceType, r.stageScope) === null) {
@@ -188,8 +219,8 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
   }
 
   function schedulingWindow() {
-    const starts = ranges.map(r => r.startDate).filter(Boolean);
-    const ends = ranges.map(r => r.endDate).filter(Boolean);
+    const starts = ranges.flatMap(r => r.dateSegments.map(s => s.start)).filter(Boolean);
+    const ends = ranges.flatMap(r => r.dateSegments.map(s => s.end)).filter(Boolean);
     return { startDate: starts.sort()[0], endDate: ends.sort().slice(-1)[0] };
   }
 
@@ -225,8 +256,7 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
     try {
       const body = {
         ranges: ranges.map(r => ({
-          start_date: r.startDate,
-          end_date: r.endDate,
+          date_segments: r.dateSegments.map(s => ({ start_date: s.start, end_date: s.end })),
           meeting_service_type: r.serviceType,
           duration_minutes: r.duration,
           advisor_ids: resolveRangeAdvisorIds(r, school),
@@ -375,17 +405,63 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
                     </fieldset>
                   )}
 
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="flex flex-col gap-1">
-                      <label htmlFor={`dc-start-${r.localId}`} className="text-xs font-medium text-slate-500">מתאריך</label>
-                      <DirectStyleDateInput id={`dc-start-${r.localId}`} value={r.startDate}
-                        onChange={v => updateRange(r.localId, { startDate: v })} />
-                    </div>
-                    <div className="flex flex-col gap-1">
-                      <label htmlFor={`dc-end-${r.localId}`} className="text-xs font-medium text-slate-500">עד תאריך</label>
-                      <DirectStyleDateInput id={`dc-end-${r.localId}`} value={r.endDate}
-                        onChange={v => updateRange(r.localId, { endDate: v })} />
-                    </div>
+                  <div className="flex flex-col gap-2">
+                    {r.dateSegments.map((seg, segIdx) => {
+                      const orderInvalid = !!(seg.start && seg.end && seg.start > seg.end);
+                      const overlappingWith = seg.start && seg.end && !orderInvalid
+                        ? r.dateSegments
+                          .map((s, i) => ({ s, i }))
+                          .filter(({ s, i }) => i !== segIdx && segmentsOverlap(seg, s))
+                          .map(({ i }) => i + 1)
+                        : [];
+                      return (
+                      <div key={seg.localId} className="flex flex-col gap-1">
+                        {segIdx > 0 && (
+                          <div className="relative group self-center">
+                            <span className="text-xs font-bold text-blue-600 cursor-default">או</span>
+                            <div className="pointer-events-none absolute bottom-full right-1/2 translate-x-1/2 mb-1 opacity-0 group-hover:opacity-100 transition-opacity bg-amber-400 text-amber-950 text-[11px] font-medium px-2.5 py-1.5 rounded-md shadow-lg whitespace-nowrap z-10">
+                              בית הספר יתבקש לקבוע פגישה אחת בין התאריכים {r.dateSegments.filter(s => s.start && s.end).map(s => `${formatDateDMY(s.start)}-${formatDateDMY(s.end)}`).join(" או ")}
+                            </div>
+                          </div>
+                        )}
+                        <div className="grid grid-cols-2 gap-3 items-end">
+                          <div className="flex flex-col gap-1">
+                            <label htmlFor={`dc-start-${seg.localId}`} className="text-xs font-medium text-slate-500">מתאריך</label>
+                            <DirectStyleDateInput id={`dc-start-${seg.localId}`} value={seg.start}
+                              onChange={v => updateDateSegment(r.localId, seg.localId, { start: v })} />
+                          </div>
+                          <div className="flex items-end gap-2">
+                            <div className="flex flex-col gap-1 flex-1">
+                              <label htmlFor={`dc-end-${seg.localId}`} className="text-xs font-medium text-slate-500">עד תאריך</label>
+                              <DirectStyleDateInput id={`dc-end-${seg.localId}`} value={seg.end}
+                                onChange={v => updateDateSegment(r.localId, seg.localId, { end: v })} invalid={orderInvalid} />
+                            </div>
+                            {r.dateSegments.length > 1 && (
+                              <button type="button" onClick={() => removeDateSegment(r.localId, seg.localId)}
+                                aria-label={`הסרת טווח תאריכים ${segIdx + 1}`}
+                                className="text-slate-400 hover:text-red-500 text-sm h-[30px]">✕</button>
+                            )}
+                          </div>
+                        </div>
+                        {orderInvalid && (
+                          <p role="alert" className="text-[11px] text-red-600">
+                            לא ניתן לבחור בשדה "עד תאריך" מועד המוקדם מהשדה "מתאריך". אנא תקנו את טווח התאריכים.
+                          </p>
+                        )}
+                        {overlappingWith.length > 0 && (
+                          <p className="text-[11px] text-amber-600">
+                            לתשומת לבכם: קיימת חפיפה עם טווח תאריכים {overlappingWith.join(", ")}.
+                          </p>
+                        )}
+                      </div>
+                      );
+                    })}
+                    {r.dateSegments.length < MAX_DATE_SEGMENTS && (
+                      <button type="button" onClick={() => addDateSegment(r.localId)}
+                        className="text-xs text-blue-600 hover:underline self-start">
+                        + הוסף טווח תאריכים
+                      </button>
+                    )}
                   </div>
 
                   <div className="grid grid-cols-3 gap-3">

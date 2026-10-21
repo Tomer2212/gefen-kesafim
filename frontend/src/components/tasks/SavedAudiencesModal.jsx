@@ -16,7 +16,7 @@ function CriteriaChips({ criteria, fieldOptions }) {
           {gi > 0 && <span className="text-[10px] font-bold text-blue-600 mx-1">או</span>}
           {(g.conditions || []).map((c, ci) => (
             <span key={ci} className="inline-flex items-center text-[11px] font-medium px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 whitespace-nowrap">
-              {describeCondition(c, fieldOptions)}
+              {describeCondition(c, { fieldOptions })}
             </span>
           ))}
         </div>
@@ -41,7 +41,7 @@ export default function SavedAudiencesModal({ audiences, fieldOptions, onClose, 
     return audiences.filter(a => {
       if (a.name.toLowerCase().includes(q)) return true;
       const groups = a.criteria?.groups || [];
-      return groups.some(g => (g.conditions || []).some(c => describeCondition(c, fieldOptions).toLowerCase().includes(q)));
+      return groups.some(g => (g.conditions || []).some(c => describeCondition(c, { fieldOptions }).toLowerCase().includes(q)));
     });
   }, [audiences, q, fieldOptions]);
 

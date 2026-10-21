@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import axios from "axios";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
 import ConditionGroupsEditor, { newConditionGroup, isMeetingRequirementComplete } from "./ConditionGroupsEditor";
+import TemplateBodyEditor from "./TemplateBodyEditor";
 import ScheduleCriteriaModal from "./ScheduleCriteriaModal";
 import OutlookLimitModal from "./OutlookLimitModal";
 import TaskContactResolutionModal from "./TaskContactResolutionModal";
@@ -64,6 +65,32 @@ const SCHOOL_DEFAULT_CONDITIONS = [
 // match from re-rendering thousands of <li>s on every debounced filter change. The true total
 // is always shown separately from preview.count.
 const PREVIEW_SCHOOL_LIMIT = 200;
+
+// Short badge-friendly labels for {recipient_name} — mirrors RECIPIENT_ROLE_OPTIONS' own labels
+// (taskShared.js) but trimmed (no "(לפי הגדרת בית הספר)" parenthetical) to fit a compact chip.
+const RECIPIENT_BADGE_LABELS = {
+  meeting_coordinator: "מתאם/ת הפגישות",
+  principal: "מנהל/ת",
+  secretary: "מנהלנ/ית",
+  finance_contact: "אחראי/ת כספים",
+};
+
+// Which {placeholder} merge-tags are relevant for this specific task, mirroring exactly which
+// ones tasks_router.py's _apply_template actually substitutes for it (see that function's own
+// conditions) — a tag never shown here would just sit as literal "{...}" text if someone typed
+// it by hand, so keeping this list in lockstep with the backend matters. meetings_list/
+// booking_link are the ones that actually deliver the scheduling link to the school, so they're
+// "critical" — TemplateBodyEditor never lets them be removed from the message body.
+function buildMessageBadges({ isMeetingTask, looksLikeMissingMeetingTask, recipientRole }) {
+  const badges = [
+    { key: "school_name", label: "שם בית ספר" },
+    { key: "recipient_name", label: `שם ${RECIPIENT_BADGE_LABELS[recipientRole] || "הנמען/ת"}` },
+  ];
+  if (isMeetingTask) badges.push({ key: "advisor_names", label: "שם/שמות היועץ המלווה" });
+  if (looksLikeMissingMeetingTask) badges.push({ key: "booking_link", label: "קישור לקביעת פגישה", critical: true });
+  if (isMeetingTask) badges.push({ key: "meetings_list", label: "רשימת הפגישות המבוקשות", critical: true });
+  return badges;
+}
 
 // Same table shape/styling as PersonTaskCreateWizard.jsx's "יועץ מלווה" preview table — a
 // single "בית ספר" column here since a general school-audience preview has no per-row advisor
@@ -546,14 +573,23 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
   // only meaningful once a meeting type + at least one participant role is chosen (an empty/
   // half-filled requirement has nothing to check yet).
   function meetingRequirementsPayload() {
-    return meetingRequirementGroups.flatMap(g => g.conditions).map(c => ({
-      meeting_service_type: c.meeting_service_type,
-      date_from: c.date_from, date_to: c.date_to,
-      advisor_mode: c.advisor_mode || "default", advisor_ids: c.advisor_ids || [],
-      duration_mode: c.duration_mode || "default", duration_minutes: c.duration_minutes,
-      participant_roles: c.participant_roles || [],
-      stage_scope: c.stage_scope || null,
-    }));
+    return meetingRequirementGroups.flatMap(g => g.conditions).map(c => {
+      const segments = c.date_segments || [];
+      const froms = segments.map(s => s.date_from).filter(Boolean).sort();
+      const tos = segments.map(s => s.date_to).filter(Boolean).sort();
+      return {
+        meeting_service_type: c.meeting_service_type,
+        // Aggregated min/max span — the backend only uses date_from/date_to here for the
+        // advisor_access-window display (see _check_meeting_problems), not for actual
+        // availability computation (that happens later from the stored condition's own
+        // date_segments, at send time — see tasks_router._build_meeting_ranges).
+        date_from: froms[0] || "", date_to: tos[tos.length - 1] || "",
+        advisor_mode: c.advisor_mode || "default", advisor_ids: c.advisor_ids || [],
+        duration_mode: c.duration_mode || "default", duration_minutes: c.duration_minutes,
+        participant_roles: c.participant_roles || [],
+        stage_scope: c.stage_scope || null,
+      };
+    });
   }
 
   // Runs after the (general-task-only, round 6) contact-resolution step clears — meeting tasks
@@ -638,12 +674,23 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
     review: true,
   }[phase];
 
+  // Whether the task's currently-matched audience (live preview) includes at least one
+  // six-year school — the חטיבה (תיכון/חט"ב/שניהם/נפרדות) question on a "פגישה" card only
+  // means anything then; see ConditionGroupsEditor's schoolsIncludeSixYear prop. Bug fix:
+  // this question used to show (and "נפרדות" would split into two booking requests sent to
+  // the SAME principal) even for a task whose entire matched audience was non-six-year
+  // schools — _build_meeting_ranges now also guards this server-side, but hiding/not-requiring
+  // the question here avoids asking it when it can never be relevant.
+  const hasSixYearSchool = (preview?.schools || []).some(s => s.stage === "sheshshnati");
+
+  const messageBadges = buildMessageBadges({ isMeetingTask, looksLikeMissingMeetingTask, recipientRole });
+
   // Every "פגישה" card must be fully filled (type/dates/participants) before leaving this
   // step — checked on click (not folded into canGoNext/disabled) so an incomplete attempt can
   // surface a visible alert + red-bordered fields (ConditionGroupsEditor's
   // showValidationErrors) instead of the button just silently staying disabled.
   const meetingRequirementsComplete = meetingRequirementGroups.some(g => g.conditions.length > 0)
-    && meetingRequirementGroups.every(g => g.conditions.every(isMeetingRequirementComplete));
+    && meetingRequirementGroups.every(g => g.conditions.every(c => isMeetingRequirementComplete(c, hasSixYearSchool)));
 
   function handleNextClick() {
     if (phase === "meeting_audience" && isMeetingTask && !meetingRequirementsComplete) {
@@ -794,6 +841,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
                   allowedTypes={["meeting"]}
                   hideGroupChrome
                   forceMeetingNegateFalse
+                  schoolsIncludeSixYear={hasSixYearSchool}
                   addConditionLabel="הוסף פגישה"
                   showValidationErrors={meetingReqAttempted}
                 />
@@ -944,7 +992,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
               <label className="block">
                 <span className="text-sm font-medium text-slate-700 mb-1.5 block">נמען</span>
                 <select value={recipientRole} onChange={e => setRecipientRole(e.target.value)}
-                  className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 bg-white">
+                  className="w-full text-sm border border-black rounded-lg px-3 py-2 bg-white">
                   {RECIPIENT_ROLE_OPTIONS.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
                 </select>
               </label>
@@ -952,7 +1000,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
               <label className="block">
                 <span className="text-sm font-medium text-slate-700 mb-1.5 block">ערוץ שליחה</span>
                 <select value={channel} onChange={e => setChannel(e.target.value)}
-                  className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 bg-white">
+                  className="w-full text-sm border border-black rounded-lg px-3 py-2 bg-white">
                   {CHANNEL_OPTIONS.map(c => {
                     const disabled = (c.value === "email_outlook" && !channelAvailability.email_outlook)
                       || (c.value === "whatsapp_twilio" && !channelAvailability.whatsapp_twilio);
@@ -964,7 +1012,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
               <label className="block">
                 <span className="text-sm font-medium text-slate-700 mb-1.5 block">תבנית הודעה</span>
                 <select value={selectedTemplateId} onChange={e => applyTemplate(e.target.value)}
-                  className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 bg-white">
+                  className="w-full text-sm border border-black rounded-lg px-3 py-2 bg-white">
                   <option value="">בחר תבנית (אופציונלי)...</option>
                   <option value={isMeetingTask ? MEETING_TASK_BUILT_IN_TEMPLATE.id : BUILT_IN_TEMPLATE.id}>
                     {isMeetingTask ? MEETING_TASK_BUILT_IN_TEMPLATE.name : BUILT_IN_TEMPLATE.name}
@@ -976,19 +1024,20 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
               <label className="block">
                 <span className="text-sm font-medium text-slate-700 mb-1.5 block">נושא (למייל)</span>
                 <input value={subject} onChange={e => setSubject(e.target.value)}
-                  className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2" />
+                  className="w-full text-sm border border-black rounded-lg px-3 py-2" />
               </label>
 
-              <label className="block">
+              <div>
                 <span className="text-sm font-medium text-slate-700 mb-1.5 block">
-                  תוכן ההודעה — ניתן להשתמש ב-{"{school_name}"}, {"{recipient_name}"}
-                  {isMeetingTask ? <>, {"{advisor_names}"}</> : null}
-                  {looksLikeMissingMeetingTask ? <> וב-{"{booking_link}"}</> : null}
-                  {isMeetingTask ? <> וב-{"{meetings_list}"} (רשימת הפגישות המבוקשות — מוצגת אוטומטית לפי הנתונים בפועל)</> : null}
+                  תוכן ההודעה — לחצו על תגית כדי להוסיף אותה בנקודת הסמן. תגיות מסומנות ב-🔒 (כמו קישור קביעת הפגישה ורשימת הפגישות) יתווספו אוטומטית ולא ניתן להסירן, כי הן חיוניות לשליחת הבקשה.
                 </span>
-                <textarea value={bodyTemplate} onChange={e => setBodyTemplate(e.target.value)} rows={5}
-                  className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2" />
-              </label>
+                <TemplateBodyEditor
+                  value={bodyTemplate}
+                  onChange={setBodyTemplate}
+                  badges={messageBadges}
+                  ariaLabel="תוכן ההודעה"
+                />
+              </div>
 
               {showSaveTemplate ? (
                 <div className="flex items-center gap-2">
@@ -998,7 +1047,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
                     value={newTemplateName}
                     onChange={e => setNewTemplateName(e.target.value)}
                     placeholder="שם התבנית לשמירה"
-                    className="flex-1 text-sm border border-slate-200 rounded-lg px-3 py-1.5"
+                    className="flex-1 text-sm border border-black rounded-lg px-3 py-1.5"
                   />
                   <button onClick={handleSaveTemplate} disabled={savingTemplate || !newTemplateName.trim()}
                     className="text-xs px-3 py-1.5 rounded-lg font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60 whitespace-nowrap">
@@ -1048,42 +1097,54 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
 
           {phase === "review" && (
             <div className="space-y-3 text-sm">
-              <div><span className="font-semibold text-slate-700">שם המשימה: </span>{name}</div>
-              <div>
-                <span className="font-semibold text-slate-700">תזמון: </span>
-                {scheduledFor
-                  ? <>המשימה תופעל וההודעות יישלחו אוטומטית ב-<bdi>{new Date(scheduledFor).toLocaleString("he-IL")}</bdi></>
-                  : "המשימה תיווצר וההודעות יישלחו מיד עם היצירה"}
-              </div>
-              <div>
-                <span className="font-semibold text-slate-700 block mb-1">קהל היעד:</span>
-                {isMeetingTask && audienceMode === "manual" ? (
-                  <span className="text-slate-600">{manualSchoolIds.length} בתי ספר נבחרו ידנית</span>
-                ) : (
-                  <ul className="list-disc pr-5 space-y-0.5 text-slate-600">
-                    {(isMeetingTask ? fieldGroups : groups).map((g, gi) => (
-                      <li key={gi}>
-                        {gi > 0 && <span className="font-bold text-blue-600">או: </span>}
-                        {g.conditions.map(c => describeCondition(c, taskFieldMeta)).join(" וגם ")}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-              <div>
-                <span className="font-semibold text-slate-700">מדד הצלחה: </span>
-                {isMeetingTask ? (
-                  meetingRequirementGroups.flatMap(g => g.conditions).map(c => describeCondition(c, taskFieldMeta)).join(" וגם ")
-                ) : successMode === "none" ? (
-                  "שליחת הודעה בלבד (ללא מדד הצלחה)"
-                ) : successMode === "custom" ? (
-                  successGroups.map(g => g.conditions.map(c => describeCondition(c, taskFieldMeta)).join(" וגם ")).join(" או ")
-                ) : "—"}
-              </div>
-              <div>נמען: {RECIPIENT_ROLE_OPTIONS.find(r => r.value === recipientRole)?.label}</div>
-              <div>ערוץ: {CHANNEL_OPTIONS.find(c => c.value === channel)?.label}</div>
-              <div>
-                בתי ספר התואמים {scheduledFor ? "את המצב הנוכחי (להערכה בלבד — ייבדק מחדש במועד התזמון)" : "כרגע"}: <b>{preview?.count ?? "—"}</b>
+              <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2.5 items-start">
+                <span className="font-semibold text-slate-700">שם המשימה:</span>
+                <span>{name}</span>
+
+                <span className="font-semibold text-slate-700">תזמון:</span>
+                <span>
+                  {scheduledFor
+                    ? <>המשימה תופעל וההודעות יישלחו אוטומטית ב-<bdi>{new Date(scheduledFor).toLocaleString("he-IL")}</bdi></>
+                    : "המשימה תיווצר וההודעות יישלחו מיד עם היצירה"}
+                </span>
+
+                <span className="font-semibold text-slate-700">קהל היעד:</span>
+                <div>
+                  {isMeetingTask && audienceMode === "manual" ? (
+                    <span className="text-slate-600">{manualSchoolIds.length} בתי ספר נבחרו ידנית</span>
+                  ) : (
+                    <ul className="list-disc pr-5 space-y-0.5 text-slate-600">
+                      {(isMeetingTask ? fieldGroups : groups).map((g, gi) => (
+                        <li key={gi}>
+                          {gi > 0 && <span className="font-bold text-blue-600">או: </span>}
+                          {g.conditions.map(c => describeCondition(c, taskFieldMeta)).join(" וגם ")}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+
+                <span className="font-semibold text-slate-700">מדד הצלחה:</span>
+                <span>
+                  {isMeetingTask ? (
+                    meetingRequirementGroups.flatMap(g => g.conditions).map(c => describeCondition(c, taskFieldMeta)).join(" וגם ")
+                  ) : successMode === "none" ? (
+                    "שליחת הודעה בלבד (ללא מדד הצלחה)"
+                  ) : successMode === "custom" ? (
+                    successGroups.map(g => g.conditions.map(c => describeCondition(c, taskFieldMeta)).join(" וגם ")).join(" או ")
+                  ) : "—"}
+                </span>
+
+                <span className="font-semibold text-slate-700">נמען:</span>
+                <span>{RECIPIENT_ROLE_OPTIONS.find(r => r.value === recipientRole)?.label}</span>
+
+                <span className="font-semibold text-slate-700">ערוץ:</span>
+                <span>{CHANNEL_OPTIONS.find(c => c.value === channel)?.label}</span>
+
+                <span className="font-semibold text-slate-700">
+                  בתי ספר התואמים {scheduledFor ? "את המצב הנוכחי (להערכה בלבד — ייבדק מחדש במועד התזמון)" : "כרגע"}:
+                </span>
+                <span><b>{preview?.count ?? "—"}</b></span>
               </div>
               {error && <p role="alert" className="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">{error}</p>}
             </div>

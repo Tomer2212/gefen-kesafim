@@ -115,6 +115,50 @@ def _build_contact_map(org_id: str) -> dict:
     return contact_map
 
 
+def _build_profile_phone_map(org_id: str) -> dict:
+    """Fallback phone map for calls with no school-contact match: resolves the
+    counterpart phone to one of OUR OWN users (profiles), via either their assigned
+    calls line (calls_agent_mappings.agent_key — meaningful mainly for EXM, where
+    agent_key IS the line's phone number) or their work_phone. Returns
+    dict[phone_suffix] -> {"name": full_name}. agent_key takes priority over
+    work_phone on the rare case both resolve the same number to different users."""
+    phone_map: dict = {}
+    try:
+        db = get_admin_client()
+        p_rows = (
+            db.table("profiles")
+            .select("id, full_name, work_phone")
+            .eq("org_id", org_id)
+            .execute()
+        ).data or []
+        profiles_by_id = {p["id"]: p for p in p_rows}
+
+        # Lower priority first (work_phone), so agent_key overwrites on collision.
+        for p in p_rows:
+            suffix = _phone_suffix(p.get("work_phone"))
+            if suffix and p.get("full_name"):
+                phone_map[suffix] = {"name": p["full_name"]}
+
+        m_rows = (
+            db.table("calls_agent_mappings")
+            .select("agent_key, advisor_id")
+            .eq("org_id", org_id)
+            .execute()
+        ).data or []
+        for m in m_rows:
+            raw_key = m.get("agent_key") or ""
+            digits = "".join(ch for ch in raw_key if ch.isdigit())
+            if len(digits) < 9:
+                continue  # not phone-shaped (e.g. a Voicenter rep code) — skip
+            suffix = _phone_suffix(raw_key)
+            advisor = profiles_by_id.get(m.get("advisor_id"))
+            if suffix and advisor and advisor.get("full_name"):
+                phone_map[suffix] = {"name": advisor["full_name"]}
+    except Exception as exc:
+        logger.warning("calls: profile phone map enrichment failed (non-fatal): %s", exc)
+    return phone_map
+
+
 def _get_call_resolutions(org_id: str, call_ids: list[str]) -> dict:
     """Existing calls_call_contact_resolutions rows for the given call_ids, keyed by call_id."""
     if not call_ids:
@@ -168,14 +212,30 @@ def _get_manual_school_overrides(org_id: str, call_ids: list[str]) -> tuple[dict
         return {}, {}
 
 
-def _resolve_contact_for_call(contact_map: dict, resolutions_by_call_id: dict, call_id: str, counterpart: str) -> dict:
+def _resolve_contact_for_call(contact_map: dict, profile_phone_map: dict, resolutions_by_call_id: dict, call_id: str, counterpart: str) -> dict:
     """Resolves a single call's contact/school given the org-wide contact_map and any
     persisted resolutions. Returns a dict with contact_name/contact_role/school_id/
     school_name (all possibly None) plus pending_school_resolution + candidate_schools
-    for the ambiguous-and-unresolved case."""
+    for the ambiguous-and-unresolved case.
+
+    When no school contact matches at all, falls back to profile_phone_map (our own
+    users' work_phone / assigned calls line) so internal calls between users resolve to
+    a name too — contact_role/school_id/school_name stay None in that case, same as the
+    no-match case."""
     matches = contact_map.get(_phone_suffix(counterpart)) or []
     if len(matches) <= 1:
         m = matches[0] if matches else None
+        if not m:
+            profile_match = profile_phone_map.get(_phone_suffix(counterpart))
+            if profile_match:
+                return {
+                    "contact_name": profile_match["name"],
+                    "contact_role": None,
+                    "school_id": None,
+                    "school_name": None,
+                    "pending_school_resolution": False,
+                    "candidate_schools": None,
+                }
         return {
             "contact_name": m["name"] if m else None,
             "contact_role": m["role"] if m else None,
@@ -562,6 +622,7 @@ def _pull_org_calls(org_id: str, date_from: str, date_to: str) -> dict:
     # Contact matching is OUR OWN data (schools/contacts), not the provider's — resolves the
     # counterpart phone number to known person(s)/role/school(s). Non-fatal enrichment.
     contact_map = _build_contact_map(org_id)
+    profile_phone_map = _build_profile_phone_map(org_id)
     resolutions_by_call_id = _get_call_resolutions(org_id, call_ids)
     manual_links_by_call_id, manual_exclusions_by_call_id = _get_manual_school_overrides(org_id, call_ids)
 
@@ -572,7 +633,7 @@ def _pull_org_calls(org_id: str, date_from: str, date_to: str) -> dict:
         mapped_advisor_id = mapping_by_key.get(agent_key)
         counterpart = c.get("counterpart_phone")
         ai_row = ai_by_call_id.get(call_id)
-        contact = _resolve_contact_for_call(contact_map, resolutions_by_call_id, call_id, counterpart)
+        contact = _resolve_contact_for_call(contact_map, profile_phone_map, resolutions_by_call_id, call_id, counterpart)
         calls.append({
             "call_id": call_id,
             "direction": c.get("direction"),

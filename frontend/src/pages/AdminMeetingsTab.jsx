@@ -871,7 +871,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
       )}
 
       {blockedDatesOpen && (
-        <BlockedDatesModal onClose={() => setBlockedDatesOpen(false)} />
+        <BlockedDatesModal schools={schools} onClose={() => setBlockedDatesOpen(false)} />
       )}
 
       {importMeetingsOpen && (

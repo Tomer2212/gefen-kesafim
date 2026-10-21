@@ -132,10 +132,6 @@ function CallRowBase({ call, onDelete, hideSchoolColumn, hideAdvisorColumn, canM
       <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap">{formatDate(call.start_time)}</td>
       <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap" dir="ltr">{formatTime(call.start_time)}</td>
       <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap" dir="ltr">{formatTime(endIso)}</td>
-      <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap" dir="ltr">{formatDuration(call.duration_seconds)}</td>
-      {!hideAdvisorColumn && (
-        <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap">{advisorLabel}</td>
-      )}
       <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap">
         {call.direction === "outgoing" ? (
           <span className="inline-flex items-center gap-1">יוצאת<ArrowIcon pointing="left" color="#16a34a" /></span>
@@ -145,6 +141,16 @@ function CallRowBase({ call, onDelete, hideSchoolColumn, hideAdvisorColumn, canM
           <span className="text-slate-500">פנימית</span>
         )}
       </td>
+      <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap">
+        <span className="flex items-center gap-1.5">
+          <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: status.dot }} aria-hidden="true" />
+          {status.label}
+        </span>
+      </td>
+      <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap" dir="ltr">{formatDuration(call.duration_seconds)}</td>
+      {!hideAdvisorColumn && (
+        <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap">{advisorLabel}</td>
+      )}
       <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap" dir="ltr">{formatPhone(call.counterpart_phone)}</td>
       <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap">{call.contact_name || "—"}</td>
       <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap">
@@ -159,12 +165,6 @@ function CallRowBase({ call, onDelete, hideSchoolColumn, hideAdvisorColumn, canM
             : (call.school_name || "—")}
         </td>
       )}
-      <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap">
-        <span className="flex items-center gap-1.5">
-          <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: status.dot }} aria-hidden="true" />
-          {status.label}
-        </span>
-      </td>
       <td className="py-2.5 px-2 text-center">
         {call.ai_summary ? (
           <button type="button"

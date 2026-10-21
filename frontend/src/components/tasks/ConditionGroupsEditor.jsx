@@ -3,6 +3,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import TaskDateTimeInput from "./TaskDateTimeInput";
 import DirectStyleDateInput from "./DirectStyleDateInput";
 import FieldPickerButton from "./FieldPickerButton";
+import { formatDateDMY } from "./taskShared";
 import { MEETING_STATUS_OPTIONS, MEETING_TYPE_OPTIONS } from "../meetings/constants";
 import { ACADEMIC_YEARS, DEFAULT_ACADEMIC_YEAR } from "../../constants/academicYears";
 
@@ -13,8 +14,24 @@ import { ACADEMIC_YEARS, DEFAULT_ACADEMIC_YEAR } from "../../constants/academicY
 // just these two avoids offering options that could never actually match anything.
 const MEETING_CONDITION_STATUS_OPTIONS = MEETING_STATUS_OPTIONS.filter(s => s.value === "scheduled" || s.value === "completed");
 
+let meetingDateSegmentIdCounter = 0;
+function newMeetingDateSegment() {
+  meetingDateSegmentIdCounter += 1;
+  return { localId: meetingDateSegmentIdCounter, date_from: "", date_to: "" };
+}
+export const MAX_MEETING_DATE_SEGMENTS = 5;
+
+function meetingSegmentsOverlap(a, b) {
+  return !!(a.date_from && a.date_to && b.date_from && b.date_to && a.date_from <= b.date_to && b.date_from <= a.date_to);
+}
+
 const EMPTY_MEETING_CONDITION = {
-  type: "meeting", meeting_service_type: "", status: "", meeting_type: "", date_from: "", date_to: "", negate: false,
+  // date_from/date_to: used by the generic "meeting" audience-filter condition (lines ~612+
+  // below, "יש פגישה/אין פגישה" — a single-range existence check, unrelated to scheduling).
+  // date_segments: used by the "אילו פגישות יש לקבוע?" scheduling-requirement card
+  // (forceMeetingNegateFalse block below) — up to 5 OR'd date ranges to offer the school.
+  type: "meeting", meeting_service_type: "", status: "", meeting_type: "", date_from: "", date_to: "",
+  date_segments: [newMeetingDateSegment()], negate: false,
   // Round-5 "אילו פגישות צריך לקבוע?" metadata — ignored entirely by success-condition
   // evaluation (_eval_meeting_condition/_resolve_condition only read the fields above), used
   // only by the booking-link generator when this condition lives inside a meeting-scheduling
@@ -30,6 +47,11 @@ const EMPTY_MEETING_CONDITION = {
   // public booking page ("אפשרויות נוספות"). null (unanswered) until explicitly set; see
   // isMeetingRequirementComplete below.
   allow_time_range_search: null,
+  // Required yes/no — whether a school that already has a matching scheduled meeting should
+  // still be asked to book an ADDITIONAL one through this requirement, instead of the
+  // requirement being auto-satisfied by the pre-existing meeting. null (unanswered) until
+  // explicitly set; see isMeetingRequirementComplete below.
+  require_additional_meeting: null,
   // Which academic year(s) the secretary will be asked to upload files for, once this
   // requirement's meeting is actually scheduled. Only meaningful when meeting_service_type
   // != "current"; null there. Mirrors DirectCoordinationRangeIn.requested_upload_years.
@@ -67,11 +89,22 @@ export function formatDuration(minutes) {
 // (DirectStyleDateInput now lives in its own file — see ./DirectStyleDateInput.jsx — reused by
 // PersonTaskCreateWizard.jsx's "תאריך יעד" field.)
 const MEETING_SERVICE_TYPE_LABELS = { gefen: "גפן", current: "שוטף", gefen_current: "גפן+שוטף", district: "מחוז", takuma: "תקומה" };
-export function isMeetingRequirementComplete(cond) {
+export function isMeetingDateSegmentsComplete(cond) {
+  const segments = cond.date_segments || [];
+  return segments.length > 0 && segments.every(s => s.date_from && s.date_to && s.date_from <= s.date_to);
+}
+// hasSixYearSchool: whether the task's currently-matched audience includes at least one
+// six-year (sheshshnati) school — the חטיבה (תיכון/חט"ב/שניהם/נפרדות) question only means
+// anything for such a school, so when the matched audience has none, the question is both
+// hidden (see schoolsIncludeSixYear prop below) and no longer required to be answered. Defaults
+// to true (= old behavior, always required when needsStageScope) for any caller that doesn't
+// know/track this — currently only TaskCreateWizard.jsx does.
+export function isMeetingRequirementComplete(cond, hasSixYearSchool = true) {
   return !!(
-    cond.meeting_service_type && cond.date_from && cond.date_to && (cond.participant_roles || []).length > 0 &&
-    (!needsStageScope(cond) || cond.stage_scope) &&
-    cond.allow_time_range_search !== null && cond.allow_time_range_search !== undefined
+    cond.meeting_service_type && isMeetingDateSegmentsComplete(cond) && (cond.participant_roles || []).length > 0 &&
+    (!needsStageScope(cond) || !hasSixYearSchool || cond.stage_scope) &&
+    cond.allow_time_range_search !== null && cond.allow_time_range_search !== undefined &&
+    cond.require_additional_meeting !== null && cond.require_additional_meeting !== undefined
   );
 }
 const EMPTY_FIELD_CONDITION = { type: "field", field: "", op: "eq", value: "" };
@@ -187,6 +220,15 @@ function SearchableMultiSelect({ options, selected, onChange }) {
   const filteredOptions = (options || []).filter(o =>
     !query.trim() || o.label.toLowerCase().includes(query.toLowerCase())
   );
+  // "כולם" — selects/clears the FULL option list regardless of the current search filter, so
+  // the common "בחר הכל ואז הסר יחיד/ים" flow (select everyone, then uncheck the one or two
+  // exceptions) doesn't require clearing the search box first. Reflects `draft` (not `selected`)
+  // so it stays in sync with in-progress checkbox clicks before "אישור" is pressed.
+  const allValues = (options || []).map(o => o.value);
+  const allSelected = allValues.length > 0 && allValues.every(v => draft.includes(v));
+  function toggleAll() {
+    setDraft(allSelected ? [] : allValues);
+  }
 
   return (
     <div ref={containerRef} className="relative mt-0.5">
@@ -217,6 +259,11 @@ function SearchableMultiSelect({ options, selected, onChange }) {
               placeholder="חיפוש..." aria-label="חיפוש יועץ"
               className="w-full text-xs border border-slate-200 rounded-lg px-3 py-1.5 outline-none focus:border-blue-400 bg-white" />
           </div>
+          <label className="flex items-center gap-2.5 px-3 py-2 border-b border-slate-100 hover:bg-blue-50 cursor-pointer">
+            <input type="checkbox" checked={allSelected} onChange={toggleAll}
+              className="w-3.5 h-3.5 rounded accent-blue-600 flex-shrink-0" />
+            <span className="text-xs font-semibold text-slate-700">כולם</span>
+          </label>
           <div className="overflow-y-auto" style={{ maxHeight: 180 }} role="listbox" aria-multiselectable="true">
             {filteredOptions.length === 0 ? (
               <p className="text-xs text-slate-400 px-4 py-3 text-center">לא נמצאו תוצאות</p>
@@ -338,6 +385,12 @@ export default function ConditionGroupsEditor({
   // service_type are always required) that the caller pre-fills into every group via
   // defaultGroupConditions, so it should never be removable, in any group.
   nonRemovableFields = [],
+  // Whether the task's currently-matched audience includes at least one six-year school — gates
+  // the חטיבה (תיכון/חט"ב/שניהם/נפרדות) question on a "פגישה" card (see needsStageScope):
+  // meaningless (and hidden) when no matched school is six-year. Defaults to true so every
+  // caller except TaskCreateWizard.jsx's forceMeetingNegateFalse instance (the only one that
+  // actually sets it) keeps the original always-shown-when-applicable behavior.
+  schoolsIncludeSixYear = true,
 }) {
   function updateCondition(gi, ci, patch) {
     setGroups(prev => prev.map((g, i) => i !== gi ? g : {
@@ -435,7 +488,7 @@ export default function ConditionGroupsEditor({
                   // in the list, not a separate toggle. Participants are role-level (not named
                   // people) for the same reason.
                   <div className="flex flex-col gap-3">
-                    {showValidationErrors && !isMeetingRequirementComplete(cond) && (
+                    {showValidationErrors && !isMeetingRequirementComplete(cond, schoolsIncludeSixYear) && (
                       <p role="alert" className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-2.5 py-1.5">
                         יש להשלים את כל השדות המסומנים באדום בפגישה זו לפני שממשיכים.
                       </p>
@@ -458,15 +511,71 @@ export default function ConditionGroupsEditor({
                       </div>
                     </fieldset>
 
-                    <div className="grid grid-cols-2 gap-3">
-                      <div className="flex flex-col gap-1">
-                        <label htmlFor={`mtg-start-${gi}-${ci}`} className="text-xs font-medium text-black">מתאריך</label>
-                        <DirectStyleDateInput id={`mtg-start-${gi}-${ci}`} value={cond.date_from} onChange={v => updateCondition(gi, ci, { date_from: v })} invalid={showValidationErrors && !cond.date_from} />
-                      </div>
-                      <div className="flex flex-col gap-1">
-                        <label htmlFor={`mtg-end-${gi}-${ci}`} className="text-xs font-medium text-black">עד תאריך</label>
-                        <DirectStyleDateInput id={`mtg-end-${gi}-${ci}`} value={cond.date_to} onChange={v => updateCondition(gi, ci, { date_to: v })} invalid={showValidationErrors && !cond.date_to} />
-                      </div>
+                    <div className="flex flex-col gap-2">
+                      {(cond.date_segments || []).map((seg, segIdx) => {
+                        const segments = cond.date_segments || [];
+                        function updateSegment(patch) {
+                          updateCondition(gi, ci, {
+                            date_segments: segments.map(s => s.localId === seg.localId ? { ...s, ...patch } : s),
+                          });
+                        }
+                        function removeSegment() {
+                          if (segments.length <= 1) return;
+                          updateCondition(gi, ci, { date_segments: segments.filter(s => s.localId !== seg.localId) });
+                        }
+                        const orderInvalid = !!(seg.date_from && seg.date_to && seg.date_from > seg.date_to);
+                        const overlappingWith = seg.date_from && seg.date_to && !orderInvalid
+                          ? segments
+                            .map((s, i) => ({ s, i }))
+                            .filter(({ s, i }) => i !== segIdx && meetingSegmentsOverlap(seg, s))
+                            .map(({ i }) => i + 1)
+                          : [];
+                        return (
+                          <div key={seg.localId} className="flex flex-col gap-1">
+                            {segIdx > 0 && (
+                              <div className="relative group self-center">
+                                <span className="text-xs font-bold text-blue-600 cursor-default">או</span>
+                                <div className="pointer-events-none absolute bottom-full right-1/2 translate-x-1/2 mb-1 opacity-0 group-hover:opacity-100 transition-opacity bg-amber-400 text-amber-950 text-[11px] font-medium px-2.5 py-1.5 rounded-md shadow-lg whitespace-nowrap z-10">
+                                  בית הספר יתבקש לקבוע פגישה אחת בין התאריכים {segments.filter(s => s.date_from && s.date_to).map(s => `${formatDateDMY(s.date_from)}-${formatDateDMY(s.date_to)}`).join(" או ")}
+                                </div>
+                              </div>
+                            )}
+                            <div className="grid grid-cols-2 gap-3 items-end">
+                              <div className="flex flex-col gap-1">
+                                <label htmlFor={`mtg-start-${gi}-${ci}-${seg.localId}`} className="text-xs font-medium text-black">מתאריך</label>
+                                <DirectStyleDateInput id={`mtg-start-${gi}-${ci}-${seg.localId}`} value={seg.date_from} onChange={v => updateSegment({ date_from: v })} invalid={showValidationErrors && !seg.date_from} />
+                              </div>
+                              <div className="flex items-end gap-2">
+                                <div className="flex flex-col gap-1 flex-1">
+                                  <label htmlFor={`mtg-end-${gi}-${ci}-${seg.localId}`} className="text-xs font-medium text-black">עד תאריך</label>
+                                  <DirectStyleDateInput id={`mtg-end-${gi}-${ci}-${seg.localId}`} value={seg.date_to} onChange={v => updateSegment({ date_to: v })} invalid={(showValidationErrors && !seg.date_to) || orderInvalid} />
+                                </div>
+                                {segments.length > 1 && (
+                                  <button type="button" onClick={removeSegment} aria-label={`הסרת טווח תאריכים ${segIdx + 1}`}
+                                    className="text-slate-400 hover:text-red-500 text-sm h-[30px]">✕</button>
+                                )}
+                              </div>
+                            </div>
+                            {orderInvalid && (
+                              <p role="alert" className="text-[11px] text-red-600">
+                                לא ניתן לבחור בשדה "עד תאריך" מועד המוקדם מהשדה "מתאריך". אנא תקנו את טווח התאריכים.
+                              </p>
+                            )}
+                            {overlappingWith.length > 0 && (
+                              <p className="text-[11px] text-amber-600">
+                                לתשומת לבכם: קיימת חפיפה עם טווח תאריכים {overlappingWith.join(", ")}.
+                              </p>
+                            )}
+                          </div>
+                        );
+                      })}
+                      {(cond.date_segments || []).length < MAX_MEETING_DATE_SEGMENTS && (
+                        <button type="button"
+                          onClick={() => updateCondition(gi, ci, { date_segments: [...(cond.date_segments || []), newMeetingDateSegment()] })}
+                          className="text-xs text-blue-600 hover:underline self-start">
+                          + הוסף טווח תאריכים
+                        </button>
+                      )}
                     </div>
 
                     <div className="grid grid-cols-3 gap-3">
@@ -557,6 +666,26 @@ export default function ConditionGroupsEditor({
                       </div>
                     </fieldset>
 
+                    <fieldset className="flex flex-col gap-1.5">
+                      <legend className="text-xs font-medium text-black">
+                        במידה ולבית הספר כבר קיימת פגישת {cond.meeting_service_type ? MEETING_SERVICE_TYPE_LABELS[cond.meeting_service_type] : "זו"} בטווח התאריכים שהוגדר, האם לבקש לקבוע פגישה נוספת? <span className="text-red-600">(שדה חובה)</span>
+                      </legend>
+                      <div className={`flex gap-2 ${showValidationErrors && (cond.require_additional_meeting === null || cond.require_additional_meeting === undefined) ? "border border-red-400 rounded-lg p-1.5 -m-1.5" : ""}`}>
+                        {[{ value: true, label: "כן" }, { value: false, label: "לא" }].map(opt => (
+                          <button key={String(opt.value)} type="button"
+                            aria-pressed={cond.require_additional_meeting === opt.value}
+                            onClick={() => updateCondition(gi, ci, { require_additional_meeting: opt.value })}
+                            className={`text-sm px-4 py-1.5 rounded-lg border transition-colors ${
+                              cond.require_additional_meeting === opt.value
+                                ? "bg-blue-600 border-blue-600 text-white font-semibold"
+                                : "border-black text-black hover:bg-slate-50"
+                            }`}>
+                            {opt.label}
+                          </button>
+                        ))}
+                      </div>
+                    </fieldset>
+
                     {cond.meeting_service_type && cond.meeting_service_type !== "current" && (
                       <fieldset className="flex flex-col gap-1.5">
                         <legend className="text-xs font-medium text-black">
@@ -583,7 +712,7 @@ export default function ConditionGroupsEditor({
                       </fieldset>
                     )}
 
-                    {needsStageScope(cond) && (
+                    {needsStageScope(cond) && schoolsIncludeSixYear && (
                       <fieldset className="flex flex-col gap-1.5">
                         <legend className="text-xs font-medium text-black">חטיבה</legend>
                         <p className="text-[11px] text-slate-400">

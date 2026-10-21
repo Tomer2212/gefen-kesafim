@@ -104,7 +104,7 @@ CONTROL_LETTER_FIELD_LABELS = {
 
 YEAR_ADMIN_FIELDS = {
     "service_type": "select", "client_status": "select", "requested_price": "number",
-    "order_method": "select",
+    "order_method": "select", "order_method_other_text": "text",
     "order_amount_gefen": "number", "hours_ordered": "number", "rate": "number",
     "payment_received": "number", "payment_requests_sent": "number",
     "contract_sent": "bool", "contract_received": "bool", "receipts_sent": "number",
@@ -123,7 +123,7 @@ YEAR_ADMIN_FIELDS = {
 # entirely fabricated values that don't exist anywhere else in the codebase).
 SERVICE_TYPE_OPTIONS = ["gefen", "current", "gefen_current", "district", "takuma"]
 CLIENT_STATUS_OPTIONS = ["active", "inactive", "in_progress", "former"]
-ORDER_METHOD_OPTIONS = ["private", "authority", "district"]
+ORDER_METHOD_OPTIONS = ["private", "authority", "district", "other"]
 
 # Hebrew display labels for every fixed-choice field's raw stored value, mirroring the label
 # maps already duplicated across DashboardPage.jsx/SchoolPage.jsx — centralized here so
@@ -133,7 +133,7 @@ FINANCE_SOFTWARE_LABELS = {"kesafim2000": "כספים 2000", "payscool": "פיי
 MEETING_COORDINATOR_LABELS = {"principal": "מנהל/ת", "secretary": "מנהלנ/ית", "finance_contact": "אחראי/ת כספים"}
 SERVICE_TYPE_LABELS = {"gefen": "גפן", "current": "שוטף", "gefen_current": "גפן+שוטף", "district": "מחוז", "takuma": "תקומה"}
 CLIENT_STATUS_LABELS = {"active": "פעיל", "inactive": "לא פעיל", "in_progress": "בתהליך", "former": "לקוח עבר"}
-ORDER_METHOD_LABELS = {"private": "פרטי", "authority": "רשות", "district": "מחוז"}
+ORDER_METHOD_LABELS = {"private": "פרטי", "authority": "רשות", "district": "מחוז", "other": "אחר"}
 BOOL_LABELS = {"yes": "כן", "no": "לא"}
 
 
@@ -192,7 +192,8 @@ FIELD_LABELS = {
     "advisor_gefen": "יועץ מלווה [גפן]", "advisor_current": "יועץ מלווה [שוטף]", "advisor_district": "יועץ מלווה [מחוז]",
     "meetings_completed": 'סה"כ פגישות שבוצעו', "meetings_hours": 'סה"כ שעות שבוצעו',
     "service_type": "סוג שירות", "client_status": "סטטוס לקוח", "requested_price": "מחיר מבוקש",
-    "order_method": "אמצעי הזמנה", "order_amount_gefen": 'מחיר כולל מע"מ',
+    "order_method": "אמצעי הזמנה", "order_method_other_text": "אמצעי הזמנה - טקסט חופשי (אחר)",
+    "order_amount_gefen": 'מחיר כולל מע"מ',
     "hours_ordered": "מספר שעות שהוזמנו", "rate": "תעריף",
     "payment_received": "תשלום שהתקבל", "payment_requests_sent": "דרישות תשלום שנשלחו",
     "contract_sent": "חוזה נשלח", "contract_received": "חוזה התקבל",
@@ -360,7 +361,7 @@ def _fetch_schools_and_meetings(
 
             meetings = (
                 db.table("meetings")
-                .select("school_id, meeting_date, meeting_service_type, status, stage_scope, meeting_type")
+                .select("id, school_id, meeting_date, meeting_service_type, status, stage_scope, meeting_type, booking_token_id")
                 .in_("school_id", school_ids)
                 .in_("status", ["scheduled", "completed"])
                 .execute()
@@ -432,8 +433,30 @@ def _rows_for_school(rows_map: dict[str, list[dict]], school_id: str) -> list[di
     return rows_map.get(school_id) or []
 
 
-def _matching_meetings(cond: dict, school_meetings: list[dict]) -> list[dict]:
+def _date_in_cond_window(md: str, cond: dict) -> bool:
+    """True if `md` (a meeting_date) falls inside the condition's date window. The
+    "אילו פגישות יש לקבוע?" scheduling-requirement card (ConditionGroupsEditor.jsx,
+    forceMeetingNegateFalse) stores its window as `date_segments` — a list of up to 5 OR'd
+    {date_from, date_to} ranges (the multi-date-range feature) — leaving the legacy singular
+    date_from/date_to empty. The generic "יש/אין פגישה" audience-filter meeting condition still
+    uses the legacy singular pair and has no date_segments. Checking both (segments take
+    priority when present) keeps both condition shapes working correctly."""
+    segments = cond.get("date_segments")
+    if segments:
+        for seg in segments:
+            seg_from, seg_to = seg.get("date_from"), seg.get("date_to")
+            if (not seg_from or md >= seg_from) and (not seg_to or md <= seg_to):
+                return True
+        return False
     date_from, date_to = cond.get("date_from"), cond.get("date_to")
+    if date_from and md < date_from:
+        return False
+    if date_to and md > date_to:
+        return False
+    return True
+
+
+def _matching_meetings(cond: dict, school_meetings: list[dict], task_token_ids: set[str] | None = None) -> list[dict]:
     meeting_service_type = cond.get("meeting_service_type")
     # status/meeting_type are optional filters added for audience-filtering condition cards
     # (ConditionGroupsEditor.jsx) — a condition dict missing these keys (e.g. every audience
@@ -441,20 +464,26 @@ def _matching_meetings(cond: dict, school_meetings: list[dict]) -> list[dict]:
     # today, preserving old saved criteria unchanged.
     status = cond.get("status")
     meeting_type = cond.get("meeting_type")
+    # "בקש לקבוע פגישה נוספת" — when set, a pre-existing meeting must never satisfy this
+    # requirement; only a meeting booked specifically through one of THIS task's own booking
+    # tokens counts (task_token_ids is None for callers that don't track this, e.g. audience
+    # targeting — see _eval_meeting_condition's docstring — in which case this filter is
+    # skipped entirely, matching old behavior).
+    require_additional = cond.get("require_additional_meeting") and task_token_ids is not None
     out = []
     for m in school_meetings:
         md = m.get("meeting_date")
         if not md:
             continue
-        if date_from and md < date_from:
-            continue
-        if date_to and md > date_to:
+        if not _date_in_cond_window(md, cond):
             continue
         if meeting_service_type and m.get("meeting_service_type") != meeting_service_type:
             continue
         if status and m.get("status") != status:
             continue
         if meeting_type and m.get("meeting_type") != meeting_type:
+            continue
+        if require_additional and m.get("booking_token_id") not in task_token_ids:
             continue
         out.append(m)
     return out
@@ -482,26 +511,37 @@ def _eval_meeting_condition(cond: dict, school_meetings: list[dict]) -> bool:
     return (not matched) if cond.get("negate") else matched
 
 
-def _required_count_for_condition(cond: dict) -> int:
+def _required_count_for_condition(cond: dict, school: dict | None = None) -> int:
     """Round 17 — default required count for a meeting condition. A stage_scope="separate"
-    requirement always needs exactly 2 (one per principal) regardless of any manually-set
-    required_count (a split requirement can't sensibly ask for a different number — there are
-    only ever two slots). Every other meeting condition uses the manager's required_count if
-    set, otherwise 1 — matching _meeting_exists's original ">=1 match" behavior exactly, so this
-    is a no-op for every condition that doesn't use these new features."""
-    if cond.get("type") == "meeting" and cond.get("stage_scope") == "separate":
+    requirement needs exactly 2 (one per principal) ONLY for a six-year (sheshshnati) school —
+    every other school has just one principal/division regardless of what was selected at the
+    condition level, so it always needs exactly 1 (bug fix: this used to return 2 for EVERY
+    school whenever stage_scope=="separate", inflating a non-six-year school's required-action
+    count and making its single, already-booked meeting read as "0/2" — see
+    _build_meeting_ranges's matching school-stage guard in tasks_router.py for the companion fix
+    on the send side). Every other meeting condition uses the manager's required_count if set,
+    otherwise 1 — matching _meeting_exists's original ">=1 match" behavior exactly, so this is a
+    no-op for every condition that doesn't use these new features."""
+    if cond.get("type") == "meeting" and cond.get("stage_scope") == "separate" and (school or {}).get("stage") == "sheshshnati":
         return 2
     return cond.get("required_count") or 1
 
 
-def _fulfilled_count_for_meeting_condition(cond: dict, school_meetings: list[dict]) -> int:
-    """Round 17 — for stage_scope="separate", counts DISTINCT principal slots fulfilled (0-2)
-    via each matching meeting's own stage_scope, not the raw row count — booking only the
-    tichon principal's meeting must not count as 2/2. A "both"-scoped (or legacy/unscoped)
-    meeting counts toward either slot, since it covers both principals at once. Every other
-    condition keeps the original raw match count (identical to _count_matching_meetings)."""
-    matches = _matching_meetings(cond, school_meetings)
-    if cond.get("stage_scope") == "separate":
+def _fulfilled_count_for_meeting_condition(
+    cond: dict, school_meetings: list[dict], task_token_ids: set[str] | None = None, school: dict | None = None,
+) -> int:
+    """Round 17 — for stage_scope="separate" on a six-year school, counts DISTINCT principal
+    slots fulfilled (0-2) via each matching meeting's own stage_scope, not the raw row count —
+    booking only the tichon principal's meeting must not count as 2/2. A "both"-scoped (or
+    legacy/unscoped) meeting counts toward either slot, since it covers both principals at once.
+    For a non-six-year school (or any other condition), this is just the raw match count
+    (identical to _count_matching_meetings) — bug fix: a non-six-year school's single booked
+    meeting is stored with stage_scope=None (see _build_meeting_ranges), which never matches
+    "tichon"/"chativa"/"both", so the distinct-slot counting used to always read 0 fulfilled for
+    such a school even after it booked its one and only meeting.
+    task_token_ids: see _matching_meetings — threaded through for "require_additional_meeting"."""
+    matches = _matching_meetings(cond, school_meetings, task_token_ids)
+    if cond.get("stage_scope") == "separate" and (school or {}).get("stage") == "sheshshnati":
         has_tichon = any(m.get("stage_scope") in ("tichon", "both") for m in matches)
         has_chativa = any(m.get("stage_scope") in ("chativa", "both") for m in matches)
         return int(has_tichon) + int(has_chativa)
@@ -708,6 +748,7 @@ def evaluate_tree(
 def _resolve_condition(
     cond: dict, school: dict, school_meetings: list[dict], year_row: dict | None,
     goal_rows: list[dict] | None = None, cl_rows: list[dict] | None = None,
+    task_token_ids: set[str] | None = None,
 ) -> bool:
     """Plain evaluation of a single condition against current data — used ONLY for walking a
     success tree (either `task.success_criteria` or the auto-derived inverse of `criteria`,
@@ -731,7 +772,7 @@ def _resolve_condition(
         # stage_scope="separate", so this is behavior-identical to the old _meeting_exists check
         # for the vast majority of existing conditions (confirmed against the regression task,
         # which has no explicit required_count on any condition).
-        return _fulfilled_count_for_meeting_condition(cond, school_meetings) >= _required_count_for_condition(cond)
+        return _fulfilled_count_for_meeting_condition(cond, school_meetings, task_token_ids, school) >= _required_count_for_condition(cond, school)
     if ctype == "goal":
         return _eval_goal_condition(cond, goal_rows or [])
     if ctype == "control_letter":
@@ -802,7 +843,7 @@ def find_matching_schools(
     if manual_school_ids is not None:
         wanted = set(manual_school_ids)
         return [
-            {"school_id": s["id"], "school_name": s["name"], "symbol": s.get("symbol"), "authority": s.get("authority")}
+            {"school_id": s["id"], "school_name": s["name"], "symbol": s.get("symbol"), "authority": s.get("authority"), "stage": s.get("stage")}
             for s in schools if s["id"] in wanted
         ]
     matched = []
@@ -814,7 +855,7 @@ def find_matching_schools(
         ):
             matched.append({
                 "school_id": s["id"], "school_name": s["name"],
-                "symbol": s.get("symbol"), "authority": s.get("authority"),
+                "symbol": s.get("symbol"), "authority": s.get("authority"), "stage": s.get("stage"),
             })
     return matched
 
@@ -837,6 +878,19 @@ def compute_task_progress(org_id: str, task: dict, academic_year: str = DEFAULT_
     schools, meetings, year_map, goal_map, cl_map = _fetch_schools_and_meetings(org_id, academic_year)
     schools_by_id = {s["id"]: s for s in schools}
     matched_ids = set(task.get("matched_school_ids") or [])
+
+    # "בקש לקבוע פגישה נוספת" — IDs of every booking token ever minted for THIS task, so a
+    # require_additional_meeting condition can require a meeting booked specifically through one
+    # of them (see _matching_meetings) rather than accept any pre-existing meeting. Non-fatal:
+    # a failed lookup degrades to "no token counts yet" (empty set), which is the safe direction
+    # — such a condition just stays unresolved (red ✕) rather than wrongly marked done.
+    task_token_ids: set[str] = set()
+    try:
+        db = get_admin_client()
+        token_rows = db.table("meeting_booking_tokens").select("id").eq("task_id", task["id"]).execute().data or []
+        task_token_ids = {r["id"] for r in token_rows}
+    except Exception as exc:
+        _log.warning("compute_task_progress: task_token_ids lookup failed (non-fatal) for task %s: %s", task.get("id"), exc)
 
     if not track_success:
         rows = []
@@ -883,7 +937,7 @@ def compute_task_progress(org_id: str, task: dict, academic_year: str = DEFAULT_
         satisfied_group_idx = None
         for gi, group in enumerate(groups):
             conditions = group.get("conditions") or []
-            if conditions and all(_resolve_condition(c, school, school_meetings, year_row, goal_rows, cl_rows) for c in conditions):
+            if conditions and all(_resolve_condition(c, school, school_meetings, year_row, goal_rows, cl_rows, task_token_ids) for c in conditions):
                 satisfied_group_idx = gi
                 break
 
@@ -892,15 +946,15 @@ def compute_task_progress(org_id: str, task: dict, academic_year: str = DEFAULT_
         condition_results = [
             (
                 {
-                    "ok": _resolve_condition(c, school, school_meetings, year_row, goal_rows, cl_rows), "meeting_exists": _meeting_exists(c, school_meetings),
+                    "ok": _resolve_condition(c, school, school_meetings, year_row, goal_rows, cl_rows, task_token_ids), "meeting_exists": _meeting_exists(c, school_meetings),
                     # Round 17: required-count-aware — always >=1 for a meeting condition now
                     # (was raw match count / manager-set-or-None), so a "separate" split
                     # condition shows 0-2 distinct-slot progress instead of a raw row count that
                     # could misleadingly read "1/1" after only one of two principals was booked.
-                    "actual_count": _fulfilled_count_for_meeting_condition(c, school_meetings), "required_count": _required_count_for_condition(c),
+                    "actual_count": _fulfilled_count_for_meeting_condition(c, school_meetings, task_token_ids, school), "required_count": _required_count_for_condition(c, school),
                 }
                 if c.get("type") == "meeting"
-                else {"ok": _resolve_condition(c, school, school_meetings, year_row, goal_rows, cl_rows), "meeting_exists": None, "actual_count": None, "required_count": None}
+                else {"ok": _resolve_condition(c, school, school_meetings, year_row, goal_rows, cl_rows, task_token_ids), "meeting_exists": None, "actual_count": None, "required_count": None}
             )
             for c in conds
         ]
@@ -940,7 +994,7 @@ def compute_task_progress(org_id: str, task: dict, academic_year: str = DEFAULT_
                     cond_stage_scope = c.get("stage_scope")
                     if c.get("type") == "meeting" and cond_stage_scope in ("tichon", "chativa", "separate"):
                         if cond_stage_scope == "separate":
-                            matches = _matching_meetings(c, school_meetings)
+                            matches = _matching_meetings(c, school_meetings, task_token_ids)
                             ok = any(m.get("stage_scope") in (row_stage, "both") for m in matches)
                             row_results.append({"ok": ok, "merged": False, "not_applicable": False})
                         elif cond_stage_scope == row_stage:

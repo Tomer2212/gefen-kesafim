@@ -393,8 +393,15 @@ export default function MeetingBookingPage() {
                         )}
                       </div>
                       <p className="text-xs text-slate-500">
-                        {formatDateDDMMYYYY(r.start_date)} עד {formatDateDDMMYYYY(r.end_date)}
+                        {r.segments?.length > 0
+                          ? r.segments.map(s => `${formatDateDDMMYYYY(s.start_date)} עד ${formatDateDDMMYYYY(s.end_date)}`).join(" או ")
+                          : `${formatDateDDMMYYYY(r.start_date)} עד ${formatDateDDMMYYYY(r.end_date)}`}
                       </p>
+                      {!r.booked && r.existing_meeting_fyi && (
+                        <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
+                          לתשומת לבכם: כבר קיימת פגישה מסוג זה בתאריך {formatDateDDMMYYYY(r.existing_meeting_fyi.meeting_date)} בשעה {r.existing_meeting_fyi.start_time} — מבוקשת פגישה נוספת.
+                        </p>
+                      )}
                       {r.advisor_names?.length > 0 && (
                         <p className="text-xs text-slate-500">
                           יועץ מבצע: {r.advisor_names.join(", ")}

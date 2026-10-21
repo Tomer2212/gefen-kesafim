@@ -48,12 +48,16 @@ def get_or_create_booking_token(db, org_id: str, school_id: str, advisor_id: str
 
 
 def create_direct_booking_token(db, org_id: str, school_id: str, advisor_ids: list[str],
-                                 ranges: list[dict]) -> dict:
+                                 ranges: list[dict], task_id: str | None = None) -> dict:
     """Always mints a brand-new token — unlike get_or_create_booking_token, a 'תיאום ישיר'
     request is a one-off admin action with its own content (advisors/ranges/participants),
     not an idempotent recurring reminder, so there is no reuse-by-(school,advisor) semantics
     here. `ranges` is the list of {key, start_date, end_date, service_type, duration_minutes,
-    label, participants} dicts built by the caller (schools_router.py)."""
+    label, participants} dicts built by the caller (schools_router.py). task_id: set only when
+    minted from the Tasks feature (tasks_router._mint_meeting_booking_link) — lets
+    task_logic.compute_task_progress tell "a meeting booked through one of THIS task's own
+    links" apart from a pre-existing meeting, for require_additional_meeting conditions. None
+    for 'תיאום ישיר' tokens, which have no task behind them."""
     token = secrets.token_urlsafe(32)
     now = datetime.now(timezone.utc)
     last_end = max(date.fromisoformat(r["end_date"]) for r in ranges)
@@ -70,6 +74,7 @@ def create_direct_booking_token(db, org_id: str, school_id: str, advisor_ids: li
         "advisor_id": advisor_ids[0],
         "advisor_ids": advisor_ids,
         "draft_id": None,
+        "task_id": task_id,
         "months": [],
         "scheduling_window": {
             "days_of_week": DIRECT_BOOKING_DAYS_OF_WEEK,
