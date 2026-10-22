@@ -436,7 +436,7 @@ def _rows_for_school(rows_map: dict[str, list[dict]], school_id: str) -> list[di
 def _date_in_cond_window(md: str, cond: dict) -> bool:
     """True if `md` (a meeting_date) falls inside the condition's date window. The
     "אילו פגישות יש לקבוע?" scheduling-requirement card (ConditionGroupsEditor.jsx,
-    forceMeetingNegateFalse) stores its window as `date_segments` — a list of up to 5 OR'd
+    forceMeetingNegateFalse) stores its window as `date_segments` — a list of up to 10 OR'd
     {date_from, date_to} ranges (the multi-date-range feature) — leaving the legacy singular
     date_from/date_to empty. The generic "יש/אין פגישה" audience-filter meeting condition still
     uses the legacy singular pair and has no date_segments. Checking both (segments take

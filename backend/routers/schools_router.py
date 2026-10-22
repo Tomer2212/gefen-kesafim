@@ -469,7 +469,7 @@ class DirectCoordinationSegmentIn(BaseModel):
 
 
 class DirectCoordinationRangeIn(BaseModel):
-    date_segments: list[DirectCoordinationSegmentIn]  # 1-5 OR'd date ranges the school may pick a slot from
+    date_segments: list[DirectCoordinationSegmentIn]  # 1-10 OR'd date ranges the school may pick a slot from
     meeting_service_type: str  # "gefen" | "current" | "gefen_current" | "district" | "takuma"
     duration_minutes: int      # 30..180, step 15
     advisor_ids: list[str] = []  # this specific meeting's performing advisor(s) — see send_direct_coordination_request
@@ -743,6 +743,61 @@ def _resolve_all_gefen_files_responsible(school: dict) -> dict:
         slot: _resolve_gefen_files_responsible_for_slot(school, slot)
         for slot in _gefen_files_slots_for_school(school)
     }
+
+
+# ---------------------------------------------------------------------------
+# Dashboard-only display resolvers for meeting_coordinators / gefen_files_responsible.
+# Unlike _resolve_coordinator_ref / _resolve_gefen_files_ref (used by real email flows,
+# where a ref with no name/email must resolve to None so no mail gets sent to nobody),
+# the dashboard needs to show "a role WAS assigned here, but its contact info is
+# incomplete" as a distinct, visible state rather than silently looking unassigned.
+# ---------------------------------------------------------------------------
+
+def _resolve_slot_display(school: dict, ref: str | None) -> dict | None:
+    """None = slot not assigned (no ref chosen). Otherwise {"role_label", "missing_email"}
+    — a ref with no email (or no underlying contact name at all) is still a real
+    assignment, just one missing the contact info needed to actually coordinate with them."""
+    if not ref:
+        return None
+    fields = _COORDINATOR_REF_FIELDS.get(ref)
+    if fields:
+        name_f, phone_f, email_f, label = fields
+        email = (school.get(email_f) or "").strip()
+        return {"role_label": label, "missing_email": not email}
+    if ref.startswith("extra:"):
+        try:
+            idx = int(ref.split(":", 1)[1])
+        except ValueError:
+            return None
+        extras = school.get("extra_contacts") or []
+        if idx < 0 or idx >= len(extras):
+            return None
+        ec = extras[idx]
+        email = (ec.get("email") or "").strip()
+        return {"role_label": ec.get("role") or "איש קשר נוסף", "missing_email": not email}
+    return None
+
+
+def _resolve_all_meeting_coordinators_display(school: dict, service_type: str | None) -> dict:
+    refs = school.get("meeting_coordinators") or {}
+    result: dict = {}
+    for slot in _slots_for_school(school, service_type):
+        display = _resolve_slot_display(school, refs.get(slot))
+        if display:
+            display = {**display, "slot_label": _SLOT_LABELS.get(slot, slot)}
+        result[slot] = display
+    return result
+
+
+def _resolve_all_gefen_files_responsible_display(school: dict) -> dict:
+    refs = school.get("gefen_files_responsible") or {}
+    result: dict = {}
+    for slot in _gefen_files_slots_for_school(school):
+        display = _resolve_slot_display(school, refs.get(slot))
+        if display:
+            display = {**display, "slot_label": None if slot == "default" else _GEFEN_FILES_SLOT_LABELS.get(slot)}
+        result[slot] = display
+    return result
 
 
 def _gefen_files_slots_for_meeting(school: dict, normalized_stage_scope: str | None) -> list[str]:
@@ -1048,6 +1103,8 @@ def list_schools(
         school["meeting_coordinator_contact"] = _resolve_meeting_coordinator(school)
         school["meeting_coordinators_resolved"] = _resolve_all_meeting_coordinators(school, school["service_type"])
         school["gefen_files_responsible_resolved"] = _resolve_all_gefen_files_responsible(school)
+        school["meeting_coordinators_display"] = _resolve_all_meeting_coordinators_display(school, school["service_type"])
+        school["gefen_files_responsible_display"] = _resolve_all_gefen_files_responsible_display(school)
         for service_type in ("gefen", "current", "district"):
             advisor_ids = typed_advisors_by_school[service_type].get(school["id"], [])
             school[f"advisors_{service_type}"] = [profiles_map[aid] for aid in advisor_ids if aid in profiles_map]
@@ -5065,6 +5122,8 @@ def get_school(
         _service_type_for_coord = None
     school_data["meeting_coordinators_resolved"] = _resolve_all_meeting_coordinators(school_data, _service_type_for_coord)
     school_data["gefen_files_responsible_resolved"] = _resolve_all_gefen_files_responsible(school_data)
+    school_data["meeting_coordinators_display"] = _resolve_all_meeting_coordinators_display(school_data, _service_type_for_coord)
+    school_data["gefen_files_responsible_display"] = _resolve_all_gefen_files_responsible_display(school_data)
 
     # Per-service-type advisor lists ("יועץ מלווה [גפן/שוטף/מחוז]") — needed by every role (not
     # just manager+) since meetings-tab default-advisor logic reads these regardless of who's
@@ -8588,8 +8647,8 @@ def send_direct_coordination_request(
     advisor_ids_union: list[str] = []
     range_slots: list[str] = []
     for r in body.ranges:
-        if not (1 <= len(r.date_segments) <= 5):
-            raise HTTPException(status_code=400, detail="ניתן להוסיף בין 1 ל-5 טווחי תאריכים לכל פגישה")
+        if not (1 <= len(r.date_segments) <= 10):
+            raise HTTPException(status_code=400, detail="ניתן להוסיף בין 1 ל-10 טווחי תאריכים לכל פגישה")
         for seg in r.date_segments:
             if seg.start_date > seg.end_date:
                 raise HTTPException(status_code=400, detail="טווח תאריכים לא תקין: תאריך ההתחלה מאוחר מתאריך הסיום")

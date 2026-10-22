@@ -40,7 +40,7 @@ function newDateSegment() {
   segmentIdCounter += 1;
   return { localId: segmentIdCounter, start: "", end: "" };
 }
-const MAX_DATE_SEGMENTS = 5;
+const MAX_DATE_SEGMENTS = 10;
 
 function segmentsOverlap(a, b) {
   return !!(a.start && a.end && b.start && b.end && a.start <= b.end && b.start <= a.end);

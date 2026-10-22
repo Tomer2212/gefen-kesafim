@@ -374,6 +374,8 @@ const CONTACT_COLUMNS = [
   { key: "principal_phone",       label: "טלפון מנהל/ת" },
   { key: "secretary_phone",       label: "טלפון מנהלנ/ית" },
   { key: "finance_contact_phone", label: "טלפון אחראי/ת כספים" },
+  { key: "meeting_coordinator_slots",     label: "מתאם פגישות" },
+  { key: "gefen_files_responsible_slots", label: 'אחראי/ת קבצי גפן' },
 ];
 
 const DEFAULT_VISIBLE_MOVABLE_KEYS = ["symbol", "stage", "city", "meetings_completed", "authority", "meetings_hours"];
@@ -441,6 +443,11 @@ const FILTER_COLUMN_META = [
   { key: "principal_phone",       label: "טלפון מנהל/ת",        fmt: "text" },
   { key: "secretary_phone",       label: "טלפון מנהלנ/ית",       fmt: "text" },
   { key: "finance_contact_phone", label: "טלפון אחראי/ת כספים",  fmt: "text" },
+  // Multi-line columns (one slot per division/budget) — same "contains one of" semantics as
+  // the other textMulti columns, letting a "מכיל... חסר מייל" filter find every school with
+  // an assigned-but-incomplete contact in either field.
+  { key: "meeting_coordinator_slots",     label: "מתאם פגישות",      fmt: "textMulti" },
+  { key: "gefen_files_responsible_slots", label: 'אחראי/ת קבצי גפן', fmt: "textMulti" },
 ];
 const FILTER_COLUMN_KEYS = new Set(FILTER_COLUMN_META.map(c => c.key));
 
@@ -616,6 +623,32 @@ function principalNames(school) {
   ].filter(Boolean);
 }
 
+// "מתאם פגישות" / "אחראי/ת קבצי גפן" dashboard columns — built from the per-slot display
+// dicts the backend attaches to each school (meeting_coordinators_display /
+// gefen_files_responsible_display, see schools_router.py's _resolve_slot_display). A slot
+// with no ref chosen is omitted entirely; a slot with a ref chosen but missing_email=true
+// (no valid email for that contact, backend-checked) shows a warning line instead of the
+// role, so an org can spot who still needs real contact info to actually be coordinated with.
+const GEFEN_FILES_SLOT_PREFIX = { default: null, tichon: "תיכון", beinayim: 'חט"ב' };
+const MISSING_EMAIL_TEXT = "חסר מייל של איש הקשר המוגדר";
+
+function gefenFilesResponsibleLines(school) {
+  const data = school.gefen_files_responsible_display || {};
+  return Object.entries(data).filter(([, v]) => v).map(([slot, v]) => {
+    const prefix = GEFEN_FILES_SLOT_PREFIX[slot];
+    const text = v.missing_email ? MISSING_EMAIL_TEXT : v.role_label;
+    return { text: prefix ? `${prefix} - ${text}` : text, missingEmail: !!v.missing_email };
+  });
+}
+
+function meetingCoordinatorLines(school) {
+  const data = school.meeting_coordinators_display || {};
+  return Object.entries(data).filter(([, v]) => v).map(([slot, v]) => {
+    const text = v.missing_email ? MISSING_EMAIL_TEXT : v.role_label;
+    return { text: `${v.slot_label}: ${text}`, missingEmail: !!v.missing_email };
+  });
+}
+
 function computeFilterValues(school, combo, meetingsStats, activeSummaryBudget, goalColumns = [], gefenClosureColumns = []) {
   const out = {};
   const stats = meetingsStats[school.id];
@@ -680,6 +713,8 @@ function computeFilterValues(school, combo, meetingsStats, activeSummaryBudget, 
   out.principal_phone = school.principal_phone || null;
   out.secretary_phone = school.secretary_phone || null;
   out.finance_contact_phone = school.finance_contact_phone || null;
+  out.meeting_coordinator_slots = meetingCoordinatorLines(school).map(l => l.text);
+  out.gefen_files_responsible_slots = gefenFilesResponsibleLines(school).map(l => l.text);
   return out;
 }
 
@@ -1367,6 +1402,28 @@ function renderCell(school, key, meetingsStats = {}, combo = null, activeSummary
       return school.secretary_phone || "—";
     case "finance_contact_phone":
       return school.finance_contact_phone || "—";
+    case "gefen_files_responsible_slots": {
+      const lines = gefenFilesResponsibleLines(school);
+      if (!lines.length) return "—";
+      return (
+        <div className="flex flex-col gap-0.5">
+          {lines.map((l, i) => (
+            <div key={i} className={l.missingEmail ? "text-red-600 font-medium" : undefined}>{l.text}</div>
+          ))}
+        </div>
+      );
+    }
+    case "meeting_coordinator_slots": {
+      const lines = meetingCoordinatorLines(school);
+      if (!lines.length) return "—";
+      return (
+        <div className="flex flex-col gap-0.5">
+          {lines.map((l, i) => (
+            <div key={i} className={l.missingEmail ? "text-red-600 font-medium" : undefined}>{l.text}</div>
+          ))}
+        </div>
+      );
+    }
     case "symbol":
       return <span className="font-mono">{school.symbol || "—"}</span>;
     case "city":
@@ -1478,6 +1535,10 @@ function renderCellText(school, key, meetingsStats = {}, combo = null, activeSum
       return school.secretary_phone || "";
     case "finance_contact_phone":
       return school.finance_contact_phone || "";
+    case "gefen_files_responsible_slots":
+      return gefenFilesResponsibleLines(school).map(l => l.text).join("; ");
+    case "meeting_coordinator_slots":
+      return meetingCoordinatorLines(school).map(l => l.text).join("; ");
     case "symbol":
       return school.symbol || "";
     case "city":

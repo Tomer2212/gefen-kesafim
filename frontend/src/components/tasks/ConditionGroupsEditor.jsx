@@ -19,7 +19,7 @@ function newMeetingDateSegment() {
   meetingDateSegmentIdCounter += 1;
   return { localId: meetingDateSegmentIdCounter, date_from: "", date_to: "" };
 }
-export const MAX_MEETING_DATE_SEGMENTS = 5;
+export const MAX_MEETING_DATE_SEGMENTS = 10;
 
 function meetingSegmentsOverlap(a, b) {
   return !!(a.date_from && a.date_to && b.date_from && b.date_to && a.date_from <= b.date_to && b.date_from <= a.date_to);
@@ -29,7 +29,7 @@ const EMPTY_MEETING_CONDITION = {
   // date_from/date_to: used by the generic "meeting" audience-filter condition (lines ~612+
   // below, "יש פגישה/אין פגישה" — a single-range existence check, unrelated to scheduling).
   // date_segments: used by the "אילו פגישות יש לקבוע?" scheduling-requirement card
-  // (forceMeetingNegateFalse block below) — up to 5 OR'd date ranges to offer the school.
+  // (forceMeetingNegateFalse block below) — up to 10 OR'd date ranges to offer the school.
   type: "meeting", meeting_service_type: "", status: "", meeting_type: "", date_from: "", date_to: "",
   date_segments: [newMeetingDateSegment()], negate: false,
   // Round-5 "אילו פגישות צריך לקבוע?" metadata — ignored entirely by success-condition
