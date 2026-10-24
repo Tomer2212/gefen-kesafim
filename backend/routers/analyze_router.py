@@ -2,6 +2,7 @@ import logging
 import re
 import shutil
 import tempfile
+import time
 import traceback
 import uuid
 from datetime import date
@@ -25,7 +26,7 @@ from academic_years import (
     resolve_requested_upload_years,
 )
 from auth import get_current_user
-from supabase_client import get_admin_client
+from supabase_client import get_admin_client, reset_admin_client
 from logic.excel_exporter import export
 from logic.pdf_exporter import export_pdf
 from logic.file_identifier import identify_file
@@ -42,11 +43,32 @@ router = APIRouter()
 
 _INTERNAL_KEYS = {"_school_ctx"}
 
+# Shared cap for every uploaded-file read site in this router (initial /upload,
+# /add-file/{log_id}, /detect-file-year). 50MB is well above any legitimate
+# Gefen/finance/tikhnun workbook.
+MAX_UPLOAD_SIZE_BYTES = 50 * 1024 * 1024
+
 
 def _update_run(run_id: str, run_data: dict) -> None:
-    """Upsert run state to Supabase run_states. Non-fatal on failure."""
+    """Upsert run state to Supabase run_states. Non-fatal on failure.
+
+    REPLACES the entire `result` column with `run_data` — it does not merge. `_process()`
+    calls this ~15 times across its success/error/exception branches (status updates,
+    error_code branches, the catch-all exception handler at the bottom), and only a few
+    of those calls explicitly include `_school_ctx`. Since _require_run_access reads
+    school_id from `_school_ctx` to run its org-ownership check, any call site that
+    "forgets" to include it — e.g. the generic `except Exception` handler, which fires on
+    ANY processing failure unrelated to this at all — silently wipes it, and the very next
+    poll to /analyze/result 404s with a misleading "Run not found" instead of surfacing
+    the real (possibly error-status, still legitimately owned) result. Preserving the
+    existing `_school_ctx` by default here — unless a call explicitly passes its own —
+    fixes every call site at once instead of requiring each of the ~15 to remember it."""
     try:
         db = get_admin_client()
+        if "_school_ctx" not in run_data:
+            prior = _get_run(run_id)
+            if prior and prior.get("_school_ctx"):
+                run_data = {**run_data, "_school_ctx": prior["_school_ctx"]}
         db.table("run_states").upsert(
             {"id": run_id, "status": run_data.get("status", "processing"), "result": run_data},
             on_conflict="id",
@@ -56,17 +78,84 @@ def _update_run(run_id: str, run_data: dict) -> None:
 
 
 def _get_run(run_id: str) -> dict | None:
-    """Fetch fresh run state from Supabase run_states. Returns None if not found."""
-    try:
-        db = get_admin_client()
-        row = db.table("run_states").select("result, status").eq("id", run_id).single().execute()
-        if row.data:
-            result = row.data.get("result") or {}
-            result["status"] = row.data["status"]
+    """Fetch fresh run state from Supabase run_states. Returns None if genuinely not found.
+
+    Follows this project's standard 2-attempt retry pattern (get_admin_client() fetched
+    fresh inside the try, reset+retry once on failure) — unlike the rest of this file's
+    endpoints, this used to be a single bare try/except that silently swallowed ANY
+    exception (a transient Supabase/httpx hiccup, same class of issue documented
+    elsewhere in this codebase under load) and returned None either way, which a caller
+    can't distinguish from "run genuinely doesn't exist" — surfacing as a misleading,
+    non-retryable 404 "Run not found" to the frontend mid-poll instead of a transient
+    503 the UI could sensibly retry. Also avoids .single() (raises on 0 rows instead of
+    returning cleanly), for the same reason fixed elsewhere in this audit."""
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            rows = db.table("run_states").select("result, status").eq("id", run_id).execute().data
+            if not rows:
+                return None
+            result = rows[0].get("result") or {}
+            result["status"] = rows[0]["status"]
             return result
-    except Exception:
-        pass
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("_get_run attempt 1 failed for run %s, retrying: %s", run_id, exc)
+                reset_admin_client()
+                time.sleep(0.2)
+            else:
+                logger.error("_get_run failed after 2 attempts for run %s: %s", run_id, exc, exc_info=True)
     return None
+
+
+def _check_school_access(db, user: dict, school_id: str | None) -> None:
+    """Ownership gate for every tenant-scoped resource in this router (run_id,
+    log_id, meeting_id — all of which ultimately belong to a school). The
+    backend talks to Supabase with the service_role key, which bypasses RLS
+    entirely, so this check is the ONLY thing standing between an authenticated
+    user and another org's data. Mirrors the org + advisor-restriction check in
+    schools_router.get_school. Does no caching / in-memory state — every call
+    re-reads Supabase, consistent with this file's "No In-Memory Run State" rule.
+    Raises 404 (not 403) on an org mismatch so a caller can't distinguish
+    "doesn't exist" from "exists in another org" by guessing UUIDs."""
+    if not school_id:
+        raise HTTPException(status_code=404, detail="בית ספר לא נמצא")
+    school_res = (
+        db.table("schools")
+        .select("id, org_id, restrict_access_to")
+        .eq("id", school_id)
+        .execute()
+    )
+    if not school_res.data:
+        raise HTTPException(status_code=404, detail="בית ספר לא נמצא")
+    school = school_res.data[0]
+    if school.get("org_id") != user.get("org_id"):
+        raise HTTPException(status_code=404, detail="בית ספר לא נמצא")
+
+    if user.get("role") not in ("owner", "manager"):
+        restrict = school.get("restrict_access_to")
+        if restrict is not None and user.get("id") not in (restrict or []):
+            assigned = (
+                db.table("advisor_schools")
+                .select("school_id")
+                .eq("advisor_id", user["id"])
+                .eq("school_id", school_id)
+                .execute()
+            )
+            if not assigned.data:
+                raise HTTPException(status_code=403, detail="אין הרשאה לגשת למשאב זה")
+
+
+def _require_run_access(run_id: str, user: dict) -> dict:
+    """Fetch a run and verify the caller's org (+ advisor restriction) may access
+    it, via the school_id stashed in run["_school_ctx"] by _process(). Raises
+    404 if the run doesn't exist or the caller has no access to its school."""
+    run = _get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    school_id = (run.get("_school_ctx") or {}).get("school_id")
+    _check_school_access(get_admin_client(), user, school_id)
+    return run
 
 
 def _strip_for_response(run: dict) -> dict:
@@ -256,13 +345,24 @@ async def upload(
         # Each file gets its own numbered subdirectory (not a flat run_dir) so that two
         # uploaded files sharing an identical original filename never silently overwrite
         # one another on disk — Path.name still returns the original filename downstream.
-        dest = run_dir / str(i) / uf.filename
+        # .name strips any directory components from the client-supplied filename so a
+        # crafted "../../etc" style name can't escape run_dir.
+        safe_name = Path(uf.filename or "upload").name
+        dest = run_dir / str(i) / safe_name
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(await uf.read())
+        content = await uf.read()
+        if len(content) > MAX_UPLOAD_SIZE_BYTES:
+            shutil.rmtree(run_dir, ignore_errors=True)
+            raise HTTPException(status_code=400, detail="הקובץ חדש מהמותר (מקסימום 50MB)")
+        dest.write_bytes(content)
         saved.append(dest)
 
     acknowledged_roles = {r.strip() for r in (acknowledged_file_roles or "").split(",") if r.strip()}
-    _update_run(run_id, {"status": "processing"})
+    # Write school_id into _school_ctx immediately (not just once _process() gets to it
+    # in the background task) so a poll to /analyze/result (or any other run_id-scoped
+    # endpoint) that lands before _process's first update can't 404 out of its own
+    # ownership check — see _require_run_access.
+    _update_run(run_id, {"status": "processing", "_school_ctx": {"school_id": school_id}})
     background_tasks.add_task(_process, run_id, saved, run_dir, user["id"], school_id, gefen_account_id, update_log_id, academic_year, acknowledged_roles)
     return {"run_id": run_id}
 
@@ -281,8 +381,11 @@ async def detect_file_year(
     tmp_dir = Path(tempfile.mkdtemp(prefix="gefen_detect_"))
     eff_year = expected_year or DEFAULT_ACADEMIC_YEAR
     try:
-        dest = tmp_dir / (file.filename or "upload")
-        dest.write_bytes(await file.read())
+        dest = tmp_dir / Path(file.filename or "upload").name
+        content = await file.read()
+        if len(content) > MAX_UPLOAD_SIZE_BYTES:
+            raise HTTPException(status_code=400, detail="הקובץ חדש מהמותר (מקסימום 50MB)")
+        dest.write_bytes(content)
         if file_role == "tikhnun":
             found_years = _read_tikhnun_school_years(dest)
             mapped_years = {get_academic_year_for_calendar_year(y) for y in found_years}
@@ -331,10 +434,14 @@ async def add_file_to_check(
 ):
     """Re-run a check with original stored files + new uploaded file(s)."""
     db = get_admin_client()
-    log_result = db.table("check_logs").select("*").eq("id", log_id).single().execute()
-    log = log_result.data
+    # NOT .single() — that raises PGRST116 on zero matches (e.g. a nonexistent log_id,
+    # which is the normal/expected case here, not an error), which would be misreported
+    # as a 503 instead of the intended 404.
+    log_rows = db.table("check_logs").select("*").eq("id", log_id).execute().data
+    log = log_rows[0] if log_rows else None
     if not log:
         raise HTTPException(status_code=404, detail="הבדיקה לא נמצאה")
+    _check_school_access(db, user, log.get("school_id"))
 
     stored_paths = (log.get("summary") or {}).get("stored_file_paths") or []
     if not stored_paths:
@@ -353,7 +460,7 @@ async def add_file_to_check(
         # Legacy format: plain string path (ASCII filenames only from before the dict format)
         if isinstance(sp, dict):
             storage_key = sp["path"]
-            fname = sp["name"]
+            fname = Path(sp["name"]).name
         else:
             storage_key = sp
             fname = Path(sp).name
@@ -363,18 +470,24 @@ async def add_file_to_check(
             dest.write_bytes(db.storage.from_("check-files").download(storage_key))
             all_paths.append(dest)
         except Exception as exc:
+            logger.error("add_file_to_check: failed to download original file %s (storage_key=%s): %s", fname, storage_key, exc, exc_info=True)
             raise HTTPException(status_code=500, detail=f"שגיאה בהורדת הקובץ המקורי: {fname}")
         file_idx += 1
 
     for uf in files:
-        dest = run_dir / str(file_idx) / uf.filename
+        safe_name = Path(uf.filename or "upload").name
+        dest = run_dir / str(file_idx) / safe_name
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(await uf.read())
+        content = await uf.read()
+        if len(content) > MAX_UPLOAD_SIZE_BYTES:
+            shutil.rmtree(run_dir, ignore_errors=True)
+            raise HTTPException(status_code=400, detail="הקובץ חדש מהמותר (מקסימום 50MB)")
+        dest.write_bytes(content)
         all_paths.append(dest)
         file_idx += 1
 
     acknowledged_roles = {r.strip() for r in (acknowledged_file_roles or "").split(",") if r.strip()}
-    _update_run(run_id, {"status": "processing"})
+    _update_run(run_id, {"status": "processing", "_school_ctx": {"school_id": log["school_id"]}})
     background_tasks.add_task(
         _process, run_id, all_paths, run_dir,
         user["id"], log["school_id"], log.get("gefen_account_id"), log_id, log.get("academic_year"),
@@ -401,6 +514,7 @@ async def run_check_from_uploads(
     if not meeting_res.data:
         raise HTTPException(status_code=404, detail="הפגישה לא נמצאה")
     meeting = meeting_res.data[0]
+    _check_school_access(db, user, meeting.get("school_id"))
     academic_year = academic_year or resolve_requested_upload_years(meeting)[0]
 
     files_res = db.table("meeting_upload_files").select("storage_key, original_filename").eq("meeting_id", meeting_id).eq("academic_year", academic_year).execute()
@@ -412,15 +526,16 @@ async def run_check_from_uploads(
     run_dir = Path(tempfile.mkdtemp(prefix=f"gefen_{run_id}_"))
     all_paths: list[Path] = []
     for f in stored_files:
-        fname = f.get("original_filename") or Path(f["storage_key"]).name
+        fname = Path(f.get("original_filename") or Path(f["storage_key"]).name).name
         dest = run_dir / fname
         try:
             dest.write_bytes(db.storage.from_("check-files").download(f["storage_key"]))
             all_paths.append(dest)
-        except Exception:
-            raise HTTPException(status_code=500, detail=f"שגיאה בהורדת הקובץ: {fname}")
+        except Exception as exc:
+            logger.error("run_check_from_uploads: failed to download %s (storage_key=%s): %s", fname, f["storage_key"], exc, exc_info=True)
+            raise HTTPException(status_code=500, detail="שגיאה בהורדת הקובץ")
 
-    _update_run(run_id, {"status": "processing"})
+    _update_run(run_id, {"status": "processing", "_school_ctx": {"school_id": meeting["school_id"]}})
     background_tasks.add_task(
         _run_meeting_check_and_notify, run_id, all_paths, run_dir,
         user["id"], meeting["school_id"], academic_year,
@@ -507,15 +622,22 @@ def _download_plan_rosters(db, log: dict) -> dict | None:
 
 
 @router.post("/compare-plans")
-def compare_plans(body: ComparePlansRequest, _user: dict = Depends(get_current_user)):
+def compare_plans(body: ComparePlansRequest, user: dict = Depends(get_current_user)):
     """Compare the full plan roster (מענים) of two checks' planning files.
     Independent from "דיווח חסר" — includes fully-reported plans too."""
     db = get_admin_client()
 
-    newer_log = db.table("check_logs").select("*").eq("id", body.newer_log_id).single().execute().data
-    older_log = db.table("check_logs").select("*").eq("id", body.older_log_id).single().execute().data
+    # NOT .single() — that raises PGRST116 on zero matches (e.g. a nonexistent log id,
+    # which is the normal/expected case here, not an error), which would be misreported
+    # as a 503 instead of the intended 404.
+    newer_log_rows = db.table("check_logs").select("*").eq("id", body.newer_log_id).execute().data
+    older_log_rows = db.table("check_logs").select("*").eq("id", body.older_log_id).execute().data
+    newer_log = newer_log_rows[0] if newer_log_rows else None
+    older_log = older_log_rows[0] if older_log_rows else None
     if not newer_log or not older_log:
         raise HTTPException(status_code=404, detail="אחת הבדיקות לא נמצאה")
+    _check_school_access(db, user, newer_log.get("school_id"))
+    _check_school_access(db, user, older_log.get("school_id"))
 
     newer_roster = _download_plan_rosters(db, newer_log)
     older_roster = _download_plan_rosters(db, older_log)
@@ -550,22 +672,24 @@ def compare_plans(body: ComparePlansRequest, _user: dict = Depends(get_current_u
 
 
 @router.get("/result/{run_id}")
-def get_result(run_id: str, _user: dict = Depends(get_current_user)):
-    run = _get_run(run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
+def get_result(run_id: str, user: dict = Depends(get_current_user)):
+    run = _require_run_access(run_id, user)
     return _strip_for_response(run)
 
 
 @router.get("/logs/{log_id}/source-file")
-def download_log_source_file(log_id: str, name: str, _user: dict = Depends(get_current_user)):
+def download_log_source_file(log_id: str, name: str, user: dict = Depends(get_current_user)):
     """Download one of the original files uploaded for a saved check — used by
     the filename links in the "קבצים שזוהו" tooltip in SchoolPage.jsx."""
     db = get_admin_client()
-    log_result = db.table("check_logs").select("summary").eq("id", log_id).single().execute()
-    log = log_result.data
+    # NOT .single() — that raises PGRST116 on zero matches (e.g. a nonexistent log_id,
+    # which is the normal/expected case here, not an error), which would be misreported
+    # as a 503 instead of the intended 404.
+    log_rows = db.table("check_logs").select("summary, school_id").eq("id", log_id).execute().data
+    log = log_rows[0] if log_rows else None
     if not log:
         raise HTTPException(status_code=404, detail="הבדיקה לא נמצאה")
+    _check_school_access(db, user, log.get("school_id"))
 
     stored_paths = (log.get("summary") or {}).get("stored_file_paths") or []
     match = None
@@ -580,7 +704,8 @@ def download_log_source_file(log_id: str, name: str, _user: dict = Depends(get_c
     try:
         content = db.storage.from_("check-files").download(match)
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"שגיאה בהורדת הקובץ: {exc}")
+        logger.error("download_log_source_file: failed to download %s (log_id=%s): %s", name, log_id, exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="שגיאה בהורדת הקובץ")
 
     # HTTP headers must be ASCII — a raw Hebrew filename in Content-Disposition
     # breaks the response entirely. RFC 5987's filename* handles non-ASCII names
@@ -652,10 +777,8 @@ def _build_hashva_combo_excel(scoped_run: dict) -> bytes:
 
 
 @router.get("/download/{run_id}")
-def download(run_id: str, budget: str | None = None, division: str | None = None, _user: dict = Depends(get_current_user)):
-    run = _get_run(run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
+def download(run_id: str, budget: str | None = None, division: str | None = None, user: dict = Depends(get_current_user)):
+    run = _require_run_access(run_id, user)
     if run.get("status") != "done":
         raise HTTPException(status_code=400, detail="File not ready")
 
@@ -675,7 +798,8 @@ def download(run_id: str, budget: str | None = None, division: str | None = None
     try:
         excel_bytes = get_admin_client().storage.from_("check-files").download(excel_key)
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"שגיאה בהורדת הקובץ: {exc}")
+        logger.error("download: failed to download excel for run %s: %s", run_id, exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="שגיאה בהורדת הקובץ")
     return Response(
         content=excel_bytes,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -684,10 +808,8 @@ def download(run_id: str, budget: str | None = None, division: str | None = None
 
 
 @router.get("/pdf/{run_id}")
-def download_pdf(run_id: str, section: str = "hashva", budget: str | None = None, division: str | None = None, _user: dict = Depends(get_current_user)):
-    run = _get_run(run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
+def download_pdf(run_id: str, section: str = "hashva", budget: str | None = None, division: str | None = None, user: dict = Depends(get_current_user)):
+    run = _require_run_access(run_id, user)
     if run.get("status") != "done":
         raise HTTPException(status_code=400, detail="Run not complete")
     run = _scope_run_to_budget_combo(run, budget, division)
@@ -767,11 +889,9 @@ def download_tikhnun_excel(
     multiplier: str = "03",
     budget: str | None = None,
     division: str | None = None,
-    _user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user),
 ):
-    run = _get_run(run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
+    run = _require_run_access(run_id, user)
     if run.get("status") != "done":
         raise HTTPException(status_code=400, detail="Run not complete")
     tikhnun = _tikhnun_for_division(run, division)
@@ -803,11 +923,9 @@ def download_tikhnun_pdf(
     multiplier: str = "03",
     budget: str | None = None,
     division: str | None = None,
-    _user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user),
 ):
-    run = _get_run(run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
+    run = _require_run_access(run_id, user)
     if run.get("status") != "done":
         raise HTTPException(status_code=400, detail="Run not complete")
     tikhnun = _tikhnun_for_division(run, division)
@@ -832,12 +950,10 @@ def download_combined_pdf(
     multiplier: str = "03",
     budget: str | None = None,
     division: str | None = None,
-    _user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user),
 ):
     from logic.combined_exporter import export_combined_pdf
-    run = _get_run(run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
+    run = _require_run_access(run_id, user)
     if run.get("status") != "done":
         raise HTTPException(status_code=400, detail="Run not complete")
     section_list = [s.strip() for s in sections.split(",") if s.strip()]
@@ -871,12 +987,10 @@ def download_combined_excel(
     multiplier: str = "03",
     budget: str | None = None,
     division: str | None = None,
-    _user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user),
 ):
     from logic.combined_exporter import export_combined_excel
-    run = _get_run(run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
+    run = _require_run_access(run_id, user)
     if run.get("status") != "done":
         raise HTTPException(status_code=400, detail="Run not complete")
     section_list = [s.strip() for s in sections.split(",") if s.strip()]
@@ -913,9 +1027,7 @@ async def classify_rows(
     user: dict = Depends(get_current_user),
 ):
     """Apply manual budget/stage classifications to pending rows, then finalize tikhnun metrics."""
-    run = _get_run(run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="הריצה לא נמצאה")
+    run = _require_run_access(run_id, user)
 
     if req.division == "tikkon":
         tikhnun_key = "tikhnun_tikkon"
@@ -1033,9 +1145,7 @@ async def retry_finance(
     files: list[UploadFile] = File(...),
     user: dict = Depends(get_current_user),
 ):
-    run = _get_run(run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="הריצה לא נמצאה")
+    run = _require_run_access(run_id, user)
 
     tikhnun_key = {"main": "tikhnun", "tikkon": "tikhnun_tikkon", "beinayim": "tikhnun_beinayim"}.get(division, "tikhnun")
     tikhnun = run.get(tikhnun_key)

@@ -11,7 +11,7 @@ from email.mime.text import MIMEText
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 
 from auth import get_current_user
 from supabase_client import get_admin_client, reset_admin_client
@@ -35,12 +35,17 @@ def _require_superadmin(user: dict):
         raise HTTPException(status_code=403, detail="גישה מוגבלת לסופר-אדמין בלבד")
 
 
+def _strip_header_injection(value: str) -> str:
+    """Defense in depth: strip CR/LF so a value can't be used to inject extra email headers."""
+    return (value or "").replace("\r", "").replace("\n", "")
+
+
 def _send_simple_email(to: str, subject: str, html: str):
     try:
         msg = MIMEMultipart()
         msg["From"] = f"גפן AI <{GMAIL_USER}>"
-        msg["To"] = to
-        msg["Subject"] = subject
+        msg["To"] = _strip_header_injection(to)
+        msg["Subject"] = _strip_header_injection(subject)
         msg.attach(MIMEText(html, "html", "utf-8"))
         with smtplib.SMTP("smtp.gmail.com", 587, timeout=15) as server:
             server.ehlo()
@@ -166,7 +171,7 @@ class SignupApplyIn(BaseModel):
     org_name: str
     business_number: str
     owner_name: str
-    owner_email: str
+    owner_email: EmailStr
     owner_phone: str
     consent_contact: bool
     consent_contact_at: str

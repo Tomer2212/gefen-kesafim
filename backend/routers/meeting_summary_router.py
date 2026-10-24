@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from auth import get_current_user
 from supabase_client import get_admin_client, reset_admin_client
+from routers.schools_router import _require_school_access_for_meeting_activity
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -31,6 +32,28 @@ MEETING_SUMMARY_PROMPT_TEMPLATE = """את/ה מסכם/ת פגישות ייעוץ
 תמלול:
 {transcript}
 """
+
+
+def _require_meeting_access(db, user: dict, meeting_id: str, extra_select: str = "") -> dict:
+    """Resolves meeting_id -> its school -> org_id and reuses
+    schools_router._require_school_access_for_meeting_activity to enforce the same org +
+    advisor-assignment check used elsewhere for meeting activity (service_role bypasses RLS,
+    so this is the only thing standing between a user and another org's meeting). Returns
+    the meeting row (including extra_select fields) on success. A missing meeting OR a
+    meeting belonging to a different org both come back as the same 404 "הפגישה לא נמצאה"
+    — never reveal to the caller that a different org's meeting_id exists."""
+    select_fields = f"id, school_id{(', ' + extra_select) if extra_select else ''}"
+    meeting_res = db.table("meetings").select(select_fields).eq("id", meeting_id).execute()
+    if not meeting_res.data:
+        raise HTTPException(status_code=404, detail="הפגישה לא נמצאה")
+    meeting = meeting_res.data[0]
+    try:
+        _require_school_access_for_meeting_activity(db, user, meeting["school_id"])
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            raise HTTPException(status_code=404, detail="הפגישה לא נמצאה")
+        raise
+    return meeting
 
 
 def _transcribe_audio(audio_path: Path, api_key: str) -> str:
@@ -132,12 +155,16 @@ def get_summary_status(meeting_id: str, user: Annotated[dict, Depends(get_curren
     for attempt in range(2):
         try:
             db = get_admin_client()
-            res = db.table("meetings").select(
-                "summary_status, summary_error, summary_updated_at"
-            ).eq("id", meeting_id).execute()
-            if not res.data:
-                return {"summary_status": "none", "summary_error": None, "summary_updated_at": None}
-            return res.data[0]
+            meeting = _require_meeting_access(
+                db, user, meeting_id, "summary_status, summary_error, summary_updated_at"
+            )
+            return {
+                "summary_status": meeting.get("summary_status"),
+                "summary_error": meeting.get("summary_error"),
+                "summary_updated_at": meeting.get("summary_updated_at"),
+            }
+        except HTTPException:
+            raise
         except Exception as exc:
             if attempt == 0:
                 reset_admin_client()
@@ -164,9 +191,7 @@ async def upload_summary_recording(
         raise HTTPException(status_code=400, detail="סוג קובץ לא נתמך — יש להעלות קובץ שמע (mp3, m4a, wav וכו')")
 
     db = get_admin_client()
-    meeting_res = db.table("meetings").select("id").eq("id", meeting_id).execute()
-    if not meeting_res.data:
-        raise HTTPException(status_code=404, detail="הפגישה לא נמצאה")
+    _require_meeting_access(db, user, meeting_id)
 
     tmp_dir = Path(tempfile.mkdtemp(prefix=f"meetingsummary_{meeting_id}_"))
     audio_path = tmp_dir / f"recording{ext}"
@@ -195,10 +220,10 @@ def retry_summary(meeting_id: str, background_tasks: BackgroundTasks, user: Anno
     api_key = org_config["config"]["api_key"]
 
     db = get_admin_client()
-    meeting_res = db.table("meetings").select("summary_audio_storage_key").eq("id", meeting_id).execute()
-    if not meeting_res.data or not meeting_res.data[0].get("summary_audio_storage_key"):
+    meeting = _require_meeting_access(db, user, meeting_id, "summary_audio_storage_key")
+    if not meeting.get("summary_audio_storage_key"):
         raise HTTPException(status_code=400, detail="אין הקלטה שמורה לשחזור עבור פגישה זו")
-    storage_key = meeting_res.data[0]["summary_audio_storage_key"]
+    storage_key = meeting["summary_audio_storage_key"]
 
     tmp_dir = Path(tempfile.mkdtemp(prefix=f"meetingsummary_retry_{meeting_id}_"))
     try:

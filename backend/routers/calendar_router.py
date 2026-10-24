@@ -73,6 +73,27 @@ def microsoft_admin_consent_callback(
     try:
         db = get_admin_client()
         existing = graph_client.get_org_connection(db, org_id)
+        # Guard against two different orgs (tenants in this app's sense) ever sharing the
+        # same real Microsoft 365 tenant_id — if they did, _get_app_only_token would hand
+        # both orgs a token for the SAME real Microsoft tenant, and an advisor_id that
+        # happens to resolve to a real user in that shared tenant could have their Outlook
+        # mailbox written to by either org. Each org isolating to its own distinct tenant_id
+        # is what currently makes the org_id check in _resolve_advisor_email meaningful.
+        conflicting = (
+            db.table("calendar_connections")
+            .select("org_id")
+            .eq("tenant_id", tenant)
+            .eq("status", "connected")
+            .neq("org_id", org_id)
+            .execute()
+        )
+        if conflicting.data:
+            logger.error(
+                "Microsoft tenant %s is already connected to a different org (%s) — refusing to "
+                "also connect it to org %s to avoid shared-mailbox cross-org leakage",
+                tenant, conflicting.data[0]["org_id"], org_id,
+            )
+            return RedirectResponse(f"{APP_URL}/admin?tab=integrations&calendar=tenant_conflict")
         payload = {
             "org_id": org_id,
             "scope": "org",

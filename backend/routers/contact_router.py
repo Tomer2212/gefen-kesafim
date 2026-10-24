@@ -10,11 +10,19 @@ from typing import List
 from urllib.parse import quote
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from pydantic import EmailStr, TypeAdapter, ValidationError
 
 from supabase_client import get_admin_client, reset_admin_client
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+_email_adapter = TypeAdapter(EmailStr)
+
+
+def _strip_header_injection(value: str) -> str:
+    """Defense in depth: strip CR/LF so a value can't be used to inject extra email headers."""
+    return (value or "").replace("\r", "").replace("\n", "")
 
 GMAIL_USER     = os.getenv("GMAIL_USER", "")
 GMAIL_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
@@ -212,6 +220,14 @@ async def send_contact(
         raise HTTPException(status_code=400, detail="Consent required")
     if not GMAIL_USER or not GMAIL_PASSWORD:
         raise HTTPException(status_code=500, detail="Email service not configured")
+
+    try:
+        user_email = _email_adapter.validate_python(user_email.strip())
+    except ValidationError:
+        raise HTTPException(status_code=400, detail="כתובת מייל לא תקינה")
+
+    subject = _strip_header_injection(subject)
+    user_phone = _strip_header_injection(user_phone)
 
     phone_display = user_phone.strip() if user_phone.strip() else "לא צוין"
     client_ip     = request.client.host if request.client else "unknown"

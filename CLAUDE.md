@@ -624,11 +624,12 @@ This file is the single source of truth for what will be deployed next.
 
 ### Pre-Deployment Flow (MUST follow every time)
 1. Read `dev-log.md`
-2. Present pending changes to user as Hebrew bullet-point summary
-3. Ask: **"האם להעלות את כל העדכונים הללו לאתר?"**
-4. **Wait for explicit approval**
-5. Only after approval: run Deployment Steps
-6. After successful push to `main`: clear `dev-log.md` (leave only `# Dev Log`)
+2. **Check whether this deployment needs the cross-org security test suite — see "Cross-Org Security Test Suite (MANDATORY)" below. If yes, run it now and report the result before continuing.**
+3. Present pending changes to user as Hebrew bullet-point summary
+4. Ask: **"האם להעלות את כל העדכונים הללו לאתר?"**
+5. **Wait for explicit approval**
+6. Only after approval: run Deployment Steps
+7. After successful push to `main`: clear `dev-log.md` (leave only `# Dev Log`)
 
 ### Render Setup
 - Platform: Render.com — watches `main` branch (auto-deploy on push)
@@ -1012,6 +1013,36 @@ For large binary assets that shouldn't live in Supabase Storage or on Render's e
 
 ---
 
+## Cross-Org Security Test Suite (MANDATORY)
+
+**Background:** a security audit found ~65 endpoints across the backend that checked a caller's *role* (owner/manager/advisor) but not that the specific resource (school_id, meeting_id, user_id, run_id, log_id, advisor_id, etc.) actually belongs to the caller's own `org_id` — letting a user from one org read/write another org's data via a known/guessed UUID. All known instances were fixed. An automated regression+IDOR suite now lives at `backend/tests/security/` (`conftest.py` + `test_idor_cross_org.py`), using FastAPI `TestClient` with a `get_current_user` dependency override (no real login/password needed) against two real orgs already in the live Supabase project. Run it with:
+```
+cd backend && python -m pytest tests/security/ -v
+```
+A passing run means, for every covered endpoint, both (a) a different org is rejected (403/404) and (b) the caller's own org still works (200) — catching both a missed access check AND an over-aggressive fix that broke legitimate access. This suite already caught 2 real vulnerabilities (`list_goals`, `list_meetings`) that an earlier manual-only fix pass missed — treat it as the authoritative check, not a formality.
+
+**MANDATORY, without being asked:**
+1. **Whenever you build or modify a backend endpoint that takes a `school_id`, `meeting_id`, `user_id`/`advisor_id`, `run_id`, or `log_id`** (or any other org-scoped resource identifier) as a path/query/body parameter: run `python -m pytest backend/tests/security/ -v` after the change, as part of that work — do not wait to be asked. If the new endpoint represents a new resource group not yet covered by the suite, add a pair of tests for it (cross-org-rejected + same-org-still-works) following the existing pattern in `test_idor_cross_org.py`, using the real org/resource ids already documented in `conftest.py`.
+2. **Before every deployment (Pre-Deployment Flow below)**: check whether any pending change (per `dev-log.md`) touches such an endpoint. If yes, run the suite and report the pass/fail result to the user as part of the pre-deployment summary — do not proceed to ask for deployment approval without having run it first.
+3. **Always report the result** (pass count, and the full detail of any failure) to the user in Hebrew — never silently run it and only mention it if something failed.
+4. If a failure appears: treat a cross-org test that unexpectedly passes as a real, reportable vulnerability (not a flaky test) — fix the underlying endpoint, re-run, and only then proceed. Never weaken/delete a failing test to make the suite green.
+5. This is app-level enforcement, not CI — it depends on this rule being followed each session. It does not replace the suite; it replaces relying on anyone's memory to run it.
+
+As of the most recent full audit (2026-10-24), the suite covers 102 tests across all endpoint groups fixed in that audit (`test_idor_cross_org.py` + `test_idor_cross_org_extended.py`). Keep this number roughly current when adding more coverage.
+
+### Recurring security cadence (MANDATORY — do not wait for the user to ask)
+
+| Check | Frequency | What to do |
+|---|---|---|
+| Cross-org test suite (`pytest backend/tests/security/`) | Every relevant code change + before every deployment | Covered by the rules above — already automatic. |
+| Dependency vulnerability scan (`pip-audit -r backend/requirements.txt`, `npm audit` in `frontend/`) | **At least once a month**, or whenever the user says anything like "תבדוק את מצב האבטחה" / "בדיקת אבטחה" / "סריקת אבטחה" | Run both, report any new findings in Hebrew, fix low-risk ones (patch-level bumps) directly; flag anything requiring a major-version bump or architecture change before touching it. |
+| Full security posture review (OWASP-style, like the 2026-10-23/24 audit) | **Once a quarter**, OR before any significant new feature/integration, OR before onboarding a meaningful batch of new customer orgs | Re-run the full methodology: check for new missing org-ownership checks (grep for `school_id`/`meeting_id`/`user_id`/`run_id`/`log_id` path params without a `_require_*`/`_check_*` call), re-audit exceptional-condition handling (`.single()` usage, swallowed `HTTPException`), re-check security headers are still in place (backend `main.py` + the Render static site Headers page), and re-verify the Microsoft-tenant-conflict guard (`calendar_router.py`) is intact. |
+| Ad-hoc check after anything suspicious | **Immediately**, same session, never deferred | If the user reports anything that smells like cross-org data leakage, duplicate/unexpected notifications, or unexplained access — treat it exactly like the 2026-10-24 Outlook-leak investigation: check the live DB data (read-only first), form a concrete theory, verify or rule it out before claiming anything, and report findings honestly including what couldn't be confirmed. |
+
+**Do not rely on the user remembering to ask for any of the above on schedule.** If the project has a scheduled/cron reminder set up for this (see any `schedule`/cron entry referencing "בדיקת אבטחה" or "security check"), that is the primary trigger — treat a wake-up from it as an explicit instruction to run the monthly dependency scan (or the quarterly full review, if due) and report back, without needing further confirmation to start.
+
+---
+
 ## Development Rules
 
 1. **Always use plan mode** before implementing any new feature
@@ -1021,3 +1052,4 @@ For large binary assets that shouldn't live in Supabase Storage or on Render's e
 5. After every change: append to `dev-log.md`
 6. Run `npx vite build` after every frontend change to verify 0 errors
 7. When adding a field to `schools`: run the DB migration via Management API (see above), update `SchoolIn` in `schools_router.py`, update frontend state in both `AdminPage.jsx` and `SchoolPage.jsx`
+8. **See "Cross-Org Security Test Suite (MANDATORY)" above** — applies to any endpoint touching an org-scoped resource id

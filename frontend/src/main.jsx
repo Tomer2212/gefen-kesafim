@@ -4,6 +4,7 @@ import "./index.css";
 import App from "./App.jsx";
 import { supabase } from "./lib/supabase";
 import { getDeviceId, clearDeviceId } from "./lib/deviceSession";
+import { getTrustedDeviceToken, clearTrustedDeviceToken } from "./lib/trustedDevice";
 
 if (import.meta.env.VITE_API_URL) {
   axios.defaults.baseURL = import.meta.env.VITE_API_URL;
@@ -32,6 +33,10 @@ axios.interceptors.request.use(async (config) => {
     config.headers.Authorization = `Bearer ${_currentToken}`;
   }
   config.headers["X-Device-Id"] = getDeviceId();
+  const trustedToken = getTrustedDeviceToken();
+  if (trustedToken) {
+    config.headers["X-Trusted-Device-Token"] = trustedToken;
+  }
   return config;
 });
 
@@ -45,6 +50,23 @@ axios.interceptors.response.use(
     if (err.response?.status === 401) {
       // Diagnostic: shows "Token expired" or "Invalid token" from backend
       console.warn('[Auth 401]', original?.url, err.response?.data?.detail);
+
+      if (err.response?.data?.detail === "mfa_challenge_required") {
+        // The Supabase session itself is still valid (password step passed) — this
+        // user just needs to complete (or re-complete, if their trusted-device token
+        // expired/was invalid) the TOTP step-up. Don't sign out: send them to the
+        // challenge screen on LoginPage, which reuses the existing session.
+        clearTrustedDeviceToken();
+        // Guard against a reload loop: if some other call fires before the MFA step-up
+        // completes while already on /login (LoginPage's own useEffect is already
+        // driving the challenge screen from the exact same session), a hard redirect
+        // here would reload the page, re-run everything from scratch, and could 401
+        // again — repeating forever. Only navigate when we're not already there.
+        if (!window.location.pathname.startsWith("/login")) {
+          window.location.href = "/login?mfa_required=1";
+        }
+        return Promise.reject(err);
+      }
 
       if (err.response?.data?.detail === "device_revoked") {
         // Disconnected remotely (אזור אישי / ניהול) — refreshing the Supabase token won't

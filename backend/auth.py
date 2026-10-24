@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import os
@@ -75,7 +76,7 @@ def _get_profile(user_id: str) -> dict:
             db = get_admin_client()
             profile = (
                 db.table("profiles")
-                .select("role, full_name, gender, birth_date, avatar_storage_key, org_id, status, is_superadmin, onboarding_dismissed, notification_preferences, work_phone, control_domains, control_domain_levels")
+                .select("role, full_name, gender, birth_date, avatar_storage_key, org_id, status, is_superadmin, onboarding_dismissed, notification_preferences, work_phone, control_domains, control_domain_levels, mfa_enabled")
                 .eq("id", user_id)
                 .single()
                 .execute()
@@ -95,6 +96,7 @@ def _get_profile(user_id: str) -> dict:
                 "work_phone": d.get("work_phone"),
                 "control_domains": d.get("control_domains") or [],
                 "control_domain_levels": d.get("control_domain_levels") or {},
+                "mfa_enabled": bool(d.get("mfa_enabled", False)),
                 "_cached_at": time.monotonic(),
             }
             _profile_cache[user_id] = result
@@ -112,7 +114,7 @@ def _get_profile(user_id: str) -> dict:
                 fresh = _profile_cache.get(user_id)
                 if fresh:
                     return fresh
-                return {"role": "advisor", "full_name": "", "gender": None, "birth_date": None, "avatar_storage_key": None, "org_id": None, "status": "active", "is_superadmin": False, "onboarding_dismissed": {}, "notification_preferences": {"meeting_reminder": True, "meeting_reminder_minutes": 10}, "work_phone": None, "control_domains": [], "control_domain_levels": {}, "_cached_at": time.monotonic()}
+                return {"role": "advisor", "full_name": "", "gender": None, "birth_date": None, "avatar_storage_key": None, "org_id": None, "status": "active", "is_superadmin": False, "onboarding_dismissed": {}, "notification_preferences": {"meeting_reminder": True, "meeting_reminder_minutes": 10}, "work_phone": None, "control_domains": [], "control_domain_levels": {}, "mfa_enabled": False, "_cached_at": time.monotonic()}
 
 
 def invalidate_profile_cache(user_id: str) -> None:
@@ -173,6 +175,60 @@ def invalidate_device_cache(device_id: str, user_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Trusted-device cache — the "remember this device for 30 days" MFA bypass.
+# Unlike _is_device_revoked above, this check is the security boundary itself
+# (whether an AAL1 token is allowed through for a user who has MFA enabled),
+# so it is FAIL-CLOSED: any lookup failure rejects the request rather than
+# allowing it, and the short TTL just avoids a DB round-trip on every request.
+# ---------------------------------------------------------------------------
+_trusted_device_cache: dict = {}
+_TRUSTED_DEVICE_TTL = 5  # seconds
+
+
+def _hash_device_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _is_device_trusted(token: str, user_id: str) -> bool:
+    token_hash = _hash_device_token(token)
+    cache_key = (token_hash, user_id)
+    now = time.monotonic()
+    cached = _trusted_device_cache.get(cache_key)
+    if cached and (now - cached[1]) < _TRUSTED_DEVICE_TTL:
+        return cached[0]
+
+    trusted = False
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            res = (
+                db.table("trusted_devices")
+                .select("expires_at")
+                .eq("token_hash", token_hash)
+                .eq("user_id", user_id)
+                .limit(1)
+                .execute()
+            )
+            rows = res.data or []
+            if rows:
+                import datetime as _dt
+                expires_at = _dt.datetime.fromisoformat(rows[0]["expires_at"].replace("Z", "+00:00"))
+                trusted = expires_at > _dt.datetime.now(_dt.timezone.utc)
+            break
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("_is_device_trusted attempt 1 failed for user %s: %s — resetting and retrying", user_id, exc)
+                reset_admin_client()
+                time.sleep(0.05)
+            else:
+                logger.warning("_is_device_trusted failed after 2 attempts for user %s: %s — rejecting (fail-closed)", user_id, exc)
+                trusted = False
+
+    _trusted_device_cache[cache_key] = (trusted, now)
+    return trusted
+
+
+# ---------------------------------------------------------------------------
 # FastAPI dependency
 # ---------------------------------------------------------------------------
 
@@ -185,19 +241,23 @@ def get_current_user(
     try:
         import datetime as _dt
         public_key = _get_public_key()
+        supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
+        issuer = f"{supabase_url}/auth/v1"
         payload = jwt.decode(
             token,
             public_key,
             algorithms=["ES256"],
             audience="authenticated",
+            issuer=issuer,
             leeway=_dt.timedelta(seconds=60),
         )
         user_id = payload.get("sub")
         email = payload.get("email", "")
+        aal = payload.get("aal")
         if not user_id:
             raise HTTPException(status_code=401, detail="Invalid token")
     except jwt.ExpiredSignatureError:
-        logger.warning("JWT rejected — expired (token prefix=%s)", token[:20] if token else "?")
+        logger.warning("JWT rejected — expired")
         raise HTTPException(status_code=401, detail="Token expired")
     except HTTPException:
         raise
@@ -210,6 +270,11 @@ def get_current_user(
         raise HTTPException(status_code=401, detail="device_revoked")
 
     profile = _get_profile(user_id)
+
+    if profile.get("mfa_enabled") and aal != "aal2":
+        trusted_token = request.headers.get("X-Trusted-Device-Token")
+        if not trusted_token or not _is_device_trusted(trusted_token, user_id):
+            raise HTTPException(status_code=401, detail="mfa_challenge_required")
 
     return {
         "id": user_id,
@@ -225,6 +290,7 @@ def get_current_user(
         "onboarding_dismissed": profile["onboarding_dismissed"],
         "notification_preferences": profile["notification_preferences"],
         "work_phone": profile.get("work_phone"),
+        "mfa_enabled": profile.get("mfa_enabled", False),
         "control_domains": profile.get("control_domains") or [],
         "control_domain_levels": profile.get("control_domain_levels") or {},
     }

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useParams, Link } from "react-router-dom";
+import { useParams } from "react-router-dom";
 import axios from "axios";
 import logoImg from "../assets/logo.png";
 import { useFocusTrap } from "../hooks/useFocusTrap";
@@ -382,11 +382,6 @@ export default function MeetingUploadPage() {
             </>
           )}
 
-          {(status === "invalid" || status === "expired") && (
-            <div className="text-center mt-4">
-              <Link to="/contact" className="text-sm text-blue-600 hover:underline">יצירת קשר</Link>
-            </div>
-          )}
         </div>
       </div>
 

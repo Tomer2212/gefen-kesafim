@@ -720,6 +720,20 @@ def link_call_school(
     linking to one never removes it from another."""
     _require_manager(user)
 
+    db = get_admin_client()
+    school_row = db.table("schools").select("id").eq("id", body.school_id).eq("org_id", user["org_id"]).execute()
+    if not school_row.data:
+        raise HTTPException(status_code=404, detail="בית ספר לא נמצא")
+
+    # Cross-org hijack guard: if this call_id is already linked to a school in a
+    # DIFFERENT org, it genuinely belongs to that org's call data (calls themselves live
+    # only in the provider's system, scoped by that org's own API credentials/webhook —
+    # see calls_router module docstring on org-scoping) — refuse to attach it here rather
+    # than silently creating a second, cross-org link to the same call_id.
+    hijack_check = db.table("calls_call_school_links").select("org_id").eq("call_id", call_id).neq("org_id", user["org_id"]).limit(1).execute()
+    if hijack_check.data:
+        raise HTTPException(status_code=403, detail="אין הרשאה לפעולה זו")
+
     for attempt in range(2):
         try:
             db = get_admin_client()
@@ -761,11 +775,16 @@ def exclude_call_from_school(
     from routers.schools_router import _advisor_has_access_to_school_row, _check_permission
 
     db = get_admin_client()
+    # Org check applies to BOTH branches below (owner/manager included) — previously only
+    # the advisor branch filtered school_id by org_id, so a manager of org B could pass a
+    # school_id belonging to org A and silently exclude a call from org A's school tab.
+    school_row = db.table("schools").select("id, restrict_access_to").eq("id", body.school_id).eq("org_id", user["org_id"]).execute()
+    if not school_row.data:
+        raise HTTPException(status_code=404, detail="בית ספר לא נמצא")
     if user["role"] not in _MANAGER_ROLES:
         if not _check_permission(db, user, "can_remove_call_from_school"):
             raise HTTPException(status_code=403, detail="אין הרשאה לפעולה זו")
-        school_row = db.table("schools").select("id, restrict_access_to").eq("id", body.school_id).eq("org_id", user["org_id"]).execute()
-        if not school_row.data or not _advisor_has_access_to_school_row(db, user["id"], school_row.data[0]):
+        if not _advisor_has_access_to_school_row(db, user["id"], school_row.data[0]):
             raise HTTPException(status_code=403, detail="אין הרשאה לצפות בבית ספר זה")
 
     for attempt in range(2):

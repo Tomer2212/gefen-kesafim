@@ -19,4 +19,7 @@ backend/result_debug.json
 .claude/
 temp_*.json
 _skill_tmp/
+backend/users.json
+backend/consents.json
+backend/tickets.json
 

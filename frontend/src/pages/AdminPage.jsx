@@ -157,7 +157,7 @@ function RoleSelect({ value, options, onChange, disabled, title, ariaLabel }) {
 // `position: absolute` dropdowns nested in the table lose click hit-testing to later DOM
 // siblings that also happen to be positioned elements — see MultiSelectChips.jsx for the same
 // issue with a different symptom).
-function UserActionsMenu({ open, onToggle, onClose, showResend, resending, resendResult, onResend, onDelete, ariaLabel }) {
+function UserActionsMenu({ open, onToggle, onClose, showResend, resending, resendResult, onResend, showMfaReset, resettingMfa, onResetMfa, onDelete, ariaLabel }) {
   const [pos, setPos] = useState(null);
   const triggerRef = useRef(null);
   const dropdownRef = useRef(null);
@@ -241,6 +241,20 @@ function UserActionsMenu({ open, onToggle, onClose, showResend, resending, resen
                   {resendResult === "ok" ? "✓ נשלח" : "שגיאה"}
                 </p>
               )}
+              <div className="border-t border-slate-100 my-1" />
+            </>
+          )}
+          {showMfaReset && (
+            <>
+              <button
+                role="menuitem"
+                type="button"
+                onClick={onResetMfa}
+                disabled={resettingMfa}
+                className="w-full text-right px-4 py-2 text-sm text-amber-600 hover:bg-amber-50 transition-colors disabled:opacity-40"
+              >
+                {resettingMfa ? "מאפס..." : "אפס אימות דו-שלבי"}
+              </button>
               <div className="border-t border-slate-100 my-1" />
             </>
           )}
@@ -1592,8 +1606,8 @@ const PERM_GROUPS = [
   },
   {
     label: "משתמשים",
-    perms: ["can_invite_users", "can_delete_users", "can_change_user_role", "can_manage_user_permissions"],
-    advisorNA: new Set(["can_invite_users", "can_delete_users", "can_change_user_role", "can_manage_user_permissions"]),
+    perms: ["can_invite_users", "can_delete_users", "can_change_user_role", "can_manage_user_permissions", "can_manage_manager_permissions"],
+    advisorNA: new Set(["can_invite_users", "can_delete_users", "can_change_user_role", "can_manage_user_permissions", "can_manage_manager_permissions"]),
   },
   {
     label: "חיובים",
@@ -2145,6 +2159,7 @@ export default function AdminPage() {
   const [canInviteUsers, setCanInviteUsers] = useState(false);
   const [canDeleteUsers, setCanDeleteUsers] = useState(false);
   const [canManagePermissions, setCanManagePermissions] = useState(false);
+  const [canManageManagerPermissions, setCanManageManagerPermissions] = useState(false);
   const [canDeleteMeetings, setCanDeleteMeetings] = useState(false);
 
   // Schools state
@@ -2280,6 +2295,7 @@ export default function AdminPage() {
   const [userImportProgressMsg, setUserImportProgressMsg] = useState("");
   const [resendingUserId, setResendingUserId] = useState(null);
   const [resendMsg, setResendMsg] = useState(null); // { id, ok }
+  const [resettingMfaUserId, setResettingMfaUserId] = useState(null);
 
   // User edit / delete
   const [editingUser, setEditingUser] = useState(null);
@@ -2453,6 +2469,7 @@ export default function AdminPage() {
         setCanInviteUsers(!!res.data?.can_invite_users);
         setCanDeleteUsers(!!res.data?.can_delete_users);
         setCanManagePermissions(!!res.data?.can_manage_user_permissions);
+        setCanManageManagerPermissions(!!res.data?.can_manage_manager_permissions);
         setCanDeleteMeetings(!!res.data?.can_delete_own_meetings);
       }).catch(() => {});
     });
@@ -3674,6 +3691,19 @@ export default function AdminPage() {
       setTimeout(() => setResendMsg(null), 4000);
     } finally {
       setResendingUserId(null);
+    }
+  }
+
+  async function resetUserMfa(u) {
+    if (!window.confirm(`לאפס אימות דו-שלבי עבור ${u.full_name || u.email}? ${u.full_name || "המשתמש"} יצטרך/תצטרך להגדיר אותו מחדש בכניסה הבאה.`)) return;
+    setResettingMfaUserId(u.id);
+    try {
+      await axios.post(`/schools/users/${u.id}/mfa/reset`);
+      setUsers(prev => prev.map(x => x.id === u.id ? { ...x, mfa_enabled: false } : x));
+    } catch {
+      alert("שגיאה באיפוס אימות דו-שלבי. נסה שוב.");
+    } finally {
+      setResettingMfaUserId(null);
     }
   }
 
@@ -5657,7 +5687,9 @@ export default function AdminPage() {
                         {isUserColVisible("overrides") && (
                         <td className="px-5 py-3 whitespace-nowrap">
                           <div className="flex items-center justify-center">
-                            {u.role !== "owner" && (
+                            {u.role !== "owner" &&
+                              !(myRole === "manager" && u.id === myUserId) &&
+                              (myRole !== "manager" || u.role !== "manager" || canManageManagerPermissions) && (
                               <button onClick={() => openOverridePanel(u)}
                                 aria-label={`הרשאות אישיות: ${u.full_name || u.email}`}
                                 className="relative w-7 h-7 flex items-center justify-center rounded-lg border border-dashed border-slate-300 text-slate-400 hover:text-blue-600 hover:border-blue-400 hover:bg-blue-50 transition-colors">
@@ -5720,6 +5752,9 @@ export default function AdminPage() {
                                 resending={resendingUserId === u.id}
                                 resendResult={resendMsg?.id === u.id ? (resendMsg.ok ? "ok" : "error") : null}
                                 onResend={() => resendInvite(u)}
+                                showMfaReset={myRole === "owner" && !!u.mfa_enabled}
+                                resettingMfa={resettingMfaUserId === u.id}
+                                onResetMfa={() => { setOpenActionsMenu(null); resetUserMfa(u); }}
                                 onDelete={() => { setOpenActionsMenu(null); handleDeleteButtonClick(u); }}
                               />
                             </div>

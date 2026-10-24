@@ -31,7 +31,7 @@ from routers.analyze_router import (
     _finance_budget_scoped,
     _kesafim_is_unreadable_binary,
 )
-from routers.schools_router import _create_notifications
+from routers.schools_router import _create_notifications, _require_school_access_for_meeting_activity
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -150,6 +150,30 @@ def _reclassify_gefen_budgets(meeting_id: str, academic_year: str) -> None:
             shutil.rmtree(run_dir, ignore_errors=True)
     except Exception as exc:
         logger.warning("meeting-upload: gefen budget reclassification failed (non-fatal): %s", exc)
+
+
+def _require_meeting_access(db, user: dict, meeting_id: str, extra_select: str = "") -> dict:
+    """Resolves meeting_id -> its school -> org_id and reuses
+    schools_router._require_school_access_for_meeting_activity to enforce the org +
+    advisor-assignment check — service_role bypasses RLS, so this is the only thing
+    standing between a user and another org's meeting. Returns the meeting row (including
+    extra_select fields) on success. A missing meeting and a meeting belonging to a
+    different org both come back as the same 404 "הפגישה לא נמצאה" — never reveal to the
+    caller that a different org's meeting_id exists. Only used by the AUTHENTICATED
+    advisor/manager endpoints below — the public /public/meeting-upload/{token} endpoints
+    are intentionally unauthenticated and scoped by the magic-link token instead."""
+    select_fields = f"id, school_id{(', ' + extra_select) if extra_select else ''}"
+    meeting_res = db.table("meetings").select(select_fields).eq("id", meeting_id).execute()
+    if not meeting_res.data:
+        raise HTTPException(status_code=404, detail="הפגישה לא נמצאה")
+    meeting = meeting_res.data[0]
+    try:
+        _require_school_access_for_meeting_activity(db, user, meeting["school_id"])
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            raise HTTPException(status_code=404, detail="הפגישה לא נמצאה")
+        raise
+    return meeting
 
 
 def _get_valid_token(db, token: str) -> dict:
@@ -357,10 +381,7 @@ def get_upload_comparison(meeting_id: str, user: Annotated[dict, Depends(get_cur
     for attempt in range(2):
         try:
             db = get_admin_client()
-            meeting_res = db.table("meetings").select("id, school_id, meeting_date, academic_year, requested_upload_years").eq("id", meeting_id).execute()
-            if not meeting_res.data:
-                raise HTTPException(status_code=404, detail="הפגישה לא נמצאה")
-            meeting = meeting_res.data[0]
+            meeting = _require_meeting_access(db, user, meeting_id, "meeting_date, academic_year, requested_upload_years")
             year = academic_year or resolve_requested_upload_years(meeting)[0]
 
             school_res = db.table("schools").select("id, name, stage, finance_software").eq("id", meeting["school_id"]).execute()
@@ -387,6 +408,7 @@ def get_uploaded_files(meeting_id: str, user: Annotated[dict, Depends(get_curren
     for attempt in range(2):
         try:
             db = get_admin_client()
+            _require_meeting_access(db, user, meeting_id)
             query = db.table("meeting_upload_files").select(
                 "id, original_filename, identified_type, division_type, budgets, uploaded_at"
             ).eq("meeting_id", meeting_id)
@@ -399,6 +421,8 @@ def get_uploaded_files(meeting_id: str, user: Annotated[dict, Depends(get_curren
                 "type_label": file_type_label(f.get("identified_type"), f.get("division_type"), f.get("budgets")),
                 "uploaded_at": f["uploaded_at"],
             } for f in (files_res.data or [])]
+        except HTTPException:
+            raise
         except Exception as exc:
             if attempt == 0:
                 reset_admin_client()
@@ -411,6 +435,7 @@ def get_uploaded_files(meeting_id: str, user: Annotated[dict, Depends(get_curren
 @router.get("/schools/meetings/{meeting_id}/uploaded-files/{file_id}/download")
 def download_uploaded_file(meeting_id: str, file_id: str, user: Annotated[dict, Depends(get_current_user)]):
     db = get_admin_client()
+    _require_meeting_access(db, user, meeting_id)
     file_res = db.table("meeting_upload_files").select("storage_key, original_filename").eq("id", file_id).eq("meeting_id", meeting_id).execute()
     if not file_res.data:
         raise HTTPException(status_code=404, detail="הקובץ לא נמצא")
@@ -438,10 +463,7 @@ def request_missing_files(meeting_id: str, user: Annotated[dict, Depends(get_cur
     """The one manual button in this feature — sends a targeted follow-up
     email to the secretary/finance contact naming exactly the missing items."""
     db = get_admin_client()
-    meeting_res = db.table("meetings").select("id, school_id, participants, meeting_date, academic_year, requested_upload_years").eq("id", meeting_id).execute()
-    if not meeting_res.data:
-        raise HTTPException(status_code=404, detail="הפגישה לא נמצאה")
-    meeting = meeting_res.data[0]
+    meeting = _require_meeting_access(db, user, meeting_id, "participants, meeting_date, academic_year, requested_upload_years")
 
     school_res = db.table("schools").select("id, name, stage, finance_software").eq("id", meeting["school_id"]).execute()
     school = school_res.data[0]

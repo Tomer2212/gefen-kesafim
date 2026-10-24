@@ -804,6 +804,8 @@ export default function AdminIntegrationsTab() {
     const calendarResult = params.get("calendar");
     if (calendarResult === "connected") {
       setBanner({ type: "success", text: "היומן הארגוני חובר בהצלחה!" });
+    } else if (calendarResult === "tenant_conflict") {
+      setBanner({ type: "error", text: "חשבון Microsoft 365 הזה מחובר כבר לארגון אחר במערכת. יש להתחבר עם חשבון Microsoft 365 נפרד וייחודי לארגון זה, או לפנות לתמיכה." });
     } else if (calendarResult === "error") {
       setBanner({ type: "error", text: "החיבור ליומן נכשל. נסו שוב או פנו לתמיכה." });
     }

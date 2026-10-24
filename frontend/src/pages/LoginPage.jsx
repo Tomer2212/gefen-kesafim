@@ -1,7 +1,10 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
+import axios from "axios";
 import { supabase } from "../lib/supabase";
 import { describeConnectionError } from "../lib/connectionError";
+import { getTrustedDeviceToken, setTrustedDeviceToken } from "../lib/trustedDevice";
+import { getDeviceId } from "../lib/deviceSession";
 import logoImg from "../assets/logo.png";
 
 const LogoMark = () => (
@@ -11,7 +14,8 @@ const LogoMark = () => (
 );
 
 export default function LoginPage() {
-  const [view, setView]           = useState("login"); // "login" | "forgot" | "sent"
+  const [searchParams] = useSearchParams();
+  const [view, setView]           = useState("login"); // "login" | "forgot" | "sent" | "mfa"
   const [email, setEmail]         = useState("");
   const [password, setPassword]   = useState("");
   const [error, setError]         = useState("");
@@ -21,6 +25,13 @@ export default function LoginPage() {
   const [resetEmail, setResetEmail]   = useState("");
   const [resetError, setResetError]   = useState("");
   const [resetLoading, setResetLoading] = useState(false);
+
+  const [mfaFactorId, setMfaFactorId]     = useState(null);
+  const [mfaChallengeId, setMfaChallengeId] = useState(null);
+  const [mfaCode, setMfaCode]             = useState("");
+  const [mfaError, setMfaError]           = useState("");
+  const [mfaLoading, setMfaLoading]       = useState(false);
+  const [rememberDevice, setRememberDevice] = useState(false);
 
   useEffect(() => {
     try {
@@ -33,6 +44,42 @@ export default function LoginPage() {
     }
   }, []);
 
+  // Reached via a backend-initiated 401 "mfa_challenge_required" redirect: the password
+  // step already passed earlier (the Supabase session is still valid at AAL1) and only
+  // the TOTP step-up is missing — so go straight to the challenge screen on the existing
+  // session instead of asking for the password again.
+  useEffect(() => {
+    if (searchParams.get("mfa_required") !== "1") return;
+    (async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session) {
+        await startMfaChallenge();
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function startMfaChallenge() {
+    setMfaError("");
+    try {
+      const { data: factorsData, error: factorsErr } = await supabase.auth.mfa.listFactors();
+      if (factorsErr) throw factorsErr;
+      const totpFactor = (factorsData?.totp || []).find(f => f.status === "verified");
+      if (!totpFactor) {
+        setError("לא נמצא פקטור אימות דו-שלבי מאומת. פנה לבעלים של המערכת לאיפוס.");
+        setView("login");
+        return;
+      }
+      const { data: challengeData, error: challengeErr } = await supabase.auth.mfa.challenge({ factorId: totpFactor.id });
+      if (challengeErr) throw challengeErr;
+      setMfaFactorId(totpFactor.id);
+      setMfaChallengeId(challengeData.id);
+      setView("mfa");
+    } catch (err) {
+      setError(describeConnectionError(err).message);
+    }
+  }
+
   async function handleSubmit(e) {
     e.preventDefault();
     setLoading(true);
@@ -43,11 +90,70 @@ export default function LoginPage() {
         setError("אימייל או סיסמה שגויים");
         return;
       }
+      const { data: aalData } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
+      if (aalData?.nextLevel === "aal2" && aalData?.currentLevel !== "aal2") {
+        // Enrolled in MFA. If this browser was marked as trusted within the last 30 days,
+        // proceed optimistically — the backend re-validates the token on every request and
+        // will bounce back here (via the mfa_challenge_required redirect) if it's invalid.
+        if (getTrustedDeviceToken()) {
+          window.location.replace("/");
+          return;
+        }
+        await startMfaChallenge();
+        return;
+      }
       window.location.replace("/");
     } catch (err) {
       setError(describeConnectionError(err).message);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleMfaSubmit(e) {
+    e.preventDefault();
+    setMfaLoading(true);
+    setMfaError("");
+    try {
+      const { error: verifyErr } = await supabase.auth.mfa.verify({
+        factorId: mfaFactorId,
+        challengeId: mfaChallengeId,
+        code: mfaCode.trim(),
+      });
+      if (verifyErr) {
+        setMfaError("קוד שגוי. נסה שוב.");
+        return;
+      }
+      if (rememberDevice) {
+        // Deliberately NOT a plain axios.post(): the shared interceptor in main.jsx attaches
+        // its own cached token (mirrored from onAuthStateChange, which may not have caught up
+        // to the AAL2 session mfa.verify() just minted) and, on any failure, triggers global
+        // side effects (sign-out / redirect) that would collide with this page's own
+        // navigation below. A raw fetch with an explicitly fresh token keeps this truly
+        // best-effort — a failure here has zero side effects beyond not remembering the device.
+        try {
+          const { data: { session } } = await supabase.auth.getSession();
+          const baseURL = axios.defaults.baseURL || "";
+          const resp = await fetch(`${baseURL}/schools/users/me/mfa/trust-device`, {
+            method: "POST",
+            headers: {
+              ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+              "X-Device-Id": getDeviceId(),
+            },
+          });
+          if (resp.ok) {
+            const data = await resp.json();
+            setTrustedDeviceToken(data.token, data.expires_at);
+          }
+        } catch {
+          // best-effort — failing to remember the device just means a code is needed next time
+        }
+      }
+      window.location.replace("/");
+    } catch (err) {
+      setMfaError(describeConnectionError(err).message);
+    } finally {
+      setMfaLoading(false);
     }
   }
 
@@ -178,6 +284,82 @@ export default function LoginPage() {
                     אין לכם חשבון עדיין? הגישו בקשת הרשמה
                   </Link>
                 </div>
+              </form>
+            </>
+          )}
+
+          {/* ── MFA CHALLENGE VIEW ── */}
+          {view === "mfa" && (
+            <>
+              <LogoMark />
+              <h1 className="text-center text-2xl mb-1" style={{ color: "#0070F3", fontWeight: 800 }}>
+                אימות דו-שלבי
+              </h1>
+              <p className="text-center text-sm text-slate-400 mb-8 font-medium">
+                הזן את הקוד בן 6 הספרות המוצג כרגע באפליקציית האימות שלך
+              </p>
+
+              <form onSubmit={handleMfaSubmit} className="flex flex-col gap-4">
+                <div className="flex flex-col gap-1.5">
+                  <label htmlFor="mfa-code" className="text-xs text-slate-500 text-right" style={{ fontWeight: 600 }}>
+                    קוד אימות
+                  </label>
+                  <input
+                    id="mfa-code"
+                    className="input-field text-center tracking-[0.3em]"
+                    type="text"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    maxLength={6}
+                    placeholder="000000"
+                    value={mfaCode}
+                    onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, ""))}
+                    required
+                    autoFocus
+                    dir="ltr"
+                  />
+                </div>
+
+                <label className="flex items-center gap-2 text-sm text-slate-600 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={rememberDevice}
+                    onChange={(e) => setRememberDevice(e.target.checked)}
+                    className="w-4 h-4"
+                  />
+                  זכור מכשיר זה ל-30 יום
+                </label>
+
+                {mfaError && (
+                  <div role="alert" className="flex items-center gap-2 bg-red-50 border border-red-200 rounded-xl px-4 py-2.5">
+                    <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" className="flex-shrink-0">
+                      <circle cx="8" cy="8" r="7" stroke="#ef4444" strokeWidth="1.5"/>
+                      <path d="M8 4.5v4M8 10.5v.5" stroke="#ef4444" strokeWidth="1.5" strokeLinecap="round"/>
+                    </svg>
+                    <p className="text-red-600 text-sm">{mfaError}</p>
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={mfaLoading || mfaCode.length !== 6}
+                  className="btn-blue mt-2 py-3 text-base"
+                >
+                  {mfaLoading ? (
+                    <span className="flex items-center justify-center gap-2">
+                      <span aria-hidden="true" className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full inline-block" style={{ animation: "spin-smooth 0.7s linear infinite" }} />
+                      מאמת...
+                    </span>
+                  ) : "אמת והיכנס"}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={async () => { await supabase.auth.signOut(); setView("login"); }}
+                  className="text-center text-sm text-slate-500 hover:text-slate-700 hover:underline"
+                >
+                  חזור לכניסה
+                </button>
               </form>
             </>
           )}

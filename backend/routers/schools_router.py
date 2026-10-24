@@ -1,3 +1,4 @@
+import hashlib
 import io
 import json
 import logging
@@ -1480,6 +1481,18 @@ def _advisor_has_school_access(db, user: dict, school_id: str) -> bool:
     return bool(assigned.data)
 
 
+def _require_school_in_org(db, user: dict, school_id: str) -> None:
+    """Raises 404 unless `school_id` belongs to the caller's org. For advisor-role callers,
+    also raises 403 unless they have assignment/restrict_access_to access to the school.
+    Use this on every owner/manager branch that currently skips an org check — mirrors the
+    pattern already used by `_advisor_has_school_access` / `update_school` / `get_school`."""
+    school_row = db.table("schools").select("id, restrict_access_to").eq("id", school_id).eq("org_id", user["org_id"]).execute()
+    if not school_row.data:
+        raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
+    if user["role"] not in ("owner", "manager") and not _advisor_has_access_to_school_row(db, user["id"], school_row.data[0]):
+        raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
+
+
 def _attach_updater_names(db, rows: list[dict]) -> None:
     """Non-fatal enrichment: resolve order_amount_gefen_updated_by → full_name."""
     updater_ids = list({r["order_amount_gefen_updated_by"] for r in rows if r.get("order_amount_gefen_updated_by")})
@@ -1553,8 +1566,7 @@ def get_year_admin_data(
     academic_year: str = DEFAULT_ACADEMIC_YEAR,
 ):
     db = get_admin_client()
-    if user["role"] not in ("owner", "manager") and not _advisor_has_school_access(db, user, school_id):
-        raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
+    _require_school_in_org(db, user, school_id)
 
     row = (
         db.table("school_year_admin_data")
@@ -1591,8 +1603,11 @@ _YEAR_ADMIN_ADVISOR_ALLOWED_FIELDS = {
 
 
 def _check_year_admin_field_access(db, user: dict, school_id: str, fields: set[str]) -> None:
-    """Raises HTTPException(403) if `user` may not write `fields` on this school's year-admin-data row."""
+    """Raises HTTPException(403/404) if `user` may not write `fields` on this school's year-admin-data row."""
     if user["role"] in ("owner", "manager"):
+        school_check = db.table("schools").select("id").eq("id", school_id).eq("org_id", user["org_id"]).execute()
+        if not school_check.data:
+            raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
         return
     if not _advisor_has_school_access(db, user, school_id):
         raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
@@ -1726,6 +1741,7 @@ async def upload_contract_file(
 
     _require_manager(user)
     db = get_admin_client()
+    _require_school_in_org(db, user, school_id)
 
     run_dir = Path(tempfile.mkdtemp(prefix=f"contract_{school_id}_"))
     try:
@@ -1760,8 +1776,7 @@ def download_contract_file(
     academic_year: str = DEFAULT_ACADEMIC_YEAR,
 ):
     db = get_admin_client()
-    if user["role"] not in ("owner", "manager") and not _advisor_has_school_access(db, user, school_id):
-        raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
+    _require_school_in_org(db, user, school_id)
 
     row = (
         db.table("school_year_admin_data")
@@ -2010,7 +2025,7 @@ async def gefen_organized_check(
     for attempt in range(2):
         try:
             db = get_admin_client()
-            schools_rows = db.table("schools").select("id, symbol").eq("status", "active").execute()
+            schools_rows = db.table("schools").select("id, symbol").eq("status", "active").eq("org_id", user["org_id"]).execute()
             yad_rows = (
                 db.table("school_year_admin_data")
                 .select("school_id, client_status, order_method, order_amount_gefen")
@@ -2115,6 +2130,9 @@ def list_accounts(
     for attempt in range(2):
         try:
             db = get_admin_client()
+            school_check = db.table("schools").select("id").eq("id", school_id).eq("org_id", user["org_id"]).execute()
+            if not school_check.data:
+                raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
             rows = (
                 db.table("gefen_accounts")
                 .select("*")
@@ -2123,6 +2141,8 @@ def list_accounts(
                 .execute()
             )
             return rows.data
+        except HTTPException:
+            raise
         except Exception as exc:
             if attempt == 0:
                 logger.warning("list_accounts attempt 1 failed: %s — resetting client and retrying", exc)
@@ -2150,6 +2170,9 @@ def create_account(
         assigned = db.table("advisor_schools").select("school_id").eq("advisor_id", user["id"]).eq("school_id", school_id).execute()
         if not (assigned.data):
             raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
+    school_check = db.table("schools").select("id").eq("id", school_id).eq("org_id", user["org_id"]).execute()
+    if not school_check.data:
+        raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
     row = (
         db.table("gefen_accounts")
         .insert({"school_id": school_id, **body.model_dump(exclude_none=True)})
@@ -2167,6 +2190,9 @@ def update_account(
 ):
     _require_manager(user)
     db = get_admin_client()
+    school_check = db.table("schools").select("id").eq("id", school_id).eq("org_id", user["org_id"]).execute()
+    if not school_check.data:
+        raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
     data = {k: v for k, v in body.model_dump().items() if k != "division_type" and v is not None}
     row = (
         db.table("gefen_accounts")
@@ -2188,6 +2214,9 @@ def delete_account(
 ):
     _require_manager(user)
     db = get_admin_client()
+    school_check = db.table("schools").select("id").eq("id", school_id).eq("org_id", user["org_id"]).execute()
+    if not school_check.data:
+        raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
     db.table("gefen_accounts").delete().eq("id", account_id).eq("school_id", school_id).execute()
     return {"ok": True}
 
@@ -2219,6 +2248,7 @@ def list_goals(
     for attempt in range(2):
         try:
             db = get_admin_client()
+            _require_school_in_org(db, user, school_id)
             defs = sorted(
                 (d for d in GOAL_DEFINITIONS if d["division"] in ("all", division_type)),
                 key=lambda d: d["target_date"],
@@ -2280,6 +2310,8 @@ def list_goals(
                 "important_dates": important_dates,
                 "goal_automation_enabled": goal_automation_enabled,
             }
+        except HTTPException:
+            raise
         except Exception as exc:
             if attempt == 0:
                 logger.warning("list_goals attempt 1 failed: %s — resetting client and retrying", exc)
@@ -2306,8 +2338,7 @@ def set_goal_status(
     # Was missing entirely (only Depends(get_current_user), no access check) — any authenticated
     # user, including an advisor with zero assignment to this school, could update ANY school's
     # goal. Same access rule already enforced by upsert_control_letter/get_year_admin_data.
-    if user["role"] not in ("owner", "manager") and not _advisor_has_school_access(db, user, school_id):
-        raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
+    _require_school_in_org(db, user, school_id)
 
     # Append a "הערות" audit line for every manual toggle (kept append-only alongside the
     # automation's own lines — see goals_logic). Manual edits are always allowed, regardless
@@ -2371,8 +2402,7 @@ def list_gefen_closures(
     for attempt in range(2):
         try:
             db = get_admin_client()
-            if user["role"] not in ("owner", "manager") and not _advisor_has_school_access(db, user, school_id):
-                raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
+            _require_school_in_org(db, user, school_id)
 
             metric_rows = (
                 db.table("check_metrics")
@@ -2436,8 +2466,7 @@ def set_gefen_closure(
     user: Annotated[dict, Depends(get_current_user)],
 ):
     db = get_admin_client()
-    if user["role"] not in ("owner", "manager") and not _advisor_has_school_access(db, user, school_id):
-        raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
+    _require_school_in_org(db, user, school_id)
 
     # Only "status"/"notes" are partial-updatable (one toggle, one textarea blur) — build
     # the upsert payload from exclude_unset so an update to one never nulls out the other
@@ -2480,8 +2509,7 @@ def get_incentive_model(
     for attempt in range(2):
         try:
             db = get_admin_client()
-            if user["role"] not in ("owner", "manager") and not _advisor_has_school_access(db, user, school_id):
-                raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
+            _require_school_in_org(db, user, school_id)
 
             existing = (
                 db.table("yozma_incentive_selections")
@@ -2558,8 +2586,7 @@ def set_incentive_model(
     user: Annotated[dict, Depends(get_current_user)],
 ):
     db = get_admin_client()
-    if user["role"] not in ("owner", "manager") and not _advisor_has_school_access(db, user, school_id):
-        raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
+    _require_school_in_org(db, user, school_id)
 
     row = (
         db.table("yozma_incentive_selections")
@@ -2594,6 +2621,9 @@ def list_advisors(
     for attempt in range(2):
         try:
             db = get_admin_client()
+            school_check = db.table("schools").select("id").eq("id", school_id).eq("org_id", user["org_id"]).execute()
+            if not school_check.data:
+                raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
             rows = (
                 db.table("advisor_schools")
                 .select("advisor_id, profiles(id, email, full_name, role)")
@@ -2601,6 +2631,8 @@ def list_advisors(
                 .execute()
             )
             return [r["profiles"] for r in rows.data if r.get("profiles")]
+        except HTTPException:
+            raise
         except Exception as exc:
             if attempt == 0:
                 logger.warning("list_advisors attempt 1 failed: %s — resetting client and retrying", exc)
@@ -2619,6 +2651,9 @@ def assign_advisor(
 ):
     _require_manager(user)
     db = get_admin_client()
+    school_check = db.table("schools").select("id").eq("id", school_id).eq("org_id", user["org_id"]).execute()
+    if not school_check.data:
+        raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
     # temp_access_expires_at explicitly nulled — a manual/permanent assignment always wins
     # over any pending or already-active temporary grant for the same advisor+school pair
     # (see _process_temp_advisor_access below, which never touches a row with a null expiry).
@@ -2688,8 +2723,9 @@ def check_advisor_access(
 ):
     """Round: advisor-access grant modal. advisor_ids is a comma-separated list; returns
     {advisor_id: bool} for whether each advisor currently has access to the school."""
+    _require_manager(user)
     db = get_admin_client()
-    school_row = db.table("schools").select("id, restrict_access_to").eq("id", school_id).execute()
+    school_row = db.table("schools").select("id, restrict_access_to").eq("id", school_id).eq("org_id", user["org_id"]).execute()
     if not school_row.data:
         raise HTTPException(status_code=404, detail="בית ספר לא נמצא")
     school = school_row.data[0]
@@ -2711,10 +2747,11 @@ def advisor_access_matrix(
     פגישות / אזור אישי), which render many schools' rows at once and need to know per-row
     which advisors lack access before the AdvisorCell picker can meaningfully flag them.
     Returns {school_id: {advisor_id: bool}}."""
+    _require_manager(user)
     db = get_admin_client()
     if not body.school_ids or not body.advisor_ids:
         return {}
-    schools = db.table("schools").select("id, restrict_access_to").in_("id", body.school_ids).execute().data or []
+    schools = db.table("schools").select("id, restrict_access_to").eq("org_id", user["org_id"]).in_("id", body.school_ids).execute().data or []
     school_ids = [s["id"] for s in schools]
     rows = (
         db.table("advisor_schools").select("advisor_id, school_id")
@@ -2749,6 +2786,9 @@ def grant_temp_advisor_access(
 ):
     _require_manager(user)
     db = get_admin_client()
+    school_check = db.table("schools").select("id").eq("id", school_id).eq("org_id", user["org_id"]).execute()
+    if not school_check.data:
+        raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
     now = datetime.now(timezone.utc)
     starts_at = datetime.fromisoformat(body.starts_at.replace("Z", "+00:00"))
     row = {
@@ -2875,6 +2915,9 @@ def unassign_advisor(
 ):
     _require_manager(user)
     db = get_admin_client()
+    school_check = db.table("schools").select("id").eq("id", school_id).eq("org_id", user["org_id"]).execute()
+    if not school_check.data:
+        raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
     existing = db.table("advisor_schools").select("advisor_id").eq("school_id", school_id).execute()
     current_ids = [r["advisor_id"] for r in (existing.data or [])]
     if advisor_id in current_ids and len(current_ids) <= 1:
@@ -2936,6 +2979,9 @@ def list_typed_advisors(
     for attempt in range(2):
         try:
             db = get_admin_client()
+            school_check = db.table("schools").select("id").eq("id", school_id).eq("org_id", user["org_id"]).execute()
+            if not school_check.data:
+                raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
             rows = (
                 db.table(table)
                 .select("advisor_id, profiles(id, email, full_name, role)")
@@ -2943,6 +2989,8 @@ def list_typed_advisors(
                 .execute()
             )
             return [r["profiles"] for r in rows.data if r.get("profiles")]
+        except HTTPException:
+            raise
         except Exception as exc:
             if attempt == 0:
                 logger.warning("list_typed_advisors attempt 1 failed: %s — resetting client and retrying", exc)
@@ -2963,6 +3011,9 @@ def assign_typed_advisor(
     _require_manager(user)
     table = _typed_advisor_table(service_type)
     db = get_admin_client()
+    school_check = db.table("schools").select("id").eq("id", school_id).eq("org_id", user["org_id"]).execute()
+    if not school_check.data:
+        raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
     db.table(table).upsert({"advisor_id": body.advisor_id, "school_id": school_id}).execute()
     db.table("advisor_schools").upsert({"advisor_id": body.advisor_id, "school_id": school_id}).execute()
     try:
@@ -2994,6 +3045,9 @@ def unassign_typed_advisor(
     _require_manager(user)
     table = _typed_advisor_table(service_type)
     db = get_admin_client()
+    school_check = db.table("schools").select("id").eq("id", school_id).eq("org_id", user["org_id"]).execute()
+    if not school_check.data:
+        raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
 
     db.table(table).delete().eq("advisor_id", advisor_id).eq("school_id", school_id).execute()
 
@@ -3057,6 +3111,16 @@ def bulk_assign_typed_advisor(
         raise HTTPException(status_code=400, detail="לא נבחרו בתי ספר")
 
     db = get_admin_client()
+    # Filter the requested school_ids down to the caller's org before acting — mirrors
+    # bulk_update_school_field's approach (a manager must not be able to touch another org's
+    # schools by guessing/supplying their UUIDs here).
+    org_schools = (
+        db.table("schools").select("id").eq("org_id", user["org_id"]).in_("id", body.school_ids).execute()
+    )
+    org_school_ids = {r["id"] for r in (org_schools.data or [])}
+    body.school_ids = [sid for sid in body.school_ids if sid in org_school_ids]
+    if not body.school_ids:
+        raise HTTPException(status_code=400, detail="לא נבחרו בתי ספר")
     existing = (
         db.table(table)
         .select("school_id")
@@ -3112,6 +3176,13 @@ def bulk_unassign_typed_advisor(
         raise HTTPException(status_code=400, detail="לא נבחרו בתי ספר")
 
     db = get_admin_client()
+    org_schools = (
+        db.table("schools").select("id").eq("org_id", user["org_id"]).in_("id", body.school_ids).execute()
+    )
+    org_school_ids = {r["id"] for r in (org_schools.data or [])}
+    body.school_ids = [sid for sid in body.school_ids if sid in org_school_ids]
+    if not body.school_ids:
+        raise HTTPException(status_code=400, detail="לא נבחרו בתי ספר")
     db.table(table).delete().eq("advisor_id", body.advisor_id).in_("school_id", body.school_ids).execute()
 
     for school_id in body.school_ids:
@@ -3984,11 +4055,16 @@ def send_status_reminder(
         try:
             db = get_admin_client()
 
-            # Fetch meeting
-            m_res = db.table("meetings").select("*").eq("id", meeting_id).execute()
+            # Fetch meeting — joined through schools to enforce org scoping (meetings has
+            # no org_id column of its own).
+            m_res = (
+                db.table("meetings").select("*, schools!inner(org_id)")
+                .eq("id", meeting_id).eq("schools.org_id", user["org_id"]).execute()
+            )
             if not m_res.data:
                 raise HTTPException(status_code=404, detail="פגישה לא נמצאה")
             meeting = m_res.data[0]
+            meeting.pop("schools", None)
 
             if meeting["status"] != "scheduled":
                 raise HTTPException(status_code=400, detail="הפגישה אינה במצב 'נקבעה'")
@@ -4257,13 +4333,21 @@ def check_blocked_date(school_id: str, date: str, user: Annotated[dict, Depends(
     for attempt in range(2):
         try:
             db = get_admin_client()
-            school = (
+            # Resolve org from the CALLER, not from the school row — a school_id that belongs
+            # to a different org must 404, not silently compute blocking rules against that
+            # other org's blocked_dates.
+            # NOT .single() — that raises PGRST116 on zero matches (e.g. a cross-org
+            # school_id, which is the normal/expected case here, not an error), which would
+            # get caught below as a generic exception and misreported as a 503 instead of
+            # the intended 404.
+            school_rows = (
                 db.table("schools").select(",".join(("org_id",) + BLOCKED_DATE_SCOPE_FIELDS))
-                .eq("id", school_id).single().execute().data
+                .eq("id", school_id).eq("org_id", user["org_id"]).execute().data
             )
+            school = school_rows[0] if school_rows else None
             if not school:
                 raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
-            rule = _find_blocking_rule(db, school["org_id"], date, school)
+            rule = _find_blocking_rule(db, user["org_id"], date, school)
             return {"blocked": rule is not None, "reason": rule["reason"] if rule else None}
         except HTTPException:
             raise
@@ -4993,10 +5077,22 @@ def get_meeting_reminder_status(
     meeting_id: str,
     user: Annotated[dict, Depends(get_current_user)],
 ):
-    """Per-recipient reminder send status for a single meeting (for the UI)."""
+    """Per-recipient reminder send status for a single meeting (for the UI).
+    Previously had no auth-beyond-JWT check at all (any logged-in user, any org, could
+    read any meeting_id's reminder log) — now requires a role + org/assignment check via
+    the owning school, same as the other meeting-scoped endpoints."""
     for attempt in range(2):
         try:
             db = get_admin_client()
+            m_res = (
+                db.table("meetings").select("school_id, schools!inner(id, restrict_access_to, org_id)")
+                .eq("id", meeting_id).eq("schools.org_id", user["org_id"]).execute()
+            )
+            if not m_res.data:
+                return {"reminders": []}
+            school_row = m_res.data[0]["schools"]
+            if user["role"] not in ("owner", "manager") and not _advisor_has_access_to_school_row(db, user["id"], school_row):
+                return {"reminders": []}
             res = (
                 db.table("meeting_reminders")
                 .select("recipient_email, recipient_name, status, error_message, sent_at")
@@ -5200,6 +5296,7 @@ def get_me(user: Annotated[dict, Depends(get_current_user)]):
         result["can_invite_users"] = _check_permission(db, user, "can_invite_users")
         result["can_delete_users"] = _check_permission(db, user, "can_delete_users")
         result["can_manage_user_permissions"] = _check_permission(db, user, "can_manage_user_permissions")
+        result["can_manage_manager_permissions"] = _check_permission(db, user, "can_manage_manager_permissions")
         result["can_remove_call_from_school"] = _check_permission(db, user, "can_remove_call_from_school")
         # Advisors only: manager/owner always edit their own profile directly.
         result["can_edit_own_work_phone"] = (
@@ -5210,14 +5307,20 @@ def get_me(user: Annotated[dict, Depends(get_current_user)]):
         )
     except Exception as exc:
         logger.warning("get_me permission check failed (non-fatal): %s", exc)
-        result["can_view_school_card"] = True  # fail-open: a transient error must not lock users out of the card
-        result["can_delete_schools"] = user.get("role") == "owner"
-        result["can_edit_school_directly"] = user.get("role") in ("owner", "manager")
-        result["can_request_school_update"] = True
+        # Fall back to the same PERMISSION_DEFAULTS system-default layer _check_permission
+        # itself uses on a lookup failure (not an unconditional True) — an org that has
+        # explicitly turned one of these off for a role must stay off during a transient
+        # error too, not silently revert to "allowed".
+        _role = user.get("role")
+        result["can_view_school_card"] = _role == "owner" or PERMISSION_DEFAULTS["can_view_school_card"].get(_role, False)
+        result["can_delete_schools"] = _role == "owner"
+        result["can_edit_school_directly"] = _role in ("owner", "manager")
+        result["can_request_school_update"] = _role == "owner" or PERMISSION_DEFAULTS["can_request_school_update"].get(_role, False)
         result["can_delete_own_meetings"] = user.get("role") in ("owner", "manager")
         result["can_invite_users"] = user.get("role") in ("owner", "manager")
         result["can_delete_users"] = user.get("role") == "owner"
         result["can_manage_user_permissions"] = user.get("role") == "owner"
+        result["can_manage_manager_permissions"] = user.get("role") == "owner"
         result["can_remove_call_from_school"] = user.get("role") in ("owner", "manager")
         result["can_edit_own_work_phone"] = user.get("role") != "advisor"
         result["can_edit_own_knowledge_areas"] = user.get("role") != "advisor"
@@ -6011,6 +6114,209 @@ def delete_user(
     return {"ok": True}
 
 
+# ---------------------------------------------------------------------------
+# MFA (TOTP two-factor authentication) — optional per-user security feature.
+# Enrollment/challenge/verify happen entirely client-side via supabase-js
+# against Supabase Auth. These endpoints only: (1) confirm enrollment server-
+# side once a factor is actually verified, (2) issue/track "trusted device"
+# tokens for the 30-day remember-this-device bypass, and (3) let an owner
+# reset a user's MFA when they lose their phone. See backend/auth.py for the
+# actual AAL2-or-trusted-device enforcement in get_current_user().
+# ---------------------------------------------------------------------------
+
+def _supabase_admin_headers() -> dict:
+    service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+    return {
+        "apikey": service_key,
+        "Authorization": f"Bearer {service_key}",
+        "Content-Type": "application/json",
+    }
+
+
+def _list_verified_totp_factors(user_id: str) -> list:
+    supabase_url = os.getenv("SUPABASE_URL", "")
+    resp = httpx.get(
+        f"{supabase_url}/auth/v1/admin/users/{user_id}",
+        headers=_supabase_admin_headers(),
+        timeout=10,
+    )
+    resp.raise_for_status()
+    factors = resp.json().get("factors") or []
+    return [f for f in factors if f.get("factor_type") == "totp" and f.get("status") == "verified"]
+
+
+def _delete_all_mfa_factors(user_id: str) -> None:
+    supabase_url = os.getenv("SUPABASE_URL", "")
+    resp = httpx.get(
+        f"{supabase_url}/auth/v1/admin/users/{user_id}",
+        headers=_supabase_admin_headers(),
+        timeout=10,
+    )
+    resp.raise_for_status()
+    factors = resp.json().get("factors") or []
+    for factor in factors:
+        del_resp = httpx.delete(
+            f"{supabase_url}/auth/v1/admin/users/{user_id}/factors/{factor['id']}",
+            headers=_supabase_admin_headers(),
+            timeout=10,
+        )
+        if del_resp.status_code not in (200, 204, 404):
+            del_resp.raise_for_status()
+
+
+@router.post("/users/me/mfa/confirm")
+def confirm_mfa_enrollment(user: Annotated[dict, Depends(get_current_user)]):
+    """Called by the frontend right after supabase.auth.mfa.verify() succeeds
+    during initial enrollment. Flips profiles.mfa_enabled on, which is what
+    actually activates AAL2 enforcement in get_current_user() going forward."""
+    try:
+        if not _list_verified_totp_factors(user["id"]):
+            raise HTTPException(status_code=400, detail="לא נמצא פקטור אימות מאומת — נסה להגדיר שוב")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("confirm_mfa_enrollment factor check failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            db.table("profiles").update({"mfa_enabled": True}).eq("id", user["id"]).execute()
+            break
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("confirm_mfa_enrollment attempt 1 failed: %s — resetting", exc)
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.error("confirm_mfa_enrollment failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+    invalidate_profile_cache(user["id"])
+    return {"ok": True}
+
+
+@router.post("/users/me/mfa/disable")
+def disable_mfa(user: Annotated[dict, Depends(get_current_user)]):
+    """Self-service disable — reachable only once get_current_user's AAL2-or-
+    trusted-device gate has passed (enforced whenever mfa_enabled is true), so
+    a stolen password alone cannot reach this without also controlling either
+    a completed TOTP challenge or an already-trusted browser.
+
+    Order matters: flip mfa_enabled off (the thing that actually controls
+    access) FIRST, then best-effort delete the Supabase factors. If factor
+    deletion is done first and fails partway (e.g. network blip after
+    deleting factor 1 of 2), mfa_enabled would still be true with no usable
+    factor left — a permanent lockout only an owner reset could fix. Deleting
+    after is safe to fail: a leftover factor with mfa_enabled=false is inert."""
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            db.table("profiles").update({"mfa_enabled": False}).eq("id", user["id"]).execute()
+            db.table("trusted_devices").delete().eq("user_id", user["id"]).execute()
+            break
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("disable_mfa attempt 1 failed: %s — resetting", exc)
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.error("disable_mfa failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+    invalidate_profile_cache(user["id"])
+
+    try:
+        _delete_all_mfa_factors(user["id"])
+    except Exception as exc:
+        logger.warning("disable_mfa factor deletion failed (non-fatal, mfa_enabled already cleared): %s", exc)
+
+    return {"ok": True}
+
+
+@router.post("/users/me/mfa/trust-device")
+def trust_this_device(user: Annotated[dict, Depends(get_current_user)], request: Request):
+    """Issues a 30-day 'remember this device' token. Reachable only once
+    get_current_user's AAL2-or-trusted-device gate has passed (enforced
+    whenever mfa_enabled is true) — in practice this is called right after a
+    real TOTP challenge during login, since that's the only flow that offers
+    the "remember this device" checkbox."""
+    raw_token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            db.table("trusted_devices").insert({
+                "user_id": user["id"],
+                "token_hash": token_hash,
+                "expires_at": expires_at,
+                "user_agent": (request.headers.get("User-Agent") or "")[:500],
+            }).execute()
+            break
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("trust_this_device attempt 1 failed: %s — resetting", exc)
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.error("trust_this_device failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+    return {"token": raw_token, "expires_at": expires_at}
+
+
+@router.post("/users/{user_id}/mfa/reset")
+def reset_user_mfa(user_id: str, user: Annotated[dict, Depends(get_current_user)]):
+    """Owner-only recovery path for a user who lost their phone: removes all
+    TOTP factors + trusted devices for the target user so they can enroll
+    again from scratch on next login."""
+    if user["role"] != "owner":
+        raise HTTPException(status_code=403, detail="אין הרשאה — רק בעלים יכול לאפס אימות דו-שלבי")
+
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            target = db.table("profiles").select("org_id").eq("id", user_id).execute()
+            if not target.data or target.data[0].get("org_id") != user["org_id"]:
+                raise HTTPException(status_code=404, detail="המשתמש לא נמצא")
+            break
+        except HTTPException:
+            raise
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("reset_user_mfa lookup attempt 1 failed: %s — resetting", exc)
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.error("reset_user_mfa lookup failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    # Order matters — see the identical comment in disable_mfa above: flip the
+    # DB flag (and clear trusted devices) FIRST so the user is never left in a
+    # mfa_enabled=true-but-no-usable-factor state if the admin API call below
+    # fails partway; factor deletion is then a best-effort cleanup.
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            db.table("profiles").update({"mfa_enabled": False}).eq("id", user_id).execute()
+            db.table("trusted_devices").delete().eq("user_id", user_id).execute()
+            break
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("reset_user_mfa update attempt 1 failed: %s — resetting", exc)
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.error("reset_user_mfa update failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+    invalidate_profile_cache(user_id)
+
+    try:
+        _delete_all_mfa_factors(user_id)
+    except Exception as exc:
+        logger.warning("reset_user_mfa factor deletion failed (non-fatal, mfa_enabled already cleared): %s", exc)
+
+    return {"ok": True}
+
+
 @router.get("/users/{user_id}/future-meetings")
 def get_user_future_meetings(user_id: str, user: Annotated[dict, Depends(get_current_user)]):
     """Future scheduled meetings for this advisor — shown before deleting them, so the
@@ -6019,17 +6325,25 @@ def get_user_future_meetings(user_id: str, user: Annotated[dict, Depends(get_cur
         raise HTTPException(status_code=403, detail="אין הרשאה")
     from datetime import datetime, timezone
     db = get_admin_client()
+    # user_id was never validated against the caller's org — a manager from org A could
+    # enumerate org B's user_id and read their future meetings.
+    target = db.table("profiles").select("id").eq("id", user_id).eq("org_id", user["org_id"]).execute()
+    if not target.data:
+        raise HTTPException(status_code=404, detail="המשתמש לא נמצא")
     today = datetime.now(timezone.utc).date().isoformat()
     rows = (
         db.table("meetings")
-        .select("id, meeting_date, start_time, end_time, school_id")
+        .select("id, meeting_date, start_time, end_time, school_id, schools!inner(org_id)")
         .gte("meeting_date", today)
         .eq("status", "scheduled")
+        .eq("schools.org_id", user["org_id"])
         .filter("advisor_ids", "cs", json.dumps([user_id]))
         .order("meeting_date")
         .execute()
     )
     meetings = rows.data or []
+    for m in meetings:
+        m.pop("schools", None)
     school_ids = list({m["school_id"] for m in meetings if m.get("school_id")})
     schools_map = {}
     if school_ids:
@@ -6056,16 +6370,22 @@ def transfer_user_meetings(user_id: str, body: TransferMeetingsIn, user: Annotat
         raise HTTPException(status_code=403, detail="אין הרשאה")
     from datetime import datetime, timezone
     db = get_admin_client()
+    target = db.table("profiles").select("id").eq("id", user_id).eq("org_id", user["org_id"]).execute()
+    if not target.data:
+        raise HTTPException(status_code=404, detail="המשתמש לא נמצא")
     today = datetime.now(timezone.utc).date().isoformat()
     rows = (
         db.table("meetings")
-        .select("*")
+        .select("*, schools!inner(org_id)")
         .gte("meeting_date", today)
         .eq("status", "scheduled")
+        .eq("schools.org_id", user["org_id"])
         .filter("advisor_ids", "cs", json.dumps([user_id]))
         .execute()
     )
     meetings = rows.data or []
+    for m in meetings:
+        m.pop("schools", None)
     school_ids = list({m["school_id"] for m in meetings if m.get("school_id")})
     schools_map = {}
     if school_ids:
@@ -6106,16 +6426,22 @@ def cancel_user_future_meetings(user_id: str, user: Annotated[dict, Depends(get_
         raise HTTPException(status_code=403, detail="אין הרשאה")
     from datetime import datetime, timezone
     db = get_admin_client()
+    target = db.table("profiles").select("id").eq("id", user_id).eq("org_id", user["org_id"]).execute()
+    if not target.data:
+        raise HTTPException(status_code=404, detail="המשתמש לא נמצא")
     today = datetime.now(timezone.utc).date().isoformat()
     rows = (
         db.table("meetings")
-        .select("*")
+        .select("*, schools!inner(org_id)")
         .gte("meeting_date", today)
         .eq("status", "scheduled")
+        .eq("schools.org_id", user["org_id"])
         .filter("advisor_ids", "cs", json.dumps([user_id]))
         .execute()
     )
     meetings = rows.data or []
+    for m in meetings:
+        m.pop("schools", None)
     for m in meetings:
         try:
             if m.get("calendar_sync"):
@@ -6159,10 +6485,13 @@ def get_user_sole_schools(user_id: str, user: Annotated[dict, Depends(get_curren
     if user["role"] not in ("owner", "manager"):
         raise HTTPException(status_code=403, detail="אין הרשאה")
     db = get_admin_client()
+    target = db.table("profiles").select("id").eq("id", user_id).eq("org_id", user["org_id"]).execute()
+    if not target.data:
+        raise HTTPException(status_code=404, detail="המשתמש לא נמצא")
     sole_ids = _get_user_sole_schools(db, user_id)
     if not sole_ids:
         return []
-    rows = db.table("schools").select("id, name, city").in_("id", sole_ids).execute().data or []
+    rows = db.table("schools").select("id, name, city").eq("org_id", user["org_id"]).in_("id", sole_ids).execute().data or []
     return rows
 
 
@@ -6177,10 +6506,13 @@ def transfer_user_sole_schools(user_id: str, body: TransferSchoolsIn, user: Anno
     if user["role"] not in ("owner", "manager"):
         raise HTTPException(status_code=403, detail="אין הרשאה")
     db = get_admin_client()
+    target = db.table("profiles").select("id").eq("id", user_id).eq("org_id", user["org_id"]).execute()
+    if not target.data:
+        raise HTTPException(status_code=404, detail="המשתמש לא נמצא")
     sole_ids = _get_user_sole_schools(db, user_id)
     if not sole_ids:
         return {"transferred": 0, "schools": []}
-    srows = db.table("schools").select("id, name").in_("id", sole_ids).execute().data or []
+    srows = db.table("schools").select("id, name").eq("org_id", user["org_id"]).in_("id", sole_ids).execute().data or []
     names_map = {s["id"]: s["name"] for s in srows}
     for sid in sole_ids:
         db.table("advisor_schools").upsert({"advisor_id": body.new_advisor_id, "school_id": sid}).execute()
@@ -6217,6 +6549,9 @@ def list_logs(
         try:
             db = get_admin_client()
             _ensure_can_view_school_card(db, user)
+            # Was gated only by the global permission flag, never by school ownership —
+            # add the same org/assignment check used across the rest of the school card.
+            _require_school_in_org(db, user, school_id)
             q = (
                 db.table("check_logs")
                 .select("*")
@@ -6272,6 +6607,7 @@ def get_log(
 ):
     db = get_admin_client()
     _ensure_can_view_school_card(db, user)
+    _require_school_in_org(db, user, school_id)
     row = db.table("check_logs").select("*").eq("id", log_id).eq("school_id", school_id).execute()
     if not row.data:
         raise HTTPException(status_code=404, detail="הבדיקה לא נמצאה")
@@ -6393,6 +6729,8 @@ def delete_log(
     db = get_admin_client()
     if not _can_delete_check_log(user, db):
         raise HTTPException(status_code=403, detail="אין הרשאה למחיקת בדיקות")
+    # Was gated only by the global permission flag — add the school ownership/org check.
+    _require_school_in_org(db, user, school_id)
     # Delete stored files from Supabase Storage before removing the DB record
     log_row = db.table("check_logs").select("summary, gefen_account_id, academic_year").eq("id", log_id).eq("school_id", school_id).execute()
     deleted_row = log_row.data[0] if log_row.data else None
@@ -6424,6 +6762,7 @@ def update_log_name(
     db = get_admin_client()
     if not _can_delete_check_log(user, db):
         raise HTTPException(status_code=403, detail="אין הרשאה לערוך שם בדיקה")
+    _require_school_in_org(db, user, school_id)
     name = body.custom_name.strip()
     db.table("check_logs").update({"custom_name": name or None}).eq("id", log_id).eq("school_id", school_id).execute()
     return {"ok": True}
@@ -6445,6 +6784,7 @@ def update_log_pin(
     db = get_admin_client()
     if not _can_delete_check_log(user, db):
         raise HTTPException(status_code=403, detail="אין הרשאה לנעוץ בדיקה")
+    _require_school_in_org(db, user, school_id)
     pinned_at = datetime.now(timezone.utc).isoformat() if body.pinned else None
     db.table("check_logs").update({"pinned_at": pinned_at}).eq("id", log_id).eq("school_id", school_id).execute()
     return {"ok": True}
@@ -6475,6 +6815,7 @@ def batch_get_partial_updates(
     for attempt in range(2):
         try:
             db = get_admin_client()
+            _require_school_in_org(db, user, school_id)
             q = (
                 db.table("partial_row_updates")
                 .select("*")
@@ -6485,6 +6826,8 @@ def batch_get_partial_updates(
             q = q.eq("budget_name", body.budget_name) if body.budget_name else q.is_("budget_name", "null")
             rows = q.order("created_at").execute().data or []
             break
+        except HTTPException:
+            raise
         except Exception as exc:
             if attempt == 0:
                 logger.warning("batch_get_partial_updates attempt 1 failed: %s — resetting and retrying", exc)
@@ -6551,6 +6894,9 @@ def create_partial_update(
     if not content:
         raise HTTPException(status_code=400, detail="לא ניתן לשמור עדכון ריק")
     db = get_admin_client()
+    # Was missing entirely (no access check at all) — any authenticated user, including a
+    # cross-org advisor/manager, could write a "partial update" row onto any school_id.
+    _require_school_in_org(db, user, school_id)
     row = db.table("partial_row_updates").insert({
         "school_id": school_id,
         "division": body.division,
@@ -6618,6 +6964,7 @@ def edit_partial_update_segment(
     if not content:
         raise HTTPException(status_code=400, detail="לא ניתן לשמור עדכון ריק")
     db = get_admin_client()
+    _require_school_in_org(db, user, school_id)
     author_id, author_role = _get_partial_segment_author(db, school_id, segment_id)
     if not _can_edit_partial_segment(user, author_id, author_role):
         raise HTTPException(status_code=403, detail="אין הרשאה לערוך עדכון זה")
@@ -6637,6 +6984,7 @@ def delete_partial_update_segment(
     user: Annotated[dict, Depends(get_current_user)],
 ):
     db = get_admin_client()
+    _require_school_in_org(db, user, school_id)
     author_id, author_role = _get_partial_segment_author(db, school_id, segment_id)
     if not _can_delete_partial_segment(user, author_id, author_role):
         raise HTTPException(status_code=403, detail="אין הרשאה למחוק עדכון זה")
@@ -6684,6 +7032,7 @@ def get_school_notes(
         try:
             db = get_admin_client()
             _ensure_can_view_school_card(db, user)
+            _require_school_in_org(db, user, school_id)
             rows = db.table("school_notes").select("*").eq("school_id", school_id).order("created_at").execute().data or []
             break
         except HTTPException:
@@ -6751,6 +7100,9 @@ def create_school_note(
         raise HTTPException(status_code=400, detail="לא ניתן לשמור הערה ריקה")
     imported_from_excel = bool(body.imported_from_excel) and body.note_type == "general"
     db = get_admin_client()
+    # Was missing entirely (no access check at all) — any authenticated user, including a
+    # cross-org advisor/manager, could write a note onto any school_id.
+    _require_school_in_org(db, user, school_id)
     row = db.table("school_notes").insert({
         "school_id": school_id,
         "note_type": body.note_type,
@@ -6812,6 +7164,7 @@ def edit_school_note_segment(
     if not content:
         raise HTTPException(status_code=400, detail="לא ניתן לשמור הערה ריקה")
     db = get_admin_client()
+    _require_school_in_org(db, user, school_id)
     author_id, author_role, note_type = _get_school_note_author(db, school_id, segment_id)
     if note_type == "quarterly" and user["role"] == "advisor":
         raise HTTPException(status_code=403, detail="אין הרשאה לערוך הערה רבעונית")
@@ -6833,6 +7186,7 @@ def delete_school_note_segment(
     user: Annotated[dict, Depends(get_current_user)],
 ):
     db = get_admin_client()
+    _require_school_in_org(db, user, school_id)
     author_id, author_role, note_type = _get_school_note_author(db, school_id, segment_id)
     if note_type == "quarterly" and user["role"] == "advisor":
         raise HTTPException(status_code=403, detail="אין הרשאה למחוק הערה רבעונית")
@@ -6857,11 +7211,15 @@ def batch_get_quarterly_notes_summary(
     for attempt in range(2):
         try:
             db = get_admin_client()
+            org_schools = db.table("schools").select("id").eq("org_id", user["org_id"]).in_("id", body.school_ids).execute()
+            org_school_ids = [r["id"] for r in (org_schools.data or [])]
+            if not org_school_ids:
+                return {}
             rows = (
                 db.table("school_notes")
                 .select("*")
                 .eq("note_type", "quarterly")
-                .in_("school_id", body.school_ids)
+                .in_("school_id", org_school_ids)
                 .order("created_at")
                 .execute()
                 .data or []
@@ -6950,6 +7308,7 @@ def get_school_files(
         try:
             db = get_admin_client()
             _ensure_can_view_school_card(db, user)
+            _require_school_in_org(db, user, school_id)
             rows = (
                 db.table("school_files")
                 .select("*")
@@ -6986,6 +7345,7 @@ async def upload_school_file(
     import tempfile
 
     db = get_admin_client()
+    _require_school_in_org(db, user, school_id)
     run_dir = Path(tempfile.mkdtemp(prefix=f"school_file_{school_id}_"))
     try:
         suffix = Path(file.filename or "").suffix
@@ -7056,6 +7416,7 @@ def edit_school_file(
     user: Annotated[dict, Depends(get_current_user)],
 ):
     db = get_admin_client()
+    _require_school_in_org(db, user, school_id)
     author_id, author_role, _storage_key, _file_name = _get_school_file_author(db, school_id, file_id)
     if not _can_edit_school_file(user, author_id, author_role):
         raise HTTPException(status_code=403, detail="אין הרשאה לערוך קובץ זה")
@@ -7075,6 +7436,7 @@ def delete_school_file(
     user: Annotated[dict, Depends(get_current_user)],
 ):
     db = get_admin_client()
+    _require_school_in_org(db, user, school_id)
     author_id, author_role, storage_key, _file_name = _get_school_file_author(db, school_id, file_id)
     if not _can_delete_school_file(user, author_id, author_role):
         raise HTTPException(status_code=403, detail="אין הרשאה למחוק קובץ זה")
@@ -7093,6 +7455,7 @@ def download_school_file(
     user: Annotated[dict, Depends(get_current_user)],
 ):
     db = get_admin_client()
+    _require_school_in_org(db, user, school_id)
     row = db.table("school_files").select("storage_key, file_name").eq("id", file_id).eq("school_id", school_id).execute()
     if not row.data:
         raise HTTPException(status_code=404, detail="הקובץ לא נמצא")
@@ -7188,6 +7551,7 @@ def preview_meeting_subject(school_id: str, body: MeetingSubjectPreviewIn, user:
     selection — used by the frontend's conflict-warning dialog so it shows the same
     text that will actually be sent to Outlook, not a stale hardcoded guess."""
     db = get_admin_client()
+    _require_school_in_org(db, user, school_id)
     subject = _build_meeting_subject(db, school_id, body.participants, body.primary_contact_key, body.meeting_service_type)
     return {"subject": subject}
 
@@ -7807,11 +8171,14 @@ def list_meetings(school_id: str, user: Annotated[dict, Depends(get_current_user
     for attempt in range(2):
         try:
             db = get_admin_client()
+            _require_school_in_org(db, user, school_id)
             q = db.table("meetings").select("*").eq("school_id", school_id)
             if academic_year:
                 q = q.eq("academic_year", academic_year)
             meetings = _fetch_all_rows(q, order_col="created_at", order_desc=True)
             break
+        except HTTPException:
+            raise
         except Exception as exc:
             if attempt == 0:
                 logger.warning("list_meetings attempt 1 failed: %s — resetting client and retrying", exc)
@@ -7854,13 +8221,29 @@ def list_meetings(school_id: str, user: Annotated[dict, Depends(get_current_user
     return meetings
 
 
-def _enforce_advisor_ids_for_role(user: dict, requested_ids: list[str] | None, context: str) -> list[str]:
+def _enforce_advisor_ids_for_role(db, user: dict, requested_ids: list[str] | None, context: str) -> list[str]:
     """An advisor-role user may never be assigned as anyone but themselves on a meeting —
     only owner/manager may set advisor_ids to someone else. Coerces silently (defense-in-depth;
     the frontend already locks this field for advisor-role users) and logs when a mismatch
-    was actually sent, since that should never happen in normal operation."""
+    was actually sent, since that should never happen in normal operation.
+
+    For owner/manager, also drops any requested id that isn't a profile in the caller's own
+    org — without this, an owner/manager could assign a cross-org user_id as the meeting's
+    advisor, which later lets graph_client resolve that other org's advisor's mailbox for
+    the Outlook sync (same missing-org-check bug class as the rest of this audit)."""
     if user["role"] in ("owner", "manager"):
-        return requested_ids if requested_ids is not None else []
+        ids = requested_ids if requested_ids is not None else []
+        if not ids:
+            return ids
+        valid = db.table("profiles").select("id").in_("id", ids).eq("org_id", user["org_id"]).execute()
+        valid_ids = {row["id"] for row in (valid.data or [])}
+        dropped = [i for i in ids if i not in valid_ids]
+        if dropped:
+            logger.warning(
+                "%s attempted to set advisor_ids=%s on %s — dropped cross-org ids %s",
+                user["id"], ids, context, dropped,
+            )
+        return [i for i in ids if i in valid_ids]
     self_id = user["id"]
     # Only warn on a genuine mismatch — an empty/omitted list is the normal "not set yet" case,
     # not an attempted override, and would otherwise log noise on every advisor-created meeting.
@@ -7875,6 +8258,9 @@ def _enforce_advisor_ids_for_role(user: dict, requested_ids: list[str] | None, c
 @router.post("/{school_id}/meetings")
 def create_meeting(school_id: str, body: MeetingIn, user: Annotated[dict, Depends(get_current_user)]):
     db = get_admin_client()
+    # Was missing entirely (no role or org check at all) — any authenticated user, including
+    # a cross-org advisor, could create a meeting under any school_id.
+    _require_school_access_for_meeting_activity(db, user, school_id)
     data = {
         "school_id": school_id,
         "created_by": user["id"],
@@ -7903,11 +8289,11 @@ def create_meeting(school_id: str, body: MeetingIn, user: Annotated[dict, Depend
         data["requested_upload_years"] = body.requested_upload_years
     # advisor_ids takes precedence; fall back to legacy advisor_id
     if body.advisor_ids is not None:
-        data["advisor_ids"] = _enforce_advisor_ids_for_role(user, body.advisor_ids, "create_meeting")
+        data["advisor_ids"] = _enforce_advisor_ids_for_role(db, user, body.advisor_ids, "create_meeting")
     elif body.advisor_id:
-        data["advisor_ids"] = _enforce_advisor_ids_for_role(user, [body.advisor_id], "create_meeting")
+        data["advisor_ids"] = _enforce_advisor_ids_for_role(db, user, [body.advisor_id], "create_meeting")
     else:
-        data["advisor_ids"] = _enforce_advisor_ids_for_role(user, [], "create_meeting")
+        data["advisor_ids"] = _enforce_advisor_ids_for_role(db, user, [], "create_meeting")
     # Reminder toggle: honour an explicit value (meeting_booking_router sends True); otherwise
     # default it from automation 1 — ON only for a future-dated meeting that already has a
     # participant. update_meeting flips it on later if the meeting becomes eligible.
@@ -8798,9 +9184,19 @@ def send_direct_coordination_request(
 @router.put("/{school_id}/meetings/{meeting_id}")
 def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annotated[dict, Depends(get_current_user)]):
     db = get_admin_client()
+    # Org check — the advisor branch below already validated ownership of the meeting
+    # itself, but the owner/manager branch previously skipped any org check entirely,
+    # letting a manager from org A update org B's meeting by school_id/meeting_id.
+    school_check = db.table("schools").select("id").eq("id", school_id).eq("org_id", user["org_id"]).execute()
+    if not school_check.data:
+        raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
     if user["role"] not in ("owner", "manager"):
-        existing_row = db.table("meetings").select("advisor_ids, advisor_id") \
-            .eq("id", meeting_id).eq("school_id", school_id).single().execute().data
+        # NOT .single() — that raises PGRST116 on zero matches (e.g. a nonexistent or
+        # cross-school meeting_id, which is the normal/expected case here, not an error),
+        # which would be misreported as a 503 instead of the intended 404.
+        existing_rows = db.table("meetings").select("advisor_ids, advisor_id") \
+            .eq("id", meeting_id).eq("school_id", school_id).execute().data
+        existing_row = existing_rows[0] if existing_rows else None
         if not existing_row:
             raise HTTPException(status_code=404, detail="פגישה לא נמצאה")
         existing_advisor_ids = existing_row.get("advisor_ids") or ([existing_row["advisor_id"]] if existing_row.get("advisor_id") else [])
@@ -8829,11 +9225,11 @@ def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annot
     if body.requested_upload_years is not None: data["requested_upload_years"] = body.requested_upload_years
     # advisor_ids takes precedence; fall back to legacy advisor_id
     if body.advisor_ids is not None:
-        data["advisor_ids"] = _enforce_advisor_ids_for_role(user, body.advisor_ids, "update_meeting")
+        data["advisor_ids"] = _enforce_advisor_ids_for_role(db, user, body.advisor_ids, "update_meeting")
     elif body.advisor_id:
-        data["advisor_ids"] = _enforce_advisor_ids_for_role(user, [body.advisor_id], "update_meeting")
+        data["advisor_ids"] = _enforce_advisor_ids_for_role(db, user, [body.advisor_id], "update_meeting")
     else:
-        data["advisor_ids"] = _enforce_advisor_ids_for_role(user, [], "update_meeting")
+        data["advisor_ids"] = _enforce_advisor_ids_for_role(db, user, [], "update_meeting")
 
     # Auto-enable the reminder the first time a meeting becomes eligible for one (gains its
     # first participant, or a future date) — the whole point of the org "send reminders"
@@ -8920,9 +9316,16 @@ def _apply_meeting_patch(db, org_id: str, school_id: str, meeting_id: str, patch
 def patch_meeting(school_id: str, meeting_id: str, body: MeetingStatusPatchIn, user: Annotated[dict, Depends(get_current_user)]):
     """Partial update — only updates the fields provided. Does not touch advisor_ids, participants, etc."""
     db = get_admin_client()
+    school_check = db.table("schools").select("id").eq("id", school_id).eq("org_id", user["org_id"]).execute()
+    if not school_check.data:
+        raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
     if user["role"] not in ("owner", "manager"):
-        existing_row = db.table("meetings").select("advisor_ids, advisor_id") \
-            .eq("id", meeting_id).eq("school_id", school_id).single().execute().data
+        # NOT .single() — that raises PGRST116 on zero matches (e.g. a nonexistent or
+        # cross-school meeting_id, which is the normal/expected case here, not an error),
+        # which would be misreported as a 503 instead of the intended 404.
+        existing_rows = db.table("meetings").select("advisor_ids, advisor_id") \
+            .eq("id", meeting_id).eq("school_id", school_id).execute().data
+        existing_row = existing_rows[0] if existing_rows else None
         if not existing_row:
             raise HTTPException(status_code=404, detail="פגישה לא נמצאה")
         existing_advisor_ids = existing_row.get("advisor_ids") or ([existing_row["advisor_id"]] if existing_row.get("advisor_id") else [])
@@ -8948,8 +9351,17 @@ def join_meeting_as_advisor(school_id: str, meeting_id: str, user: Annotated[dic
     isn't theirs": they may always add themselves, never anyone else, and this never removes
     or changes any other field. Idempotent if already present."""
     db = get_admin_client()
-    existing_row = db.table("meetings").select("advisor_ids, advisor_id") \
-        .eq("id", meeting_id).eq("school_id", school_id).single().execute().data
+    # Was missing entirely (no org check at all) — any authenticated user could add
+    # themselves to a meeting under a school_id belonging to a different org.
+    school_check = db.table("schools").select("id").eq("id", school_id).eq("org_id", user["org_id"]).execute()
+    if not school_check.data:
+        raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
+    # NOT .single() — that raises PGRST116 on zero matches (e.g. a nonexistent or
+    # cross-school meeting_id, which is the normal/expected case here, not an error),
+    # which would be misreported as a 503 instead of the intended 404.
+    existing_rows = db.table("meetings").select("advisor_ids, advisor_id") \
+        .eq("id", meeting_id).eq("school_id", school_id).execute().data
+    existing_row = existing_rows[0] if existing_rows else None
     if not existing_row:
         raise HTTPException(status_code=404, detail="פגישה לא נמצאה")
     existing_advisor_ids = existing_row.get("advisor_ids") or ([existing_row["advisor_id"]] if existing_row.get("advisor_id") else [])
@@ -9010,6 +9422,15 @@ def reassign_meeting_school(meeting_id: str, body: MeetingReassignSchoolIn, user
             sch = db.table("schools").select("id").eq("id", body.new_school_id).eq("org_id", user["org_id"]).execute()
             if not sch.data:
                 raise HTTPException(status_code=404, detail="בית ספר לא נמצא")
+            # The NEW school's org was already validated above, but the meeting_id itself was
+            # never checked — without this, a manager could reassign another org's meeting
+            # (by guessing/enumerating meeting_id) into one of their OWN org's schools.
+            m_check = (
+                db.table("meetings").select("id, schools!inner(org_id)")
+                .eq("id", meeting_id).eq("schools.org_id", user["org_id"]).execute()
+            )
+            if not m_check.data:
+                raise HTTPException(status_code=404, detail="פגישה לא נמצאה")
             res = db.table("meetings").update({
                 "school_id": body.new_school_id,
                 "participants": [],
@@ -9102,10 +9523,14 @@ def get_meeting_notes(school_id: str, meeting_id: str, user: Annotated[dict, Dep
     for attempt in range(2):
         try:
             db = get_admin_client()
+            # Was missing entirely (no access check at all).
+            _require_school_in_org(db, user, school_id)
             rows = (db.table("meeting_notes").select("*")
                     .eq("meeting_id", meeting_id).eq("school_id", school_id)
                     .order("created_at").execute().data or [])
             break
+        except HTTPException:
+            raise
         except Exception as exc:
             if attempt == 0:
                 logger.warning("get_meeting_notes attempt 1 failed: %s — resetting and retrying", exc)
@@ -9138,6 +9563,8 @@ def create_meeting_note(school_id: str, meeting_id: str, body: MeetingNoteCreate
     if not content:
         raise HTTPException(status_code=400, detail="לא ניתן לשמור הערה ריקה")
     db = get_admin_client()
+    # Was missing entirely (no access check at all).
+    _require_school_in_org(db, user, school_id)
     row = db.table("meeting_notes").insert({
         "meeting_id": meeting_id,
         "school_id": school_id,
@@ -9242,6 +9669,7 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
     "can_request_school_update":    {"manager": True,  "advisor": True},
     "can_delete_own_meetings":      {"manager": True,  "advisor": True},
     "can_manage_user_permissions":  {"manager": False, "advisor": False},
+    "can_manage_manager_permissions": {"manager": False, "advisor": False},
     "can_view_billing":             {"manager": False, "advisor": False},
     "can_manage_billing":           {"manager": False, "advisor": False},
     "can_edit_meeting_automations": {"manager": True,  "advisor": False},
@@ -9270,6 +9698,7 @@ PERMISSION_LABELS: dict[str, str] = {
     "can_request_school_update":    "להגיש בקשה לעריכת פרטי בית ספר",
     "can_delete_own_meetings":      "למחוק נתוני פגישה של בית ספר",
     "can_manage_user_permissions":  "לערוך הרשאות של יועצים",
+    "can_manage_manager_permissions": "לערוך הרשאות בהתאמה אישית של מנהלים אחרים",
     "can_view_billing":             "לצפות באזור 'חיובים' של הארגון",
     "can_manage_billing":           "לנהל את אזור 'חיובים' (לרבות אמצעי תשלום)",
     "can_edit_meeting_automations": "לערוך אוטומציות של פגישות",
@@ -9485,10 +9914,17 @@ def get_override_counts(user: Annotated[dict, Depends(get_current_user)]):
     for attempt in range(2):
         try:
             db = get_admin_client()
+            # Was unscoped — returned override counts for users in EVERY org. Scope to the
+            # caller's org via profiles.
+            org_user_ids = {p["id"] for p in (db.table("profiles").select("id").eq("org_id", user["org_id"]).execute().data or [])}
             rows = db.table("user_permission_overrides").select("user_id").execute().data or []
+            rows = [r for r in rows if r["user_id"] in org_user_ids]
             counts: dict[str, int] = {}
             for r in rows:
                 uid = r["user_id"]
+                if user["role"] == "manager" and uid == user["id"]:
+                    # Managers must never see their own override count/badge.
+                    continue
                 counts[uid] = counts.get(uid, 0) + 1
             return counts
         except Exception as exc:
@@ -9503,15 +9939,28 @@ def get_override_counts(user: Annotated[dict, Depends(get_current_user)]):
 
 @router.get("/permissions/overrides/{user_id}")
 def get_user_overrides(user_id: str, user: Annotated[dict, Depends(get_current_user)]):
-    """Return per-user overrides for a specific user (manager+ or self)."""
+    """Return per-user overrides for a specific user (manager+ or self; a manager may never view their own)."""
+    if user["role"] == "manager" and user["id"] == user_id:
+        raise HTTPException(status_code=403, detail="אינך יכול/ה לצפות בהרשאות בהתאמה אישית של עצמך")
     if user["role"] not in ("owner", "manager") and user["id"] != user_id:
         raise HTTPException(status_code=403, detail="אין הרשאה")
 
     for attempt in range(2):
         try:
             db = get_admin_client()
+            # user_id was never validated against the caller's org — a manager could read
+            # another org's user's overrides by guessing their id.
+            if user["id"] != user_id:
+                target = db.table("profiles").select("id, role").eq("id", user_id).eq("org_id", user["org_id"]).execute()
+                if not target.data:
+                    raise HTTPException(status_code=404, detail="המשתמש לא נמצא")
+                if user["role"] == "manager" and target.data[0]["role"] == "manager":
+                    if not _check_permission(db, user, "can_manage_manager_permissions"):
+                        raise HTTPException(status_code=403, detail="אין הרשאה לצפייה בהרשאות של מנהלים אחרים")
             rows = db.table("user_permission_overrides").select("permission,allowed").eq("user_id", user_id).execute().data or []
             return {r["permission"]: r["allowed"] for r in rows}
+        except HTTPException:
+            raise
         except Exception as exc:
             if attempt == 0:
                 logger.warning("get_user_overrides attempt 1 failed: %s — retrying", exc)
@@ -9524,16 +9973,27 @@ def get_user_overrides(user_id: str, user: Annotated[dict, Depends(get_current_u
 
 @router.put("/permissions/overrides/{user_id}")
 def set_user_override(user_id: str, body: UserPermissionOverrideIn, user: Annotated[dict, Depends(get_current_user)]):
-    """Set or remove a per-user permission override (owner, or manager with can_manage_user_permissions)."""
+    """Set or remove a per-user permission override (owner, or manager with can_manage_user_permissions).
+    A manager may never edit their own overrides, and may only edit another manager's overrides
+    if also granted can_manage_manager_permissions."""
     _require_manager(user)
+    if user["role"] == "manager" and user_id == user["id"]:
+        raise HTTPException(status_code=403, detail="אינך יכול/ה לערוך הרשאות בהתאמה אישית של עצמך")
+    db_pre = get_admin_client()
+    # user_id was never validated against the caller's org on the owner path — an owner
+    # could set/clear an override for ANY org's user by id.
+    target_rows = db_pre.table("profiles").select("role").eq("id", user_id).eq("org_id", user["org_id"]).execute().data or []
+    if not target_rows:
+        raise HTTPException(status_code=404, detail="המשתמש לא נמצא")
     if user["role"] != "owner":
-        db_pre = get_admin_client()
         if not _check_permission(db_pre, user, "can_manage_user_permissions"):
             raise HTTPException(status_code=403, detail="אין הרשאה לעריכת הרשאות משתמשים")
-        # managers can only edit advisor overrides, not other managers
-        target_rows = db_pre.table("profiles").select("role").eq("id", user_id).execute().data or []
-        if not target_rows or target_rows[0]["role"] != "advisor":
-            raise HTTPException(status_code=403, detail="מנהל יכול לערוך הרשאות של יועצים בלבד")
+        target_role = target_rows[0]["role"]
+        if target_role == "manager":
+            if not _check_permission(db_pre, user, "can_manage_manager_permissions"):
+                raise HTTPException(status_code=403, detail="אין הרשאה לעריכת הרשאות של מנהלים אחרים")
+        elif target_role != "advisor":
+            raise HTTPException(status_code=403, detail="מנהל יכול לערוך הרשאות של יועצים ומנהלים אחרים בלבד")
     if body.permission not in PERMISSION_DEFAULTS:
         raise HTTPException(status_code=400, detail="הרשאה לא מוכרת")
 

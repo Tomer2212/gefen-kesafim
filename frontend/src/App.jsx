@@ -18,6 +18,7 @@ import ChatWidget from "./components/ChatWidget";
 import axios from "axios";
 import { supabase } from "./lib/supabase";
 import { registerDeviceSession } from "./lib/deviceSession";
+import { getTrustedDeviceToken } from "./lib/trustedDevice";
 import LoginPage from "./pages/LoginPage";
 import DashboardPage from "./pages/DashboardPage";
 import SchoolPage from "./pages/SchoolPage";
@@ -134,11 +135,24 @@ export default function App() {
             axios.get("/health", { timeout: 5000 }).catch(() => {});
           }, 9 * 60 * 1000); // every 9 minutes — keeps Render dyno warm
         }
-        if (_event === "SIGNED_IN" || _event === "INITIAL_SESSION") {
-          registerDeviceSession().then(({ ok, limitReached }) => {
-            if (!ok && limitReached && window.location.pathname !== "/connections-limit") {
-              window.location.href = "/connections-limit";
-            }
+        if (_event === "SIGNED_IN" || _event === "INITIAL_SESSION" || _event === "MFA_CHALLENGE_VERIFIED") {
+          // Runs on every route including /login (this effect isn't gated by PrivateRoute), so
+          // right after a password sign-in for an MFA-enrolled user — before the TOTP step-up —
+          // this session is AAL1 with no trusted-device token yet. Calling any protected endpoint
+          // here would 401 with mfa_challenge_required, and that 401 handler does a hard page
+          // reload, which re-runs this exact effect and 401s again — an infinite reload loop that
+          // also blows away LoginPage's own challenge-screen state every time. So: don't call it
+          // until AAL2 is actually satisfied (or a trusted-device token already covers it) — the
+          // post-login full reload (LoginPage does window.location.replace("/") after a successful
+          // verify) re-fires this same handler once the session legitimately qualifies.
+          supabase.auth.mfa.getAuthenticatorAssuranceLevel().then(({ data: aalData }) => {
+            const mfaStepUpPending = aalData?.nextLevel === "aal2" && aalData?.currentLevel !== "aal2";
+            if (mfaStepUpPending && !getTrustedDeviceToken()) return;
+            registerDeviceSession().then(({ ok, limitReached }) => {
+              if (!ok && limitReached && window.location.pathname !== "/connections-limit") {
+                window.location.href = "/connections-limit";
+              }
+            });
           });
         }
       } else {

@@ -30,8 +30,9 @@ from routers.tasks_router import router as tasks_router
 from routers.calls_router import router as calls_router
 from routers.training_videos_router import router as training_videos_router
 
+_log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=getattr(logging, _log_level, logging.INFO),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 
@@ -121,6 +122,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    """Passive defense-in-depth headers — none of these block/alter any response body,
+    so they carry zero functional risk. CSP is intentionally NOT set here: this service
+    is a JSON API, not an HTML-serving frontend, so CSP belongs on whatever actually
+    serves the React app (see CLAUDE.md)."""
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+    return response
+
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     _log.error(
@@ -138,6 +154,12 @@ async def global_exception_handler(request: Request, exc: Exception):
         headers["Access-Control-Allow-Origin"] = origin
         headers["Access-Control-Allow-Credentials"] = "true"
         headers["Vary"] = "Origin"
+    # Same bypass as the CORS headers above — this handler sits outside the
+    # @app.middleware("http") stack, so _security_headers never runs for it.
+    headers["X-Content-Type-Options"] = "nosniff"
+    headers["X-Frame-Options"] = "DENY"
+    headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
     return JSONResponse(
         status_code=503,
         content={"detail": "שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות"},

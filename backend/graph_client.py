@@ -193,12 +193,14 @@ def _get_app_only_token(db, org_id: str) -> str:
     raise last_exc
 
 
-def _resolve_advisor_email(db, advisor_id: str) -> str | None:
+def _resolve_advisor_email(db, org_id: str, advisor_id: str) -> str | None:
+    """org_id is required so a cross-org advisor_id (e.g. slipped through to a meeting via a
+    stale/direct API call) can never resolve to another org's real mailbox for Outlook sync."""
     for attempt in range(2):
         try:
             if attempt == 1:
                 db = get_admin_client()
-            res = db.table("profiles").select("email, calendar_sync_email").eq("id", advisor_id).execute()
+            res = db.table("profiles").select("email, calendar_sync_email").eq("id", advisor_id).eq("org_id", org_id).execute()
             if not res.data:
                 return None
             row = res.data[0]
@@ -256,7 +258,7 @@ def get_event(db, org_id: str, advisor_id: str, event_id: str) -> dict | str | N
         logger.info("get_event skipped for org %s: %s", org_id, exc)
         return EVENT_CHECK_SKIPPED
 
-    email = _resolve_advisor_email(db, advisor_id)
+    email = _resolve_advisor_email(db, org_id, advisor_id)
     if not email:
         return EVENT_CHECK_SKIPPED
 
@@ -347,7 +349,7 @@ def get_freebusy(db, org_id: str, advisor_id: str, start_iso: str, end_iso: str)
         logger.info("freebusy skipped for org %s: %s", org_id, exc)
         return None
 
-    email = _resolve_advisor_email(db, advisor_id)
+    email = _resolve_advisor_email(db, org_id, advisor_id)
     if not email:
         return []
 
@@ -573,7 +575,7 @@ def _ensure_subscription(db, org_id: str, advisor_id: str) -> None:
                 return  # still valid for a while, nothing to do
 
         token = _get_app_only_token(db, org_id)
-        email = _resolve_advisor_email(db, advisor_id)
+        email = _resolve_advisor_email(db, org_id, advisor_id)
         if not email:
             return
 
@@ -733,7 +735,7 @@ def send_mail_as_advisor(db, org_id: str, advisor_id: str, subject: str, html_bo
     attachments: [{"filename": str, "content_b64": str}] — mapped to Graph's fileAttachment shape.
     """
     token = _get_app_only_token(db, org_id)
-    email = _resolve_advisor_email(db, advisor_id)
+    email = _resolve_advisor_email(db, org_id, advisor_id)
     if not email:
         raise RuntimeError(f"could not resolve mailbox for advisor {advisor_id}")
 
@@ -780,7 +782,7 @@ def find_bounce_for_subject(db, org_id: str, advisor_id: str, original_subject: 
     check itself could not be performed (missing permission / transient error) — callers must
     NOT treat None as "no bounce", since that would wrongly finalize a message we never
     actually confirmed."""
-    email = _resolve_advisor_email(db, advisor_id)
+    email = _resolve_advisor_email(db, org_id, advisor_id)
     if not email:
         return None
     try:
@@ -826,7 +828,7 @@ def sync_meeting_create(db, org_id: str, meeting: dict, subject: str | None = No
 
 
 def _create_event_for_advisor(db, org_id: str, token: str, advisor_id: str, meeting: dict, subject: str | None, show_as: str | None = None, clear_attendees: bool = False) -> dict:
-    email = _resolve_advisor_email(db, advisor_id)
+    email = _resolve_advisor_email(db, org_id, advisor_id)
     if not email:
         return {"provider": "microsoft", "status": "not_connected"}
     try:
@@ -871,7 +873,7 @@ def sync_meeting_update(db, org_id: str, meeting: dict, previous_sync: dict, sub
     sync_map: dict = {}
     for advisor_id in current_ids:
         prior = previous_sync.get(advisor_id)
-        email = _resolve_advisor_email(db, advisor_id)
+        email = _resolve_advisor_email(db, org_id, advisor_id)
         if prior and prior.get("external_event_id") and email:
             entry = _update_event_for_advisor(db, org_id, token, advisor_id, email, prior["external_event_id"], meeting, subject, show_as, clear_attendees)
         else:
@@ -882,7 +884,7 @@ def sync_meeting_update(db, org_id: str, meeting: dict, previous_sync: dict, sub
 
     for advisor_id in previous_ids - current_ids:
         prior = previous_sync.get(advisor_id) or {}
-        email = _resolve_advisor_email(db, advisor_id)
+        email = _resolve_advisor_email(db, org_id, advisor_id)
         if prior.get("external_event_id") and email:
             _delete_event_for_advisor(token, email, prior["external_event_id"])
 

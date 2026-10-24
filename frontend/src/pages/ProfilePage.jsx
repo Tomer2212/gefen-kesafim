@@ -8,6 +8,7 @@ import PersonalTasksSection from "../components/personTasks/PersonalTasksSection
 import PersonalCallsTab from "./PersonalCallsTab";
 import PersonalAttendanceTab from "./PersonalAttendanceTab";
 import ConnectionsTab from "./ConnectionsTab";
+import PersonalSecurityTab from "../components/PersonalSecurityTab";
 import { MultiSelectChips } from "../components/MultiSelectChips";
 import { DOMAIN_OPTIONS } from "../constants/domains";
 import Avatar from "../components/Avatar";
@@ -30,6 +31,7 @@ const BASE_TABS = [
   { id: "attendance", label: "שעון נוכחות" },
   { id: "connections", label: "חיבורים" },
   { id: "personal", label: "פרטים אישיים" },
+  { id: "security", label: "אבטחה" },
 ];
 const TAB_IDS = BASE_TABS.map(t => t.id);
 // "שעון נוכחות" מיועד לתפקידים advisor/manager בלבד (owner לא מדווח נוכחות).
@@ -762,6 +764,8 @@ export default function ProfilePage() {
               {activeTab === "attendance" && canSeeAttendance(userRole) && (
                 <PersonalAttendanceTab userName={userName} />
               )}
+
+              {activeTab === "security" && <PersonalSecurityTab />}
             </>
           )}
         </div>
