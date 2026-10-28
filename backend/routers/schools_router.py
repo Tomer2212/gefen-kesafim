@@ -413,10 +413,14 @@ class MeetingImportRowIn(BaseModel):
     # from a spreadsheet cell — parsed defensively in _run_meeting_import_validation.
     planned_duration_hours: str | None = None
     actual_duration_hours: str | None = None
-    # reminder_enabled is intentionally NOT importable from the file — every other meeting
-    # creation path in this app defaults it to False and leaves it as a manual post-creation
-    # toggle (MeetingRow's reminder switch); imported meetings must behave identically, not
-    # let a spreadsheet column silently opt schools into reminder emails.
+    # reminder_enabled is intentionally NOT importable from the file — a spreadsheet column
+    # must never directly opt a school into reminder emails. commit_meeting_import instead
+    # computes it the same way create_meeting/update_meeting do (_org_reminders_default_on +
+    # _reminder_eligible), but scoped ONLY to role-matched participants (resolved_participants,
+    # pulled from the school's own verified contact fields) — never to the free-text
+    # participant_name/phone/email columns below, since an unverified typo there could silently
+    # email a reminder to the wrong address with no one reviewing each imported row the way a
+    # single manual creation naturally is.
     # resolution fields — set by the client on the /commit call only
     excluded: bool = False
     school_id: str | None = None
@@ -8972,11 +8976,23 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
                 past_count += 1
             else:
                 advisor_id = row.resolved_advisor_id or data_ctx.get("resolved_advisor_id")
+                # Reminder auto-enable is deliberately scoped to ROLE-MATCHED participants only
+                # (data_ctx["resolved_participants"] — pulled from the school's own verified
+                # contact fields, same source create_meeting's toggle already trusts), never to
+                # the free-text participant_name/phone/email columns above. A typo in a
+                # spreadsheet email column would otherwise risk silently emailing a reminder to
+                # the wrong address, with no one reviewing each of potentially hundreds of
+                # imported rows the way a single manual creation is naturally reviewed. Same
+                # eligibility function create_meeting/update_meeting use — see
+                # _org_reminders_default_on / _reminder_eligible.
+                reminder_enabled = _reminder_eligible(
+                    true_date, data_ctx.get("resolved_participants") or [], _org_reminders_default_on(db, school_id)
+                )
                 insert_data = {
                     "school_id": school_id,
                     "created_by": user["id"],
                     "status": row_status or "scheduled",
-                    "reminder_enabled": False,
+                    "reminder_enabled": reminder_enabled,
                     "participants": participants,
                     "academic_year": academic_year,
                     "meeting_type": final_meeting_type or "remote",
@@ -9057,7 +9073,7 @@ def process_calendar_sync_queue(request: Request):
     db = get_admin_client()
     MAX_RUNTIME_SECONDS = 30
     PER_ADVISOR_MIN_INTERVAL = 2.0  # seconds between two Graph calls for the SAME advisor — well under the 4/sec Graph limit
-    MAX_ROW_ATTEMPTS = 8  # ~16 minutes of retries at this cron's 2-minute cadence before giving up and surfacing as a permanent failure
+    MAX_ROW_ATTEMPTS = 4  # ~20 minutes of retries at this cron's 5-minute cadence before giving up and surfacing as a permanent failure
     started = time.monotonic()
 
     # Self-heal rows orphaned by a worker crash/restart mid-processing (no in-memory state is
