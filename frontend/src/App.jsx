@@ -8,6 +8,8 @@ import { MeetingNotesProvider } from "./context/MeetingNotesContext";
 import MeetingNotesWindow from "./components/meetings/MeetingNotesWindow";
 import { GefenOrganizedResultsProvider } from "./context/GefenOrganizedResultsContext";
 import GefenOrganizedResultsWindow from "./components/GefenOrganizedResultsWindow";
+import { CalendarSyncProvider } from "./context/CalendarSyncContext";
+import CalendarSyncWindow from "./components/meetings/CalendarSyncWindow";
 import { TasksProvider } from "./context/TasksContext";
 import TaskPanel from "./components/tasks/TaskPanel";
 import { CallNoteWindowsProvider } from "./context/CallNoteWindowsContext";
@@ -82,6 +84,7 @@ function AppLayout() {
       <CompareResultsWindow />
       <MeetingNotesWindow />
       <GefenOrganizedResultsWindow />
+      <CalendarSyncWindow />
       <TaskPanel />
       <CallNoteWindows />
       <GuideWindow />
@@ -172,13 +175,15 @@ export default function App() {
         <CompareChecksProvider>
           <MeetingNotesProvider>
             <GefenOrganizedResultsProvider>
-              <TasksProvider>
-                <CallNoteWindowsProvider>
-                  <GuideProvider>
-                    <RouterProvider router={router} />
-                  </GuideProvider>
-                </CallNoteWindowsProvider>
-              </TasksProvider>
+              <CalendarSyncProvider>
+                <TasksProvider>
+                  <CallNoteWindowsProvider>
+                    <GuideProvider>
+                      <RouterProvider router={router} />
+                    </GuideProvider>
+                  </CallNoteWindowsProvider>
+                </TasksProvider>
+              </CalendarSyncProvider>
             </GefenOrganizedResultsProvider>
           </MeetingNotesProvider>
         </CompareChecksProvider>

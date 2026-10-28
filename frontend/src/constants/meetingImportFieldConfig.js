@@ -14,8 +14,7 @@ export const MEETING_IMPORT_CHUNK_SIZE = 200;
 
 export const MEETING_IMPORT_FIELD_CONFIG = [
   { key: "meeting_date",          label: "תאריך פגישה",              required: true, hint: "DD/MM/YYYY או YYYY-MM-DD" },
-  { key: "school_name",           label: "שם מוסד",                   required: true },
-  { key: "school_symbol",         label: "סמל מוסד",                  required: true, hint: "מזהה בית הספר במערכת" },
+  { key: "school_symbol",         label: "סמל מוסד",                  required: true, hint: "מזהה בית הספר במערכת — שיוך בית הספר מתבצע לפי שדה זה בלבד" },
   { key: "start_time",            label: "שעת התחלה",                 required: true, hint: "HH:MM או HH:MM AM/PM" },
   { key: "end_time",              label: "שעת סיום",                  required: true, hint: "HH:MM או HH:MM AM/PM" },
   { key: "planned_duration_hours", label: "זמן פגישה מתוכנן (שעות)",  required: false, hint: "מספר שעות, למשל 0.25 לרבע שעה — שעת הסיום תחושב אוטומטית משעת ההתחלה" },
@@ -25,7 +24,8 @@ export const MEETING_IMPORT_FIELD_CONFIG = [
   { key: "advisor_name_text",     label: "יועץ מבצע",                 required: true, hint: "יישמר כטקסט חופשי, ללא שיוך למשתמש קיים" },
   { key: "meeting_type",          label: "מיקום פגישה",               required: false, hint: "פיזי / מרחוק" },
   { key: "meeting_service_type",  label: "סוג פגישה",                 required: true, hint: "גפן / שוטף / גפן+שוטף / מחוז — נושא הפגישה הספציפי, לא סוג השירות הקבוע של בית הספר" },
-  { key: "participant_name",      label: "שם איש קשר משתתף",          required: false, hint: "איש הקשר מטעם בית הספר שהשתתף/ישתתף בפגישה" },
+  { key: "participant_roles",     label: "תפקיד/י משתתפים (מהכרטיס)", required: false, hint: 'לדוגמה: "מנהל" או "מנהלנית" או "מנהל, מנהלנית" — המערכת תזהה אוטומטית את איש/י הקשר המתאימים מכרטיס בית הספר' },
+  { key: "participant_name",      label: "שם איש קשר משתתף (טקסט חופשי)", required: false, hint: "איש קשר שאינו מופיע בכרטיס בית הספר — בנוסף לעמודת התפקיד שלמעלה, לא במקומה" },
   { key: "participant_phone",     label: "טלפון איש קשר משתתף",       required: false },
   { key: "participant_email",     label: "מייל איש קשר משתתף",        required: false, hint: "בפגישות עתידיות ישמש גם כנמען להזמנת Outlook" },
   { key: "notes",                 label: "הערות",                     required: false },

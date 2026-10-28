@@ -114,7 +114,6 @@ function buildRowsFromSheet(mode, headers, dataRows, mapping) {
   return dataRows.map((row, i) => ({
     row_index: i,
     meeting_date: normalizeImportDate(dateCell(row, "meeting_date")) || null,
-    school_name: cell(row, "school_name") || null,
     school_symbol: cell(row, "school_symbol") || null,
     start_time: timeCell(row, "start_time") || null,
     end_time: timeCell(row, "end_time") || null,
@@ -125,6 +124,7 @@ function buildRowsFromSheet(mode, headers, dataRows, mapping) {
     advisor_name_text: mode === "past" ? (cell(row, "advisor_name_text") || null) : null,
     meeting_type: isPast ? (cell(row, "meeting_type") || null) : normalizeImportMeetingType(cell(row, "meeting_type")),
     meeting_service_type: isPast ? (cell(row, "meeting_service_type") || null) : normalizeImportServiceType(cell(row, "meeting_service_type")),
+    participant_roles: cell(row, "participant_roles") || null,
     participant_name: cell(row, "participant_name") || null,
     participant_phone: cell(row, "participant_phone") || null,
     participant_email: cell(row, "participant_email") || null,
@@ -139,6 +139,7 @@ export default function ImportMeetingsModal({ orgUsers, academicYear, onClose, o
   const [mode, setMode] = useState(null);
   const [sheetData, setSheetData] = useState(null); // { headers, previewRow, dataRows }
   const [validateRows, setValidateRows] = useState(null);
+  const [schoolsContacts, setSchoolsContacts] = useState({});
   const [error, setError] = useState(null);
   const [validateProgress, setValidateProgress] = useState(null); // { done, total } while chunking /validate
   const [selectedFile, setSelectedFile] = useState(null);
@@ -220,6 +221,7 @@ export default function ImportMeetingsModal({ orgUsers, academicYear, onClose, o
       // timeout allows if sent as one request — split into sequential chunks so each request
       // stays fast, with visible progress and a bumped per-request timeout as a safety net.
       const mergedRows = [];
+      const mergedSchoolsContacts = {};
       for (let i = 0; i < rows.length; i += MEETING_IMPORT_CHUNK_SIZE) {
         const chunk = rows.slice(i, i + MEETING_IMPORT_CHUNK_SIZE);
         const res = await axios.post(
@@ -228,9 +230,11 @@ export default function ImportMeetingsModal({ orgUsers, academicYear, onClose, o
           { timeout: 60000 }
         );
         mergedRows.push(...res.data.rows);
+        Object.assign(mergedSchoolsContacts, res.data.schools_contacts || {});
         setValidateProgress({ done: mergedRows.length, total: rows.length });
       }
       setValidateRows(mergedRows);
+      setSchoolsContacts(mergedSchoolsContacts);
       setStep("problems");
     } catch (e) {
       const detail = e?.response?.data?.detail;
@@ -248,6 +252,7 @@ export default function ImportMeetingsModal({ orgUsers, academicYear, onClose, o
         mode={mode}
         durationPriority={durationPriorityForRequest}
         rows={validateRows}
+        schoolsContacts={schoolsContacts}
         orgUsers={orgUsers}
         academicYear={academicYear}
         onClose={onClose}

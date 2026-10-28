@@ -10,6 +10,7 @@ import contextlib
 import json
 import logging
 import os
+import random
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -219,24 +220,63 @@ def _headers(token: str) -> dict:
     return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
 
-def _request_with_retry(method: str, url: str, **kwargs) -> httpx.Response:
-    """One retry with a short backoff for transient network/5xx failures. Graph API
-    occasionally has brief hiccups — don't let a one-off blip permanently mark a
-    meeting's calendar sync as failed when a second attempt would have succeeded."""
+def _request_with_retry(method: str, url: str, max_attempts: int = 2, max_delay: float = 3.0, **kwargs) -> httpx.Response:
+    """Retries transient network/5xx failures and 429 throttling (honors Retry-After when
+    present, else a short exponential backoff with jitter), so a brief Graph hiccup or
+    rate-limit response doesn't instantly mark a meeting's calendar sync as failed.
+
+    max_attempts defaults to 2 (one retry) and max_delay caps any single sleep at 3s — this
+    function is also called from the INLINE single-meeting sync path (create_meeting /
+    update_meeting), which runs synchronously inside a user-facing HTTP request, so it must
+    stay bounded regardless of what Graph's Retry-After asks for. The bulk-import queue
+    (process_calendar_sync_queue) doesn't need a more patient retry here: a row that still
+    fails after this gets marked 'pending' again (if the failure looks transient — see
+    _create_event_for_advisor) and simply retried on a later cron tick, which is a much
+    safer place to absorb a longer backoff than sleeping inside a request thread."""
     last_exc = None
-    for attempt in range(2):
+    for attempt in range(max_attempts):
+        is_last = attempt == max_attempts - 1
         try:
             resp = httpx.request(method, url, **kwargs)
-            if resp.status_code >= 500 and attempt == 0:
-                time.sleep(0.5)
-                continue
-            return resp
         except httpx.HTTPError as exc:
             last_exc = exc
-            if attempt == 0:
-                time.sleep(0.5)
-                continue
+            if is_last:
+                raise
+            time.sleep(min(0.5, max_delay))
+            continue
+
+        if resp.status_code == 429 and not is_last:
+            retry_after = resp.headers.get("Retry-After")
+            if retry_after is not None:
+                try:
+                    delay = float(retry_after)
+                except ValueError:
+                    delay = 2.0 ** attempt
+            else:
+                delay = 2.0 ** attempt
+            delay = min(delay + random.uniform(0, 0.5), max_delay)
+            time.sleep(delay)
+            continue
+
+        if resp.status_code >= 500 and not is_last:
+            time.sleep(min(0.5, max_delay))
+            continue
+
+        return resp
     raise last_exc
+
+
+def _is_retryable_graph_error(exc: Exception) -> bool:
+    """True for failures a later attempt (e.g. a future cron tick) could plausibly fix on its
+    own — throttling, server-side 5xx, or a network blip. False for failures that won't change
+    just by waiting (bad request, auth/permission errors, the event/mailbox genuinely not
+    existing) — those should surface immediately rather than silently retry forever."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        return status == 429 or status >= 500
+    if isinstance(exc, httpx.HTTPError):
+        return True  # connection/timeout/etc — transient by nature
+    return False
 
 
 # Sentinel returned by get_event() when the check itself couldn't be completed
@@ -849,7 +889,7 @@ def _create_event_for_advisor(db, org_id: str, token: str, advisor_id: str, meet
         }
     except Exception as exc:
         logger.warning("calendar event create failed for advisor %s: %s", advisor_id, exc)
-        return {"provider": "microsoft", "status": "error"}
+        return {"provider": "microsoft", "status": "error", "error": str(exc), "retryable": _is_retryable_graph_error(exc)}
 
 
 def sync_meeting_update(db, org_id: str, meeting: dict, previous_sync: dict, subject: str | None = None, show_as: str | None = None, clear_attendees: bool = False) -> dict:
@@ -915,7 +955,7 @@ def _update_event_for_advisor(db, org_id: str, token: str, advisor_id: str, emai
                 "calendar event %s returned 404 on PATCH but still exists (or check was inconclusive) on "
                 "re-check — treating as transient, not recreating to avoid a duplicate", event_id,
             )
-            return {"provider": "microsoft", "external_event_id": event_id, "status": "error"}
+            return {"provider": "microsoft", "external_event_id": event_id, "status": "error", "error": "404 on PATCH, unconfirmed", "retryable": True}
         resp.raise_for_status()
         _ensure_subscription(db, org_id, advisor_id)
         return {
@@ -926,7 +966,7 @@ def _update_event_for_advisor(db, org_id: str, token: str, advisor_id: str, emai
         }
     except Exception as exc:
         logger.warning("calendar event update failed (event %s): %s", event_id, exc)
-        return {"provider": "microsoft", "external_event_id": event_id, "status": "error"}
+        return {"provider": "microsoft", "external_event_id": event_id, "status": "error", "error": str(exc), "retryable": _is_retryable_graph_error(exc)}
 
 
 def _delete_event_for_advisor(token: str, email: str, event_id: str) -> None:

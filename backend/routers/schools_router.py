@@ -54,6 +54,7 @@ from meeting_labels import (
     normalize_meeting_service_type,
     normalize_meeting_status,
     normalize_meeting_type,
+    resolve_participant_role_token,
 )
 from meeting_upload_logic import build_upload_checklist, get_or_create_upload_token
 from supabase_client import get_admin_client, reset_admin_client
@@ -397,6 +398,11 @@ class MeetingImportRowIn(BaseModel):
     participant_name: str | None = None
     participant_phone: str | None = None
     participant_email: str | None = None
+    # Free-text role column (e.g. "מנהל", "מנהלנית", "מנהל, מנהלנית") — resolved against the
+    # row's school's actual contacts (principal/secretary/finance/extra_contacts) in
+    # _run_meeting_import_validation via meeting_labels.resolve_participant_role_token.
+    # Independent of / additive with participant_name/phone/email above, not a replacement.
+    participant_roles: str | None = None
     notes: str | None = None
     status: str | None = None
     # Alternative to end_time — exactly one of the two is populated per import batch (the
@@ -428,6 +434,11 @@ class MeetingImportRowIn(BaseModel):
     status_override: str | None = None
     meeting_type_override: str | None = None
     meeting_service_type_override: str | None = None
+    # token (trimmed, as split from participant_roles by comma) -> resolved role key
+    # ("principal"/"secretary"/"finance"/"extra_{i}"/"__ignore__"), chosen in the "unrecognized
+    # participant role" mapping step. Grouped per (school_id, token) on the frontend since
+    # extra_contacts roles are school-specific — see MeetingImportProblemsModal.jsx.
+    participant_role_overrides: dict[str, str] | None = None
 
 
 class MeetingImportValidateIn(BaseModel):
@@ -8313,18 +8324,68 @@ def create_meeting(school_id: str, body: MeetingIn, user: Annotated[dict, Depend
     return meeting
 
 
-def _sync_new_meeting_calendar(db, org_id: str, school_id: str, meeting: dict, user_id: str) -> None:
-    """Shared Outlook-sync block for a just-inserted meeting row — used by create_meeting()
-    and by the future-mode meeting-import commit endpoint so both paths behave identically.
-    Non-fatal: any failure here must never fail the caller's request."""
+def _do_sync_new_meeting_calendar(db, org_id: str, school_id: str, meeting: dict) -> tuple[bool, str | None, bool]:
+    """Does the actual Outlook sync for a just-inserted meeting. Returns (synced, error,
+    retryable) so callers that need to know the outcome (the calendar-sync queue processor)
+    can report it and decide whether to re-queue, while callers that don't (the inline
+    single-meeting path) can ignore it. `retryable` reflects graph_client's classification
+    of the underlying failure (throttling/5xx/network vs. a permanent error) when available;
+    defaults to True (worth another attempt) for failure modes with no such signal, e.g. the
+    sync-lock already held by a concurrent call.
+
+    Idempotency: checks the meeting's already-persisted calendar_sync map before calling Graph
+    at all — if every current advisor already has a 'synced'/'soft_cancelled' entry, this is a
+    no-op that just returns success. This matters because the calendar-sync QUEUE can call this
+    more than once for the same meeting (e.g. a worker crash between a successful Graph POST
+    and the queue row's own status write, recovered by process_calendar_sync_queue's stuck-row
+    self-heal) — sync_meeting_create itself has no such check and would otherwise create a
+    second, genuinely duplicate Outlook event."""
+    advisor_ids = meeting.get("advisor_ids") or []
+    existing_sync = meeting.get("calendar_sync") or {}
+    if advisor_ids and all(
+        isinstance(existing_sync.get(aid), dict) and existing_sync[aid].get("status") in ("synced", "soft_cancelled")
+        for aid in advisor_ids
+    ):
+        return True, None, False
     try:
         with graph_client.calendar_sync_lock(db, meeting["id"]) as acquired:
-            if acquired:
-                subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"), meeting.get("meeting_service_type"))
-                sync_map = graph_client.sync_meeting_create(db, org_id, meeting, subject)
-                if sync_map:
-                    graph_client.persist_calendar_sync(db, meeting["id"], sync_map)
-                    meeting["calendar_sync"] = sync_map
+            if not acquired:
+                return False, "סנכרון כבר מתבצע עבור פגישה זו", True
+            subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"), meeting.get("meeting_service_type"))
+            sync_map = graph_client.sync_meeting_create(db, org_id, meeting, subject)
+            if not sync_map:
+                return False, "לא נמצא יועץ מחובר ליומן Outlook", True
+            graph_client.persist_calendar_sync(db, meeting["id"], sync_map)
+            meeting["calendar_sync"] = sync_map
+            failed_entries = [
+                entry for entry in sync_map.values()
+                if isinstance(entry, dict) and entry.get("status") not in ("synced", "soft_cancelled")
+            ]
+            if failed_entries:
+                errors = [e.get("error") or f"סטטוס {e.get('status')}" for e in failed_entries]
+                # not_connected has no "retryable" key (it's not a Graph HTTP failure at all —
+                # the advisor just isn't connected) and won't fix itself by waiting, unlike an
+                # "error" entry, which graph_client already classified via _is_retryable_graph_error.
+                retryable = any(e.get("retryable", e.get("status") != "not_connected") for e in failed_entries)
+                return False, "; ".join(str(e) for e in errors), retryable
+            return True, None, False
+    except Exception as exc:
+        # Only a Graph/network-shaped failure is worth retrying automatically — a bug in our own
+        # code (e.g. a malformed meeting dict reaching _build_meeting_subject) should surface as
+        # 'failed' immediately rather than silently retrying for up to MAX_ROW_ATTEMPTS cron
+        # ticks (~16 minutes), which would just delay noticing a real defect.
+        return False, str(exc), isinstance(exc, httpx.HTTPError)
+
+
+def _sync_new_meeting_calendar(db, org_id: str, school_id: str, meeting: dict, user_id: str) -> None:
+    """Shared Outlook-sync block for a just-inserted meeting row — used by create_meeting().
+    Non-fatal: any failure here must never fail the caller's request. The future-mode
+    meeting-import commit path does NOT call this directly (see commit_meeting_import) — it
+    queues a meeting_calendar_sync_queue row instead, drained by process_calendar_sync_queue()
+    at a safe, throttling-aware pace, since a bulk import can contain hundreds/thousands of
+    meetings and calling Graph once per row inline would risk 429s and request timeouts."""
+    try:
+        _do_sync_new_meeting_calendar(db, org_id, school_id, meeting)
     except Exception as exc:
         logger.warning("calendar sync failed for new meeting %s (non-fatal): %s", meeting.get("id"), exc)
 
@@ -8470,13 +8531,57 @@ def _resolve_import_duration_hours(raw: str | None) -> float | None:
         return None
 
 
-def _run_meeting_import_validation(db, org_id: str, mode: str, rows: list, duration_priority: str | None = None) -> list[dict]:
+_PARTICIPANT_ROLE_LABELS = {"principal": "מנהל/ת", "secretary": "מנהלנ/ית", "finance": "אחראי/ת כספים"}
+
+
+def _school_contact_options(school: dict) -> list[dict]:
+    """Builds the same {key, label, name, phone, email} shape ParticipantsSelector.jsx's
+    buildSchoolContacts() produces client-side for manual participant picking — the
+    server-side equivalent, used both to resolve import rows and to tell the frontend what
+    options to offer for an unrecognized participant-role value specific to this school."""
+    options = []
+    for key, label in _PARTICIPANT_ROLE_LABELS.items():
+        name = school.get(f"{key if key != 'finance' else 'finance_contact'}_name")
+        if name:
+            options.append({
+                "key": key, "label": label, "name": name,
+                "phone": school.get(f"{key if key != 'finance' else 'finance_contact'}_phone") or "",
+                "email": school.get(f"{key if key != 'finance' else 'finance_contact'}_email") or "",
+            })
+    for i, ec in enumerate(school.get("extra_contacts") or []):
+        if isinstance(ec, dict) and ec.get("name"):
+            options.append({
+                "key": f"extra_{i}", "label": ec.get("role") or "איש קשר נוסף",
+                "name": ec.get("name"), "phone": ec.get("phone") or "", "email": ec.get("email") or "",
+            })
+    return options
+
+
+def _participant_from_role_key(school: dict, role_key: str) -> dict | None:
+    for opt in _school_contact_options(school):
+        if opt["key"] == role_key:
+            return opt
+    return None
+
+
+def _run_meeting_import_validation(db, org_id: str, mode: str, rows: list, duration_priority: str | None = None) -> tuple[list[dict], dict]:
     """Shared row-by-row validation used by both /meetings/import/validate (first pass) and
     /meetings/import/commit (mandatory server-side re-check before committing). Batch-fetches
-    schools/profiles/existing-meetings once (CLAUDE.md rule 7 — no per-row queries)."""
+    schools/profiles/existing-meetings once (CLAUDE.md rule 7 — no per-row queries).
+
+    Returns (results, schools_contacts) — schools_contacts is {school_id: {symbol, name,
+    options}} for every school that has at least one 'unrecognized_participant_role' problem
+    in this batch (kept small/only-as-needed rather than every school), so the frontend's
+    problems screen can offer that specific school's actual contacts as resolution choices."""
     today = date.today()
 
-    schools_res = db.table("schools").select("id, symbol, name, stage").eq("org_id", org_id).execute()
+    schools_res = db.table("schools").select(
+        "id, symbol, name, stage, "
+        "principal_name, principal_phone, principal_email, "
+        "secretary_name, secretary_phone, secretary_email, "
+        "finance_contact_name, finance_contact_phone, finance_contact_email, "
+        "extra_contacts"
+    ).eq("org_id", org_id).execute()
     schools = schools_res.data or []
     schools_by_symbol = {}
     schools_by_id = {}
@@ -8633,6 +8738,42 @@ def _run_meeting_import_validation(db, org_id: str, mode: str, rows: list, durat
                 "raw_value": str(raw_val).strip(),
             })
 
+        # Participant-role column ("מנהל", "מנהלנית, אחראי כספים", ...) — each comma-separated
+        # token resolves to a contact key (principal/secretary/finance/extra_N) specific to THIS
+        # row's school, via a user override (set in the problems screen) or the synonym table.
+        # Unmatched tokens become 'unrecognized_participant_role' problems carrying school_id,
+        # since the same raw text can mean different things (or nothing) at different schools —
+        # see MeetingImportProblemsModal.jsx's per-school grouping for why that's necessary.
+        resolved_participants = []
+        if school and (row.participant_roles or "").strip():
+            overrides = row.participant_role_overrides or {}
+            for raw_token in str(row.participant_roles).split(","):
+                token = raw_token.strip()
+                if not token:
+                    continue
+                role_key = overrides.get(token) or resolve_participant_role_token(token, school)
+                if role_key == "__ignore__":
+                    continue
+                contact = _participant_from_role_key(school, role_key) if role_key else None
+                if not contact:
+                    # Either the token matched nothing, or it matched a role that has no
+                    # contact info on file for THIS school (e.g. "מנהל" recognized, but
+                    # principal_name is empty on the school card) — either way, nothing can be
+                    # added automatically, so surface it the same way for the user to resolve.
+                    detail = (
+                        f"התפקיד '{token}' זוהה אך לא נמצאו פרטי קשר עבורו בכרטיס בית הספר {school.get('name') or ''}"
+                        if role_key else
+                        f"התפקיד '{token}' אינו מזוהה עבור בית הספר {school.get('name') or ''} — יש למפות אותו לאיש קשר מוכר"
+                    )
+                    problems.append({
+                        "type": "unrecognized_participant_role",
+                        "detail": detail,
+                        "raw_value": token,
+                        "school_id": school["id"],
+                    })
+                    continue
+                resolved_participants.append(contact)
+
         results.append({
             "row_index": row.row_index,
             "data": {
@@ -8645,22 +8786,36 @@ def _run_meeting_import_validation(db, org_id: str, mode: str, rows: list, durat
                 "academic_year": academic_year,
                 "true_date": true_date.isoformat() if true_date else None,
                 "stage_scope_normalized": stage_scope,
+                "resolved_participants": resolved_participants,
                 "resolved_start_time": resolved_start_time,
                 "resolved_end_time": resolved_end_time,
             },
             "problems": problems,
         })
-    return results
+
+    schools_contacts = {}
+    for r in results:
+        for p in r["problems"]:
+            if p["type"] != "unrecognized_participant_role":
+                continue
+            sid = p["school_id"]
+            if sid in schools_contacts:
+                continue
+            s = schools_by_id.get(sid)
+            if s:
+                schools_contacts[sid] = {"symbol": s.get("symbol"), "name": s.get("name"), "options": _school_contact_options(s)}
+
+    return results, schools_contacts
 
 
 @router.post("/meetings/import/validate")
 def validate_meeting_import(body: MeetingImportValidateIn, user: Annotated[dict, Depends(get_current_user)]):
     _require_manager(user)
-    results = None
+    results, schools_contacts = None, {}
     for attempt in range(2):
         try:
             db = get_admin_client()
-            results = _run_meeting_import_validation(db, user["org_id"], body.mode, body.rows, body.duration_priority)
+            results, schools_contacts = _run_meeting_import_validation(db, user["org_id"], body.mode, body.rows, body.duration_priority)
             break
         except HTTPException:
             raise
@@ -8674,7 +8829,7 @@ def validate_meeting_import(body: MeetingImportValidateIn, user: Annotated[dict,
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
     ok_count = sum(1 for r in results if not r["problems"])
     problem_count = len(results) - ok_count
-    return {"rows": results, "ok_count": ok_count, "problem_count": problem_count}
+    return {"rows": results, "ok_count": ok_count, "problem_count": problem_count, "schools_contacts": schools_contacts}
 
 
 @router.post("/meetings/import/commit")
@@ -8682,7 +8837,7 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
     _require_manager(user)
     db = get_admin_client()
     active_rows = [r for r in body.rows if not r.excluded]
-    revalidated = _run_meeting_import_validation(db, user["org_id"], body.mode, active_rows, body.duration_priority)
+    revalidated, _schools_contacts = _run_meeting_import_validation(db, user["org_id"], body.mode, active_rows, body.duration_priority)
 
     unresolved_row_indexes = []
     for row, val in zip(active_rows, revalidated):
@@ -8724,7 +8879,7 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
         })
 
     import_batch_id = body.import_batch_id or str(uuid4())
-    imported, past_count, future_count = 0, 0, 0
+    imported, past_count, future_count, future_unqueued = 0, 0, 0, 0
     errors: list[str] = []
 
     for row, val in zip(active_rows, revalidated):
@@ -8752,14 +8907,18 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
             resolved_start_time = data_ctx.get("resolved_start_time")
             resolved_end_time = data_ctx.get("resolved_end_time")
 
-            participants = []
+            # Role-based matches (from the "תפקיד/י משתתפים" column — e.g. "מנהל, מנהלנית"
+            # resolved against this school's actual contacts) come first, additively alongside
+            # the free-text participant_name/phone/email fallback below — the two are
+            # independent, not mutually exclusive.
+            participants = list(data_ctx.get("resolved_participants") or [])
             if row.participant_name or row.participant_phone or row.participant_email:
-                participants = [{
+                participants.append({
                     "key": "extra:import",
                     "name": row.participant_name or "",
                     "phone": row.participant_phone or None,
                     "email": row.participant_email or None,
-                }]
+                })
 
             effective_mode = data_ctx.get("effective_mode") or body.mode
             # The file's status column reflects what the org filled in assuming the mode they
@@ -8835,14 +8994,262 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
 
                 res = db.table("meetings").insert(insert_data).execute()
                 meeting = res.data[0]
-                _sync_new_meeting_calendar(db, user["org_id"], school_id, meeting, user["id"])
+                if advisor_id:
+                    # Calendar sync for imported future meetings is queued, not sent inline —
+                    # a bulk import can contain hundreds/thousands of rows, and calling Graph
+                    # once per row synchronously here risks Microsoft Graph throttling (429) and
+                    # request timeouts. process_calendar_sync_queue() drains this at a safe,
+                    # per-advisor-paced rate. See _sync_new_meeting_calendar for the single-meeting
+                    # (non-import) path, which still syncs inline since it's just one call.
+                    try:
+                        db.table("meeting_calendar_sync_queue").insert({
+                            "import_batch_id": import_batch_id,
+                            "meeting_id": meeting["id"],
+                            "advisor_id": advisor_id,
+                            "school_id": school_id,
+                            "org_id": user["org_id"],
+                        }).execute()
+                    except Exception as exc:
+                        logger.warning("meeting import row %s: failed to queue calendar sync: %s", row.row_index, exc)
+                        future_unqueued += 1
+                else:
+                    # No advisor resolved for this row — the meeting is still imported, but
+                    # nothing will ever create an Outlook event for it (sync_meeting_create
+                    # requires at least one advisor_id). Counted separately so the user isn't
+                    # left thinking every "future" meeting got (or will get) a calendar invite.
+                    future_unqueued += 1
                 imported += 1
                 future_count += 1
         except Exception as exc:
             logger.warning("meeting import row %s failed: %s", row.row_index, exc)
             errors.append(f"שורה {row.row_index}: {str(exc)}")
 
-    return {"imported": imported, "past": past_count, "future": future_count, "errors": errors}
+    return {
+        "imported": imported, "past": past_count, "future": future_count, "errors": errors,
+        "future_unqueued": future_unqueued,
+        "import_batch_id": import_batch_id if future_count else None,
+    }
+
+
+@router.post("/meetings/process-calendar-sync-queue")
+def process_calendar_sync_queue(request: Request):
+    """Cron-triggered (same GitHub Actions convention as process-booking-email-queue). Drains
+    the future-meeting-import calendar-sync queue at a safe, per-advisor-paced rate so a bulk
+    import of hundreds/thousands of meetings never approaches Microsoft Graph's throttling limit
+    (4 requests/sec per app per mailbox, per Microsoft's docs — this stays far below that).
+    Different advisors are different Outlook mailboxes with independent limits, so processing
+    round-robins across advisors (one row per advisor per round) rather than draining one
+    advisor's backlog before starting the next — this is what gives "parallel per advisor"
+    pacing without needing real thread/async concurrency against the shared Supabase client
+    (see Architecture Invariant #8 — ThreadPoolExecutor against the singleton is forbidden).
+    Bounded to a fixed wall-clock budget per invocation so it never risks Render's request
+    timeout; the cron re-invokes this frequently, so a large batch simply drains over many
+    invocations (potentially hours for a very large import) rather than one long request.
+    A row whose sync attempt fails with a transient-looking error (throttling/5xx/network —
+    see graph_client._is_retryable_graph_error) goes back to 'pending' instead of 'failed', so
+    it's retried on a later tick rather than needing a synchronous in-request retry/backoff —
+    up to MAX_ROW_ATTEMPTS attempts before it's surfaced as a permanent failure. A row whose
+    failure looks permanent (advisor not connected, bad request, etc.) is marked 'failed'
+    immediately, since waiting won't change the outcome."""
+    if not CRON_SECRET or request.headers.get("X-Cron-Secret") != CRON_SECRET:
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+    db = get_admin_client()
+    MAX_RUNTIME_SECONDS = 30
+    PER_ADVISOR_MIN_INTERVAL = 2.0  # seconds between two Graph calls for the SAME advisor — well under the 4/sec Graph limit
+    MAX_ROW_ATTEMPTS = 8  # ~16 minutes of retries at this cron's 2-minute cadence before giving up and surfacing as a permanent failure
+    started = time.monotonic()
+
+    # Self-heal rows orphaned by a worker crash/restart mid-processing (no in-memory state is
+    # ever relied on — see Architecture Invariant #1 — so a stuck 'processing' row just means
+    # a previous invocation died before it could record the outcome; safe to retry).
+    try:
+        db.table("meeting_calendar_sync_queue").update({"status": "pending"}).eq(
+            "status", "processing"
+        ).lt("attempted_at", (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()).execute()
+    except Exception as exc:
+        logger.warning("process_calendar_sync_queue: stuck-row recovery failed (non-fatal): %s", exc)
+
+    pending = (
+        db.table("meeting_calendar_sync_queue")
+        .select("*")
+        .eq("status", "pending")
+        .order("created_at")
+        .limit(500)
+        .execute()
+        .data or []
+    )
+
+    by_advisor: dict[str, list[dict]] = {}
+    for row in pending:
+        by_advisor.setdefault(row["advisor_id"], []).append(row)
+    cursor = {advisor_id: 0 for advisor_id in by_advisor}
+    last_call_at: dict[str, float] = {}
+
+    sent, failed = 0, 0
+    advisor_ids = list(by_advisor.keys())
+    made_progress = True
+    while made_progress and (time.monotonic() - started) < MAX_RUNTIME_SECONDS:
+        made_progress = False
+        for advisor_id in advisor_ids:
+            rows = by_advisor[advisor_id]
+            idx = cursor[advisor_id]
+            if idx >= len(rows):
+                continue
+            if (time.monotonic() - started) >= MAX_RUNTIME_SECONDS:
+                break
+            last = last_call_at.get(advisor_id)
+            if last is not None:
+                wait = PER_ADVISOR_MIN_INTERVAL - (time.monotonic() - last)
+                if wait > 0:
+                    time.sleep(wait)
+            row = rows[idx]
+            cursor[advisor_id] += 1
+            last_call_at[advisor_id] = time.monotonic()
+            made_progress = True
+            attempts_so_far = row.get("attempts", 0) + 1
+
+            try:
+                # Fresh client per row (Architecture Invariant #5) — if the shared httpx client
+                # goes stale mid-run, this row's exception handler resets it so the NEXT row
+                # (not just a later cron tick) can recover within the same invocation.
+                row_db = get_admin_client()
+
+                # Atomic claim: only proceed if THIS call actually flipped pending->processing.
+                # If update_result.data is empty, another (overlapping) invocation already
+                # claimed this row first — skip it rather than processing it a second time,
+                # which is what let two invocations' terminal writes race on the same row.
+                claim = row_db.table("meeting_calendar_sync_queue").update({
+                    "status": "processing", "attempts": attempts_so_far, "attempted_at": "now()",
+                }).eq("id", row["id"]).eq("status", "pending").execute()
+                if not claim.data:
+                    continue
+
+                def _finalize(fields: dict) -> None:
+                    # Guarded on status='processing' (still held by THIS invocation) so a
+                    # straggling write from another invocation that raced us for this same row
+                    # can never downgrade/overwrite a terminal status we already set — this is
+                    # what makes 'sent' truly terminal and prevents a synced meeting from being
+                    # silently flipped back to 'pending' and re-synced (a real duplicate Outlook
+                    # event otherwise, since sync_meeting_create has no idempotency check).
+                    row_db.table("meeting_calendar_sync_queue").update({
+                        **fields, "attempted_at": "now()",
+                    }).eq("id", row["id"]).eq("status", "processing").execute()
+
+                meeting_rows = row_db.table("meetings").select(
+                    "id, school_id, meeting_date, start_time, end_time, notes, participants, "
+                    "advisor_ids, primary_contact_key, meeting_service_type, calendar_sync"
+                ).eq("id", row["meeting_id"]).execute().data
+                if not meeting_rows:
+                    _finalize({"status": "skipped", "error_message": "הפגישה נמחקה"})
+                    continue
+                meeting = meeting_rows[0]
+
+                synced, error, retryable = _do_sync_new_meeting_calendar(row_db, row["org_id"], row["school_id"], meeting)
+                if synced:
+                    _finalize({"status": "sent", "error_message": None})
+                    sent += 1
+                elif retryable and attempts_so_far < MAX_ROW_ATTEMPTS:
+                    # Transient-looking failure (throttling/5xx/network/lock contention) with
+                    # attempts to spare — go back to 'pending' so a later cron tick retries it
+                    # naturally, instead of sleeping/retrying synchronously inside this request.
+                    # error_message is still recorded so the progress window can show *why* a
+                    # row is taking a while, even though it isn't a final failure yet.
+                    _finalize({"status": "pending", "error_message": error})
+                else:
+                    _finalize({"status": "failed", "error_message": error})
+                    failed += 1
+            except Exception as exc:
+                logger.warning("process_calendar_sync_queue: row %s failed: %s", row["id"], exc)
+                reset_admin_client()
+                try:
+                    final = attempts_so_far >= MAX_ROW_ATTEMPTS
+                    get_admin_client().table("meeting_calendar_sync_queue").update({
+                        "status": "failed" if final else "pending", "attempted_at": "now()", "error_message": str(exc),
+                    }).eq("id", row["id"]).eq("status", "processing").execute()
+                    if final:
+                        failed += 1
+                except Exception as log_exc:
+                    logger.error("process_calendar_sync_queue: failed to mark row %s failed: %s", row["id"], log_exc)
+                    failed += 1
+
+    return {"ok": True, "sent": sent, "failed": failed, "pending_total": len(pending)}
+
+
+_CALENDAR_SYNC_STATUS_UNAVAILABLE = {
+    "total": 0, "done": 0, "is_complete": False, "counts": {}, "failed_rows": [], "unavailable": True,
+}
+_CALENDAR_SYNC_STATUS_NOT_FOUND = {
+    "total": 0, "done": 0, "is_complete": True, "counts": {}, "failed_rows": [], "not_found": True,
+}
+
+
+@router.get("/meetings/import/{batch_id}/calendar-sync-status")
+def get_calendar_sync_status(batch_id: str, user: Annotated[dict, Depends(get_current_user)]):
+    """Polled every few seconds by the frontend's minimizable calendar-sync progress window
+    (see CalendarSyncContext.jsx) to show exactly how many of a meeting import's calendar-sync
+    rows are pending/sent/failed/skipped, and the reason for each failure. Per Architecture
+    Invariant #9 (endpoints polled periodically for non-critical UI state must never raise),
+    this always returns 200 with a safe payload — `unavailable: true` on a transient DB error
+    (frontend keeps polling), `not_found: true` with `is_complete: true` when the batch has no
+    queue rows at all (frontend's existing is_complete check naturally stops polling instead of
+    retrying forever against a batch that will never produce rows — e.g. every future-mode row
+    in that import lacked a resolved advisor, so none were ever queued)."""
+    _require_manager(user)
+    rows = None
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            rows = (
+                db.table("meeting_calendar_sync_queue")
+                .select("id, meeting_id, advisor_id, school_id, status, error_message, attempts")
+                .eq("import_batch_id", batch_id)
+                .eq("org_id", user["org_id"])
+                .execute()
+                .data or []
+            )
+            break
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("get_calendar_sync_status attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("get_calendar_sync_status failed after 2 attempts: %s", exc, exc_info=True)
+                return _CALENDAR_SYNC_STATUS_UNAVAILABLE
+
+    if not rows:
+        return _CALENDAR_SYNC_STATUS_NOT_FOUND
+
+    counts = {"pending": 0, "processing": 0, "sent": 0, "failed": 0, "skipped": 0}
+    for r in rows:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+
+    failures = [r for r in rows if r["status"] == "failed"]
+    school_ids = list({r["school_id"] for r in failures})
+    advisor_ids = list({r["advisor_id"] for r in failures})
+    schools_map, advisors_map = {}, {}
+    try:
+        if school_ids:
+            schools_map = {s["id"]: s["name"] for s in db.table("schools").select("id, name").in_("id", school_ids).execute().data or []}
+        if advisor_ids:
+            advisors_map = {p["id"]: p["full_name"] for p in db.table("profiles").select("id, full_name").in_("id", advisor_ids).execute().data or []}
+    except Exception as exc:
+        logger.warning("get_calendar_sync_status: school/advisor name enrichment failed (non-fatal): %s", exc)
+
+    failed_rows = [{
+        "meeting_id": r["meeting_id"],
+        "school_name": schools_map.get(r["school_id"], ""),
+        "advisor_name": advisors_map.get(r["advisor_id"], ""),
+        "error_message": r["error_message"],
+        "attempts": r["attempts"],
+    } for r in failures]
+
+    done = counts["sent"] + counts["failed"] + counts["skipped"]
+    return {
+        "total": len(rows), "done": done, "is_complete": done == len(rows),
+        "counts": counts, "failed_rows": failed_rows,
+    }
 
 
 @router.post("/meetings/import/historical-schools")

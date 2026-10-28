@@ -121,3 +121,49 @@ CANONICAL_LABELS = {
     "meeting_type": MEETING_TYPE_LABELS,
     "meeting_service_type": MEETING_SERVICE_TYPE_LABELS,
 }
+
+
+# ---------------------------------------------------------------------------
+# Participant-role recognition for the meeting-import "תפקיד/י משתתפים" column —
+# maps free Hebrew role text (e.g. "מנהל", "מנהלנית") to the standard contact keys
+# ParticipantsSelector already uses ("principal" / "secretary" / "finance"), or to a
+# specific school's own extra_contacts entry ("extra_0", "extra_1", ...). Same
+# substring-match-via-_match() pattern as the three tables above; only the
+# extra_contacts step is inherently per-school (not a fixed global table) since each
+# school defines its own extra contact roles.
+# ---------------------------------------------------------------------------
+
+_PRINCIPAL_ROLE_SYNONYMS = [
+    "מנהל", "מנהלת", "מנהל/ת", "מנהל בית הספר", "מנהלת בית הספר", "מנהל בי\"ס", "מנהלת בי\"ס", "principal",
+]
+_SECRETARY_ROLE_SYNONYMS = [
+    "מנהלן", "מנהלנית", "מנהלנ/ית", "מנהלן/נית", "מזכיר", "מזכירה", "מזכיר/ה", "secretary",
+]
+_FINANCE_ROLE_SYNONYMS = [
+    "אחראי כספים", "אחראית כספים", "אחראי/ת כספים", "גזבר", "גזברית", "רכז כספים", "רכזת כספים", "finance",
+]
+
+# Order matters (first match wins, via _match()'s substring check): secretary and finance are
+# checked BEFORE principal, because "מנהל" is itself a substring of "מנהלן"/"מנהלנית" (secretary)
+# — checking principal first would make every secretary token falsely match "principal" via that
+# accidental substring collision. Putting the more specific synonym lists first avoids this.
+_PARTICIPANT_ROLE_MAP = [
+    (_SECRETARY_ROLE_SYNONYMS, "secretary"),
+    (_FINANCE_ROLE_SYNONYMS, "finance"),
+    (_PRINCIPAL_ROLE_SYNONYMS, "principal"),
+]
+
+
+def resolve_participant_role_token(raw_token: str, school: dict) -> str | None:
+    """A single comma-split token from the import's participant-role column -> one of
+    'principal' / 'secretary' / 'finance' / 'extra_{i}' (matching that specific school's
+    extra_contacts[i]), or None if nothing matches (caller surfaces this as an
+    'unrecognized_participant_role' import problem)."""
+    standard = _match(raw_token, _PARTICIPANT_ROLE_MAP)
+    if standard:
+        return standard
+    for i, ec in enumerate(school.get("extra_contacts") or []):
+        role = ec.get("role") if isinstance(ec, dict) else None
+        if role and _match(raw_token, [([role], f"extra_{i}")]):
+            return f"extra_{i}"
+    return None

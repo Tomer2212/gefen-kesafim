@@ -1,0 +1,32 @@
+name: Process Meeting Calendar Sync Queue
+
+on:
+  schedule:
+    # Every 2 minutes — drains the future-meeting-import Outlook calendar-sync queue at a safe,
+    # per-advisor-paced rate (see process_calendar_sync_queue in schools_router.py). Frequent
+    # small invocations, rather than one long-running job, are what let a bulk import of
+    # hundreds/thousands of meetings trickle out over hours without ever approaching
+    # Microsoft Graph's per-mailbox throttling limit.
+    - cron: '*/2 * * * *'
+  workflow_dispatch: {}
+
+# Defense in depth alongside the endpoint's own atomic per-row claim (process_calendar_sync_queue
+# only proceeds on a row if its own pending->processing update actually matched it): never let a
+# slow run, a manual workflow_dispatch, or an Actions retry overlap the next scheduled tick.
+concurrency:
+  group: calendar-sync-queue
+  cancel-in-progress: false
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call calendar sync queue endpoint
+        run: |
+          URL="${BACKEND_URL%/}"
+          curl -sf -X POST "${URL}/schools/meetings/process-calendar-sync-queue" \
+            -H "X-Cron-Secret: ${CRON_SECRET}" \
+            --max-time 60
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}

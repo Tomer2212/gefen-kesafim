@@ -2,6 +2,7 @@ import { useState } from "react";
 import axios from "axios";
 import * as XLSX from "xlsx";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
+import { useCalendarSync } from "../../context/CalendarSyncContext";
 import { ACADEMIC_YEARS } from "../../constants/academicYears";
 import {
   MEETING_IMPORT_CHUNK_SIZE,
@@ -57,6 +58,7 @@ const PROBLEM_TITLES = {
   unrecognized_status: "ערך סטטוס לא מזוהה",
   unrecognized_meeting_type: "ערך מיקום לא מזוהה",
   unrecognized_service_type: "ערך סוג לא מזוהה",
+  unrecognized_participant_role: "תפקיד משתתף לא מזוהה",
 };
 
 function normStr(s) { return (s || "").trim().toLowerCase(); }
@@ -308,8 +310,11 @@ function QuickAddSchoolForm({ row, orgUsers, academicYear, onCreated, onCancel }
   );
 }
 
-export default function MeetingImportProblemsModal({ mode, durationPriority, rows, orgUsers, academicYear, onSubmit, onClose }) {
+const IGNORE_PARTICIPANT_ROLE = "__ignore__";
+
+export default function MeetingImportProblemsModal({ mode, durationPriority, rows, schoolsContacts = {}, orgUsers, academicYear, onSubmit, onClose }) {
   const { ref, handleKeyDown } = useFocusTrap(onClose);
+  const { openCalendarSync } = useCalendarSync();
   const [resolvedKeys, setResolvedKeys] = useState(new Set());
   const [excludedRows, setExcludedRows] = useState(new Set());
   const [rowResolutions, setRowResolutions] = useState({}); // row_index -> partial resolution fields
@@ -321,9 +326,14 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
   const [bulkHistoricalBusy, setBulkHistoricalBusy] = useState(false);
   const [bulkHistoricalError, setBulkHistoricalError] = useState(null);
 
-  function key(type, rowIndex) { return `${type}:${rowIndex}`; }
-  function isResolved(type, rowIndex) { return resolvedKeys.has(key(type, rowIndex)); }
-  function markResolved(type, rowIndex) { setResolvedKeys(prev => new Set(prev).add(key(type, rowIndex))); }
+  // rawValue is only passed for problem types that can occur more than once per row with
+  // different raw text (currently just unrecognized_participant_role — a cell like "מנהל,
+  // רכז לא קיים" can carry two distinct unmatched tokens on the SAME row, unlike
+  // status/meeting_type/meeting_service_type which are each a single column, so at most one
+  // problem of that type per row). Omitting it keeps the original per-(type,row) key.
+  function key(type, rowIndex, rawValue) { return rawValue === undefined ? `${type}:${rowIndex}` : `${type}:${rowIndex}:${rawValue}`; }
+  function isResolved(type, rowIndex, rawValue) { return resolvedKeys.has(key(type, rowIndex, rawValue)); }
+  function markResolved(type, rowIndex, rawValue) { setResolvedKeys(prev => new Set(prev).add(key(type, rowIndex, rawValue))); }
   function setRowField(rowIndex, patch) {
     setRowResolutions(prev => ({ ...prev, [rowIndex]: { ...prev[rowIndex], ...patch } }));
   }
@@ -340,7 +350,7 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
 
   function rowUnresolvedCount(r) {
     if (excludedRows.has(r.row_index)) return 0;
-    return r.problems.filter(p => !isResolved(p.type, r.row_index)).length;
+    return r.problems.filter(p => !isResolved(p.type, r.row_index, p.type === "unrecognized_participant_role" ? p.raw_value : undefined)).length;
   }
   const remainingRows = problemRows.filter(r => rowUnresolvedCount(r) > 0);
   const allClear = remainingRows.length === 0;
@@ -427,15 +437,63 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
     });
   }
 
+  // Distinct unrecognized participant-role tokens, grouped by (school_id, rawValue) rather
+  // than rawValue alone — unlike status/מיקום/סוג, the same raw text (e.g. "רכז") can mean a
+  // different extra_contacts role (or nothing) at a different school, so the set of resolution
+  // options is school-specific (schoolsContacts[schoolId].options, from the validate response),
+  // not a fixed global list like UNRECOGNIZED_FIELD_CONFIG's other three types.
+  const participantRoleGroups = (() => {
+    const groups = new Map(); // `${schoolId}|${rawValue}` -> { schoolId, rawValue, options, schoolName, rowIndexes, unresolvedCount }
+    for (const r of problemRows) {
+      if (excludedRows.has(r.row_index)) continue;
+      for (const p of r.problems) {
+        if (p.type !== "unrecognized_participant_role") continue;
+        const schoolId = p.school_id;
+        const raw = p.raw_value ?? "";
+        const k = `${schoolId}|${raw}`;
+        if (!groups.has(k)) {
+          const schoolInfo = schoolsContacts[schoolId];
+          groups.set(k, {
+            schoolId, rawValue: raw,
+            schoolName: schoolInfo?.name || "",
+            options: schoolInfo?.options || [],
+            rowIndexes: [], unresolvedCount: 0,
+          });
+        }
+        const g = groups.get(k);
+        g.rowIndexes.push(r.row_index);
+        if (!isResolved(p.type, r.row_index, raw)) g.unresolvedCount += 1;
+      }
+    }
+    return [...groups.values()].filter(g => g.unresolvedCount > 0);
+  })();
+
+  function mapParticipantRoleValue(group, choice) {
+    if (!choice) return;
+    setRowResolutions(prev => {
+      const next = { ...prev };
+      for (const idx of group.rowIndexes) {
+        const existing = next[idx]?.participant_role_overrides || {};
+        next[idx] = { ...next[idx], participant_role_overrides: { ...existing, [group.rawValue]: choice } };
+      }
+      return next;
+    });
+    setResolvedKeys(prev => {
+      const next = new Set(prev);
+      for (const idx of group.rowIndexes) next.add(key("unrecognized_participant_role", idx, group.rawValue));
+      return next;
+    });
+  }
+
   // Exports every row that still has at least one unresolved problem (any type) — lets the
   // manager skip them now and handle/re-import separately later, per the user's request.
   function handleExportProblems() {
     const wsData = [["שורה", "שם מוסד", "סמל מוסד", "תאריך", "בעיות שלא טופלו"]];
     for (const r of remainingRows) {
-      const unresolved = r.problems.filter(p => !isResolved(p.type, r.row_index));
+      const unresolved = r.problems.filter(p => !isResolved(p.type, r.row_index, p.type === "unrecognized_participant_role" ? p.raw_value : undefined));
       wsData.push([
         r.row_index + 1,
-        r.data.school_name || "",
+        r.data.resolved_school_name || r.data.school_name || "",
         r.data.school_symbol || "",
         r.data.meeting_date || "",
         unresolved.map(p => `${PROBLEM_TITLES[p.type] || p.type}: ${p.detail}`).join(" | "),
@@ -469,6 +527,7 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
         status_override: res.status_override ?? null,
         meeting_type_override: res.meeting_type_override ?? null,
         meeting_service_type_override: res.meeting_service_type_override ?? null,
+        participant_role_overrides: res.participant_role_overrides ?? null,
       };
     });
 
@@ -476,7 +535,7 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
     // from this file (regardless of which chunk it landed in) is tagged together — this is
     // what makes it possible to look up "everything this import produced" later if needed.
     const importBatchId = crypto.randomUUID();
-    const totals = { imported: 0, past: 0, future: 0, errors: [] };
+    const totals = { imported: 0, past: 0, future: 0, futureUnqueued: 0, errors: [] };
     setSubmitProgress({ done: 0, total: payloadRows.length });
 
     for (let i = 0; i < payloadRows.length; i += MEETING_IMPORT_CHUNK_SIZE) {
@@ -490,6 +549,7 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
         totals.imported += res.data.imported || 0;
         totals.past += res.data.past || 0;
         totals.future += res.data.future || 0;
+        totals.futureUnqueued += res.data.future_unqueued || 0;
         if (res.data.errors?.length) totals.errors.push(...res.data.errors);
       } catch (e) {
         // Keep going to the next chunk rather than aborting the whole import — a transient
@@ -504,6 +564,10 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
     setSubmitResult(totals);
     setSubmitting(false);
     setSubmitProgress(null);
+    // Future-mode meetings each queue an Outlook calendar-sync job (processed gradually, in the
+    // background, server-side — see process_calendar_sync_queue) rather than syncing inline, so
+    // open the tracking window now to show the user how that's progressing.
+    if (totals.future > 0) openCalendarSync(importBatchId);
   }
 
   if (submitResult) {
@@ -526,6 +590,11 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
               <p className="font-semibold">{submitResult.errors.length} שורות לא יובאו:</p>
               {submitResult.errors.map((e, i) => <p key={i}>{e}</p>)}
             </div>
+          )}
+          {submitResult.futureUnqueued > 0 && (
+            <p role="alert" className="text-xs text-amber-700 bg-amber-50 rounded-lg px-3 py-2">
+              {submitResult.futureUnqueued} מתוך הפגישות העתידיות יובאו למערכת אך לא ישויכו ליומן Outlook — לא נמצא עבורן יועץ מתאים. ניתן לשייך יועץ ידנית בכרטיס הפגישה.
+            </p>
           )}
           <button type="button" onClick={() => onSubmit(submitResult)} className="text-sm px-4 py-2 rounded-xl font-medium bg-blue-600 text-white hover:bg-blue-700">
             סגור
@@ -596,6 +665,28 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
             </div>
           )}
 
+          {participantRoleGroups.length > 0 && (
+            <div className="border border-amber-200 bg-amber-50/60 rounded-xl p-3 space-y-2">
+              <p className="text-xs text-amber-800">
+                מיפוי תפקידי משתתפים לא מזוהים — לכל בית ספר אפשרויות משלו, לפי אנשי הקשר המוגדרים בכרטיס שלו:
+              </p>
+              {participantRoleGroups.map(g => (
+                <div key={`${g.schoolId}|${g.rawValue}`} className="flex items-center gap-2 flex-wrap bg-white rounded-lg border border-amber-100 px-2.5 py-1.5">
+                  <span className="text-xs text-slate-500">תפקיד משתתף ({g.schoolName}):</span>
+                  <b className="text-xs text-slate-800">"{g.rawValue}"</b>
+                  <span className="text-xs text-slate-400">({g.rowIndexes.length} שורות)</span>
+                  <select aria-label={`מיפוי תפקיד המשתתף ${g.rawValue} עבור ${g.schoolName}`} defaultValue=""
+                    onChange={e => mapParticipantRoleValue(g, e.target.value)}
+                    className="text-xs border border-amber-300 rounded-lg px-2 py-1.5 bg-white mr-auto">
+                    <option value="" disabled>בחר איש קשר...</option>
+                    {g.options.map(o => <option key={o.key} value={o.key}>{o.label} — {o.name}</option>)}
+                    <option value={IGNORE_PARTICIPANT_ROLE}>התעלם מערך זה (אל תוסיף משתתף)</option>
+                  </select>
+                </div>
+              ))}
+            </div>
+          )}
+
           {problemRows.map(r => {
             const isExcluded = excludedRows.has(r.row_index);
             const isRowClear = isExcluded || rowUnresolvedCount(r) === 0;
@@ -608,7 +699,7 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
                     </span>
                     <b className="text-slate-800">שורה {r.row_index + 1}</b>
                     <span className="text-slate-400 text-xs">
-                      {r.data.school_name || ""} {r.data.school_symbol ? `(סמל ${r.data.school_symbol})` : ""} {r.data.meeting_date ? `· ${r.data.meeting_date}` : ""}
+                      {r.data.resolved_school_name || r.data.school_name || ""} {r.data.school_symbol ? `(סמל ${r.data.school_symbol})` : ""} {r.data.meeting_date ? `· ${r.data.meeting_date}` : ""}
                     </span>
                   </span>
                   <button type="button" onClick={() => toggleExcluded(r.row_index)} className="text-xs text-slate-400 hover:text-red-600">
@@ -619,7 +710,7 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
                 {!isExcluded && (
                   <div className="space-y-2">
                     {r.problems.map((p, i) => {
-                      const done = isResolved(p.type, r.row_index);
+                      const done = isResolved(p.type, r.row_index, p.type === "unrecognized_participant_role" ? p.raw_value : undefined);
                       if (done) {
                         return (
                           <div key={i} className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1.5">
@@ -714,6 +805,9 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
 
                           {UNRECOGNIZED_FIELD_CONFIG[p.type] && (
                             <p className="text-[11px] text-slate-400">יש למפות את הערך בסקשן "מיפוי ערכים לא מזוהים" למעלה.</p>
+                          )}
+                          {p.type === "unrecognized_participant_role" && (
+                            <p className="text-[11px] text-slate-400">יש למפות את התפקיד בסקשן "מיפוי תפקידי משתתפים לא מזוהים" למעלה.</p>
                           )}
                         </div>
                       );

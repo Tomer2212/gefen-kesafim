@@ -18,6 +18,8 @@ Safety convention used throughout this file (stricter than "never write to org A
     or skipped entirely with a comment, per the task's own escape clause for "genuinely
     unsafe or impractical" positive tests.
 """
+import uuid
+
 import pytest
 
 from conftest import (
@@ -27,6 +29,7 @@ from conftest import (
     ORG_A_MANAGER_ID,
     ORG_A_RUN_ID,
     ORG_B_SCHOOL_ID,
+    ORG_B_ID,
     ORG_B_OWNER_ID,
     ORG_B_MANAGER_ID,
 )
@@ -1011,3 +1014,61 @@ def test_link_call_school_same_org_round_trip(org_b_client):
         # is the property this test actually cares about; a stray harmless sandbox link
         # row for a fake call_id is not real customer data and poses no risk left behind.
         pass
+
+
+# ===========================================================================
+# 14. meetings — calendar-sync-status (meeting_calendar_sync_queue)
+# ===========================================================================
+
+@pytest.fixture
+def org_b_calendar_sync_batch(admin_db):
+    """Creates a throwaway org-B meeting + a meeting_calendar_sync_queue row tagged with a
+    fresh import_batch_id, so the status endpoint has something real to look up. Cleans up
+    both rows afterward regardless of test outcome."""
+    meeting = admin_db.table("meetings").insert({
+        "school_id": ORG_B_SCHOOL_ID,
+        "created_by": ORG_B_MANAGER_ID,
+        "status": "scheduled",
+        "meeting_type": "remote",
+        "advisor_ids": [ORG_B_MANAGER_ID],
+        "created_via": "import",
+    }).execute().data[0]
+    batch_id = str(uuid.uuid4())
+    queue_row = admin_db.table("meeting_calendar_sync_queue").insert({
+        "import_batch_id": batch_id,
+        "meeting_id": meeting["id"],
+        "advisor_id": ORG_B_MANAGER_ID,
+        "school_id": ORG_B_SCHOOL_ID,
+        "org_id": ORG_B_ID,
+        "status": "failed",
+        "error_message": "test fixture row",
+    }).execute().data[0]
+    try:
+        yield batch_id
+    finally:
+        admin_db.table("meeting_calendar_sync_queue").delete().eq("id", queue_row["id"]).execute()
+        admin_db.table("meetings").delete().eq("id", meeting["id"]).execute()
+
+
+def test_calendar_sync_status_cross_org_rejected(org_a_client, org_b_calendar_sync_batch):
+    # This endpoint is polled periodically by a non-blocking progress UI, so per CLAUDE.md
+    # Architecture Invariant #9 it never raises/404s — the org_id filter means a cross-org
+    # caller's query simply matches zero rows, which is indistinguishable from "no such batch"
+    # and returns the same safe `not_found` payload. No Org B data is exposed either way.
+    resp = org_a_client.get(f"/schools/meetings/import/{org_b_calendar_sync_batch}/calendar-sync-status")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body.get("not_found") is True, body
+    assert body.get("total") == 0, body
+    assert body.get("failed_rows") == [], (
+        f"VULNERABILITY: cross-org caller saw Org B's queue rows. Body: {body}"
+    )
+
+
+def test_calendar_sync_status_same_org_still_works(org_b_manager_client, org_b_calendar_sync_batch):
+    resp = org_b_manager_client.get(f"/schools/meetings/import/{org_b_calendar_sync_batch}/calendar-sync-status")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["total"] == 1
+    assert data["counts"]["failed"] == 1
+    assert data["failed_rows"][0]["error_message"] == "test fixture row"
