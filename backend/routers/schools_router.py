@@ -8629,6 +8629,55 @@ def _run_meeting_import_validation(db, org_id: str, mode: str, rows: list, durat
         except Exception as exc:
             logger.warning("meeting import duplicate lookup failed (non-fatal): %s", exc)
 
+    # Batch-fetch each advisor's Outlook freebusy ONCE for their whole date range in this batch,
+    # instead of once per row inside the main loop below. A bulk import can have hundreds of
+    # future-mode rows; _check_meeting_conflict's live Graph call per row (the only per-row
+    # remote call anywhere in this function, unlike everything else here which is batch-fetched
+    # per CLAUDE.md rule 7) was measured to blow a chunk's request timeout on a real ~550-row
+    # file. This mirrors the same resolution the main loop does below for school/advisor_id/
+    # true_date — a mismatch here only costs a cache miss (falls back to the main loop's own
+    # live per-row fetch via prefetched_blocks=None), never an incorrect result.
+    advisor_date_range: dict[str, list[date]] = {}
+    for row in rows:
+        if mode != "future":
+            continue
+        s = schools_by_id.get(row.school_id) if row.school_id else schools_by_symbol.get(str(row.school_symbol or "").strip())
+        if not s:
+            continue
+        d = _parse_import_date(row.meeting_date_override) or _parse_import_date(row.meeting_date)
+        if not d or d < today:
+            continue
+        aid = row.resolved_advisor_id if (row.resolved_advisor_id and row.resolved_advisor_id in profiles_by_id) else _resolve_advisor_match(profiles_by_email, profiles_by_name, row.advisor_name_or_email)
+        if not aid:
+            continue
+        advisor_date_range.setdefault(aid, [d, d])
+        rng = advisor_date_range[aid]
+        if d < rng[0]:
+            rng[0] = d
+        if d > rng[1]:
+            rng[1] = d
+
+    advisor_blocks_cache: dict[str, list[dict]] = {}
+    # Advisors whose prefetch itself returned "couldn't check" (not connected, token/network
+    # error, etc.) — tracked separately from a cache MISS. A miss falls back to the main loop's
+    # own live per-row call; but for an advisor the prefetch already confirmed is uncheckable,
+    # every one of their rows would independently repeat that exact same failing live call
+    # (same advisor, same reason), turning what should be a single fast "can't check" into N
+    # slow ones. Known-unavailable advisors skip the live retry entirely in the main loop below.
+    advisor_prefetch_unavailable: set[str] = set()
+    for aid, (min_d, max_d) in advisor_date_range.items():
+        start_iso = min_d.strftime("%Y-%m-%dT00:00:00.000Z")
+        end_iso = (max_d + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00.000Z")
+        try:
+            blocks = graph_client.get_freebusy(db, org_id, aid, start_iso, end_iso)
+            if blocks is not None:
+                advisor_blocks_cache[aid] = graph_client.reconcile_busy_blocks(db, blocks)
+            else:
+                advisor_prefetch_unavailable.add(aid)
+        except Exception as exc:
+            logger.warning("meeting import conflict pre-fetch failed for advisor %s (non-fatal, treated as un-checkable): %s", aid, exc)
+            advisor_prefetch_unavailable.add(aid)
+
     results = []
     for row in rows:
         problems = []
@@ -8704,15 +8753,23 @@ def _run_meeting_import_validation(db, org_id: str, mode: str, rows: list, durat
                 resolved_end_time = _compute_end_time_from_duration(resolved_start_time, chosen_h)
 
         if effective_mode == "future" and advisor_id and true_date and resolved_start_time and resolved_end_time:
-            try:
-                has_conflict = graph_client._check_meeting_conflict(
-                    db, org_id, advisor_id,
-                    {"meeting_date": true_date.isoformat(), "start_time": resolved_start_time, "end_time": resolved_end_time},
-                    None,
-                )
-            except Exception as exc:
-                logger.warning("meeting import conflict check failed (non-fatal): %s", exc)
+            if advisor_id in advisor_prefetch_unavailable:
+                # Already confirmed un-checkable for this advisor during the batch pre-fetch —
+                # retrying live here would just repeat the identical failure for every one of
+                # this advisor's rows. Same "can't check -> don't claim a conflict" semantics
+                # _check_meeting_conflict itself falls back to when get_freebusy returns None.
                 has_conflict = False
+            else:
+                try:
+                    has_conflict = graph_client._check_meeting_conflict(
+                        db, org_id, advisor_id,
+                        {"meeting_date": true_date.isoformat(), "start_time": resolved_start_time, "end_time": resolved_end_time},
+                        None,
+                        prefetched_blocks=advisor_blocks_cache.get(advisor_id),
+                    )
+                except Exception as exc:
+                    logger.warning("meeting import conflict check failed (non-fatal): %s", exc)
+                    has_conflict = False
             if has_conflict and not row.accept_conflict:
                 problems.append({"type": "calendar_conflict", "detail": "קיימת התנגשות ביומן ה-Outlook של היועץ בטווח השעות שצוין"})
 

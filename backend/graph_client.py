@@ -394,20 +394,32 @@ def get_freebusy(db, org_id: str, advisor_id: str, start_iso: str, end_iso: str)
         return []
 
     try:
-        resp = httpx.get(
-            f"{GRAPH_BASE}/users/{email}/calendarView",
-            headers={**_headers(token), "Prefer": 'outlook.timezone="Israel Standard Time"'},
-            params={
-                "startDateTime": start_iso,
-                "endDateTime": end_iso,
-                "$select": "id,subject,start,end,showAs",
-                "$orderby": "start/dateTime",
-                "$top": 200,
-            },
-            timeout=15,
-        )
-        resp.raise_for_status()
-        events = resp.json().get("value", [])
+        events = []
+        url = f"{GRAPH_BASE}/users/{email}/calendarView"
+        params = {
+            "startDateTime": start_iso,
+            "endDateTime": end_iso,
+            "$select": "id,subject,start,end,showAs",
+            "$orderby": "start/dateTime",
+            "$top": 200,
+        }
+        # Follows @odata.nextLink until exhausted. A single-day range (the original use case)
+        # never comes close to needing a second page, but callers that widen the range to cover
+        # many days for one advisor at once (e.g. a bulk meeting-import's batched conflict
+        # pre-check) can realistically have an advisor with 200+ events in that wider window —
+        # without this, events past the first page would silently never be checked, which could
+        # miss a real conflict. Capped at 20 pages (~4,000 events) as a sanity bound against a
+        # pathological range/account; no legitimate caller needs more than that.
+        for _ in range(20):
+            resp = httpx.get(url, headers={**_headers(token), "Prefer": 'outlook.timezone="Israel Standard Time"'},
+                              params=params, timeout=15)
+            resp.raise_for_status()
+            payload = resp.json()
+            events.extend(payload.get("value", []))
+            next_link = payload.get("@odata.nextLink")
+            if not next_link:
+                break
+            url, params = next_link, None  # nextLink already carries all query params
         return [
             {
                 "id": e.get("id"),
@@ -735,25 +747,42 @@ def _time_overlaps(a_start: str, a_end: str, b_start: str, b_end: str) -> bool:
     return s < be and bs < e
 
 
-def _check_meeting_conflict(db, org_id: str, advisor_id: str, meeting: dict, exclude_event_id: str | None) -> bool:
+def _check_meeting_conflict(
+    db, org_id: str, advisor_id: str, meeting: dict, exclude_event_id: str | None,
+    prefetched_blocks: list[dict] | None = None,
+) -> bool:
     """Does this meeting's own time genuinely overlap another event already on the
     advisor's Outlook calendar that day (other than the meeting's own synced event)?
     Persisted into calendar_sync so the UI can show it immediately on load, instead of
-    depending on a fresh live fetch finishing first (which flickers/looks momentary)."""
+    depending on a fresh live fetch finishing first (which flickers/looks momentary).
+
+    `prefetched_blocks`: pass already-reconciled busy blocks (from a prior get_freebusy +
+    reconcile_busy_blocks call covering this meeting's date) to skip the live Graph/DB round
+    trip entirely. Exists for bulk callers (meeting-import validation) that fetch one wider
+    date-range window per advisor ONCE up front instead of once per meeting — see
+    _run_meeting_import_validation. Single-meeting callers (sync_meeting_create/update) omit
+    this and keep doing a live per-call fetch, which is the right trade-off at that scale."""
     date, start, end = meeting.get("meeting_date"), meeting.get("start_time"), meeting.get("end_time")
     if not date or not start or not end:
         return False
-    try:
-        day_start = datetime.strptime(date, "%Y-%m-%d")
-    except Exception:
-        return False
-    start_iso = day_start.strftime("%Y-%m-%dT00:00:00.000Z")
-    end_iso = (day_start + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00.000Z")
-    blocks = get_freebusy(db, org_id, advisor_id, start_iso, end_iso)
-    if blocks is None:
-        return False  # couldn't check — don't claim a conflict we can't actually see
-    blocks = reconcile_busy_blocks(db, blocks)
+    if prefetched_blocks is not None:
+        blocks = prefetched_blocks
+    else:
+        try:
+            day_start = datetime.strptime(date, "%Y-%m-%d")
+        except Exception:
+            return False
+        start_iso = day_start.strftime("%Y-%m-%dT00:00:00.000Z")
+        end_iso = (day_start + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00.000Z")
+        blocks = get_freebusy(db, org_id, advisor_id, start_iso, end_iso)
+        if blocks is None:
+            return False  # couldn't check — don't claim a conflict we can't actually see
+        blocks = reconcile_busy_blocks(db, blocks)
     for b in blocks:
+        # A prefetched window spans many days for one advisor — only blocks landing on THIS
+        # meeting's specific date are relevant to it (b["start"] is an ISO datetime string).
+        if prefetched_blocks is not None and not str(b.get("start", "")).startswith(date):
+            continue
         if exclude_event_id and b.get("id") == exclude_event_id:
             continue
         if _time_overlaps(start, end, b["start"][11:16], b["end"][11:16]):

@@ -401,6 +401,22 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
     });
   }
 
+  const unresolvedConflictRows = problemRows.filter(r =>
+    !excludedRows.has(r.row_index) && r.problems.some(p => p.type === "calendar_conflict") && !isResolved("calendar_conflict", r.row_index)
+  );
+
+  // "כלול את כל הפגישות המתנגשות" — same "resolve many rows at once" idea as the
+  // school_not_found banner above, requested specifically so an org that already knows it
+  // wants every conflicting row included anyway doesn't have to click "לכלול למרות ההתנגשות"
+  // on each one separately. Purely local state (accept_conflict is a client-side resolution
+  // flag re-sent on /commit, same as the per-row button) — no server round trip needed.
+  function handleBulkAcceptConflicts() {
+    for (const r of unresolvedConflictRows) {
+      setRowField(r.row_index, { accept_conflict: true });
+      markResolved("calendar_conflict", r.row_index);
+    }
+  }
+
   // Distinct unrecognized status/מיקום/סוג values across the batch, one mapping control each
   // (not one per row). Same "resolve many rows at once" idea as the school_not_found banner.
   const unrecognizedGroups = (() => {
@@ -637,6 +653,18 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
                 </button>
               </div>
               {bulkHistoricalError && <p role="alert" className="text-xs text-red-600">{bulkHistoricalError}</p>}
+            </div>
+          )}
+
+          {unresolvedConflictRows.length > 0 && (
+            <div className="border border-amber-200 bg-amber-50/60 rounded-xl p-3 space-y-2">
+              <p className="text-xs text-amber-800">
+                {unresolvedConflictRows.length} שורות מתנגשות עם מופע קיים ביומן ה-Outlook של היועץ — אפשר לכלול את כולן בבת אחת אם זו כוונת הארגון:
+              </p>
+              <button type="button" onClick={handleBulkAcceptConflicts}
+                className="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-amber-600 text-white hover:bg-amber-700">
+                כלול את כל הפגישות המתנגשות ({unresolvedConflictRows.length})
+              </button>
             </div>
           )}
 
