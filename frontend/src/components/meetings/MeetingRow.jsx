@@ -192,16 +192,18 @@ function ActionsMenu({ anchorRef, onClose, children }) {
   // screen (e.g. the trailing "..." column in a wide table), that growth pushes the menu's
   // left edge off-screen and it renders partly clipped/hidden. Once the real width is known,
   // pull the menu back in so its left edge never crosses a small margin from the viewport edge.
+  // Shifts at most ONCE, by the measured overflow: a fixed box positioned by `right` alone
+  // shrink-wraps to the space left of it, so its width changes as `right` moves — re-deriving
+  // the position from that width on every render fed back into itself ("Maximum update depth
+  // exceeded") once the items were wider than min-w. `w-max` below also pins the width.
+  const clampedRef = useRef(false);
   useLayoutEffect(() => {
-    if (!pos || !menuRef.current) return;
+    if (!pos || !menuRef.current || clampedRef.current) return;
     const margin = 8;
-    const width = menuRef.current.getBoundingClientRect().width;
-    const leftEdge = window.innerWidth - pos.right - width;
-    if (leftEdge < margin) {
-      const newRight = Math.max(0, window.innerWidth - width - margin);
-      if (Math.abs(newRight - pos.right) > 1) {
-        setPos(p => ({ ...p, right: newRight }));
-      }
+    const overflow = margin - menuRef.current.getBoundingClientRect().left;
+    if (overflow > 1) {
+      clampedRef.current = true;
+      setPos(p => ({ ...p, right: p.right - overflow }));
     }
   }, [pos]);
 
@@ -222,7 +224,7 @@ function ActionsMenu({ anchorRef, onClose, children }) {
   if (!pos) return null;
   return createPortal(
     <div ref={menuRef} dir="rtl"
-      className="fixed z-[9999] bg-white border border-slate-200 rounded-xl shadow-lg py-1 min-w-[200px]"
+      className="fixed z-[9999] bg-white border border-slate-200 rounded-xl shadow-lg py-1 min-w-[200px] w-max"
       style={{ top: pos.top, right: pos.right }}>
       {children}
     </div>,
@@ -269,7 +271,7 @@ function CalendarSyncBadge({ calendarSync }) {
 // state — busy-range fetch, reminder-status fetch, draft syncing — when an unrelated row or a
 // parent-level filter/sort state changes).
 function MeetingRowImpl({
-  meeting, onSave, onMeetingPatched, onRequestDelete, onOpenNotes, usersWithAccess, usersWithoutAccess,
+  meeting, onSave, onMeetingPatched, onRequestDelete, onRequestMoveYear, onOpenNotes, usersWithAccess, usersWithoutAccess,
   contacts, onRequestAccess, onReminderOn,
   showSchoolColumn, schoolLabel, onOpenSchoolPicker,
   selectable, selected, onToggleSelect, onSendStatusReminder, hideAdvisorColumn,
@@ -1000,7 +1002,7 @@ function MeetingRowImpl({
           </td>
         )}
         {/* Actions */}
-        {(onRequestDelete || onSendStatusReminder) && (
+        {(onRequestDelete || onSendStatusReminder || onRequestMoveYear) && (
           <td className="py-2.5 px-2 text-center">
             <div className="relative inline-block" ref={actionsMenuRef}>
               <button type="button" onClick={() => setShowActionsMenu(o => !o)} aria-label="פעולות"
@@ -1018,6 +1020,14 @@ function MeetingRowImpl({
                       onMouseDown={e => { e.preventDefault(); onSendStatusReminder(meeting); setShowActionsMenu(false); }}
                       className="w-full text-right px-3 py-2 text-sm text-sky-700 hover:bg-sky-50 transition-colors whitespace-nowrap">
                       שלח תזכורת לעדכון סטטוס
+                    </button>
+                  )}
+                  {onRequestMoveYear && !rowLocked && meeting.id && meeting.school_id && (
+                    <button type="button"
+                      onMouseDown={e => e.preventDefault()}
+                      onClick={() => { onRequestMoveYear(meeting); setShowActionsMenu(false); }}
+                      className="w-full text-right px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 transition-colors whitespace-nowrap">
+                      העבר לשנת לימודים אחרת
                     </button>
                   )}
                   {onRequestDelete && (

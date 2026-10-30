@@ -5282,6 +5282,7 @@ export default function SchoolPage() {
                   onSave={updateMeeting}
                   onMeetingPatched={(id, patch) => setMeetings(prev => prev.map(m => m.id === id ? { ...m, ...patch } : m))}
                   onDelete={deleteMeeting}
+                  onMeetingMovedYear={meetingId => setMeetings(prev => prev.filter(m => m.id !== meetingId))}
                   onOpenNotes={openMeetingNotesForSchool}
                   onRequestAccess={handleRequestAdvisorAccess}
                   canDeleteMeetings={canDeleteMeetings}

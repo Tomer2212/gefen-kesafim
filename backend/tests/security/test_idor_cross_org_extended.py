@@ -661,6 +661,43 @@ def test_reassign_meeting_school_cross_org_rejected(org_b_client, org_a_client):
             )
 
 
+def test_move_meeting_year_and_delete_cross_org_isolation(org_b_client, org_a_client):
+    """Throwaway Org B meeting (no date → no Outlook side effects): org_a_client must be
+    rejected from both moving it to another academic year and deleting it; Org B itself can
+    still move it. Cleanup (the same-org delete) runs in `finally`."""
+    meeting_id = None
+    try:
+        create_resp = org_b_client.post(
+            f"/schools/{ORG_B_SCHOOL_ID}/meetings",
+            json={"meeting_type": "remote", "status": "scheduled", "academic_year": "תשפ\"ז"},
+        )
+        assert create_resp.status_code == 200, create_resp.text
+        meeting_id = create_resp.json()["id"]
+
+        move_resp = org_a_client.patch(
+            f"/schools/{ORG_B_SCHOOL_ID}/meetings/{meeting_id}/academic-year",
+            json={"academic_year": "תשפ\"ו"},
+        )
+        assert move_resp.status_code in (403, 404), move_resp.text
+
+        delete_resp = org_a_client.delete(f"/schools/{ORG_B_SCHOOL_ID}/meetings/{meeting_id}")
+        assert delete_resp.status_code in (403, 404), delete_resp.text
+
+        # Positive regression check — same org can still move the meeting.
+        move_ok = org_b_client.patch(
+            f"/schools/{ORG_B_SCHOOL_ID}/meetings/{meeting_id}/academic-year",
+            json={"academic_year": "תשפ\"ו"},
+        )
+        assert move_ok.status_code == 200, move_ok.text
+        assert move_ok.json()["academic_year"] == "תשפ\"ו"
+    finally:
+        if meeting_id:
+            cleanup_resp = org_b_client.delete(f"/schools/{ORG_B_SCHOOL_ID}/meetings/{meeting_id}")
+            assert cleanup_resp.status_code == 200, (
+                f"Cleanup failed — test meeting {meeting_id} may still exist. Response: {cleanup_resp.text}"
+            )
+
+
 # ===========================================================================
 # 9. User-scoped family — /users/{user_id}/future-meetings, meetings/transfer,
 #    meetings/cancel-future, sole-schools; and permissions/overrides get/set.

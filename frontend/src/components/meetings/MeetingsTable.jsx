@@ -1,6 +1,8 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import axios from "axios";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { DeleteMeetingModal } from "./DeleteMeetingModal";
+import { MoveMeetingYearModal } from "./MoveMeetingYearModal";
 import { MeetingRow } from "./MeetingRow";
 import { MEETING_SERVICE_TYPE_BREAKDOWN, formatMeetingMinutes } from "./constants";
 import {
@@ -59,6 +61,24 @@ function ReminderToast({ onClose }) {
   );
 }
 
+function MovedYearToast({ year, reminderOn, onClose }) {
+  useEffect(() => {
+    const t = setTimeout(onClose, 4000);
+    return () => clearTimeout(t);
+  }, [onClose]);
+  return (
+    <div className="fixed bottom-6 left-6 z-50" dir="rtl">
+      <div role="status" className="bg-green-50 border border-green-400 rounded-xl shadow-xl p-4 flex items-start gap-3 max-w-xs">
+        <p className="text-sm text-green-800 flex-1">
+          הפגישה הועברה לשנת {year}{reminderOn ? " · התזכורת הופעלה" : ""}
+        </p>
+        <button type="button" onClick={onClose} aria-label="סגור התראה"
+          className="text-green-500 hover:text-green-800 text-lg leading-none mt-0.5 transition-colors">×</button>
+      </div>
+    </div>
+  );
+}
+
 function PermissionDeniedToast({ message, onClose }) {
   useEffect(() => {
     const t = setTimeout(onClose, 5000);
@@ -78,7 +98,7 @@ function PermissionDeniedToast({ message, onClose }) {
 export function MeetingsTable({
   meetings, usersWithAccess, usersWithoutAccess, usersWithAccessFor, usersWithoutAccessFor,
   contacts, contactsFor, onSave, onDelete, onOpenNotes, onMeetingPatched,
-  onRequestAccess, canDeleteMeetings,
+  onRequestAccess, canDeleteMeetings, onMeetingMovedYear,
   showSchoolColumn, schoolLabelFor, onOpenSchoolPicker,
   selectable, selectedIds, onToggleSelect, onToggleSelectAll,
   onSendStatusReminder, hideAdvisorColumn,
@@ -93,6 +113,8 @@ export function MeetingsTable({
   const [sortSpecs, setSortSpecs] = useState([]);          // [{ key, dir }], index 0 = primary
   const [openMenuKey, setOpenMenuKey] = useState(null);
   const [pendingDeleteId, setPendingDeleteId] = useState(null);
+  const [pendingMoveMeeting, setPendingMoveMeeting] = useState(null);
+  const [movedYearToast, setMovedYearToast] = useState(null);
   const [reminderToast, setReminderToast] = useState(false);
   const [permissionDeniedMsg, setPermissionDeniedMsg] = useState(null);
   const [expandedIds, setExpandedIds] = useState(() => new Set());
@@ -103,6 +125,17 @@ export function MeetingsTable({
       if (next.has(meetingId)) next.delete(meetingId); else next.add(meetingId);
       return next;
     });
+  }
+
+  // The ⋮ actions column also holds "העבר לשנת לימודים אחרת", which any editor may use —
+  // so it can't depend on the delete permission alone.
+  const showActionsColumn = canDeleteMeetings || !!onMeetingMovedYear;
+
+  async function moveMeetingYear(meeting, academicYear) {
+    const res = await axios.patch(`/schools/${meeting.school_id}/meetings/${meeting.id}/academic-year`, { academic_year: academicYear });
+    setPendingMoveMeeting(null);
+    setMovedYearToast({ year: academicYear, reminderOn: !!res.data?.reminder_enabled && !meeting.reminder_enabled });
+    onMeetingMovedYear(meeting.id, res.data);
   }
 
   const colSpanTotal =
@@ -122,7 +155,7 @@ export function MeetingsTable({
     (showCalendarColumn ? 1 : 0) +
     4 /* בפועל */ +
     (aiSummaryEnabled ? 1 : 0) /* סיכום פגישה */ +
-    (canDeleteMeetings ? 1 : 0);
+    (showActionsColumn ? 1 : 0);
 
   // One { m, filterValues } per meeting — filterValues feeds both the header menus'
   // value lists and the filter/sort helpers. School label is resolved here so the
@@ -200,6 +233,16 @@ export function MeetingsTable({
           onCancel={() => setPendingDeleteId(null)}
         />
       )}
+      {pendingMoveMeeting && (
+        <MoveMeetingYearModal
+          meeting={pendingMoveMeeting}
+          onConfirm={year => moveMeetingYear(pendingMoveMeeting, year)}
+          onCancel={() => setPendingMoveMeeting(null)}
+        />
+      )}
+      {movedYearToast && (
+        <MovedYearToast year={movedYearToast.year} reminderOn={movedYearToast.reminderOn} onClose={() => setMovedYearToast(null)} />
+      )}
       {meetings.length > 0 && (
         <p className="text-sm text-slate-500 mb-2">
           {sortedMeetings.length === meetings.length
@@ -259,7 +302,7 @@ export function MeetingsTable({
                 {aiSummaryEnabled && (
                   <th scope="col" rowSpan={2} className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">סיכום פגישה</th>
                 )}
-                {canDeleteMeetings && <th scope="col" rowSpan={2} className="py-3 px-2 text-xs font-semibold text-slate-500"></th>}
+                {showActionsColumn && <th scope="col" rowSpan={2} className="py-3 px-2 text-xs font-semibold text-slate-500"></th>}
               </tr>
               <tr className="border-b border-slate-200 bg-slate-50/80">
                 <th scope="col" className="py-1.5 px-2 text-[11px] font-semibold text-slate-500 whitespace-nowrap text-center">תחילת שיחה</th>
@@ -285,6 +328,7 @@ export function MeetingsTable({
                       <tbody key={m.id} data-index={vi.index} ref={rowVirtualizer.measureElement}>
                         <MeetingRow meeting={m} onSave={onSave} onMeetingPatched={onMeetingPatched}
                           onRequestDelete={canDeleteMeetings ? setPendingDeleteId : null}
+                          onRequestMoveYear={onMeetingMovedYear ? setPendingMoveMeeting : null}
                           onOpenNotes={onOpenNotes}
                           usersWithAccess={usersWithAccessFor ? usersWithAccessFor(m) : usersWithAccess}
                           usersWithoutAccess={usersWithoutAccessFor ? usersWithoutAccessFor(m) : usersWithoutAccess}

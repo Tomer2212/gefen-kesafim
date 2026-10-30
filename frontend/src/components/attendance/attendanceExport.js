@@ -8,7 +8,7 @@ import {
   monthSummary,
 } from "./attendanceConstants";
 
-const HEADERS = ["עובד", "תאריך", "יום", "סוג", "שעת התחלה", "שעת סיום", "שעות עבודה", "הערות"];
+const HEADERS = ["עובד", "תאריך", "יום", "סוג", "שעת התחלה", "שעת סיום", "שעות עבודה", "הערות", "ק״מ"];
 
 // ייצוא גיליון RTL אחד: בלוק שורות לכל עובד + שורת סיכום. משמש גם בניהול (כל העובדים)
 // וגם באזור האישי (עובד אחד). users = [{ name, entries }].
@@ -28,6 +28,7 @@ export function exportAttendanceXlsx({ month, users, filenamePrefix = "שעון_
         e.end_time || "",
         e.work_minutes != null ? formatMinutes(e.work_minutes) : "",
         e.notes || "",
+        e.km != null && e.km !== "" ? Number(e.km) : "",
       ]);
     }
     const s = monthSummary(u.entries || []);
@@ -40,14 +41,15 @@ export function exportAttendanceXlsx({ month, users, filenamePrefix = "שעון_
       "סה״כ",
       formatMinutes(s.totalWorkMinutes),
       `ימי עבודה: ${s.workDays} | מחלה: ${s.sickDays} | מילואים: ${s.reserveDays} | חופש: ${s.vacationDays} | ממוצע/יום: ${formatMinutes(s.avgMinutesPerDay)}`,
+      s.totalKm,
     ]);
-    rows.push(["", "", "", "", "", "", "", ""]);
+    rows.push(["", "", "", "", "", "", "", "", ""]);
   }
 
   const ws = XLSX.utils.aoa_to_sheet(rows);
   ws["!cols"] = [
     { wch: 22 }, { wch: 12 }, { wch: 8 }, { wch: 14 },
-    { wch: 11 }, { wch: 11 }, { wch: 12 }, { wch: 48 },
+    { wch: 11 }, { wch: 11 }, { wch: 12 }, { wch: 48 }, { wch: 9 },
   ];
   ws["!views"] = [{ rightToLeft: true, workbookViewId: 0 }];
   const wb = XLSX.utils.book_new();

@@ -32,7 +32,7 @@ export default function AttendanceTable({
         [&::-webkit-scrollbar-thumb]:border-slate-100 [&::-webkit-scrollbar-thumb]:bg-clip-content
         hover:[&::-webkit-scrollbar-thumb]:bg-slate-400"
     >
-      <table dir="rtl" className="w-full min-w-[680px] border-separate border-spacing-0">
+      <table dir="rtl" className="w-full min-w-[760px] border-separate border-spacing-0">
         <thead>
           <tr className="text-xs font-semibold">
             <th scope="col" className={`${th} px-3 text-right`}>תאריך</th>
@@ -40,14 +40,16 @@ export default function AttendanceTable({
             <th scope="col" className={`${th} text-center`}>שעת התחלה</th>
             <th scope="col" className={`${th} text-center`}>שעת סיום</th>
             <th scope="col" className={`${th} text-center`}>שעות עבודה</th>
-            <th scope="col" className={`${th} text-center`}>קבצים</th>
-            <th scope="col" className={`${th} text-center`}>הערות</th>
+            {/* רוחב קבוע וזהה לשלוש העמודות הצרות */}
+            <th scope="col" className={`${th} text-center w-28`}>קבצים</th>
+            <th scope="col" className={`${th} text-center w-28`}>הערות</th>
+            <th scope="col" className={`${th} text-center w-28`}>ק״מ</th>
           </tr>
         </thead>
         <tbody>
           {rows.length === 0 ? (
             <tr>
-              <td colSpan={7} className="px-2 py-6 text-center text-sm text-slate-400 border-b border-slate-200">
+              <td colSpan={8} className="px-2 py-6 text-center text-sm text-slate-400 border-b border-slate-200">
                 אין ימים להצגה
               </td>
             </tr>

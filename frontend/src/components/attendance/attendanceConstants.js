@@ -89,8 +89,11 @@ export function monthSummary(entries) {
   let sickDays = 0;
   let reserveDays = 0;
   let vacationDays = 0;
+  let totalKm = 0;
   for (const e of entries || []) {
     const dt = e.day_type;
+    const km = Number(e.km);
+    if (e.km != null && Number.isFinite(km)) totalKm += km;
     if (dt === "sick") sickDays++;
     else if (dt === "reserve") reserveDays++;
     else if (dt === "vacation") vacationDays++;
@@ -107,5 +110,6 @@ export function monthSummary(entries) {
     reserveDays,
     vacationDays,
     avgMinutesPerDay: workDays ? Math.round(totalWorkMinutes / workDays) : 0,
+    totalKm: Math.round(totalKm * 10) / 10,
   };
 }

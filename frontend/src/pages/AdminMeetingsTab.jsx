@@ -1122,6 +1122,10 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
             onSave={updateMeeting}
             onMeetingPatched={(id, patch) => setMeetings(prev => prev.map(m => m.id === id ? { ...m, ...patch } : m))}
             onDelete={deleteMeeting}
+            onMeetingMovedYear={meetingId => {
+              setMeetings(prev => prev.filter(x => x.id !== meetingId));
+              setSelectedIds(prev => { const n = { ...prev }; delete n[meetingId]; return n; });
+            }}
             onOpenNotes={openMeetingNotesFor}
             onRequestAccess={handleRequestAdvisorAccess}
             canDeleteMeetings={canDeleteMeetings}

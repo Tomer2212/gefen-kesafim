@@ -82,6 +82,7 @@ export default function AttendanceCalendar({
       start_time: e.start_time || null,
       end_time: e.end_time || null,
       notes: text || null,
+      km: e.km ?? null,
     });
     setNotesModal(null);
   }

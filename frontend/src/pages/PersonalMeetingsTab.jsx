@@ -679,6 +679,7 @@ export default function PersonalMeetingsTab({ userId, role, canDeleteMeetings, u
             onSave={updateMeeting}
             onMeetingPatched={(id, patch) => setMeetings(prev => prev.map(m => m.id === id ? { ...m, ...patch } : m))}
             onDelete={deleteMeeting}
+            onMeetingMovedYear={meetingId => setMeetings(prev => prev.filter(x => x.id !== meetingId))}
             onOpenNotes={openMeetingNotesFor}
             onRequestAccess={() => {}}
             canDeleteMeetings={canDeleteMeetings}

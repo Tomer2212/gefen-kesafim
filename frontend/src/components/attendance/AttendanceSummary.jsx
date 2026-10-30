@@ -15,13 +15,14 @@ export default function AttendanceSummary({ entries }) {
   return (
     <div className="glass-card rounded-xl p-3 mt-2 flex items-center gap-3">
       <span className="text-xs font-semibold text-slate-500 shrink-0">סיכום החודש</span>
-      <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 flex-1">
+      <div className="grid grid-cols-4 sm:grid-cols-7 gap-2 flex-1">
         <Stat label="סה״כ שעות עבודה" value={formatMinutes(s.totalWorkMinutes) || "00:00"} />
         <Stat label="ימי עבודה בפועל" value={s.workDays} />
         <Stat label="ממוצע שעות ליום" value={formatMinutes(s.avgMinutesPerDay) || "00:00"} />
         <Stat label="ימי מחלה" value={s.sickDays} />
         <Stat label="ימי מילואים" value={s.reserveDays} />
         <Stat label="ימי חופש" value={s.vacationDays} />
+        <Stat label="סה״כ ק״מ" value={s.totalKm} />
       </div>
     </div>
   );

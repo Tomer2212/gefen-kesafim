@@ -45,6 +45,7 @@ class AttendanceDayIn(BaseModel):
     start_time: str | None = None
     end_time: str | None = None
     notes: str | None = None
+    km: float | None = None  # private-car mileage for travel reimbursement
 
 
 class LockIn(BaseModel):
@@ -174,7 +175,7 @@ def _audit(db, *, org_id, entry_id, target_user_id, actor_id, action, diff=None)
 
 
 def _diff_entry(old: dict | None, new: dict) -> dict:
-    fields = ["day_type", "start_time", "end_time", "notes", "work_minutes"]
+    fields = ["day_type", "start_time", "end_time", "notes", "work_minutes", "km"]
     out = {}
     old = old or {}
     for f in fields:
@@ -186,9 +187,14 @@ def _diff_entry(old: dict | None, new: dict) -> dict:
 
 def _summary(entries: list[dict]) -> dict:
     total = 0
+    total_km = 0.0
     work_days = sick = reserve = vacation = 0
     for e in entries:
         dt = e.get("day_type")
+        try:
+            total_km += float(e.get("km") or 0)
+        except (TypeError, ValueError):
+            pass
         if dt == "sick":
             sick += 1
         elif dt == "reserve":
@@ -208,6 +214,7 @@ def _summary(entries: list[dict]) -> dict:
         "reserve_days": reserve,
         "vacation_days": vacation,
         "avg_minutes_per_day": round(total / work_days) if work_days else 0,
+        "total_km": round(total_km, 1),
     }
 
 
@@ -232,6 +239,11 @@ def _upsert_day(db, *, user_id: str, org_id: str, date_str: str, body: Attendanc
         raise HTTPException(status_code=400, detail="סוג יום לא תקין")
     start_t = _norm_time(body.start_time)
     end_t = _norm_time(body.end_time)
+    km = None
+    if body.km is not None:
+        if not (0 <= body.km <= 9999):
+            raise HTTPException(status_code=400, detail="ערך ק״מ לא תקין")
+        km = round(body.km, 1)
     old = _fetch_entry(db, user_id, org_id, date_str)
     payload = {
         "org_id": org_id,
@@ -242,6 +254,7 @@ def _upsert_day(db, *, user_id: str, org_id: str, date_str: str, body: Attendanc
         "end_time": end_t,
         "work_minutes": _compute_work_minutes(start_t, end_t),
         "notes": (body.notes or None),
+        "km": km,
         "updated_by": actor_id,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }

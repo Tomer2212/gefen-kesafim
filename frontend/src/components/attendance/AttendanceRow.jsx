@@ -9,7 +9,17 @@ function draftFromEntry(entry, isWeekend) {
     start_time: entry?.start_time || "",
     end_time: entry?.end_time || "",
     notes: entry?.notes || "",
+    km: parseKm(entry?.km) != null ? String(parseKm(entry.km)) : "",
   };
+}
+
+// ק"מ: מספר אי-שלילי, עד ספרה אחת אחרי הנקודה. ריק/לא תקין → null.
+function parseKm(v) {
+  const s = String(v ?? "").trim();
+  if (!s) return null;
+  const n = Number(s);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return Math.round(n * 10) / 10;
 }
 
 function isEmptyDraft(d) {
@@ -17,7 +27,8 @@ function isEmptyDraft(d) {
     (d.day_type || "work_home") === "work_home" &&
     !d.start_time &&
     !d.end_time &&
-    !(d.notes && d.notes.trim())
+    !(d.notes && d.notes.trim()) &&
+    parseKm(d.km) == null
   );
 }
 
@@ -53,6 +64,7 @@ export default function AttendanceRow({
       ...nd,
       start_time: normalizeTimeValue(nd.start_time) || "",
       end_time: normalizeTimeValue(nd.end_time) || "",
+      km: parseKm(nd.km) != null ? String(parseKm(nd.km)) : "",
     };
     const curr = JSON.stringify(normalized);
     if (curr === lastSavedRef.current) return;
@@ -67,6 +79,7 @@ export default function AttendanceRow({
       start_time: normalized.start_time || null,
       end_time: normalized.end_time || null,
       notes: normalized.notes || null,
+      km: parseKm(normalized.km),
     });
   }
 
@@ -173,6 +186,28 @@ export default function AttendanceRow({
         >
           {draft.notes && draft.notes.trim() ? "📝" : <span className="text-lg font-light">+</span>}
         </button>
+      </td>
+
+      <td className={`${CELL} text-center`}>
+        {readOnly ? (
+          <span className="text-sm text-slate-700 tabular-nums" dir="ltr">{draft.km || "—"}</span>
+        ) : (
+          <>
+            <label className="sr-only" htmlFor={`att-km-${day.date}`}>ק״מ ליום {day.date}</label>
+            <input
+              id={`att-km-${day.date}`}
+              type="text"
+              inputMode="decimal"
+              dir="ltr"
+              value={draft.km}
+              onChange={(e) => {
+                const v = e.target.value.replace(",", ".");
+                if (/^\d{0,4}(\.\d?)?$/.test(v)) setField("km", v);
+              }}
+              className="mx-auto block w-16 text-sm text-center tabular-nums bg-transparent border border-transparent rounded px-1.5 py-1 outline-none transition-colors hover:border-slate-300 hover:bg-white focus:border-blue-400 focus:bg-white focus:ring-1 focus:ring-blue-200"
+            />
+          </>
+        )}
       </td>
     </tr>
   );

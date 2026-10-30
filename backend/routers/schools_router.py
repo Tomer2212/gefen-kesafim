@@ -388,6 +388,10 @@ class MeetingStatusPatchIn(BaseModel):
     requested_upload_years: list[str] | None = None
 
 
+class MeetingMoveYearIn(BaseModel):
+    academic_year: str
+
+
 class BlockedDateIn(BaseModel):
     start_date: str
     end_date: str
@@ -10152,6 +10156,53 @@ def patch_meeting(school_id: str, meeting_id: str, body: MeetingStatusPatchIn, u
     return _apply_meeting_patch(db, user["org_id"], school_id, meeting_id, data)
 
 
+@router.patch("/{school_id}/meetings/{meeting_id}/academic-year")
+def move_meeting_academic_year(school_id: str, meeting_id: str, body: MeetingMoveYearIn, user: Annotated[dict, Depends(get_current_user)]):
+    """Re-tag a meeting to another academic year, leaving every other field as-is.
+
+    Deliberately does NOT go through _apply_meeting_patch / graph_client: the meeting's date,
+    times and participants don't change, so there is nothing to push to Outlook — and a sync
+    here would re-send updates (or, for a never-synced past meeting, brand-new invites) to the
+    school's contacts. The only side effect is the reminder toggle: a still-off, future,
+    scheduled meeting that is eligible under automation 1 gets it turned ON (never OFF)."""
+    target = (body.academic_year or "").strip()
+    if target not in ACADEMIC_YEARS:
+        raise HTTPException(status_code=400, detail="שנת לימודים לא תקינה")
+    db = get_admin_client()
+    school_check = db.table("schools").select("id").eq("id", school_id).eq("org_id", user["org_id"]).execute()
+    if not school_check.data:
+        raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
+    rows = db.table("meetings") \
+        .select("academic_year, status, meeting_date, participants, reminder_enabled, advisor_ids, advisor_id") \
+        .eq("id", meeting_id).eq("school_id", school_id).execute().data
+    meeting = rows[0] if rows else None
+    if not meeting:
+        raise HTTPException(status_code=404, detail="פגישה לא נמצאה")
+    if user["role"] not in ("owner", "manager"):
+        existing_advisor_ids = meeting.get("advisor_ids") or ([meeting["advisor_id"]] if meeting.get("advisor_id") else [])
+        if user["id"] not in existing_advisor_ids:
+            raise HTTPException(status_code=403, detail="אין לך הרשאה לערוך פגישה זו — הפגישה משויכת ליועץ אחר")
+    if meeting.get("academic_year") == target:
+        return {"ok": True, "unchanged": True, "academic_year": target, "reminder_enabled": bool(meeting.get("reminder_enabled"))}
+
+    data = {"academic_year": target}
+    if (not meeting.get("reminder_enabled")
+            and meeting.get("status") == "scheduled"
+            and _reminder_eligible(meeting.get("meeting_date"), meeting.get("participants"),
+                                   _org_reminders_default_on(db, school_id))):
+        data["reminder_enabled"] = True
+    try:
+        db.table("meetings").update(data).eq("id", meeting_id).eq("school_id", school_id).execute()
+    except Exception as exc:
+        logger.error("move_meeting_academic_year failed for %s: %s", meeting_id, exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="שגיאה בהעברת הפגישה")
+    return {
+        "ok": True,
+        "academic_year": target,
+        "reminder_enabled": bool(data.get("reminder_enabled", meeting.get("reminder_enabled"))),
+    }
+
+
 @router.post("/{school_id}/meetings/{meeting_id}/join")
 def join_meeting_as_advisor(school_id: str, meeting_id: str, user: Annotated[dict, Depends(get_current_user)]):
     """Lets a user add themselves as an additional performing advisor on a meeting they are
@@ -10185,6 +10236,14 @@ def delete_meeting(school_id: str, meeting_id: str, user: Annotated[dict, Depend
     db = get_admin_client()
     if not _check_permission(db, user, "can_delete_own_meetings"):
         raise HTTPException(status_code=403, detail="אין הרשאה למחוק פגישות")
+    # Org ownership must be checked before the Outlook soft-cancel below — otherwise a caller
+    # from another org could both delete the row and push a cancellation to its attendees.
+    school_check = db.table("schools").select("id").eq("id", school_id).eq("org_id", user["org_id"]).execute()
+    if not school_check.data:
+        raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
+    existing = db.table("meetings").select("id").eq("id", meeting_id).eq("school_id", school_id).execute().data
+    if not existing:
+        raise HTTPException(status_code=404, detail="פגישה לא נמצאה")
     try:
         with graph_client.calendar_sync_lock(db, meeting_id) as acquired:
             if acquired:
