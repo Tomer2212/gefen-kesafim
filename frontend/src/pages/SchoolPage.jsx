@@ -2716,6 +2716,10 @@ export default function SchoolPage() {
   // "מחיר כולל מע"מ" — synced with the same admin-table field on AdminPage's schools table
   // (both read/write the school_year_admin_data row for this school_id+academic_year).
   const [yearAdminData, setYearAdminData] = useState({});
+  // Bumped when this school+year's row arrives — part of the `key` of the uncontrolled
+  // (defaultValue) ליווי inputs, so they remount with the loaded value instead of keeping
+  // an empty default and then saving it back on blur.
+  const [yearAdminLoadVersion, setYearAdminLoadVersion] = useState(0);
 
   useEffect(() => {
     const meetingParam = searchParams.get("meeting");
@@ -2748,23 +2752,80 @@ export default function SchoolPage() {
   const [notesData, setNotesData] = useState(null); // { general: [...], quarterly: {1:[...],2:[...],3:[...],4:[...]} }
   const [filesData, setFilesData] = useState(null); // flat array of school_files rows
 
+  // Race guards for the per-field autosave below. `ctx` identifies which school+year the
+  // state currently belongs to (responses for another ctx are dropped); `seq` is a per-field
+  // save counter (only the newest save of a field may write its server value back); and
+  // `inflight` counts unfinished saves per field (no other response — PUT or GET — may
+  // overwrite a field whose own save is still on its way). Without these, saving "סוג שירות"
+  // and then immediately blurring "הקצאת פגישות" could let the older response repaint the
+  // older value on screen.
+  const yearAdminCtxRef = useRef("");
+  const yearAdminSeqRef = useRef({});
+  const yearAdminInflightRef = useRef({});
+
+  function busyYearAdminFields(exceptField) {
+    const inflight = yearAdminInflightRef.current;
+    return new Set(Object.keys(inflight).filter(k => inflight[k] > 0 && k !== exceptField));
+  }
+
+  // Merges a server row into the current state without (a) dropping fields the response
+  // doesn't carry, or (b) touching fields in `skip` (their own save is still in flight).
+  function mergeYearAdminRow(prev, data, skip) {
+    const next = { ...prev };
+    for (const [k, v] of Object.entries(data || {})) {
+      if (!skip.has(k)) next[k] = v;
+    }
+    return next;
+  }
+
   useEffect(() => {
     if (!schoolId) return;
+    const ctx = `${schoolId}|${academicYear}`;
+    yearAdminCtxRef.current = ctx;
+    yearAdminSeqRef.current = {};
+    yearAdminInflightRef.current = {};
+    setYearAdminData({});
     axios.get(`/schools/${schoolId}/year-admin-data`, { params: { academic_year: academicYear } })
-      .then(res => setYearAdminData(res.data && typeof res.data === "object" ? res.data : {}))
-      .catch(() => setYearAdminData({}));
+      .then(res => {
+        if (yearAdminCtxRef.current !== ctx) return;
+        const data = res.data && typeof res.data === "object" ? res.data : {};
+        const skip = busyYearAdminFields(null);
+        setYearAdminData(prev => mergeYearAdminRow(prev, data, skip));
+        setYearAdminLoadVersion(v => v + 1);
+      })
+      .catch(() => {});
   }, [schoolId, academicYear]);
 
   async function saveYearAdminField(field, value) {
+    const ctx = yearAdminCtxRef.current;
+    const seq = (yearAdminSeqRef.current[field] || 0) + 1;
+    yearAdminSeqRef.current[field] = seq;
+    yearAdminInflightRef.current[field] = (yearAdminInflightRef.current[field] || 0) + 1;
     setYearAdminData(prev => ({ ...prev, [field]: value }));
     try {
       const res = await axios.put(`/schools/${schoolId}/year-admin-data`, { [field]: value }, { params: { academic_year: academicYear } });
-      setYearAdminData(res.data && typeof res.data === "object" ? res.data : {});
+      if (yearAdminCtxRef.current !== ctx) return;
+      const data = res.data && typeof res.data === "object" ? res.data : {};
+      const skip = busyYearAdminFields(field);
+      if (yearAdminSeqRef.current[field] !== seq) skip.add(field);  // a newer save of this field exists
+      setYearAdminData(prev => mergeYearAdminRow(prev, data, skip));
     } catch {
-      // revert on failure
+      if (yearAdminCtxRef.current !== ctx) return;
+      // revert on failure — re-read the saved truth, but never clobber other fields' pending saves
       axios.get(`/schools/${schoolId}/year-admin-data`, { params: { academic_year: academicYear } })
-        .then(res => setYearAdminData(res.data && typeof res.data === "object" ? res.data : {}))
+        .then(res => {
+          if (yearAdminCtxRef.current !== ctx) return;
+          const data = res.data && typeof res.data === "object" ? res.data : {};
+          const skip = busyYearAdminFields(field);
+          if (yearAdminSeqRef.current[field] !== seq) skip.add(field);
+          // The failed field reverts to its saved value, or is cleared if the server has none.
+          setYearAdminData(prev => mergeYearAdminRow(prev, skip.has(field) ? data : { [field]: null, ...data }, skip));
+        })
         .catch(() => {});
+    } finally {
+      if (yearAdminCtxRef.current === ctx) {
+        yearAdminInflightRef.current[field] = Math.max(0, (yearAdminInflightRef.current[field] || 1) - 1);
+      }
     }
   }
 
@@ -4276,7 +4337,7 @@ export default function SchoolPage() {
                         <label htmlFor="order-amount-gefen" className={`${tileLabelCls} block`}>מחיר כולל מע"מ</label>
                         <input
                           id="order-amount-gefen"
-                          key={`${schoolId}-${academicYear}`}
+                          key={`${schoolId}-${academicYear}-${yearAdminLoadVersion}`}
                           type="text"
                           inputMode="numeric"
                           defaultValue={formatAmount(yearAdminData.order_amount_gefen)}
@@ -4308,7 +4369,7 @@ export default function SchoolPage() {
                               type="text"
                               aria-label="אמצעי הזמנה - אחר, פירוט"
                               placeholder="פירוט (לא חובה)"
-                              key={`${schoolId}-${academicYear}-order-method-other`}
+                              key={`${schoolId}-${academicYear}-${yearAdminLoadVersion}-order-method-other`}
                               defaultValue={yearAdminData.order_method_other_text || ""}
                               onBlur={e => {
                                 const v = e.target.value.trim();
@@ -4634,6 +4695,7 @@ export default function SchoolPage() {
                                 <div className="min-w-0">
                                   <label htmlFor={`meeting-allocation-${key}`} className={stackedLabelCls}>הקצאת פגישות:</label>
                                   <input id={`meeting-allocation-${key}`} type="number" min="0"
+                                    key={`${schoolId}-${academicYear}-${yearAdminLoadVersion}-allocation-${key}`}
                                     className={editFieldCls(false, false)}
                                     defaultValue={yearAdminData[`meeting_allocation_${key}`] ?? ""}
                                     onBlur={e => {

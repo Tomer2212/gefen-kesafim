@@ -463,7 +463,7 @@ def request_missing_files(meeting_id: str, user: Annotated[dict, Depends(get_cur
     """The one manual button in this feature — sends a targeted follow-up
     email to the secretary/finance contact naming exactly the missing items."""
     db = get_admin_client()
-    meeting = _require_meeting_access(db, user, meeting_id, "participants, meeting_date, academic_year, requested_upload_years")
+    meeting = _require_meeting_access(db, user, meeting_id, "participants, meeting_date, academic_year, requested_upload_years, advisor_ids")
 
     school_res = db.table("schools").select("id, name, stage, finance_software").eq("id", meeting["school_id"]).execute()
     school = school_res.data[0]
@@ -501,12 +501,24 @@ def request_missing_files(meeting_id: str, user: Annotated[dict, Depends(get_cur
 <p>נשמח אם תוכלו להעלות רק את אלה בקישור: <a href="{upload_url}">{upload_url}</a></p>
 </body></html>"""
 
+    # Replies go to the meeting's first advisor with an email, falling back to the clicking user.
+    reply_to = None
+    advisor_ids = meeting.get("advisor_ids") or []
+    if advisor_ids:
+        try:
+            p_res = db.table("profiles").select("id, email").in_("id", advisor_ids).execute()
+            emails_map = {p["id"]: (p.get("email") or "").strip() for p in (p_res.data or [])}
+            reply_to = next((emails_map[aid] for aid in advisor_ids if emails_map.get(aid)), None)
+        except Exception as exc:
+            logger.warning("request_missing_files: advisor email lookup failed (non-fatal): %s", exc)
+    reply_to = reply_to or (user.get("email") or "").strip() or None
+
     sent, failed_count = 0, 0
     for p in recipients:
         email_addr = p["email"].strip()
         status, error = "sent", None
         try:
-            send_resend_email(email_addr, "חסרים קבצים לפגישה הקרובה", html)
+            send_resend_email(email_addr, "חסרים קבצים לפגישה הקרובה", html, reply_to=reply_to)
             sent += 1
         except Exception as exc:
             status, error = "failed", str(exc)

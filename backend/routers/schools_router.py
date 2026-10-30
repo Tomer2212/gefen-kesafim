@@ -1547,6 +1547,29 @@ def _attach_updater_names(db, rows: list[dict]) -> None:
         logger.warning("profile enrichment for year_admin_data failed (non-fatal): %s", exc)
 
 
+def _fill_inherited_year_admin(db, rows: list[dict], academic_year: str) -> None:
+    """Fills client_status / service_type on year-admin-data rows returned to the client
+    with the carry-forward value (most recent earlier year), exactly like the GET does,
+    when the row's own value is empty. Never overrides an explicit value and never writes
+    to the DB — it only shapes the response. Every endpoint that returns a
+    school_year_admin_data row MUST pass it through here: the frontend merges/replaces its
+    state with the response, so a raw row (nulls for inherited fields) used to wipe
+    "סוג שירות"/"סטטוס לקוח" from the screen after any other ליווי field was saved.
+    Non-fatal."""
+    rows = [r for r in rows if r and r.get("school_id")]
+    if not rows:
+        return
+    try:
+        resolved = resolve_inherited_year_admin(db, [r["school_id"] for r in rows], academic_year)
+        for r in rows:
+            fields = resolved.get(r["school_id"], {})
+            for f in INHERITED_YEAR_ADMIN_FIELDS:
+                if r.get(f) in (None, "") and fields.get(f) not in (None, ""):
+                    r[f] = fields[f]
+    except Exception as exc:
+        logger.warning("year_admin_data inheritance fill failed (non-fatal): %s", exc)
+
+
 @router.get("/year-admin-data")
 def list_year_admin_data(
     user: Annotated[dict, Depends(get_current_user)],
@@ -1624,14 +1647,11 @@ def get_year_admin_data(
 
     # Carry-forward: fill client_status / service_type from the most recent earlier year
     # when this year's row is missing them (or missing entirely). Non-fatal.
-    try:
-        resolved = resolve_inherited_year_admin(db, [school_id], academic_year).get(school_id, {})
-        for f in INHERITED_YEAR_ADMIN_FIELDS:
-            if data.get(f) in (None, "") and resolved.get(f) not in (None, ""):
-                data[f] = resolved[f]
-    except Exception as exc:
-        logger.warning("get_year_admin_data inheritance fill failed (non-fatal): %s", exc)
-
+    if not data:
+        data = {"school_id": school_id, "academic_year": academic_year}
+        _fill_inherited_year_admin(db, [data], academic_year)
+        return {k: v for k, v in data.items() if k in INHERITED_YEAR_ADMIN_FIELDS and v not in (None, "")}
+    _fill_inherited_year_admin(db, [data], academic_year)
     return data
 
 
@@ -1698,6 +1718,7 @@ def upsert_year_admin_data(
             )
             data = row.data[0] if row.data else update_data
             _attach_updater_names(db, [data])
+            _fill_inherited_year_admin(db, [data], academic_year)
             return data
         except HTTPException:
             raise
@@ -1757,6 +1778,7 @@ def bulk_upsert_year_admin_data(
             )
             data_by_school = {r["school_id"]: r for r in (res.data or [])}
             _attach_updater_names(db, list(data_by_school.values()))
+            _fill_inherited_year_admin(db, list(data_by_school.values()), body.academic_year)
             updated = [{"school_id": sid, "data": d} for sid, d in data_by_school.items()]
             return {"field": body.field, "academic_year": body.academic_year, "updated": updated, "failed": failed}
         except HTTPException:
@@ -1809,7 +1831,9 @@ async def upload_contract_file(
         )
         .execute()
     )
-    return row.data[0] if row.data else {"contract_file_storage_key": storage_key, "contract_file_name": file.filename}
+    data = row.data[0] if row.data else {"contract_file_storage_key": storage_key, "contract_file_name": file.filename}
+    _fill_inherited_year_admin(db, [data], academic_year)
+    return data
 
 
 @router.get("/{school_id}/year-admin-data/contract-file")
@@ -2124,6 +2148,7 @@ async def gefen_organized_check(
         row = db.table("school_year_admin_data").upsert(update_data, on_conflict="school_id,academic_year").execute()
         result_map[school["id"]] = row.data[0] if row.data else update_data
 
+    _fill_inherited_year_admin(db, list(result_map.values()), academic_year)
     return result_map
 
 
@@ -4583,23 +4608,6 @@ def _build_secretary_upload_email_html(recipient_name: str, when_bet: str, schoo
 </html>"""
 
 
-def _send_reminder_email(to_email: str, subject: str, html: str):
-    gmail_user = os.getenv("GMAIL_USER", "")
-    gmail_password = os.getenv("GMAIL_APP_PASSWORD", "")
-    if not gmail_user or not gmail_password:
-        raise RuntimeError("Gmail not configured")
-    msg = MIMEMultipart()
-    msg["From"] = f"גפן AI <{gmail_user}>"
-    msg["To"] = to_email
-    msg["Subject"] = subject
-    msg.attach(MIMEText(html, "html", "utf-8"))
-    with smtplib.SMTP("smtp.gmail.com", 587, timeout=15) as server:
-        server.ehlo()
-        server.starttls()
-        server.login(gmail_user, gmail_password)
-        server.send_message(msg)
-
-
 @router.post("/meetings/send-due-reminders")
 def send_due_reminders(request: Request, school_id: str | None = None):
     """Cron-triggered (GitHub Actions, daily Sun-Thu). Sends a reminder email
@@ -4685,11 +4693,13 @@ def send_due_reminders(request: Request, school_id: str | None = None):
 
     advisor_ids = list({aid for m in meetings for aid in (m.get("advisor_ids") or [])})
     advisor_names_map = {}
+    advisor_emails_map = {}
     if advisor_ids:
         try:
             db = get_admin_client()
-            p_res = db.table("profiles").select("id, full_name").in_("id", advisor_ids).execute()
+            p_res = db.table("profiles").select("id, full_name, email").in_("id", advisor_ids).execute()
             advisor_names_map = {p["id"]: p.get("full_name") for p in (p_res.data or [])}
+            advisor_emails_map = {p["id"]: (p.get("email") or "").strip() for p in (p_res.data or [])}
         except Exception as exc:
             logger.warning("send_due_reminders: advisor name lookup failed (non-fatal): %s", exc)
 
@@ -4774,6 +4784,12 @@ def send_due_reminders(request: Request, school_id: str | None = None):
             when_lamed, when_bet = _day_phrases(m["meeting_date"], today_il)
             advisor_name = _hebrew_join([advisor_names_map.get(aid) for aid in (m.get("advisor_ids") or [])])
             subject = f"תזכורת: פגישה {when_bet}"
+            # All meeting emails go out via Resend (never the support Gmail mailbox); replies are
+            # routed to the meeting's first advisor that has an email address.
+            reply_to = next(
+                (advisor_emails_map[aid] for aid in (m.get("advisor_ids") or []) if advisor_emails_map.get(aid)),
+                None,
+            )
 
             org_settings = org_settings_map.get(school.get("org_id"), {})
             upload_request_on = org_settings.get("secretary_upload_request_enabled", True)
@@ -4852,7 +4868,7 @@ def send_due_reminders(request: Request, school_id: str | None = None):
                         )
                         status, error = "sent", None
                         try:
-                            send_resend_email(email_addr, f"בקשת קבצים לפגישה {when_bet}", html)
+                            send_resend_email(email_addr, f"בקשת קבצים לפגישה {when_bet}", html, reply_to=reply_to)
                             sent += 1
                         except Exception as email_exc:
                             status, error = "failed", str(email_exc)
@@ -4878,7 +4894,7 @@ def send_due_reminders(request: Request, school_id: str | None = None):
                     )
                     status, error = "sent", None
                     try:
-                        _send_reminder_email(email_addr, subject, html)
+                        send_resend_email(email_addr, subject, html, reply_to=reply_to)
                         sent += 1
                     except Exception as email_exc:
                         status, error = "failed", str(email_exc)

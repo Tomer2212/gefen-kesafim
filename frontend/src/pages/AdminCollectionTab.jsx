@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+﻿import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import axios from "axios";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -973,6 +973,9 @@ const COLLECTION_EMPTY_OBJ = {};
 export default function AdminCollectionTab() {
   const [schools, setSchools] = useState([]);
   const [yearAdminData, setYearAdminData] = useState({});
+  // Per-(school, field) autosave race guards — see saveYearAdminField.
+  const saveSeqRef = useRef({});
+  const saveInflightRef = useRef({});
   const [loading, setLoading] = useState(true);
   const [academicYear, setAcademicYear] = useState(DEFAULT_ACADEMIC_YEAR);
   const [colVisible, setColVisible] = useState(() =>
@@ -1020,27 +1023,50 @@ export default function AdminCollectionTab() {
   }
 
   async function saveYearAdminField(schoolId, field, value) {
+    const k = `${schoolId}:${field}`;
+    const seq = (saveSeqRef.current[k] || 0) + 1;
+    saveSeqRef.current[k] = seq;
+    saveInflightRef.current[k] = (saveInflightRef.current[k] || 0) + 1;
     setYearAdminData(prev => ({
       ...prev,
       [schoolId]: { ...(prev[schoolId] || {}), school_id: schoolId, [field]: value },
     }));
     try {
       const res = await axios.put(`/schools/${schoolId}/year-admin-data`, { [field]: value }, { params: { academic_year: academicYear } });
-      // Merge (not replace) — a full replace would clobber any other field that was
-      // optimistically saved on this same row by a concurrent, still-in-flight PUT.
-      setYearAdminData(prev => ({
-        ...prev,
-        [schoolId]: { ...(prev[schoolId] || {}), ...res.data, [field]: res.data?.[field] ?? value },
-      }));
+      // Merge (not replace), and skip every field of this row whose own save is still in
+      // flight (incl. this field if a newer save of it was sent) — otherwise this response's
+      // older copy of those fields would clobber their optimistic values.
+      const data = res.data && typeof res.data === "object" ? res.data : {};
+      const inflight = saveInflightRef.current;
+      const skip = new Set(
+        Object.keys(inflight)
+          .filter(key => inflight[key] > 0 && key !== k && key.startsWith(`${schoolId}:`))
+          .map(key => key.slice(schoolId.length + 1)),
+      );
+      if (saveSeqRef.current[k] !== seq) skip.add(field);
+      setYearAdminData(prev => {
+        const row = { ...(prev[schoolId] || {}), school_id: schoolId };
+        for (const [f, v] of Object.entries(data)) if (!skip.has(f)) row[f] = v;
+        return { ...prev, [schoolId]: row };
+      });
     } catch {
       const res = await axios.get("/schools/year-admin-data", { params: { academic_year: academicYear } });
       setYearAdminData(res.data || {});
+    } finally {
+      saveInflightRef.current[k] = Math.max(0, (saveInflightRef.current[k] || 1) - 1);
     }
   }
 
   function handleUploaded(resultMap) {
-    const mergedYearAdminData = { ...yearAdminData, ...resultMap };
-    setYearAdminData(mergedYearAdminData);
+    // Merge per school (never replace a whole row) — the check's response rows only carry the
+    // columns it wrote, so replacing used to drop e.g. an inherited client_status from the table.
+    const mergeRows = base => {
+      const next = { ...base };
+      for (const [sid, row] of Object.entries(resultMap || {})) next[sid] = { ...(base[sid] || {}), ...row };
+      return next;
+    };
+    const mergedYearAdminData = mergeRows(yearAdminData);
+    setYearAdminData(prev => mergeRows(prev));
     setShowUploadModal(false);
     setSortMismatchFirst(true);
 

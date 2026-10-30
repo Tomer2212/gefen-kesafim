@@ -2248,6 +2248,39 @@ export default function AdminPage() {
     meeting_duration_gefen: null, meeting_duration_current: null, meeting_duration_district: null,
   };
   const [yearAdminForm, setYearAdminForm] = useState(EMPTY_YEAR_ADMIN_FORM);
+  // Edit mode only: the ליווי values exactly as loaded from the server, so save sends ONLY
+  // the fields the user actually changed (never the whole form). Sending the whole form used
+  // to wipe real data: if save happened before the async GET returned, or the GET failed
+  // (form = EMPTY), or the previous school's form was still showing, nulls/another school's
+  // values were written over this school's row.
+  const [yearAdminOriginal, setYearAdminOriginal] = useState(null);
+  // "idle" (new school — full form is sent) | "loading" | "loaded" | "failed"
+  const [yearAdminLoadState, setYearAdminLoadState] = useState("idle");
+  // Bumped on load — part of the `key` of the uncontrolled (defaultValue) ליווי inputs so they
+  // remount with the loaded value instead of keeping the empty default (and blurring it back).
+  const [yearAdminLoadVersion, setYearAdminLoadVersion] = useState(0);
+  // Which school the in-flight ליווי GET is for — a late response for a school that is no
+  // longer open is dropped instead of filling (and later being saved into) another school.
+  const yearAdminLoadForRef = useRef(null);
+  const yearAdminLocked = yearAdminLoadState === "loading" || yearAdminLoadState === "failed";
+
+  function resetYearAdminForm() {
+    yearAdminLoadForRef.current = null;
+    setYearAdminForm(EMPTY_YEAR_ADMIN_FORM);
+    setYearAdminOriginal(null);
+    setYearAdminLoadState("idle");
+  }
+
+  // Only the fields changed relative to what was loaded. null/""/[] are treated as equal
+  // (all mean "empty") so merely touching a field doesn't produce a spurious write.
+  function yearAdminFormDiff(form, original) {
+    const norm = v => (v === "" || (Array.isArray(v) && v.length === 0) ? null : v ?? null);
+    const diff = {};
+    for (const f of Object.keys(EMPTY_YEAR_ADMIN_FORM)) {
+      if (JSON.stringify(norm(form[f])) !== JSON.stringify(norm(original?.[f]))) diff[f] = form[f];
+    }
+    return diff;
+  }
 
   // Delete confirmation modal
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -2352,7 +2385,7 @@ export default function AdminPage() {
     setSchoolForm(EMPTY_FORM);
     setDraftTypedAdvisorIds(EMPTY_TYPED_ADVISOR_IDS);
     setOriginalTypedAdvisorIds(EMPTY_TYPED_ADVISOR_IDS);
-    setYearAdminForm(EMPTY_YEAR_ADMIN_FORM);
+    resetYearAdminForm();
     setSchoolStage("");
     setCustomDivisions(DEFAULT_CUSTOM_DIVISIONS);
     setTriedSave(false);
@@ -2598,16 +2631,42 @@ export default function AdminPage() {
     else { setAdminSortKey(null); setAdminSortDir("asc"); }
   }
 
+  // Per-(school, field) save counter + in-flight count: only the newest save of a field may
+  // write its server value back, and no response may overwrite another field of the same
+  // school whose own save is still in flight. The response is MERGED into the row (never
+  // replaces it), so fields it doesn't carry aren't dropped.
+  const yearAdminSaveSeqRef = useRef({});
+  const yearAdminSaveInflightRef = useRef({});
+
   async function saveYearAdminField(schoolId, field, value) {
+    const year = adminAcademicYear;
+    const k = `${schoolId}:${field}`;
+    const seq = (yearAdminSaveSeqRef.current[k] || 0) + 1;
+    yearAdminSaveSeqRef.current[k] = seq;
+    yearAdminSaveInflightRef.current[k] = (yearAdminSaveInflightRef.current[k] || 0) + 1;
     setYearAdminData(prev => ({
       ...prev,
       [schoolId]: { ...(prev[schoolId] || {}), school_id: schoolId, [field]: value },
     }));
     try {
-      const res = await axios.put(`/schools/${schoolId}/year-admin-data`, { [field]: value }, { params: { academic_year: adminAcademicYear } });
-      setYearAdminData(prev => ({ ...prev, [schoolId]: res.data }));
+      const res = await axios.put(`/schools/${schoolId}/year-admin-data`, { [field]: value }, { params: { academic_year: year } });
+      const data = res.data && typeof res.data === "object" ? res.data : {};
+      const inflight = yearAdminSaveInflightRef.current;
+      const skip = new Set(
+        Object.keys(inflight)
+          .filter(key => inflight[key] > 0 && key !== k && key.startsWith(`${schoolId}:`))
+          .map(key => key.slice(schoolId.length + 1)),
+      );
+      if (yearAdminSaveSeqRef.current[k] !== seq) skip.add(field);
+      setYearAdminData(prev => {
+        const row = { ...(prev[schoolId] || {}), school_id: schoolId };
+        for (const [f, v] of Object.entries(data)) if (!skip.has(f)) row[f] = v;
+        return { ...prev, [schoolId]: row };
+      });
     } catch {
-      loadYearAdminData(adminAcademicYear);
+      loadYearAdminData(year);
+    } finally {
+      yearAdminSaveInflightRef.current[k] = Math.max(0, (yearAdminSaveInflightRef.current[k] || 1) - 1);
     }
   }
 
@@ -3186,7 +3245,14 @@ export default function AdminPage() {
             // still add the missing division manually from the expanded row's "חשבונות גפן" panel
           }
         }
-        await axios.put(`/schools/${editingSchool.id}/year-admin-data`, yearAdminForm, { params: { academic_year: DEFAULT_ACADEMIC_YEAR } });
+        // Only when this school's ליווי row actually loaded, and only the changed fields —
+        // see yearAdminOriginal. While loading/failed the fields are locked and nothing is sent.
+        if (yearAdminLoadState === "loaded" && yearAdminLoadForRef.current === editingSchool.id) {
+          const yearAdminDiff = yearAdminFormDiff(yearAdminForm, yearAdminOriginal);
+          if (Object.keys(yearAdminDiff).length > 0) {
+            await axios.put(`/schools/${editingSchool.id}/year-admin-data`, yearAdminDiff, { params: { academic_year: DEFAULT_ACADEMIC_YEAR } });
+          }
+        }
         try {
           const res = await axios.get(`/schools/${editingSchool.id}/advisors`);
           setSchoolAdvisors(prev => ({ ...prev, [editingSchool.id]: res.data || [] }));
@@ -3229,7 +3295,7 @@ export default function AdminPage() {
       setSchoolForm(EMPTY_FORM);
       setDraftTypedAdvisorIds(EMPTY_TYPED_ADVISOR_IDS);
       setOriginalTypedAdvisorIds(EMPTY_TYPED_ADVISOR_IDS);
-      setYearAdminForm(EMPTY_YEAR_ADMIN_FORM);
+      resetYearAdminForm();
       setSchoolStage("");
       setCustomDivisions(DEFAULT_CUSTOM_DIVISIONS);
       setTriedSave(false);
@@ -3307,9 +3373,25 @@ export default function AdminPage() {
     axios.get(`/schools/${school.id}/advisors`).then(res => {
       setSchoolAdvisors(prev => ({ ...prev, [school.id]: res.data || [] }));
     }).catch(() => {});
+    // Clear the previous school's ליווי values immediately and lock the fields until this
+    // school's row arrives (a late response for another school is ignored).
+    yearAdminLoadForRef.current = school.id;
+    setYearAdminForm(EMPTY_YEAR_ADMIN_FORM);
+    setYearAdminOriginal(null);
+    setYearAdminLoadState("loading");
     axios.get(`/schools/${school.id}/year-admin-data`, { params: { academic_year: DEFAULT_ACADEMIC_YEAR } })
-      .then(res => setYearAdminForm({ ...EMPTY_YEAR_ADMIN_FORM, ...(res.data || {}) }))
-      .catch(() => setYearAdminForm(EMPTY_YEAR_ADMIN_FORM));
+      .then(res => {
+        if (yearAdminLoadForRef.current !== school.id) return;
+        const loaded = { ...EMPTY_YEAR_ADMIN_FORM, ...(res.data && typeof res.data === "object" ? res.data : {}) };
+        setYearAdminForm(loaded);
+        setYearAdminOriginal(loaded);
+        setYearAdminLoadState("loaded");
+        setYearAdminLoadVersion(v => v + 1);
+      })
+      .catch(() => {
+        if (yearAdminLoadForRef.current !== school.id) return;
+        setYearAdminLoadState("failed");
+      });
     Promise.allSettled([
       axios.get(`/schools/${school.id}/advisors/gefen`),
       axios.get(`/schools/${school.id}/advisors/current`),
@@ -3342,6 +3424,7 @@ export default function AdminPage() {
       setShowSchoolForm(false);
       setEditingSchool(null);
       setSchoolForm(EMPTY_FORM);
+      resetYearAdminForm();
       setSchoolStage("");
       setCustomDivisions(DEFAULT_CUSTOM_DIVISIONS);
       await loadSchools();
@@ -3360,7 +3443,8 @@ export default function AdminPage() {
     setAccessLinkedToAdvisors(false);
     setDraftTypedAdvisorIds(EMPTY_TYPED_ADVISOR_IDS);
     setOriginalTypedAdvisorIds(EMPTY_TYPED_ADVISOR_IDS);
-    setYearAdminForm(EMPTY_YEAR_ADMIN_FORM);
+    resetYearAdminForm();
+    setYearAdminLoadVersion(v => v + 1);
     setSchoolConflict(null);
     setShowSchoolForm(true);
     loadUsers();
@@ -4979,10 +5063,16 @@ export default function AdminPage() {
                     <div className={SECTION_HEADER_CLS}>
                       {sectionTitle(Handshake, "פרטי ליווי", "bg-emerald-50 text-emerald-600")}
                     </div>
+                    {yearAdminLoadState === "loading" && (
+                      <p role="status" aria-label="טוען נתוני ליווי" className="text-xs text-slate-500 mb-2">טוען נתוני ליווי...</p>
+                    )}
+                    {yearAdminLoadState === "failed" && (
+                      <p role="alert" className="text-xs text-red-600 mb-2">לא ניתן לטעון את נתוני הליווי — סגור ופתח מחדש את העריכה. שינויים בפרטי הליווי לא יישמרו כעת.</p>
+                    )}
                     <div className="grid grid-cols-3 gap-3">
                       <div className={TILE_CLS}>
                         <label htmlFor="admin-ys-client-status" className={TILE_LABEL_CLS}>סטטוס לקוח</label>
-                        <select id="admin-ys-client-status" className="input-field text-sm"
+                        <select id="admin-ys-client-status" className="input-field text-sm" disabled={yearAdminLocked}
                           value={yearAdminForm.client_status || ""}
                           onChange={e => setYearAdminForm(p => ({ ...p, client_status: e.target.value || null }))}>
                           <option value="">בחר</option>
@@ -4992,7 +5082,7 @@ export default function AdminPage() {
 
                       <div className={TILE_CLS}>
                         <label htmlFor="admin-ys-service-type" className={TILE_LABEL_CLS}>סוג שירות</label>
-                        <select id="admin-ys-service-type" className="input-field text-sm"
+                        <select id="admin-ys-service-type" className="input-field text-sm" disabled={yearAdminLocked}
                           value={yearAdminForm.service_type || ""}
                           onChange={e => setYearAdminForm(p => ({ ...p, service_type: e.target.value || null }))}>
                           <option value="">בחר</option>
@@ -5003,6 +5093,7 @@ export default function AdminPage() {
                       <div className={TILE_CLS}>
                         <label htmlFor="admin-ys-order-amount" className={TILE_LABEL_CLS}>מחיר כולל מע"מ</label>
                         <input id="admin-ys-order-amount" className="input-field text-sm" type="text" inputMode="numeric" autoComplete="off"
+                          key={`admin-ys-order-amount-${yearAdminLoadVersion}`} disabled={yearAdminLocked}
                           defaultValue={formatAmount(yearAdminForm.order_amount_gefen)}
                           onBlur={e => {
                             const v = parseAmount(e.target.value);
@@ -5013,15 +5104,18 @@ export default function AdminPage() {
 
                       <div className={TILE_CLS}>
                         <span className={TILE_LABEL_CLS}>אמצעי הזמנה</span>
-                        <MultiSelectChips compact options={FUNDING_METHOD_OPTIONS}
-                          selected={yearAdminForm.order_method || []}
-                          onChange={v => setYearAdminForm(p => ({ ...p, order_method: v.length ? v : [] }))} />
+                        <div className={yearAdminLocked ? "pointer-events-none opacity-60" : ""} aria-disabled={yearAdminLocked || undefined}>
+                          <MultiSelectChips compact options={FUNDING_METHOD_OPTIONS}
+                            selected={yearAdminForm.order_method || []}
+                            onChange={v => setYearAdminForm(p => ({ ...p, order_method: v.length ? v : [] }))} />
+                        </div>
                         {(yearAdminForm.order_method || []).includes("other") && (
                           <input
                             type="text"
                             aria-label="אמצעי הזמנה - אחר, פירוט"
                             placeholder="פירוט (לא חובה)"
                             className="input-field text-sm mt-1"
+                            key={`admin-ys-order-other-${yearAdminLoadVersion}`} disabled={yearAdminLocked}
                             defaultValue={yearAdminForm.order_method_other_text || ""}
                             onBlur={e => {
                               const v = e.target.value.trim();
@@ -5076,7 +5170,7 @@ export default function AdminPage() {
 
                                 <label htmlFor={`admin-ys-alloc-${key}`} className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">הקצאת פגישות:</label>
                                 <div className="py-0.5">
-                                  <input id={`admin-ys-alloc-${key}`} type="number" min="0" className="input-field text-sm"
+                                  <input id={`admin-ys-alloc-${key}`} type="number" min="0" className="input-field text-sm" disabled={yearAdminLocked}
                                     value={yearAdminForm[`meeting_allocation_${key}`] ?? ""}
                                     onChange={e => {
                                       const v = e.target.value === "" ? null : Number(e.target.value);
@@ -5087,7 +5181,7 @@ export default function AdminPage() {
                                 <span className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">זמן לפגישה:</span>
                                 <div className="py-0.5">
                                   <HourMinuteInput idPrefix={`admin-ys-duration-${key}`} label={`זמן לפגישה [${label}]`}
-                                    minutes={yearAdminForm[`meeting_duration_${key}`] ?? null}
+                                    minutes={yearAdminForm[`meeting_duration_${key}`] ?? null} disabled={yearAdminLocked}
                                     onChange={v => setYearAdminForm(p => ({ ...p, [`meeting_duration_${key}`]: v }))} />
                                 </div>
                               </div>
@@ -5102,7 +5196,7 @@ export default function AdminPage() {
                     <button onClick={saveSchool} disabled={savingSchool} className={`${editingSchool ? "btn-green-light" : "btn-blue"} text-sm px-5 py-2`}>
                       {savingSchool ? "שומר..." : editingSchool ? "שמור שינויים" : "שמור"}
                     </button>
-                    <button onClick={() => { setShowSchoolForm(false); setDraftTypedAdvisorIds(originalTypedAdvisorIds); }} className="btn-ghost text-sm px-5 py-2">ביטול</button>
+                    <button onClick={() => { setShowSchoolForm(false); setDraftTypedAdvisorIds(originalTypedAdvisorIds); resetYearAdminForm(); }} className="btn-ghost text-sm px-5 py-2">ביטול</button>
                   </div>
                 </div>
               )}
