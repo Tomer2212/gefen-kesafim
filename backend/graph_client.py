@@ -334,12 +334,34 @@ def _event_payload(meeting: dict, subject: str | None, show_as: str | None = Non
     subject = subject or "פגישת ליווי כלכלי"
     date = meeting.get("meeting_date")
     start_time = meeting.get("start_time") or "09:00"
-    end_time = meeting.get("end_time") or "10:00"
+    end_time = meeting.get("end_time")
+    # A missing end_time defaults to one hour after start, not a fixed clock time — a meeting
+    # starting at e.g. 23:00 or 11:30 defaulting to a hardcoded "10:00" would put the computed
+    # end BEFORE the start (see the midnight-crossing case below), which Graph rejects outright.
+    if not end_time:
+        try:
+            start_dt = datetime.strptime(start_time, "%H:%M")
+            end_time = (start_dt + timedelta(hours=1)).strftime("%H:%M")
+        except Exception:
+            end_time = "10:00"
+    # Meetings spanning midnight (e.g. 23:00 start, 00:30 end) have an end clock-time that's
+    # numerically earlier than the start, but both are stored against the SAME meeting_date —
+    # building both datetimes off that one date put "end" before "start" on the calendar,
+    # which Graph's events API rejects with 400 (confirmed in production: every real 400 from
+    # a bulk import's calendar sync was exactly this shape). Roll the end date forward a day
+    # whenever the end clock-time is earlier than the start clock-time (equal times are left
+    # as a same-day zero-duration event rather than rolled into a bizarre 24-hour block).
+    end_date = date
+    try:
+        if date and end_time < start_time:
+            end_date = (datetime.strptime(date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+    except Exception:
+        pass
     payload = {
         "subject": subject,
         "body": {"contentType": "text", "content": meeting.get("notes") or ""},
         "start": {"dateTime": f"{date}T{start_time}:00", "timeZone": "Israel Standard Time"},
-        "end": {"dateTime": f"{date}T{end_time}:00", "timeZone": "Israel Standard Time"},
+        "end": {"dateTime": f"{end_date}T{end_time}:00", "timeZone": "Israel Standard Time"},
     }
     if show_as:
         payload["showAs"] = show_as

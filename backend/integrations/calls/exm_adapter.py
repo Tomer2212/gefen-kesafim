@@ -87,6 +87,7 @@ def pull_calls(config: dict, date_from: str, date_to: str) -> list[dict]:
     headers = _headers(config)
     calls: list[dict] = []
     cursor: str | None = None
+    hit_page_cap = True
 
     for _ in range(_MAX_PAGES):
         body = {
@@ -134,7 +135,18 @@ def pull_calls(config: dict, date_from: str, date_to: str) -> list[dict]:
 
         cursor = (data.get("metadata") or {}).get("next_page_token")
         if not cursor:
+            hit_page_cap = False
             break
+
+    if hit_page_cap:
+        # calls_router._pull_raw_calls chunks requests to one calendar day each specifically
+        # to keep this from happening — if it still does, a day's real volume exceeded
+        # _MAX_PAGES*_PAGE_ITEMS and the tail of that day was silently dropped.
+        logger.warning(
+            "exm_adapter.pull_calls: hit the %s-page cap (%s calls) for %s..%s — results may be "
+            "truncated; the day's real call volume exceeds what a single request covers",
+            _MAX_PAGES, _MAX_PAGES * _PAGE_ITEMS, date_from, date_to,
+        )
 
     return calls
 

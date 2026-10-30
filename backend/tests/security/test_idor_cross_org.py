@@ -227,6 +227,28 @@ def test_get_year_admin_data_same_org_still_works(org_a_client):
     assert resp.status_code == 200, resp.text
 
 
+# List variant — GET /schools/year-admin-data used to return every org's rows (filtered
+# only by academic_year). It takes no school_id, so "rejected" means "never contains the
+# other org's schools".
+
+def test_list_year_admin_data_cross_org_excluded(org_b_client):
+    resp = org_b_client.get("/schools/year-admin-data")
+    assert resp.status_code == 200, resp.text
+    assert ORG_A_SCHOOL_ID not in resp.json(), (
+        "VULNERABILITY: list_year_admin_data returned an Org A school to an Org B caller"
+    )
+
+
+def test_list_year_admin_data_same_org_still_works(org_a_client):
+    resp = org_a_client.get("/schools/year-admin-data")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert ORG_B_SCHOOL_ID not in data
+    # Inherited client_status must be filled for the org's schools (the bug this guards:
+    # an oversized inheritance query failing silently left ~230 schools without a status).
+    assert any(v.get("client_status") for v in data.values())
+
+
 # ---------------------------------------------------------------------------
 # Optional real write-path test, Org B sandbox ONLY: create a school_note
 # under Org B's own school, confirm Org A cannot read/edit/delete it, then

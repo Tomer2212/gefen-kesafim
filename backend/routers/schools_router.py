@@ -859,19 +859,30 @@ def list_schools(
                 # Note: restrict_access_to.cs.[uuid] is intentionally kept OUT of or_() here.
                 # PostgREST's or= parser misinterprets JSON array brackets as grouping syntax,
                 # causing an APIError. Instead we use a separate direct .filter() call (Q2).
-                open_filters = ["restrict_access_to.is.null"]
-                if assigned_ids:
-                    open_filters.append(f"id.in.({','.join(assigned_ids)})")
+                # The assigned ids are a separate `.in_()` query (Q1b) rather than an
+                # `id.in.(...)` term inside or_(): an or_() string can't be split, so an
+                # advisor with ~650+ assigned schools would overflow the request URL, while
+                # `.in_()` is auto-chunked (supabase_client.py).
                 q1_builder = (
                     db.table("schools")
                     .select(sel)
                     .eq("org_id", user["org_id"])
-                    .or_(",".join(open_filters))
-                    .order("name")
+                    .is_("restrict_access_to", "null")
                 )
                 if not include_deleted:
                     q1_builder = q1_builder.eq("status", "active")
-                q1 = q1_builder.execute()
+                q1_rows = q1_builder.execute().data or []
+                if assigned_ids:
+                    q1b_builder = (
+                        db.table("schools")
+                        .select(sel)
+                        .eq("org_id", user["org_id"])
+                        .in_("id", assigned_ids)
+                    )
+                    if not include_deleted:
+                        q1b_builder = q1b_builder.eq("status", "active")
+                    q1_ids = {s["id"] for s in q1_rows}
+                    q1_rows += [s for s in (q1b_builder.execute().data or []) if s["id"] not in q1_ids]
 
                 # Q2: schools with an explicit allow-list that includes this advisor.
                 # Uses direct .filter() (not inside or_()) so PostgREST parses the JSON value correctly.
@@ -886,8 +897,8 @@ def list_schools(
                 q2 = q2_builder.execute()
 
                 # Merge Q1 + Q2, deduplicate by ID, re-sort by name
-                seen_ids = {s["id"] for s in (q1.data or [])}
-                schools = (q1.data or []) + [s for s in (q2.data or []) if s["id"] not in seen_ids]
+                seen_ids = {s["id"] for s in q1_rows}
+                schools = q1_rows + [s for s in (q2.data or []) if s["id"] not in seen_ids]
                 schools.sort(key=lambda s: s.get("name") or "")
             else:
                 # Q1 (manager/owner): fetch all schools within their org
@@ -937,10 +948,23 @@ def list_schools(
 
     if school_ids:
         try:
-            stats_res = db.rpc("get_meetings_stats", {"school_ids": school_ids, "p_academic_year": academic_year}).execute()
+            # RPC results are NOT covered by supabase_client.py's auto-pagination and are capped
+            # at 1,000 rows too — this returns one row per (school, service_type), i.e. up to
+            # ~4× the school count, so page explicitly on that unique pair.
+            stats_rows: list = []
+            while True:
+                page = (
+                    db.rpc("get_meetings_stats", {"school_ids": school_ids, "p_academic_year": academic_year})
+                    .order("school_id").order("service_type")
+                    .range(len(stats_rows), len(stats_rows) + 999)
+                    .execute().data or []
+                )
+                stats_rows.extend(page)
+                if len(page) < 1000:
+                    break
             # RPC now returns one row per (school_id, service_type). Aggregate back into a
             # per-school grand total + a by_type breakdown (service_type "none" = no סוג set).
-            for r in (stats_res.data or []):
+            for r in stats_rows:
                 sid = r["school_id"]
                 entry = m_stats.setdefault(sid, {"completed": 0, "total_minutes": 0, "by_type": {}})
                 entry["completed"] += r["completed"]
@@ -1533,13 +1557,17 @@ def list_year_admin_data(
     for attempt in range(2):
         try:
             db = get_admin_client()
-            rows = (
+            # Scoped to the caller's org via an inner join on schools (DB-side filter, no
+            # id list in the URL), and paged past PostgREST's 1,000-row cap.
+            data = _fetch_all_rows(
                 db.table("school_year_admin_data")
-                .select("*")
+                .select("*, schools!inner(org_id)")
                 .eq("academic_year", academic_year)
-                .execute()
+                .eq("schools.org_id", user["org_id"]),
+                order_col="school_id",
             )
-            data = rows.data or []
+            for r in data:
+                r.pop("schools", None)
             break
         except Exception as exc:
             if attempt == 0:
@@ -1556,12 +1584,12 @@ def list_year_admin_data(
     # Carry-forward: client_status / service_type inherit from the most recent earlier year
     # for any school without an explicit value in `academic_year`. Non-fatal.
     try:
-        earlier = (
+        earlier = _fetch_all_rows(
             db.table("school_year_admin_data")
-            .select("school_id")
+            .select("id, school_id, schools!inner(org_id)")
             .in_("academic_year", ACADEMIC_YEARS[: ACADEMIC_YEARS.index(academic_year)] or [])
-            .execute()
-            .data
+            .eq("schools.org_id", user["org_id"]),
+            order_col="id",
         ) if academic_year in ACADEMIC_YEARS else []
         inherit_ids = {r["school_id"] for r in (earlier or [])} | set(result.keys())
         if inherit_ids:
@@ -2040,12 +2068,16 @@ async def gefen_organized_check(
     for attempt in range(2):
         try:
             db = get_admin_client()
-            schools_rows = db.table("schools").select("id, symbol").eq("status", "active").eq("org_id", user["org_id"]).execute()
-            yad_rows = (
+            schools_rows = _fetch_all_rows(
+                db.table("schools").select("id, symbol").eq("status", "active").eq("org_id", user["org_id"]),
+                order_col="id",
+            )
+            yad_rows = _fetch_all_rows(
                 db.table("school_year_admin_data")
-                .select("school_id, client_status, order_method, order_amount_gefen")
+                .select("school_id, client_status, order_method, order_amount_gefen, schools!inner(org_id)")
                 .eq("academic_year", academic_year)
-                .execute()
+                .eq("schools.org_id", user["org_id"]),
+                order_col="school_id",
             )
             break
         except Exception as exc:
@@ -2057,11 +2089,21 @@ async def gefen_organized_check(
                 logger.error("gefen_organized_check failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
-    yad_by_school = {r["school_id"]: r for r in (yad_rows.data or [])}
+    yad_by_school = {r["school_id"]: r for r in yad_rows}
+    # client_status carries forward from earlier years (same rule as the collection table),
+    # so a school "active" only by inheritance must still be checked. Non-fatal.
+    try:
+        merge_inherited_year_admin(
+            yad_by_school,
+            resolve_inherited_year_admin(db, [s["id"] for s in schools_rows], academic_year),
+            academic_year,
+        )
+    except Exception as exc:
+        logger.warning("gefen_organized_check inheritance merge failed (non-fatal): %s", exc)
     now_iso = datetime.now(timezone.utc).isoformat()
     result_map: dict[str, dict] = {}
 
-    for school in (schools_rows.data or []):
+    for school in schools_rows:
         yad = yad_by_school.get(school["id"], {})
         if yad.get("client_status") != "active" or "private" not in (yad.get("order_method") or []):
             continue
@@ -3788,18 +3830,15 @@ def _fetch_all_rows(query, order_col: str | None = None, order_desc: bool = Fals
     the user. `query` must already have every semantic filter (`.eq`/`.gte`/`.in_`/...) applied;
     this only pages through that already-filtered result set via `.range()`, it does not scan an
     unfiltered table (see CLAUDE.md "DB-level filtering — no Python-side table scans").
+
+    Paging itself now happens centrally (supabase_client.py auto-paginates any GET that hits
+    the row cap, with a primary-key tie-breaker), so this is a single execute(). A manual
+    `.range()` loop here would re-run an auto-chunked large `.in_()` query from the top on
+    every page (quadratic). `page_size` is kept for call-site compatibility.
     """
     if order_col:
         query = query.order(order_col, desc=order_desc)
-    rows: list = []
-    offset = 0
-    while True:
-        page = query.range(offset, offset + page_size - 1).execute().data or []
-        rows.extend(page)
-        if len(page) < page_size:
-            break
-        offset += page_size
-    return rows
+    return query.execute().data or []
 
 
 # ---------------------------------------------------------------------------
@@ -10211,11 +10250,9 @@ def _get_owner_id(db, user: dict) -> str:
         rows = db.table("profiles").select("id").eq("role", "owner").eq("org_id", user["org_id"]).execute().data or []
         if rows:
             return rows[0]["id"]
-    # final fallback (single-tenant dev only)
-    rows = db.table("profiles").select("id").eq("role", "owner").execute().data or []
-    if not rows:
-        raise HTTPException(status_code=404, detail="לא נמצא בעלים בארגון")
-    return rows[0]["id"]
+    # No unscoped fallback: an org-less "any owner" lookup would hand back ANOTHER org's
+    # owner, cross-wiring permission settings between tenants.
+    raise HTTPException(status_code=404, detail="לא נמצא בעלים בארגון")
 
 
 def _check_permission(db, user: dict, permission: str) -> bool:

@@ -114,6 +114,7 @@ def resolve_requested_upload_years(meeting: dict) -> list[str]:
 # overrides — per field, so an inherited field stays inherited until year N's own row
 # carries a non-empty value for it.
 INHERITED_YEAR_ADMIN_FIELDS = ("client_status", "service_type")
+_INHERIT_CHUNK_SIZE = 150
 
 
 def resolve_inherited_year_admin(db, school_ids, academic_year: str) -> dict[str, dict]:
@@ -129,15 +130,22 @@ def resolve_inherited_year_admin(db, school_ids, academic_year: str) -> dict[str
         years_oldest_first = ACADEMIC_YEARS[: idx + 1]
     except ValueError:
         years_oldest_first = [academic_year]
+    # Chunked: a single `school_id=in.(...)` with ~600+ UUIDs pushes the request URL past the
+    # API gateway's length limit (400 Bad Request), which used to silently disable inheritance
+    # for the whole call. Chunks also keep each response well under PostgREST's 1,000-row cap
+    # (chunk size × number of years).
+    rows: list = []
     try:
-        rows = (
-            db.table("school_year_admin_data")
-            .select("school_id, academic_year, " + ", ".join(INHERITED_YEAR_ADMIN_FIELDS))
-            .in_("school_id", school_ids)
-            .in_("academic_year", years_oldest_first)
-            .execute()
-            .data
-        ) or []
+        for i in range(0, len(school_ids), _INHERIT_CHUNK_SIZE):
+            rows.extend(
+                db.table("school_year_admin_data")
+                .select("school_id, academic_year, " + ", ".join(INHERITED_YEAR_ADMIN_FIELDS))
+                .in_("school_id", school_ids[i:i + _INHERIT_CHUNK_SIZE])
+                .in_("academic_year", years_oldest_first)
+                .execute()
+                .data
+                or []
+            )
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("resolve_inherited_year_admin query failed (non-fatal): %s", exc)
         return {}

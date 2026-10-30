@@ -1072,3 +1072,29 @@ def test_calendar_sync_status_same_org_still_works(org_b_manager_client, org_b_c
     assert data["total"] == 1
     assert data["counts"]["failed"] == 1
     assert data["failed_rows"][0]["error_message"] == "test fixture row"
+
+
+# ---------------------------------------------------------------------------
+# gefen-organized-check — POST /schools/collection/gefen-organized-check
+# Used to read every org's school_year_admin_data rows (filtered only by year). Writes are
+# Org B (sandbox) only: a header-only workbook makes it re-stamp Org B's own relevant rows.
+# ---------------------------------------------------------------------------
+
+def test_gefen_organized_check_only_touches_own_org(org_b_client):
+    import io
+    from openpyxl import Workbook
+    from conftest import ORG_A_SCHOOL_ID
+
+    wb = Workbook()
+    wb.active.append(["header"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    resp = org_b_client.post(
+        "/schools/collection/gefen-organized-check",
+        files={"file": ("suppliers.xlsx", buf.getvalue(),
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    assert resp.status_code == 200, resp.text
+    assert ORG_A_SCHOOL_ID not in resp.json(), (
+        "VULNERABILITY: gefen_organized_check wrote/returned an Org A school for an Org B caller"
+    )

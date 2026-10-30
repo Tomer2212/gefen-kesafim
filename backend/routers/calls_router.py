@@ -3,6 +3,7 @@ import logging
 import os
 import secrets
 import time
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 from zoneinfo import ZoneInfo
@@ -164,18 +165,26 @@ def _get_call_resolutions(org_id: str, call_ids: list[str]) -> dict:
     if not call_ids:
         return {}
     try:
-        db = get_admin_client()
-        rows = (
-            db.table("calls_call_contact_resolutions")
-            .select("*")
-            .eq("org_id", org_id)
-            .in_("call_id", call_ids)
-            .execute()
-        ).data or []
-        return {r["call_id"]: r for r in rows}
+        return _get_call_resolutions_or_raise(org_id, call_ids)
     except Exception as exc:
         logger.warning("calls: call resolutions lookup failed (non-fatal): %s", exc)
         return {}
+
+
+def _get_call_resolutions_or_raise(org_id: str, call_ids: list[str]) -> dict:
+    """Same lookup as _get_call_resolutions, but propagates failures instead of swallowing
+    them. Used by process_new_calls: if this check can't be trusted, treating it as "nothing
+    tracked yet" would re-create and re-send notifications for calls already resolved —
+    skipping this org for the current run (see call site) is safer than that."""
+    db = get_admin_client()
+    rows = (
+        db.table("calls_call_contact_resolutions")
+        .select("*")
+        .eq("org_id", org_id)
+        .in_("call_id", call_ids)
+        .execute()
+    ).data or []
+    return {r["call_id"]: r for r in rows}
 
 
 def _get_manual_school_overrides(org_id: str, call_ids: list[str]) -> tuple[dict, dict]:
@@ -556,7 +565,96 @@ async def calls_webhook(org_id: str, secret: str, request: Request):
 # Calls — live pull from the connected provider's API on every request.
 # Nothing about the calls themselves is ever written to Supabase (except the
 # ambiguous-contact resolution rows in calls_call_contact_resolutions).
+#
+# A single provider request is implicitly capped (exm_adapter._MAX_PAGES — 5,000 calls);
+# a wide requested range (e.g. list_school_calls's full academic year) could silently exceed
+# that in one shot. _pull_raw_calls below splits any multi-day range into Israel-local
+# calendar-day requests instead, so no single provider request ever needs to cover more than
+# one day's volume — the page cap stays a safety margin, not a real ceiling. Already-ended
+# days are additionally cached in-process (bounded TTL, never forever — see
+# _pull_raw_calls_for_day_cached) so repeatedly re-pulling the same range (e.g. switching the
+# advisor filter in ניהול without changing dates) doesn't re-hit the provider every time.
+# Today's own data is always pulled live, uncached — it can still change within the day.
 # ---------------------------------------------------------------------------
+
+_HISTORICAL_DAY_CACHE_TTL_SECONDS = 6 * 3600  # bounded, not forever — see module note above
+_RAW_CALLS_CACHE_MAX_ENTRIES = 500
+_raw_calls_day_cache: "OrderedDict[tuple[str, str, str], tuple[list[dict], float]]" = OrderedDict()
+
+
+def _provider_pull_calls(provider: str, provider_config: dict, date_from: str, date_to: str) -> list[dict]:
+    if provider == "voicenter":
+        return voicenter_adapter.pull_calls(provider_config, date_from, date_to)
+    elif provider == "exm":
+        return exm_adapter.pull_calls(provider_config, date_from, date_to)
+    raise HTTPException(status_code=500, detail="ספק שיחות לא נתמך")
+
+
+def _pull_raw_calls_for_day_cached(provider: str, provider_config: dict, org_id: str, day, chunk_from: str, chunk_to: str) -> list[dict]:
+    """Pulls one full, already-ended Israel-local calendar day, cached in-process with a
+    bounded TTL. Cache miss (TTL expired, or this worker process never saw this day/org
+    combination — each of the deployment's workers holds its own cache) just falls back to a
+    live pull, same as if caching didn't exist at all — the only cost of a miss is speed, never
+    a wrong or stale-forever result, which is why this doesn't run into the multi-worker
+    correctness problem that ruled out in-memory run state elsewhere in this codebase."""
+    key = (org_id, provider, day.isoformat())
+    now_mono = time.monotonic()
+    cached = _raw_calls_day_cache.get(key)
+    if cached and (now_mono - cached[1]) < _HISTORICAL_DAY_CACHE_TTL_SECONDS:
+        _raw_calls_day_cache.move_to_end(key)
+        return cached[0]
+
+    calls = _provider_pull_calls(provider, provider_config, chunk_from, chunk_to)
+    _raw_calls_day_cache[key] = (calls, now_mono)
+    _raw_calls_day_cache.move_to_end(key)
+    while len(_raw_calls_day_cache) > _RAW_CALLS_CACHE_MAX_ENTRIES:
+        _raw_calls_day_cache.popitem(last=False)
+    return calls
+
+
+# Widest range any legitimate caller ever needs is one academic year (~300 days,
+# list_school_calls); this leaves a generous margin while still bounding how many
+# sequential outbound requests one HTTP request to our own API can trigger — list_calls
+# takes date_from/date_to straight from query params, so this is also a cheap guard against
+# an authenticated manager (accidentally or not) requesting an enormous range.
+_MAX_CHUNK_RANGE_DAYS = 400
+
+
+def _pull_raw_calls(provider: str, provider_config: dict, org_id: str, date_from: str, date_to: str) -> list[dict]:
+    """Entry point for fetching raw provider calls for [date_from, date_to] (naive
+    Israel-local wall-clock strings). Ranges spanning a single day (e.g. the 15-min cron's
+    narrow rolling window) are passed straight through, unchunked — chunking/caching only
+    kicks in for genuinely wide ranges, where the page-cap risk and repeat-query cost
+    actually exist."""
+    dt_from = datetime.fromisoformat(date_from)
+    dt_to = datetime.fromisoformat(date_to)
+
+    if dt_to.date() == dt_from.date():
+        return _provider_pull_calls(provider, provider_config, date_from, date_to)
+
+    if (dt_to.date() - dt_from.date()).days > _MAX_CHUNK_RANGE_DAYS:
+        raise HTTPException(status_code=400, detail=f"טווח התאריכים רחב מדי (מעל {_MAX_CHUNK_RANGE_DAYS} ימים) — יש לצמצם אותו")
+
+    today = datetime.now(_IL_TZ).date()
+    all_calls: list[dict] = []
+    day = dt_from.date()
+    while day <= dt_to.date():
+        day_start = datetime.combine(day, datetime.min.time())
+        day_end = datetime.combine(day, datetime.max.time().replace(microsecond=0))
+        chunk_from = max(day_start, dt_from)
+        chunk_to = min(day_end, dt_to)
+        chunk_from_str = chunk_from.strftime("%Y-%m-%dT%H:%M:%S")
+        chunk_to_str = chunk_to.strftime("%Y-%m-%dT%H:%M:%S")
+
+        if day < today and chunk_from == day_start and chunk_to == day_end:
+            all_calls.extend(_pull_raw_calls_for_day_cached(provider, provider_config, org_id, day, chunk_from_str, chunk_to_str))
+        else:
+            all_calls.extend(_provider_pull_calls(provider, provider_config, chunk_from_str, chunk_to_str))
+
+        day += timedelta(days=1)
+
+    return all_calls
+
 
 def _pull_org_calls(org_id: str, date_from: str, date_to: str) -> dict:
     """Shared puller: provider Calls API fetch + advisor/AI/contact enrichment. Used by the
@@ -569,12 +667,7 @@ def _pull_org_calls(org_id: str, date_from: str, date_to: str) -> dict:
 
     provider = cfg["provider"]
     provider_config = cfg.get("config") or {}
-    if provider == "voicenter":
-        raw_calls = voicenter_adapter.pull_calls(provider_config, date_from, date_to)
-    elif provider == "exm":
-        raw_calls = exm_adapter.pull_calls(provider_config, date_from, date_to)
-    else:
-        raise HTTPException(status_code=500, detail="ספק שיחות לא נתמך")
+    raw_calls = _pull_raw_calls(provider, provider_config, org_id, date_from, date_to)
 
     # Agent (advisor) mapping is OUR OWN data (not the provider's), stored locally — non-fatal
     # enrichment. agent_key is representative_code for Voicenter, or the line's e164 for EXM
@@ -871,11 +964,24 @@ def resolve_call_contact_school(
     for attempt in range(2):
         try:
             db = get_admin_client()
-            db.table("calls_call_contact_resolutions").update({
-                "resolved_school_id": body.school_id,
-                "resolved_by": user["id"],
-                "resolved_at": now_iso,
-            }).eq("id", resolution["id"]).execute()
+            # Conditional on resolved_school_id still being unset — since the notification is
+            # only cleared for the recipient who actually acts (see below), more than one
+            # notified recipient can still have an actionable, unread copy of this same call
+            # at once. Without this guard, a second person resolving later would silently
+            # overwrite the first person's choice with a different school.
+            update_result = (
+                db.table("calls_call_contact_resolutions")
+                .update({
+                    "resolved_school_id": body.school_id,
+                    "resolved_by": user["id"],
+                    "resolved_at": now_iso,
+                })
+                .eq("id", resolution["id"])
+                .is_("resolved_school_id", "null")
+                .execute()
+            )
+            if not update_result.data:
+                raise HTTPException(status_code=400, detail="השיחה כבר שויכה לבית ספר על ידי משתמש/ת אחר/ת")
             if kind == "unknown":
                 # Unknown numbers have no contact_map entry to flow through — persist the
                 # school attribution as a manual per-call link (same mechanism as the admin
@@ -887,15 +993,15 @@ def resolve_call_contact_school(
                     "linked_by": user["id"],
                     "state": "linked",
                 }, on_conflict="org_id,call_id,school_id").execute()
-            # Mark every notification tied to this call as read for every recipient — a decision
-            # made by one owner/manager shouldn't leave the same "pending" notification open for
-            # the others who were notified as a fallback.
-            recipient_ids = resolution.get("notified_recipient_ids") or []
-            if recipient_ids:
-                db.table("notifications").update({"read_at": now_iso}).in_(
-                    "recipient_id", recipient_ids
-                ).contains("data", {"call_id": call_id}).execute()
+            # Mark the notification tied to this call as read only for the recipient who
+            # actually resolved it — other owners/managers notified as a fallback (unmapped
+            # line) still see their own copy until they open and act on it themselves.
+            db.table("notifications").update({"read_at": now_iso}).eq(
+                "recipient_id", user["id"]
+            ).contains("data", {"call_id": call_id}).execute()
             break
+        except HTTPException:
+            raise
         except Exception as exc:
             if attempt == 0:
                 reset_admin_client()
@@ -1332,9 +1438,17 @@ def upsert_mapping(user: Annotated[dict, Depends(get_current_user)], body: RepMa
         db.table("calls_known_agents").update({"unmapped_alert_sent_at": None}).eq(
             "org_id", user["org_id"]
         ).eq("provider", provider).eq("agent_key", body.representative_code).execute()
-        db.table("notifications").update({"read_at": datetime.now(timezone.utc).isoformat()}).eq(
-            "type", "voicenter_rep_unmapped"
-        ).contains("data", {"representative_code": body.representative_code}).is_("read_at", "null").execute()
+        # Scoped to this org's recipients — representative codes are provider-local and can
+        # repeat across orgs, so filtering by code alone would mark another org's alerts read.
+        org_profile_ids = [
+            p["id"] for p in (db.table("profiles").select("id").eq("org_id", user["org_id"]).execute().data or [])
+        ]
+        if org_profile_ids:
+            db.table("notifications").update({"read_at": datetime.now(timezone.utc).isoformat()}).eq(
+                "type", "voicenter_rep_unmapped"
+            ).contains("data", {"representative_code": body.representative_code}).is_(
+                "read_at", "null"
+            ).in_("recipient_id", org_profile_ids).execute()
     except Exception as exc:
         logger.warning("upsert_mapping: clearing unmapped-agent alert failed (non-fatal): %s", exc)
 
@@ -1473,7 +1587,14 @@ def process_new_calls(request: Request):
         ambiguous_calls = [c for c in result["calls"] if c.get("pending_school_resolution")]
         if ambiguous_calls:
             call_ids = [c["call_id"] for c in ambiguous_calls]
-            already_tracked = set(_get_call_resolutions(org_id, call_ids).keys())
+            try:
+                already_tracked = set(_get_call_resolutions_or_raise(org_id, call_ids).keys())
+            except Exception as exc:
+                # Treating a failed lookup as "nothing tracked yet" would re-notify every
+                # already-resolved ambiguous call for this org — skip this org for this run
+                # instead (next run, 15 min later, retries with a fresh lookup).
+                logger.warning("process_new_calls: skipping org=%s (resolutions lookup failed: %s)", org_id, exc)
+                continue
 
             managers_and_owners: list[str] = []
             try:

@@ -416,6 +416,10 @@ if all_ids:
 
 This pattern is used in `list_schools()` and `list_logs()` and must be followed for any new endpoint that needs to join `profiles`.
 
+**Large id lists in `.in_()` are auto-chunked.** Supabase's gateway rejects a request URL with ~650+ UUIDs in one `in.(...)` filter (bare 400 Bad Request — and most enrichment call sites swallow it as non-fatal, so data silently disappears). `supabase_client.py` patches postgrest's `execute()` to split any `.in_()` over 200 values into several requests and merge them (rows, `count`, `order`, `limit`/`offset`). So: always pass id lists via `.in_()` — **never** embed an id list inside an `.or_()` string (`id.in.(...)`) or any other hand-built filter string, since those can't be split. `postgrest` is pinned in `requirements.txt` because of this patch; `backend/tests/test_in_filter_chunking.py` guards it — re-run it after any supabase/postgrest upgrade.
+
+**The 1,000-row cap is auto-paginated too.** PostgREST silently truncates every response at 1,000 rows (db-max-rows) — no error. The same `supabase_client.py` patch re-fetches any GET that returns exactly 1,000 rows (or asked for `.limit()` > 1,000) in pages ordered by the caller's `order` + the table's primary key (tie-breaker), so a plain `.execute()` now returns every matching row. Consequences: (1) no manual `.range()` paging loops are needed (`_fetch_all_rows` is now a single `execute()`; a manual loop over an auto-chunked `.in_()` query is quadratic — don't write one); (2) **when creating a table whose primary key is not a single `id` column, add it to `TABLE_PRIMARY_KEYS` in `supabase_client.py`** — `backend/tests/test_row_cap_pagination.py` compares the map to the live DB and fails otherwise; (3) `.single()`/`.maybe_single()` and `.rpc()` are not covered — an RPC returning a set > 1,000 rows is still capped.
+
 ---
 
 ## Core Business Logic (DO NOT MODIFY)
@@ -1028,7 +1032,7 @@ A passing run means, for every covered endpoint, both (a) a different org is rej
 4. If a failure appears: treat a cross-org test that unexpectedly passes as a real, reportable vulnerability (not a flaky test) — fix the underlying endpoint, re-run, and only then proceed. Never weaken/delete a failing test to make the suite green.
 5. This is app-level enforcement, not CI — it depends on this rule being followed each session. It does not replace the suite; it replaces relying on anyone's memory to run it.
 
-As of the most recent full audit (2026-10-24), the suite covers 102 tests across all endpoint groups fixed in that audit (`test_idor_cross_org.py` + `test_idor_cross_org_extended.py`). Keep this number roughly current when adding more coverage.
+As of the most recent full audit (2026-10-24), the suite covers 107 tests across all endpoint groups fixed in that audit plus later additions (`test_idor_cross_org.py` + `test_idor_cross_org_extended.py`). **Note:** list endpoints with NO resource-id parameter (e.g. `GET /schools/year-admin-data`) are also a leak vector — a query filtered only by year/status on a school-scoped table (no `org_id` column) returns every org's rows; scope them with `schools!inner(org_id)` + `.eq("schools.org_id", ...)`. Keep this number roughly current when adding more coverage.
 
 ### Recurring security cadence (MANDATORY — do not wait for the user to ask)
 
