@@ -49,6 +49,13 @@ FINANCE_SOFTWARE_LABELS = {
 }
 
 
+def _known_finance_software(fs: str | None) -> bool:
+    # schools.finance_software may also be "other" (free-text software the file classifier
+    # can't identify) — treated like "unknown" so the checklist falls back to the generic
+    # finance item instead of a "(other)" item that could never be marked as received.
+    return fs in FINANCE_SOFTWARE_ONLY_KINDS
+
+
 def _finance_label(fs: str, budget_names: list[str]) -> str:
     fs_label = FINANCE_SOFTWARE_LABELS.get(fs, fs)
     budgets_part = f" {', '.join(budget_names)}" if budget_names else ""
@@ -76,8 +83,8 @@ def build_upload_checklist(db, school: dict, academic_year: str | None = None) -
     metrics = metrics_res.data or []
 
     if not metrics:
-        finance_softwares = sorted({a["finance_software"] for a in accounts if a.get("finance_software")})
-        if not finance_softwares and school.get("finance_software"):
+        finance_softwares = sorted({a["finance_software"] for a in accounts if _known_finance_software(a.get("finance_software"))})
+        if not finance_softwares and _known_finance_software(school.get("finance_software")):
             finance_softwares = [school["finance_software"]]
         items = [
             {"label": "קובץ תכנון (כלל החטיבות)", "kind": "tikhnun", "division_type": None, "budget_name": None},
@@ -105,8 +112,8 @@ def build_upload_checklist(db, school: dict, academic_year: str | None = None) -
             items.append({"label": f"דיווח ביצוע {b}{suffix}", "kind": "gefen", "division_type": div, "budget_name": b})
 
     all_budgets = sorted({m["budget_name"] for m in metrics if m.get("budget_name")})
-    finance_softwares = {a["finance_software"] for a in accounts if a.get("division_type") in divisions and a.get("finance_software")}
-    if not finance_softwares and school.get("finance_software"):
+    finance_softwares = {a["finance_software"] for a in accounts if a.get("division_type") in divisions and _known_finance_software(a.get("finance_software"))}
+    if not finance_softwares and _known_finance_software(school.get("finance_software")):
         finance_softwares = {school["finance_software"]}
     if finance_softwares:
         for fs in sorted(finance_softwares):

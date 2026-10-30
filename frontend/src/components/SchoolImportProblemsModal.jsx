@@ -31,6 +31,7 @@ const FINANCE_SOFTWARE_OPTIONS = [
   { value: "kesafim2000", label: "כספים 2000" },
   { value: "payscool", label: "פייסקול" },
   { value: "schoolcash", label: "סקולקאש" },
+  { value: "other", label: "אחר" },
 ];
 const SKIP = "__skip__";
 const EMPTY = "__empty__"; // "leave this field empty" sentinel for select resolvers
@@ -244,7 +245,11 @@ export function SchoolImportProblemsModal({ rows, users, requiredTypesFor, autoC
           const school = { ...row.school };
           const yearAdmin = { ...row.yearAdmin };
           if (!row.name || !row.symbol) { school.name = r.name.trim(); school.symbol = r.symbol.trim(); }
-          if (row.financeSoftwareIssue) school.finance_software = r.financeSoftware ?? "";
+          if (row.financeSoftwareIssue) {
+            school.finance_software = r.financeSoftware ?? "";
+            // "אחר" keeps the file's unrecognized text as the free-text software name.
+            if (school.finance_software === "other") school.finance_software_other_text = (row.financeSoftwareRaw || "").trim();
+          }
           for (const fi of (row.fieldIssues || [])) {
             const val = r.fields[fi.field];
             if (val === undefined) continue;

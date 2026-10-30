@@ -176,7 +176,8 @@ city TEXT
 authority TEXT           -- בעלות (e.g. עירייה, ממלכתי)
 district TEXT            -- מחוז (e.g. תל אביב, ירושלים)
 stage TEXT               -- 'yesodi' | 'beinayim' | 'tikkon' | 'sheshshnati' | 'other'
-finance_software TEXT    -- 'kesafim2000' | 'payscool' | 'schoolcash'
+finance_software TEXT    -- 'kesafim2000' | 'payscool' | 'schoolcash' | 'other'
+finance_software_other_text TEXT -- free-text software name, only meaningful when finance_software = 'other'
 address TEXT
 school_phone TEXT
 notes TEXT

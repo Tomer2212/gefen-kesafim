@@ -64,7 +64,15 @@ const FINANCE_SOFTWARE_LABEL = {
   kesafim2000: "כספים 2000",
   payscool:    "פייסקול",
   schoolcash:  "סקולקאש",
+  other:       "אחר",
 };
+
+// "אחר" carries an optional free-text name (schools.finance_software_other_text) → "אחר (פירוט)".
+function financeSoftwareDisplay(school) {
+  const label = FINANCE_SOFTWARE_LABEL[school.finance_software] || school.finance_software || "";
+  const other = school.finance_software === "other" ? (school.finance_software_other_text || "").trim() : "";
+  return other ? `${label} (${other})` : label;
+}
 
 // "סוג שירות" — year-scoped (school_year_admin_data.service_type), shown read-only on the
 // dashboard. Codes/labels mirror SERVICE_TYPE_OPTIONS in SchoolPage.jsx.
@@ -693,7 +701,7 @@ function computeFilterValues(school, combo, meetingsStats, activeSummaryBudget, 
   out.authority = school.authority || null;
   out.stage = SCHOOL_STAGE_LABEL[school.stage] || school.stage || null;
   out.district = school.district || null;
-  out.finance_software = FINANCE_SOFTWARE_LABEL[school.finance_software] || school.finance_software || null;
+  out.finance_software = financeSoftwareDisplay(school) || null;
   out.education_authority = school.education_authority || null;
   out.sector = school.sector || null;
   out.client_status = CLIENT_STATUS_LABEL[school.client_status] || school.client_status || null;
@@ -1436,7 +1444,7 @@ function renderCell(school, key, meetingsStats = {}, combo = null, activeSummary
     case "district":
       return school.district || "—";
     case "finance_software":
-      return FINANCE_SOFTWARE_LABEL[school.finance_software] || school.finance_software || "—";
+      return financeSoftwareDisplay(school) || "—";
     case "service_type":
       return SERVICE_TYPE_LABEL[school.service_type] || school.service_type || "—";
     case "education_authority":
@@ -1551,7 +1559,7 @@ function renderCellText(school, key, meetingsStats = {}, combo = null, activeSum
     case "district":
       return school.district || "";
     case "finance_software":
-      return FINANCE_SOFTWARE_LABEL[school.finance_software] || school.finance_software || "";
+      return financeSoftwareDisplay(school);
     case "service_type":
       return SERVICE_TYPE_LABEL[school.service_type] || school.service_type || "";
     case "education_authority":

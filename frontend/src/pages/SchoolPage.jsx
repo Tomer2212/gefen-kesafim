@@ -63,6 +63,7 @@ const FINANCE_SOFTWARE_LABEL = {
   kesafim2000: "כספים 2000",
   payscool: "פייסקול",
   schoolcash: "סקולקאש",
+  other: "אחר",
 };
 
 const PRINCIPAL_TICHON_ROW  = { label: "מנהל/ת חט\"ע", nameField: "principal_name",         phoneField: "principal_phone",         emailField: "principal_email",         dayOffField: "principal_day_off",         coordValue: "principal", slotRoleKey: "principal" };
@@ -143,6 +144,7 @@ const FINANCE_SOFTWARE_OPTIONS = [
   { value: "kesafim2000", label: "כספים 2000" },
   { value: "payscool", label: "פייסקול" },
   { value: "schoolcash", label: "סקולקאש" },
+  { value: "other", label: "אחר" },
 ];
 
 const SCHOOL_STAGE_OPTIONS = [
@@ -212,6 +214,7 @@ const FIELD_LABELS = {
   authority: "בעלות",
   stage: "שלב מוסד",
   finance_software: "תוכנת כספים",
+  finance_software_other_text: "תוכנת כספים - פירוט",
   school_phone: "טלפון בית הספר",
   address: "כתובת",
   district: "מחוז",
@@ -2940,6 +2943,7 @@ export default function SchoolPage() {
     name: "", symbol: "", city: "", authority: "",
     stage: "",
     finance_software: "",
+    finance_software_other_text: "",
     principal_name: "", principal_phone: "", principal_email: "",
     secretary_name: "", secretary_phone: "", secretary_email: "",
     finance_contact_name: "", finance_contact_phone: "", finance_contact_email: "",
@@ -3454,6 +3458,7 @@ export default function SchoolPage() {
       authority: school.authority || "",
       stage: school.stage || "",
       finance_software: school.finance_software || "",
+      finance_software_other_text: school.finance_software_other_text || "",
       principal_name: school.principal_name || "",
       principal_phone: school.principal_phone || "",
       principal_email: school.principal_email || "",
@@ -4200,9 +4205,25 @@ export default function SchoolPage() {
                     <div className={tileCls}>
                       <label htmlFor="edit-finance-software" className={`${tileLabelCls} block`}>תוכנת כספים</label>
                       <select id="edit-finance-software" className={editFieldCls(false, !editForm.finance_software)} value={editForm.finance_software}
-                        onChange={e => setEditForm(p => ({ ...p, finance_software: e.target.value }))}>
+                        onChange={e => {
+                          const v = e.target.value;
+                          // Free text only belongs to "other" — clear it on any other pick ("" not
+                          // null: update_school drops None values, so null would never clear it).
+                          setEditForm(p => ({ ...p, finance_software: v, ...(v !== "other" && { finance_software_other_text: "" }) }));
+                        }}>
                         {FINANCE_SOFTWARE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                       </select>
+                      {editForm.finance_software === "other" && (
+                        <input
+                          type="text"
+                          aria-label="תוכנת כספים - אחר, פירוט"
+                          placeholder="פירוט (לא חובה)"
+                          value={editForm.finance_software_other_text}
+                          onChange={e => setEditForm(p => ({ ...p, finance_software_other_text: e.target.value }))}
+                          className={`${editFieldCls(false, false)} mt-1`}
+                          autoComplete="off"
+                        />
+                      )}
                     </div>
 
                     <div className={tileCls}>
@@ -4759,6 +4780,9 @@ export default function SchoolPage() {
                     <div className={tileCls}>
                       <p className={tileLabelCls}>תוכנת כספים</p>
                       <p className={tileValueCls}>{FINANCE_SOFTWARE_LABEL[school?.finance_software] || school?.finance_software || "—"}</p>
+                      {school?.finance_software === "other" && school?.finance_software_other_text && (
+                        <p className="text-xs text-slate-500 mt-1">{school.finance_software_other_text}</p>
+                      )}
                     </div>
                     <div className={tileCls}>
                       <p className={tileLabelCls}>סמל מוסד</p>

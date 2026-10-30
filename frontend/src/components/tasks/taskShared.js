@@ -8,7 +8,7 @@ export const MEETING_SERVICE_TYPE_LABELS = { gefen: "גפן", current: "שוטף
 // Mirrors backend/task_logic.py's FIELD_LABELS — kept in sync by hand.
 export const FIELD_LABELS = {
   symbol: "סמל מוסד", city: "עיר", authority: "בעלות", stage: "שלב מוסד", district: "מחוז",
-  finance_software: "תוכנת כספים",
+  finance_software: "תוכנת כספים", finance_software_other_text: "תוכנת כספים - טקסט חופשי (אחר)",
   principal_name: "שם מנהל/ת", principal_phone: "טלפון מנהל/ת", principal_email: "מייל מנהל/ת",
   secretary_name: "שם מזכיר/ה", secretary_phone: "טלפון מזכיר/ה", secretary_email: "מייל מזכיר/ה",
   finance_contact_name: "שם אחראי/ת כספים", finance_contact_phone: "טלפון אחראי/ת כספים",

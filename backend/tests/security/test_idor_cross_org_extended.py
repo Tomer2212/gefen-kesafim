@@ -1185,3 +1185,41 @@ def test_year_closure_note_lifecycle_author_only(org_b_client, org_b_manager_cli
         admin_db.table("year_closure_notes").delete().eq("id", note_id).execute()
         admin_db.table("school_year_admin_data").update({"closure_parents_notes": None}) \
             .eq("school_id", ORG_B_SCHOOL_ID).eq("academic_year", _YCN_YEAR).execute()
+
+
+# ===========================================================================
+# 15. schools bulk-field (finance_software + its "other" free text)
+# ===========================================================================
+# Both tests target the Org B sandbox school (mutating-call convention above); the
+# cross-org caller is Org A's manager.
+
+def test_bulk_school_field_cross_org_rejected(org_a_client, admin_db):
+    before = admin_db.table("schools").select("finance_software, finance_software_other_text") \
+        .eq("id", ORG_B_SCHOOL_ID).execute().data[0]
+    r = org_a_client.put("/schools/bulk-field", json={
+        "field": "finance_software", "items": [{"school_id": ORG_B_SCHOOL_ID, "value": "other"}],
+    })
+    assert r.status_code == 200
+    assert r.json()["updated"] == []
+    assert [f["school_id"] for f in r.json()["failed"]] == [ORG_B_SCHOOL_ID]
+    after = admin_db.table("schools").select("finance_software, finance_software_other_text") \
+        .eq("id", ORG_B_SCHOOL_ID).execute().data[0]
+    assert after == before
+
+
+def test_bulk_school_field_same_org_still_works(org_b_client, admin_db):
+    before = admin_db.table("schools").select("finance_software, finance_software_other_text") \
+        .eq("id", ORG_B_SCHOOL_ID).execute().data[0]
+    try:
+        r = org_b_client.put("/schools/bulk-field", json={
+            "field": "finance_software", "items": [{"school_id": ORG_B_SCHOOL_ID, "value": "other"}],
+        })
+        assert r.status_code == 200
+        assert [u["school_id"] for u in r.json()["updated"]] == [ORG_B_SCHOOL_ID]
+        r = org_b_client.put("/schools/bulk-field", json={
+            "field": "finance_software_other_text", "items": [{"school_id": ORG_B_SCHOOL_ID, "value": "בדיקה"}],
+        })
+        assert r.status_code == 200
+        assert r.json()["updated"][0]["data"]["finance_software_other_text"] == "בדיקה"
+    finally:
+        admin_db.table("schools").update(before).eq("id", ORG_B_SCHOOL_ID).execute()

@@ -636,6 +636,13 @@ def _pull_raw_calls(provider: str, provider_config: dict, org_id: str, date_from
     actually exist."""
     dt_from = datetime.fromisoformat(date_from)
     dt_to = datetime.fromisoformat(date_to)
+    # Calls can't exist in the future — never ask the provider for those days (a school
+    # card asking for the whole academic year used to fire ~300 pointless requests).
+    now_il = datetime.now(_IL_TZ).replace(tzinfo=None, microsecond=0)
+    if dt_from > now_il:
+        return []
+    dt_to = min(dt_to, now_il)
+    date_to = dt_to.strftime("%Y-%m-%dT%H:%M:%S")
 
     if dt_to.date() == dt_from.date():
         return _provider_pull_calls(provider, provider_config, date_from, date_to)
@@ -676,7 +683,12 @@ def _pull_org_calls(org_id: str, date_from: str, date_to: str) -> dict:
     provider = cfg["provider"]
     provider_config = cfg.get("config") or {}
     raw_calls = _pull_raw_calls(provider, provider_config, org_id, date_from, date_to)
+    return {"calls": _enrich_raw_calls(org_id, provider, raw_calls), "provider": provider}
 
+
+def _enrich_raw_calls(org_id: str, provider: str, raw_calls: list[dict]) -> list[dict]:
+    """Advisor/AI/contact enrichment of raw provider calls — shared by the org-wide pull
+    (_pull_org_calls) and the per-school number search (_pull_school_calls)."""
     # Agent (advisor) mapping is OUR OWN data (not the provider's), stored locally — non-fatal
     # enrichment. agent_key is representative_code for Voicenter, or the line's e164 for EXM
     # (EXM's call log has no per-call "agent" field — only which line the call went through).
@@ -762,7 +774,101 @@ def _pull_org_calls(org_id: str, date_from: str, date_to: str) -> dict:
             "ai_transcript_available": bool(ai_row and ai_row.get("transcript_path")),
         })
 
-    return {"calls": calls, "provider": provider}
+    return calls
+
+
+def _israel_naive(call_start_iso: str | None) -> str:
+    """Normalized call start_time (UTC ISO) -> naive Israel-local 'YYYY-MM-DDTHH:MM:SS',
+    comparable with the naive date_from/date_to strings callers pass in."""
+    try:
+        dt = datetime.fromisoformat((call_start_iso or "").replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(_IL_TZ).strftime("%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return ""
+
+
+def _exm_search_number(provider_config: dict, number: str, date_from: str, date_to: str) -> list[dict]:
+    """EXM free-text search for one number over [date_from, date_to]. If a single request
+    hits the provider's page cap, the range is split in halves and each half re-searched,
+    so a busy number can never silently lose calls."""
+    calls, truncated = exm_adapter.pull_calls_checked(provider_config, date_from, date_to, freetext=number)
+    if not truncated:
+        return calls
+    dt_from, dt_to = datetime.fromisoformat(date_from), datetime.fromisoformat(date_to)
+    if dt_to - dt_from < timedelta(hours=1):
+        return calls  # can't usefully split further — keep what we have (logged by the adapter)
+    mid = dt_from + (dt_to - dt_from) / 2
+    fmt = "%Y-%m-%dT%H:%M:%S"
+    return (
+        _exm_search_number(provider_config, number, date_from, mid.strftime(fmt))
+        + _exm_search_number(provider_config, number, (mid + timedelta(seconds=1)).strftime(fmt), date_to)
+    )
+
+
+def _pull_school_calls(org_id: str, school_id: str, date_from: str, date_to: str) -> list[dict]:
+    """One school's calls for [date_from, date_to] (naive Israel-local), same shape and
+    same filtering as taking _pull_org_calls and keeping c.school_id == school_id or
+    manually-linked, minus manually-excluded.
+
+    For EXM it asks the provider only about the school's own contact numbers (plus its
+    manually-linked call ids) instead of pulling the whole org's volume — a few requests
+    of ~0.5s each, independent of how many calls the org makes. Every returned call is then
+    re-checked against the school's numbers, since free-text search may over-match.
+    Providers whose number search isn't verified yet (Voicenter) fall back to the org-wide
+    pull. Raises HTTPException(400) when the integration isn't configured/enabled."""
+    from routers.schools_router import _CONTACT_PHONES_SELECT, _school_phone_suffixes
+
+    cfg = _get_integration_config(org_id)
+    if not cfg or not cfg.get("enabled"):
+        raise HTTPException(status_code=400, detail="אינטגרציית שיחות אינה מוגדרת או כבויה")
+    provider = cfg["provider"]
+
+    def _for_school(calls: list[dict]) -> list[dict]:
+        return [
+            c for c in calls
+            if school_id not in (c.get("excluded_school_ids") or [])
+            and (c.get("school_id") == school_id or school_id in (c.get("linked_school_ids") or []))
+        ]
+
+    if provider != "exm":
+        return _for_school(_pull_org_calls(org_id, date_from, date_to)["calls"])
+
+    now_il = datetime.now(_IL_TZ).replace(tzinfo=None, microsecond=0)
+    if datetime.fromisoformat(date_from) > now_il:
+        return []
+    date_to = min(datetime.fromisoformat(date_to), now_il).strftime("%Y-%m-%dT%H:%M:%S")
+
+    db = get_admin_client()
+    school_rows = (
+        db.table("schools").select(f"id, {_CONTACT_PHONES_SELECT}")
+        .eq("id", school_id).eq("org_id", org_id).limit(1).execute()
+    ).data or []
+    suffixes = _school_phone_suffixes(school_rows[0] if school_rows else None)
+    linked_ids = [
+        r["call_id"] for r in (
+            db.table("calls_call_school_links").select("call_id")
+            .eq("org_id", org_id).eq("school_id", school_id).eq("state", "linked").execute()
+        ).data or []
+    ]
+
+    provider_config = cfg.get("config") or {}
+    raw_by_id: dict = {}
+    # Short codes (e.g. "*3") would free-text-match half the call log — real numbers only.
+    for suffix in sorted(s for s in suffixes if len(s) >= 7):
+        for c in _exm_search_number(provider_config, "0" + suffix, date_from, date_to):
+            if _phone_suffix(c.get("counterpart_phone")) == suffix:
+                raw_by_id[c["call_id"]] = c
+    for call_id in linked_ids:
+        if call_id in raw_by_id:
+            continue
+        for c in exm_adapter.pull_calls(provider_config, date_from, date_to, call_id=call_id):
+            if c.get("call_id") == call_id and date_from <= _israel_naive(c.get("start_time")) <= date_to:
+                raw_by_id[call_id] = c
+
+    raw_calls = sorted(raw_by_id.values(), key=lambda c: c.get("start_time") or "", reverse=True)
+    return _for_school(_enrich_raw_calls(org_id, provider, raw_calls))
 
 
 @router.get("/calls")

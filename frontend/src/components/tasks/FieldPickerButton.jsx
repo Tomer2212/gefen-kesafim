@@ -8,7 +8,7 @@ import { goalShortLabel } from "./taskShared";
 const FIELD_CATEGORIES = [
   {
     title: "פרטי בית ספר",
-    fields: ["name", "symbol", "city", "authority", "stage", "district", "finance_software", "address", "school_phone", "notes"],
+    fields: ["name", "symbol", "city", "authority", "stage", "district", "finance_software", "finance_software_other_text", "address", "school_phone", "notes"],
   },
   {
     title: "אנשי קשר",

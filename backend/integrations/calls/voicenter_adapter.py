@@ -17,9 +17,13 @@ def _derive_direction(call_type: str) -> str:
     return "internal"
 
 
-def pull_calls(config: dict, date_from: str, date_to: str) -> list[dict]:
+def pull_calls(config: dict, date_from: str, date_to: str, phones: list[str] | None = None, call_id: str | None = None) -> list[dict]:
     """Pulls call history from Voicenter's Call Log API and returns it in the
     provider-agnostic NormalizedCall shape consumed by calls_router._pull_org_calls.
+
+    `phones` narrows the search server-side to calls with any of those numbers (local
+    Israeli format is accepted, per the Call Log API docs); `call_id` fetches a single call.
+    Both let a single school's calls be looked up without pulling the whole org's volume.
 
     Confirmed empirically (2026-07-23): the Call Log API's "code" body field is
     gated by an account-level IP allowlist that our server's IP is not on. The
@@ -31,8 +35,13 @@ def pull_calls(config: dict, date_from: str, date_to: str) -> list[dict]:
     if not bearer_token:
         raise HTTPException(status_code=400, detail="יש להזין טוקן API של Voicenter בהגדרות האינטגרציה")
 
+    search = {"fromdate": date_from, "todate": date_to}
+    if phones:
+        search["phones"] = phones
+    if call_id:
+        search["callID"] = call_id
     payload = {
-        "search": {"fromdate": date_from, "todate": date_to},
+        "search": search,
         "sort": [{"field": "date", "order": "desc"}],
     }
     headers = {"Authorization": f"Bearer {bearer_token}"}

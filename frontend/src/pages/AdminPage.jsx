@@ -465,7 +465,7 @@ const BULK_OVERWRITE_YEAR_ADMIN_FIELDS = new Set([
   "meeting_allocation_gefen", "meeting_allocation_current", "meeting_allocation_district",
   "meeting_duration_gefen", "meeting_duration_current", "meeting_duration_district",
 ]);
-const BULK_OVERWRITE_SCHOOL_FIELDS = new Set(["finance_software"]);
+const BULK_OVERWRITE_SCHOOL_FIELDS = new Set(["finance_software", "finance_software_other_text"]);
 const BULK_ADVISOR_FIELDS = new Set(["advisor_gefen", "advisor_current", "advisor_district"]);
 
 function bulkFieldKind(key) {
@@ -662,7 +662,18 @@ const FINANCE_SOFTWARE_OPTIONS = [
   { value: "kesafim2000", label: "כספים 2000" },
   { value: "payscool", label: "פייסקול" },
   { value: "schoolcash", label: "סקולקאש" },
+  { value: "other", label: "אחר" },
 ];
+// Division-level (gefen_accounts) software drives which finance file the meeting-upload
+// checklist asks for — only the three identifiable softwares make sense there, never "other".
+const ACCOUNT_FINANCE_SOFTWARE_OPTIONS = FINANCE_SOFTWARE_OPTIONS.filter(o => o.value !== "other");
+
+// "אחר" carries an optional free-text name (schools.finance_software_other_text) → "אחר (פירוט)".
+function financeSoftwareDisplay(school) {
+  const label = FINANCE_SOFTWARE_OPTIONS.find(o => o.value && o.value === school.finance_software)?.label || school.finance_software || "";
+  const other = school.finance_software === "other" ? (school.finance_software_other_text || "").trim() : "";
+  return other ? `${label} (${other})` : label;
+}
 
 const PRINCIPAL_TICHON_ROW  = { label: "מנהל/ת חט\"ע", nameField: "principal_name",         phoneField: "principal_phone",         emailField: "principal_email",         dayOffField: "principal_day_off",         coordValue: "principal", slotRoleKey: "principal" };
 const PRINCIPAL_SINGLE_ROW  = { label: "מנהל/ת",       nameField: "principal_name",         phoneField: "principal_phone",         emailField: "principal_email",         dayOffField: "principal_day_off",         coordValue: "principal", slotRoleKey: "principal" };
@@ -797,7 +808,7 @@ function validateSymbol(val) {
   return "";
 }
 
-const EMPTY_FORM = { name: "", symbol: "", city: "", authority: "", stage: "", finance_software: "", principal_name: "", principal_phone: "", principal_email: "", secretary_name: "", secretary_phone: "", secretary_email: "", finance_contact_name: "", finance_contact_phone: "", finance_contact_email: "", school_phone: "", address: "", district: "", restrict_access_to: null, extra_contacts: [], principal_day_off: [], secretary_day_off: [], finance_contact_day_off: [], meeting_coordinator: null, meeting_coordinators: {}, gefen_files_responsible: {}, principal_chativa_name: "", principal_chativa_phone: "", principal_chativa_email: "", principal_chativa_day_off: [], principal_same_person: true, secretary_chativa_name: "", secretary_chativa_phone: "", secretary_chativa_email: "", secretary_chativa_day_off: [], secretary_same_person: true, finance_contact_chativa_name: "", finance_contact_chativa_phone: "", finance_contact_chativa_email: "", finance_contact_chativa_day_off: [], finance_same_person: true, education_authority: "", sector: "", supervision: "", grade_levels: [], study_days: [], student_count: "" };
+const EMPTY_FORM = { name: "", symbol: "", city: "", authority: "", stage: "", finance_software: "", finance_software_other_text: "", principal_name: "", principal_phone: "", principal_email: "", secretary_name: "", secretary_phone: "", secretary_email: "", finance_contact_name: "", finance_contact_phone: "", finance_contact_email: "", school_phone: "", address: "", district: "", restrict_access_to: null, extra_contacts: [], principal_day_off: [], secretary_day_off: [], finance_contact_day_off: [], meeting_coordinator: null, meeting_coordinators: {}, gefen_files_responsible: {}, principal_chativa_name: "", principal_chativa_phone: "", principal_chativa_email: "", principal_chativa_day_off: [], principal_same_person: true, secretary_chativa_name: "", secretary_chativa_phone: "", secretary_chativa_email: "", secretary_chativa_day_off: [], secretary_same_person: true, finance_contact_chativa_name: "", finance_contact_chativa_phone: "", finance_contact_chativa_email: "", finance_contact_chativa_day_off: [], finance_same_person: true, education_authority: "", sector: "", supervision: "", grade_levels: [], study_days: [], student_count: "" };
 
 const IMPORT_FIELD_CONFIG = [
   { key: "name",                  label: "שם בית ספר",          required: true },
@@ -805,7 +816,7 @@ const IMPORT_FIELD_CONFIG = [
   { key: "city",                  label: "עיר",                  required: false },
   { key: "authority",             label: "בעלות",                required: false },
   { key: "stage",                 label: "שלב מוסד",             required: false, hint: "יסודי / חטיבת ביניים / תיכון / שש שנתי / אחר" },
-  { key: "finance_software",      label: "תוכנת כספים",          required: false, hint: "כספים 2000 / פייסקול / סקולקאש" },
+  { key: "finance_software",      label: "תוכנת כספים",          required: false, hint: "כספים 2000 / פייסקול / סקולקאש / אחר" },
   { key: "address",               label: "כתובת",                required: false },
   { key: "district",              label: "מחוז",                 required: false, hint: "צפון / דרום / מרכז / ירושלים / תל-אביב / חיפה / חינוך התיישבותי / חרדי" },
   { key: "school_phone",          label: "טלפון בית הספר",       required: false },
@@ -1116,6 +1127,7 @@ function normFinanceKey(raw) {
 function matchFinanceSoftware(raw) {
   const key = normFinanceKey(raw);
   if (!key) return { value: "", status: "ok" };
+  if (key === "אחר" || key === "other") return { value: "other", status: "ok" };
   const hits = Object.entries(FINANCE_SOFTWARE_ALIASES)
     .filter(([, aliases]) => aliases.some(a => key.includes(a)))
     .map(([value]) => value);
@@ -1894,8 +1906,18 @@ const SchoolRow = memo(function SchoolRow({
               value={school.finance_software || ""}
               onChange={e => handlers.onSaveSchoolField(school.id, "finance_software", e.target.value || null)}>
               <option value="">בחר</option>
-              {FINANCE_SOFTWARE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              {FINANCE_SOFTWARE_OPTIONS.filter(o => o.value).map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
+            {school.finance_software === "other" && (
+              <AdminAutosaveInput
+                key={`${rowKey}-fin-other`}
+                type="text"
+                value={school.finance_software_other_text ?? null}
+                onCommit={v => handlers.onSaveSchoolField(school.id, "finance_software_other_text", v)}
+                ariaLabel="תוכנת כספים - אחר, פירוט"
+                className={`${ADMIN_FIELD_CLS} w-28 mt-1`}
+              />
+            )}
           </>
         );
         if (key === "stage") return bc(ADMIN_SCHOOL_STAGE_LABEL[school.stage] || school.stage || "—");
@@ -2657,14 +2679,17 @@ export default function AdminPage() {
     }
   }
 
-  // Single-cell save for `schools`-table fields exposed in the admin table (currently just
-  // finance_software) — same optimistic/revert-on-error shape as saveYearAdminField, just
-  // targeting PUT /schools/{id} instead of the year-admin-data endpoint.
+  // Single-cell save for `schools`-table fields exposed in the admin table (finance_software
+  // + its "other" free text) — same optimistic/revert-on-error shape as saveYearAdminField.
+  // Goes through PUT /schools/bulk-field with one item: PUT /schools/{id} requires the full
+  // SchoolIn body (`name` is mandatory) and drops null values, so it can't do a one-field save.
   async function saveSchoolField(schoolId, field, value) {
     setSchools(prev => prev.map(s => (s.id === schoolId ? { ...s, [field]: value } : s)));
     try {
-      const res = await axios.put(`/schools/${schoolId}`, { [field]: value });
-      setSchools(prev => prev.map(s => (s.id === schoolId ? { ...s, ...res.data } : s)));
+      const res = await axios.put("/schools/bulk-field", { field, items: [{ school_id: schoolId, value }] });
+      const saved = res.data.updated?.[0]?.data;
+      if (!saved) { loadSchools(); return; }
+      setSchools(prev => prev.map(s => (s.id === schoolId ? { ...s, ...saved } : s)));
     } catch {
       loadSchools();
     }
@@ -3311,6 +3336,7 @@ export default function AdminPage() {
       authority: school.authority || "",
       stage: school.stage || "",
       finance_software: school.finance_software || "",
+      finance_software_other_text: school.finance_software_other_text || "",
       principal_name: school.principal_name || "",
       principal_phone: school.principal_phone || "",
       principal_email: school.principal_email || "",
@@ -4238,7 +4264,7 @@ export default function AdminPage() {
       case "authority": return school.authority || "";
       case "district": return school.district || "";
       case "finance_software":
-        return FINANCE_SOFTWARE_OPTIONS.find(o => o.value === school.finance_software)?.label || school.finance_software || "";
+        return financeSoftwareDisplay(school);
       case "stage": return ADMIN_SCHOOL_STAGE_LABEL[school.stage] || school.stage || "";
       case "meetings_completed": return school.meetings_stats?.completed ?? -1;
       case "meetings_hours": return school.meetings_stats?.total_minutes ?? -1;
@@ -4571,9 +4597,24 @@ export default function AdminPage() {
                       <label htmlFor="school-finance-software" className={TILE_LABEL_CLS}>תוכנת כספים</label>
                       <select id="school-finance-software" className="input-field text-sm"
                         value={schoolForm.finance_software}
-                        onChange={e => setSchoolForm(p => ({ ...p, finance_software: e.target.value }))}>
+                        onChange={e => {
+                          const v = e.target.value;
+                          // "" not null: update_school drops None values, so null would never clear it.
+                          setSchoolForm(p => ({ ...p, finance_software: v, ...(v !== "other" && { finance_software_other_text: "" }) }));
+                        }}>
                         {FINANCE_SOFTWARE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                       </select>
+                      {schoolForm.finance_software === "other" && (
+                        <input
+                          type="text"
+                          aria-label="תוכנת כספים - אחר, פירוט"
+                          placeholder="פירוט (לא חובה)"
+                          className="input-field text-sm mt-1"
+                          autoComplete="off"
+                          value={schoolForm.finance_software_other_text}
+                          onChange={e => setSchoolForm(p => ({ ...p, finance_software_other_text: e.target.value }))}
+                        />
+                      )}
                     </div>
 
                     <div className={TILE_CLS}>
@@ -5381,7 +5422,7 @@ export default function AdminPage() {
                                             </span>
                                             <div className="flex gap-2 items-center">
                                               {acc.finance_software && (
-                                                <span className="text-xs text-slate-800">{FINANCE_SOFTWARE_OPTIONS.find(o => o.value === acc.finance_software)?.label}</span>
+                                                <span className="text-xs text-slate-800">{ACCOUNT_FINANCE_SOFTWARE_OPTIONS.find(o => o.value === acc.finance_software)?.label}</span>
                                               )}
                                               {acc.tmura_model && (
                                                 <span className="text-xs px-2 py-0.5 rounded-full bg-green-50 text-green-700">מודל תמרוץ</span>
@@ -5397,7 +5438,7 @@ export default function AdminPage() {
                                                 <select id={`fs-${acc.id}`} className="input-field text-sm"
                                                   value={accountForm.finance_software}
                                                   onChange={e => setAccountForm(p => ({ ...p, finance_software: e.target.value }))}>
-                                                  {FINANCE_SOFTWARE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                                                  {ACCOUNT_FINANCE_SOFTWARE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                                                 </select>
                                               </div>
                                               <div className="flex items-center gap-2 pb-1">

@@ -56,7 +56,7 @@ const TYPE_ICON = {
 // Any field missing here falls back to showing its raw code name to the approver — keep in sync.
 const FIELD_LABEL = {
   name: "שם מוסד", symbol: "סמל מוסד", city: "עיר", authority: "בעלות",
-  stage: "שלב מוסד", finance_software: "תוכנת כספים",
+  stage: "שלב מוסד", finance_software: "תוכנת כספים", finance_software_other_text: "תוכנת כספים - פירוט",
   address: "כתובת", district: "מחוז", notes: "הערות", school_phone: "טלפון בית הספר",
   education_authority: "רשות חינוך", sector: "מגזר", supervision: "פיקוח",
   grade_levels: "שכבות לימוד", study_days: "ימי לימוד", student_count: "מס' תלמידים",

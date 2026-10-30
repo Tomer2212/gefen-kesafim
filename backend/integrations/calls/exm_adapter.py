@@ -72,7 +72,12 @@ def _headers(config: dict) -> dict:
     return {"Authorization": f"Bearer {api_key}"}
 
 
-def pull_calls(config: dict, date_from: str, date_to: str) -> list[dict]:
+def pull_calls(config: dict, date_from: str, date_to: str, freetext: str | None = None, call_id: str | None = None) -> list[dict]:
+    """Same as pull_calls_checked, without the truncation flag."""
+    return pull_calls_checked(config, date_from, date_to, freetext=freetext, call_id=call_id)[0]
+
+
+def pull_calls_checked(config: dict, date_from: str, date_to: str, freetext: str | None = None, call_id: str | None = None) -> tuple[list[dict], bool]:
     """Pulls call history from EXM's Calls API and returns it in the provider-
     agnostic NormalizedCall shape consumed by calls_router._pull_org_calls.
 
@@ -83,6 +88,11 @@ def pull_calls(config: dict, date_from: str, date_to: str) -> list[dict]:
 
     EXM returns business errors as HTTP 200 with success:false — never rely on
     the HTTP status code alone.
+
+    `freetext` narrows the search server-side (used with a phone number — any local/e164
+    format matches, confirmed against the live API); `call_id` fetches a single call.
+    Returns (calls, hit_page_cap) — hit_page_cap=True means the result was truncated and
+    the caller must split the time range to get the rest.
     """
     headers = _headers(config)
     calls: list[dict] = []
@@ -93,6 +103,8 @@ def pull_calls(config: dict, date_from: str, date_to: str) -> list[dict]:
         body = {
             "time": {"from": _to_exm_timestamp(date_from), "to": _to_exm_timestamp(date_to)},
             "pagination": {"items": _PAGE_ITEMS, **({"next": cursor} if cursor else {})},
+            **({"freetext": freetext} if freetext else {}),
+            **({"id": call_id} if call_id else {}),
         }
         try:
             resp = httpx.post(f"{_BASE_URL}/calls/", json=body, headers=headers, timeout=15)
@@ -139,16 +151,15 @@ def pull_calls(config: dict, date_from: str, date_to: str) -> list[dict]:
             break
 
     if hit_page_cap:
-        # calls_router._pull_raw_calls chunks requests to one calendar day each specifically
-        # to keep this from happening — if it still does, a day's real volume exceeded
-        # _MAX_PAGES*_PAGE_ITEMS and the tail of that day was silently dropped.
+        # calls_router chunks org-wide pulls to one calendar day and splits a capped
+        # number search in halves specifically to keep this from losing calls.
         logger.warning(
-            "exm_adapter.pull_calls: hit the %s-page cap (%s calls) for %s..%s — results may be "
-            "truncated; the day's real call volume exceeds what a single request covers",
-            _MAX_PAGES, _MAX_PAGES * _PAGE_ITEMS, date_from, date_to,
+            "exm_adapter.pull_calls: hit the %s-page cap (%s calls) for %s..%s (freetext=%s) — "
+            "results truncated",
+            _MAX_PAGES, _MAX_PAGES * _PAGE_ITEMS, date_from, date_to, freetext,
         )
 
-    return calls
+    return calls, hit_page_cap
 
 
 def get_recording_url(config: dict, call_id: str) -> str | None:

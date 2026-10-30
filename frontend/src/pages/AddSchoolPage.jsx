@@ -57,6 +57,7 @@ const FINANCE_SOFTWARE_OPTIONS = [
   { value: "kesafim2000", label: "כספים 2000" },
   { value: "payscool",   label: "פייסקול" },
   { value: "schoolcash", label: "סקולקאש" },
+  { value: "other",      label: "אחר" },
 ];
 
 const PRINCIPAL_TICHON_ROW  = { label: "מנהל/ת חט\"ע", nameField: "principal_name",         phoneField: "principal_phone",         emailField: "principal_email",         dayOffField: "principal_day_off",         coordValue: "principal", slotRoleKey: "principal" };
@@ -164,7 +165,7 @@ function parseAmount(raw) {
 
 const EMPTY_FORM = {
   name: "", symbol: "", city: "", authority: "", stage: "",
-  finance_software: "", principal_name: "", principal_phone: "",
+  finance_software: "", finance_software_other_text: "", principal_name: "", principal_phone: "",
   principal_email: "", secretary_name: "", secretary_phone: "",
   secretary_email: "", finance_contact_name: "", finance_contact_phone: "",
   finance_contact_email: "", school_phone: "", address: "", district: "",
@@ -597,9 +598,23 @@ export default function AddSchoolPage() {
                 <label htmlFor="school-finance-software" className={TILE_LABEL_CLS}>תוכנת כספים</label>
                 <select id="school-finance-software" className="input-field text-sm"
                   value={schoolForm.finance_software}
-                  onChange={e => setSchoolForm(p => ({ ...p, finance_software: e.target.value }))}>
+                  onChange={e => {
+                    const v = e.target.value;
+                    setSchoolForm(p => ({ ...p, finance_software: v, ...(v !== "other" && { finance_software_other_text: "" }) }));
+                  }}>
                   {FINANCE_SOFTWARE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                 </select>
+                {schoolForm.finance_software === "other" && (
+                  <input
+                    type="text"
+                    aria-label="תוכנת כספים - אחר, פירוט"
+                    placeholder="פירוט (לא חובה)"
+                    className="input-field text-sm mt-1"
+                    autoComplete="off"
+                    value={schoolForm.finance_software_other_text}
+                    onChange={e => setSchoolForm(p => ({ ...p, finance_software_other_text: e.target.value }))}
+                  />
+                )}
               </div>
 
               <div className={TILE_CLS}>

@@ -200,6 +200,7 @@ class SchoolIn(BaseModel):
     authority: str | None = None
     stage: str | None = None
     finance_software: str | None = None
+    finance_software_other_text: str | None = None
     principal_name: str | None = None
     principal_phone: str | None = None
     secretary_name: str | None = None
@@ -1255,12 +1256,13 @@ def bulk_update_school_field(
     user: Annotated[dict, Depends(get_current_user)],
 ):
     """Applies one field+value to many `schools` rows in a single upsert call. Used by
-    AdminPage's bulk-edit for columns that live directly on `schools` (currently just
-    finance_software) rather than on `school_year_admin_data`. Only a fixed allowlist of
-    safe fields may be targeted — never identity fields like symbol/name — as defense in
-    depth beyond the frontend's own restrictions."""
+    AdminPage's bulk-edit — and its single-cell saves — for columns that live directly on
+    `schools` (finance_software + its "other" free text) rather than on
+    `school_year_admin_data`. Only a fixed allowlist of safe fields may be targeted — never
+    identity fields like symbol/name — as defense in depth beyond the frontend's own
+    restrictions."""
     _require_manager(user)
-    allowed_bulk_fields = {"finance_software"}
+    allowed_bulk_fields = {"finance_software", "finance_software_other_text"}
     if body.field not in allowed_bulk_fields:
         raise HTTPException(status_code=400, detail="שדה לא תקין לעריכה מרובה")
     if not body.items:
@@ -1283,9 +1285,23 @@ def bulk_update_school_field(
             if not ok_items:
                 return {"field": body.field, "updated": [], "failed": failed}
 
-            rows = [{"id": item.school_id, body.field: item.value} for item in ok_items]
-            res = db.table("schools").upsert(rows, on_conflict="id").execute()
-            updated = [{"school_id": r["id"], "data": r} for r in (res.data or [])]
+            # One UPDATE per distinct value (a bulk edit has one; an undo a few). Not an upsert:
+            # its INSERT path trips the NOT NULL `name` constraint before ON CONFLICT applies.
+            ids_by_value: dict = {}
+            for item in ok_items:
+                ids_by_value.setdefault(item.value, []).append(item.school_id)
+            updated = []
+            for value, ids in ids_by_value.items():
+                patch = {body.field: value}
+                if body.field == "finance_software" and value != "other":
+                    # The free-text name only belongs to "other" — drop it on any other pick.
+                    patch["finance_software_other_text"] = None
+                res = (
+                    db.table("schools").update(patch)
+                    .eq("org_id", user["org_id"]).in_("id", ids)
+                    .execute()
+                )
+                updated.extend({"school_id": r["id"], "data": r} for r in (res.data or []))
             return {"field": body.field, "updated": updated, "failed": failed}
         except HTTPException:
             raise
@@ -7842,7 +7858,7 @@ def list_school_calls(
     """Calls (from Voicenter) matched to this school's contacts — same visibility as the
     rest of the school card (advisor assigned / restrict_access_to / manager+)."""
     from academic_years import get_academic_year_date_range
-    from routers.calls_router import _pull_org_calls
+    from routers.calls_router import _pull_school_calls
 
     for attempt in range(2):
         try:
@@ -7869,18 +7885,12 @@ def list_school_calls(
     date_to = f"{end_date.isoformat()}T23:59:59"
 
     try:
-        result = _pull_org_calls(user["org_id"], date_from, date_to)
+        calls = _pull_school_calls(user["org_id"], school_id, date_from, date_to)
     except HTTPException as exc:
         if exc.status_code == 400:
-            # Voicenter not configured/enabled for this org — friendly empty state, not an error
+            # Calls integration not configured/enabled for this org — friendly empty state, not an error
             return {"calls": [], "calls_enabled": False}
         raise
-
-    calls = [
-        c for c in result["calls"]
-        if school_id not in (c.get("excluded_school_ids") or [])
-        and (c.get("school_id") == school_id or school_id in (c.get("linked_school_ids") or []))
-    ]
     return {"calls": calls, "calls_enabled": True}
 
 
@@ -8080,7 +8090,7 @@ def _resync_school_meetings_after_contact_change(org_id: str, school_id: str) ->
     meetings. Manual links are never overwritten (_recompute_meeting_call_activity).
     Sequential, fully non-fatal. Returns the number of meeting dates re-synced."""
     from zoneinfo import ZoneInfo
-    from routers.calls_router import _pull_org_calls
+    from routers.calls_router import _pull_school_calls
 
     today_il = datetime.now(ZoneInfo("Asia/Jerusalem")).date()
     since = (today_il - timedelta(days=_CONTACT_RESYNC_LOOKBACK_DAYS)).isoformat()
@@ -8098,7 +8108,7 @@ def _resync_school_meetings_after_contact_change(org_id: str, school_id: str) ->
     synced = 0
     for date_str in sorted({r["meeting_date"] for r in rows if r.get("meeting_date")}):
         try:
-            result = _pull_org_calls(org_id, f"{date_str}T00:00:00", f"{date_str}T23:59:59")
+            calls_for_school = _pull_school_calls(org_id, school_id, f"{date_str}T00:00:00", f"{date_str}T23:59:59")
         except HTTPException as exc:
             if exc.status_code == 400:
                 return synced  # calls integration not configured/enabled for this org
@@ -8107,11 +8117,6 @@ def _resync_school_meetings_after_contact_change(org_id: str, school_id: str) ->
         except Exception as exc:
             logger.warning("contact-change meeting resync: pull failed org=%s date=%s: %s", org_id, date_str, exc)
             continue
-        calls_for_school = [
-            c for c in result["calls"]
-            if school_id not in (c.get("excluded_school_ids") or [])
-            and (c.get("school_id") == school_id or school_id in (c.get("linked_school_ids") or []))
-        ]
         try:
             db = get_admin_client()
             affected = _recompute_meeting_call_activity(db, org_id, school_id, date_str, calls_for_school)
@@ -8194,14 +8199,9 @@ def get_meeting_actual_detail(school_id: str, meeting_id: str, user: Annotated[d
     should_sync = meeting_date and meeting_date <= today_il and (is_recent or not meeting.get("calls_synced_at"))
     if should_sync:
         try:
-            from routers.calls_router import _pull_org_calls
+            from routers.calls_router import _pull_school_calls
             d = meeting["meeting_date"]
-            result = _pull_org_calls(user["org_id"], f"{d}T00:00:00", f"{d}T23:59:59")
-            calls_for_school = [
-                c for c in result["calls"]
-                if school_id not in (c.get("excluded_school_ids") or [])
-                and (c.get("school_id") == school_id or school_id in (c.get("linked_school_ids") or []))
-            ]
+            calls_for_school = _pull_school_calls(user["org_id"], school_id, f"{d}T00:00:00", f"{d}T23:59:59")
             _recompute_meeting_call_activity(db, user["org_id"], school_id, d, calls_for_school)
             refreshed = db.table("meetings").select("*").eq("id", meeting_id).execute()
             if refreshed.data:

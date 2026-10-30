@@ -6,6 +6,7 @@ import { normalizeTimeValue, TimeInput } from "./TimeInput";
 import { UserMultiSelect } from "./UserMultiSelect";
 import { NotesPopover } from "./NotesPopover";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
+import { counterpartLabels } from "../calls/CallRow";
 
 function formatDuration(seconds) {
   if (!seconds) return "0:00";
@@ -235,8 +236,8 @@ export function MeetingActualDetail({ meeting }) {
             <tr key={c.call_id} className="border-b border-slate-300 last:border-0">
               <td className="py-1.5 pl-2 text-slate-600 whitespace-nowrap">שיחה</td>
               <td className="py-1.5 pl-2 text-slate-600 whitespace-nowrap">{c.advisor_name || "—"}</td>
-              <td className="py-1.5 pl-2 text-slate-600 whitespace-nowrap">{c.contact_role || "—"}</td>
-              <td className="py-1.5 pl-2 text-slate-600 whitespace-nowrap">{c.contact_name || "—"}</td>
+              <td className="py-1.5 pl-2 text-slate-600 whitespace-nowrap">{counterpartLabels(c, c.counterpart_phone).role || "—"}</td>
+              <td className="py-1.5 pl-2 text-slate-600 whitespace-nowrap">{counterpartLabels(c, c.counterpart_phone).name || "—"}</td>
               <td className="py-1.5 pl-2 text-slate-600 whitespace-nowrap" dir="ltr">{formatCallTime(c.call_time)}</td>
               <td className="py-1.5 pl-2 text-slate-600 whitespace-nowrap" dir="ltr">{computeCallEndHM(c.call_time, c.duration_seconds)}</td>
               <td className="py-1.5 pl-2">

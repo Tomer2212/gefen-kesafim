@@ -41,14 +41,37 @@ function formatDuration(seconds) {
   const s = seconds % 60;
   return `${m}:${String(s).padStart(2, "0")}`;
 }
+function localDigits(raw) {
+  let digits = String(raw || "").replace(/\D/g, "");
+  if (digits.startsWith("972")) digits = "0" + digits.slice(3);
+  return digits;
+}
+
+// Israeli landline: 9 local digits with a one-digit area code (02/03/04/08/09).
+export function isLandline(raw) {
+  return /^0[2-489]\d{7}$/.test(localDigits(raw));
+}
+
 // Israeli numbers arrive with a "972" international prefix — display them the way
-// they're dialed locally instead ("0XX-XXXXXXX"). Any other country code is shown as-is.
+// they're dialed locally instead: "0XX-XXXXXXX" for mobiles, "0X-XXXXXXX" for landlines.
+// Any other country code is shown as-is.
 function formatPhone(raw) {
   if (!raw) return "—";
-  let digits = String(raw).replace(/\D/g, "");
-  if (digits.startsWith("972")) digits = "0" + digits.slice(3);
+  const digits = localDigits(raw);
   if (digits.length <= 3) return digits;
-  return `${digits.slice(0, 3)}-${digits.slice(3)}`;
+  const cut = isLandline(digits) ? 2 : 3;
+  return `${digits.slice(0, cut)}-${digits.slice(cut)}`;
+}
+
+// The school's own main line (backend role "טלפון בית הספר") isn't a person — for a
+// landline, show that label as the counterpart's name and leave the role empty, instead
+// of repeating the school name (already in its own column). Named contacts are unchanged.
+const SCHOOL_PHONE_ROLE = "טלפון בית הספר";
+export function counterpartLabels(call, phone) {
+  if (call.contact_role === SCHOOL_PHONE_ROLE && isLandline(phone)) {
+    return { name: SCHOOL_PHONE_ROLE, role: null };
+  }
+  return { name: call.contact_name, role: call.contact_role };
 }
 
 export function computeEndTimeIso(startIso, durationSeconds) {
@@ -60,7 +83,8 @@ export function computeEndTimeIso(startIso, durationSeconds) {
 
 function buildWindowTitle(call, advisorLabel) {
   const parts = [formatDate(call.start_time), advisorLabel];
-  if (call.contact_name) parts.push(call.contact_name);
+  const { name } = counterpartLabels(call, call.counterpart_phone);
+  if (name) parts.push(name);
   parts.push(formatPhone(call.counterpart_phone));
   return parts.join(" - ");
 }
@@ -75,6 +99,7 @@ function CallRowBase({ call, onDelete, hideSchoolColumn, hideAdvisorColumn, canM
   const endIso = computeEndTimeIso(call.start_time, call.duration_seconds);
   const advisorLabel = call.advisor_profile?.full_name || call.advisor_profile?.email || call.representative_name || "—";
   const windowTitle = buildWindowTitle(call, advisorLabel);
+  const counterpart = counterpartLabels(call, call.counterpart_phone);
 
   return (
     <>
@@ -152,11 +177,11 @@ function CallRowBase({ call, onDelete, hideSchoolColumn, hideAdvisorColumn, canM
         <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap">{advisorLabel}</td>
       )}
       <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap" dir="ltr">{formatPhone(call.counterpart_phone)}</td>
-      <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap">{call.contact_name || "—"}</td>
+      <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap">{counterpart.name || "—"}</td>
       <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap">
         {call.pending_school_resolution
           ? <span className="text-amber-600 text-xs font-medium">ממתין לשיוך</span>
-          : (call.contact_role || "—")}
+          : (counterpart.role || "—")}
       </td>
       {!hideSchoolColumn && (
         <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap">

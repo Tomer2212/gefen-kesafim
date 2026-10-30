@@ -57,7 +57,7 @@ _log = logging.getLogger(__name__)
 # field-conditions also need to know which table each field lives on.
 SCHOOL_FIELDS = {
     "name": "text", "symbol": "text", "city": "text", "authority": "text", "stage": "select",
-    "district": "select", "finance_software": "select",
+    "district": "select", "finance_software": "select", "finance_software_other_text": "text",
     "principal_name": "text", "principal_phone": "text", "principal_email": "text",
     "secretary_name": "text", "secretary_phone": "text", "secretary_email": "text",
     "finance_contact_name": "text", "finance_contact_phone": "text", "finance_contact_email": "text",
@@ -73,7 +73,7 @@ SCHOOL_FIELDS = {
 # deliberately NOT exposed here — _eval_field_condition's eq/ne/gt/contains comparison model
 # isn't built for nested membership search inside them.
 STAGE_OPTIONS = ["yesodi", "beinayim", "tikkon", "sheshshnati", "other"]
-FINANCE_SOFTWARE_OPTIONS = ["kesafim2000", "payscool", "schoolcash"]
+FINANCE_SOFTWARE_OPTIONS = ["kesafim2000", "payscool", "schoolcash", "other"]
 MEETING_COORDINATOR_OPTIONS = ["principal", "secretary", "finance_contact"]
 # Matches SchoolPage.jsx's DISTRICT_OPTIONS — a closed list edited via <select> on the school
 # card, not free text (the raw stored value IS the Hebrew display string, no separate code).
@@ -129,7 +129,7 @@ ORDER_METHOD_OPTIONS = ["private", "authority", "district", "other"]
 # maps already duplicated across DashboardPage.jsx/SchoolPage.jsx — centralized here so
 # field_options() can hand the frontend {value, label} pairs directly instead of raw values.
 STAGE_LABELS = {"yesodi": "יסודי", "beinayim": "חטיבת ביניים", "tikkon": "תיכון", "sheshshnati": "שש שנתי", "other": "אחר"}
-FINANCE_SOFTWARE_LABELS = {"kesafim2000": "כספים 2000", "payscool": "פייסקול", "schoolcash": "סקולקאש"}
+FINANCE_SOFTWARE_LABELS = {"kesafim2000": "כספים 2000", "payscool": "פייסקול", "schoolcash": "סקולקאש", "other": "אחר"}
 MEETING_COORDINATOR_LABELS = {"principal": "מנהל/ת", "secretary": "מנהלנ/ית", "finance_contact": "אחראי/ת כספים"}
 SERVICE_TYPE_LABELS = {"gefen": "גפן", "current": "שוטף", "gefen_current": "גפן+שוטף", "district": "מחוז", "takuma": "תקומה"}
 CLIENT_STATUS_LABELS = {"active": "פעיל", "inactive": "לא פעיל", "in_progress": "בתהליך", "former": "לקוח עבר"}
@@ -183,6 +183,7 @@ FIELD_LABELS = {
     "name": "שם בית ספר",
     "symbol": "סמל מוסד", "city": "עיר", "authority": "בעלות", "stage": "שלב מוסד",
     "district": "מחוז", "finance_software": "תוכנת כספים",
+    "finance_software_other_text": "תוכנת כספים - טקסט חופשי (אחר)",
     "principal_name": "שם מנהל/ת", "principal_phone": "טלפון מנהל/ת", "principal_email": "מייל מנהל/ת",
     "secretary_name": "שם מזכיר/ה", "secretary_phone": "טלפון מזכיר/ה", "secretary_email": "מייל מזכיר/ה",
     "finance_contact_name": "שם אחראי/ת כספים", "finance_contact_phone": "טלפון אחראי/ת כספים",
@@ -330,6 +331,7 @@ def _fetch_schools_and_meetings(
                 db.table("schools")
                 .select(
                     "id, name, symbol, city, authority, stage, district, finance_software, "
+                    "finance_software_other_text, "
                     "principal_name, principal_phone, principal_email, "
                     "secretary_name, secretary_phone, secretary_email, "
                     "finance_contact_name, finance_contact_phone, finance_contact_email, "
