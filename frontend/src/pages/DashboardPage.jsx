@@ -1334,9 +1334,12 @@ function renderCell(school, key, meetingsStats = {}, combo = null, activeSummary
       return renderClosureStatusBadge(closure.closure_authority_status);
     case "closure_parents_notes":
     case "closure_authority_notes": {
+      // Server-maintained summary of the signed "סגירת שנה" notes, newest first — show the
+      // latest note, all of them on hover.
       const text = closure[key] || "";
       if (!text) return "—";
-      const truncated = text.length > 40 ? `${text.slice(0, 40)}…` : text;
+      const latest = text.split("\n")[0];
+      const truncated = latest.length > 40 ? `${latest.slice(0, 40)}…` : latest;
       return <span title={text}>{truncated}</span>;
     }
     case "meeting_allocation_gefen": case "meeting_allocation_current": case "meeting_allocation_district":

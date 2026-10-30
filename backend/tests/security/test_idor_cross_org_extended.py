@@ -1098,3 +1098,53 @@ def test_gefen_organized_check_only_touches_own_org(org_b_client):
     assert ORG_A_SCHOOL_ID not in resp.json(), (
         "VULNERABILITY: gefen_organized_check wrote/returned an Org A school for an Org B caller"
     )
+
+
+# ===========================================================================
+# year-closure-notes ("סגירת שנה" signed notes) — cross-org + author-only edit/delete
+# ===========================================================================
+
+_YCN_QS = "academic_year=%D7%AA%D7%A9%D7%A4%22%D7%96"
+_YCN_YEAR = "תשפ\"ז"
+
+
+def test_list_year_closure_notes_cross_org_rejected(org_b_client):
+    resp = org_b_client.get(f"/schools/{ORG_A_SCHOOL_ID}/year-closure-notes?{_YCN_QS}")
+    assert resp.status_code in (403, 404), resp.text
+
+
+def test_list_year_closure_notes_same_org_still_works(org_a_client):
+    resp = org_a_client.get(f"/schools/{ORG_A_SCHOOL_ID}/year-closure-notes?{_YCN_QS}")
+    assert resp.status_code == 200, resp.text
+
+
+def test_create_year_closure_note_cross_org_rejected(org_a_client):
+    resp = org_a_client.post(
+        f"/schools/{ORG_B_SCHOOL_ID}/year-closure-notes",
+        json={"academic_year": _YCN_YEAR, "scope": "parents", "content": "idor test"},
+    )
+    assert resp.status_code in (403, 404), resp.text
+
+
+def test_year_closure_note_lifecycle_author_only(org_b_client, org_b_manager_client, org_a_client, admin_db):
+    """Same org: author creates/edits/deletes their own note; another user of the same org
+    (even a manager) may not edit or delete it; another org may not touch it at all."""
+    resp = org_b_client.post(
+        f"/schools/{ORG_B_SCHOOL_ID}/year-closure-notes",
+        json={"academic_year": _YCN_YEAR, "scope": "parents", "content": "security test — safe to delete"},
+    )
+    assert resp.status_code == 200, resp.text
+    note_id = resp.json()["id"]
+    try:
+        url = f"/schools/{ORG_B_SCHOOL_ID}/year-closure-notes/{note_id}"
+        assert org_b_manager_client.patch(url, json={"content": "hijack"}).status_code == 403
+        assert org_b_manager_client.delete(url).status_code == 403
+        # Cross-org, via both the attacker's own school id and the real one.
+        assert org_a_client.patch(f"/schools/{ORG_A_SCHOOL_ID}/year-closure-notes/{note_id}", json={"content": "x"}).status_code in (403, 404)
+        assert org_a_client.delete(url).status_code in (403, 404)
+        assert org_b_client.patch(url, json={"content": "security test — edited"}).status_code == 200
+        assert org_b_client.delete(url).status_code == 200
+    finally:
+        admin_db.table("year_closure_notes").delete().eq("id", note_id).execute()
+        admin_db.table("school_year_admin_data").update({"closure_parents_notes": None}) \
+            .eq("school_id", ORG_B_SCHOOL_ID).eq("academic_year", _YCN_YEAR).execute()

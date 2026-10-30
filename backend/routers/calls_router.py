@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from auth import get_current_user
@@ -56,10 +56,18 @@ def _require_owner(user: dict) -> None:
 
 
 def _phone_suffix(raw) -> str | None:
-    """Normalize a phone number to its last 9 digits, so '972524399715', '0524399715'
-    and '524399715' all compare equal — strips country code / leading zero variance."""
+    """Normalize a phone number to its Israeli national number without the trunk zero,
+    so '972524399715', '0524399715' and '524399715' all compare equal — and so do
+    landlines ('+97235531905' / '035531905' -> '35531905'). A plain "last 9 digits" rule
+    broke landlines: they're only 8 digits after the trunk zero, so the e164 form kept a
+    country-code digit ('235531905') while the local form kept the zero ('035531905').
+    Mobile numbers normalize exactly as they did under the old rule, so persisted suffixes
+    (calls_unknown_number_state, calls_call_contact_resolutions) stay valid."""
     digits = "".join(ch for ch in str(raw or "") if ch.isdigit())
-    return digits[-9:] if len(digits) >= 9 else (digits or None)
+    if digits.startswith("972") and len(digits) >= 11:
+        digits = digits[3:]
+    digits = digits.lstrip("0")
+    return digits or None
 
 
 def _build_contact_map(org_id: str) -> dict:
@@ -1161,6 +1169,7 @@ def save_call_contact(
     call_id: str,
     body: SaveCallContactIn,
     user: Annotated[dict, Depends(get_current_user)],
+    background_tasks: BackgroundTasks,
 ):
     """Optional follow-up after an unknown call was attributed: save the number as a contact
     of the chosen school. Immediate write if the user may edit the school directly (and, for
@@ -1170,6 +1179,7 @@ def save_call_contact(
         _check_permission,
         _create_notifications,
         _get_approver_ids,
+        _resync_school_meetings_after_contact_change,
     )
 
     db = get_admin_client()
@@ -1205,6 +1215,8 @@ def save_call_contact(
         except Exception as exc:
             logger.error("save_call_contact: direct update failed for school=%s: %s", body.school_id, exc, exc_info=True)
             raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+        # The new number may also belong to calls on the school's past meetings.
+        background_tasks.add_task(_resync_school_meetings_after_contact_change, user["org_id"], body.school_id)
         return {"mode": "applied"}
 
     if not _check_permission(db, user, "can_request_school_update"):

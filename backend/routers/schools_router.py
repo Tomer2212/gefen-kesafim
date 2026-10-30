@@ -17,7 +17,7 @@ from uuid import uuid4
 
 import httpx
 from bidi.algorithm import get_display
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, Form
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import Response
 from openpyxl import load_workbook, Workbook
 from pydantic import BaseModel
@@ -259,9 +259,10 @@ class SchoolYearAdminDataIn(BaseModel):
     contract_received: bool | None = None
     receipts_sent: float | None = None
     closure_parents_status: bool | None = None
-    closure_parents_notes: str | None = None
     closure_authority_status: bool | None = None
-    closure_authority_notes: str | None = None
+    # closure_parents_notes / closure_authority_notes are intentionally NOT writable here —
+    # they are a server-maintained summary of year_closure_notes (signed notes), rewritten by
+    # _sync_closure_notes_summary. See the "year-closure-notes" endpoints.
     meeting_allocation_gefen: float | None = None
     meeting_allocation_current: float | None = None
     meeting_allocation_district: float | None = None
@@ -326,7 +327,19 @@ class GefenClosureIn(BaseModel):
     budget_name: str
     academic_year: str
     status: bool | None = None
-    notes: str | None = None
+    # No `notes` — Gefen closure notes are signed entries in year_closure_notes.
+
+
+class YearClosureNoteCreateIn(BaseModel):
+    academic_year: str
+    scope: str  # 'parents' | 'authority' | 'gefen'
+    division_type: str | None = None
+    budget_name: str | None = None
+    content: str
+
+
+class YearClosureNoteEditIn(BaseModel):
+    content: str
 
 
 class IncentiveModelIn(BaseModel):
@@ -1287,6 +1300,7 @@ def update_school(
     school_id: str,
     body: SchoolIn,
     user: Annotated[dict, Depends(get_current_user)],
+    background_tasks: BackgroundTasks,
 ):
     db = get_admin_client()
     if user["role"] not in ("owner", "manager"):
@@ -1302,7 +1316,7 @@ def update_school(
         if not assigned.data:
             raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
     # Fetch current restrict_access_to before update (for diff → notifications).
-    old_school = db.table("schools").select("name, restrict_access_to").eq("id", school_id).eq("org_id", user["org_id"]).execute()
+    old_school = db.table("schools").select(f"name, restrict_access_to, {_CONTACT_PHONES_SELECT}").eq("id", school_id).eq("org_id", user["org_id"]).execute()
     old_restrict = set(old_school.data[0].get("restrict_access_to") or []) if old_school.data else set()
     school_name = old_school.data[0]["name"] if old_school.data else "בית ספר"
 
@@ -1319,6 +1333,10 @@ def update_school(
     )
     if not row.data:
         raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
+
+    # A contact phone changed → calls with that number may belong to past meetings too.
+    if _school_phone_suffixes(old_school.data[0] if old_school.data else None) != _school_phone_suffixes(row.data[0]):
+        background_tasks.add_task(_resync_school_meetings_after_contact_change, user["org_id"], school_id)
 
     # Non-fatal: notify advisors added/removed from restrict_access_to
     if "restrict_access_to" in body.model_fields_set:
@@ -1660,8 +1678,7 @@ def get_year_admin_data(
 # single-row and bulk year-admin-data endpoints so there is one source of truth for this gate.
 _YEAR_ADMIN_ADVISOR_ALLOWED_FIELDS = {
     "order_amount_gefen",
-    "closure_parents_status", "closure_parents_notes",
-    "closure_authority_status", "closure_authority_notes",
+    "closure_parents_status", "closure_authority_status",
 }
 
 
@@ -2550,10 +2567,9 @@ def set_gefen_closure(
     db = get_admin_client()
     _require_school_in_org(db, user, school_id)
 
-    # Only "status"/"notes" are partial-updatable (one toggle, one textarea blur) — build
-    # the upsert payload from exclude_unset so an update to one never nulls out the other
-    # (a postgrest upsert only SETs the columns present in the payload on conflict).
-    update_data = body.model_dump(include={"status", "notes"}, exclude_unset=True)
+    # Only "status" is written here (notes live in year_closure_notes) — exclude_unset keeps
+    # the upsert from touching the server-maintained `notes` summary column on conflict.
+    update_data = body.model_dump(include={"status"}, exclude_unset=True)
     update_data.update({
         "school_id": school_id,
         "division_type": body.division_type,
@@ -2569,6 +2585,184 @@ def set_gefen_closure(
         .execute()
     )
     return row.data[0]
+
+
+# ---------------------------------------------------------------------------
+# "סגירת שנה" notes — signed, per-author entries (date · user · content) for each notes
+# area of the tab: parents account, authority account, and every (division, budget) Gefen
+# combo. Every user — owner/manager included — may edit/delete only notes they wrote
+# themselves; legacy notes migrated from the old free-text fields with no known author
+# (author_id NULL) may be deleted by the owner only.
+#
+# The old free-text columns (school_year_admin_data.closure_parents_notes /
+# closure_authority_notes, gefen_year_closures.notes) are kept as a server-maintained
+# summary (newest first, one signed line per note) so the dashboard/admin table columns and
+# task field-conditions that read them keep working. Nothing else may write them.
+# ---------------------------------------------------------------------------
+
+_YEAR_CLOSURE_NOTE_SCOPES = ("parents", "authority", "gefen")
+
+
+def _format_closure_note_line(note: dict, author_name: str | None) -> str:
+    from zoneinfo import ZoneInfo
+    created = datetime.fromisoformat(note["created_at"].replace("Z", "+00:00"))
+    stamp = created.astimezone(ZoneInfo("Asia/Jerusalem")).strftime("%d/%m/%y %H:%M")
+    return f"{stamp} · {author_name or 'משתמש לא ידוע'}: {note['content']}"
+
+
+def _sync_closure_notes_summary(db, school_id: str, academic_year: str, scope: str,
+                                division_type: str | None, budget_name: str | None) -> None:
+    """Rewrites the legacy free-text column for one notes area from year_closure_notes.
+    Non-fatal: the signed notes themselves are already saved; only the summary is stale."""
+    try:
+        q = (db.table("year_closure_notes").select("author_id, content, created_at")
+             .eq("school_id", school_id).eq("academic_year", academic_year).eq("scope", scope))
+        if scope == "gefen":
+            q = q.eq("division_type", division_type).eq("budget_name", budget_name)
+        notes = q.order("created_at", desc=True).execute().data or []
+
+        author_ids = list({n["author_id"] for n in notes if n.get("author_id")})
+        names = {}
+        if author_ids:
+            names = {p["id"]: p.get("full_name") for p in
+                     (db.table("profiles").select("id, full_name").in_("id", author_ids).execute().data or [])}
+        summary = "\n".join(_format_closure_note_line(n, names.get(n.get("author_id"))) for n in notes) or None
+
+        now = datetime.now(timezone.utc).isoformat()
+        if scope == "gefen":
+            db.table("gefen_year_closures").upsert({
+                "school_id": school_id, "division_type": division_type, "budget_name": budget_name,
+                "academic_year": academic_year, "notes": summary, "updated_at": now,
+            }, on_conflict="school_id,division_type,budget_name,academic_year").execute()
+        else:
+            db.table("school_year_admin_data").upsert({
+                "school_id": school_id, "academic_year": academic_year,
+                f"closure_{scope}_notes": summary, "updated_at": now,
+            }, on_conflict="school_id,academic_year").execute()
+    except Exception as exc:
+        logger.warning("year closure notes summary sync failed (non-fatal): %s", exc)
+
+
+def _get_year_closure_note(db, school_id: str, note_id: str) -> dict:
+    rows = (db.table("year_closure_notes").select("*")
+            .eq("id", note_id).eq("school_id", school_id).execute().data)
+    if not rows:
+        raise HTTPException(status_code=404, detail="ההערה לא נמצאה")
+    return rows[0]
+
+
+@router.get("/{school_id}/year-closure-notes")
+def list_year_closure_notes(
+    school_id: str,
+    academic_year: str,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    rows = []
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            _require_school_in_org(db, user, school_id)
+            rows = (db.table("year_closure_notes").select("*")
+                    .eq("school_id", school_id).eq("academic_year", academic_year)
+                    .order("created_at", desc=True).execute().data or [])
+            break
+        except HTTPException:
+            raise
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("list_year_closure_notes attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.error("list_year_closure_notes failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    author_ids = list({r["author_id"] for r in rows if r.get("author_id")})
+    profiles_map = {}
+    if author_ids:
+        try:
+            db = get_admin_client()
+            p_rows = db.table("profiles").select("id, full_name").in_("id", author_ids).execute()
+            profiles_map = {p["id"]: p for p in (p_rows.data or [])}
+        except Exception as exc:
+            logger.warning("list_year_closure_notes profile enrichment failed (non-fatal): %s", exc)
+    for r in rows:
+        r["author_name"] = (profiles_map.get(r.get("author_id")) or {}).get("full_name")
+    return rows
+
+
+@router.post("/{school_id}/year-closure-notes")
+def create_year_closure_note(
+    school_id: str,
+    body: YearClosureNoteCreateIn,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    content = body.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="לא ניתן לשמור הערה ריקה")
+    if body.scope not in _YEAR_CLOSURE_NOTE_SCOPES:
+        raise HTTPException(status_code=400, detail="אזור הערות לא תקין")
+    is_gefen = body.scope == "gefen"
+    if is_gefen and not (body.division_type and body.budget_name):
+        raise HTTPException(status_code=400, detail="חסרים חטיבה ותקציב")
+    division_type = body.division_type if is_gefen else None
+    budget_name = body.budget_name if is_gefen else None
+
+    db = get_admin_client()
+    _require_school_in_org(db, user, school_id)
+    note = db.table("year_closure_notes").insert({
+        "school_id": school_id,
+        "academic_year": body.academic_year,
+        "scope": body.scope,
+        "division_type": division_type,
+        "budget_name": budget_name,
+        "author_id": user["id"],
+        "content": content,
+    }).execute().data[0]
+    _sync_closure_notes_summary(db, school_id, body.academic_year, body.scope, division_type, budget_name)
+    note["author_name"] = user.get("full_name")
+    return note
+
+
+@router.patch("/{school_id}/year-closure-notes/{note_id}")
+def edit_year_closure_note(
+    school_id: str,
+    note_id: str,
+    body: YearClosureNoteEditIn,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    content = body.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="לא ניתן לשמור הערה ריקה")
+    db = get_admin_client()
+    _require_school_in_org(db, user, school_id)
+    note = _get_year_closure_note(db, school_id, note_id)
+    if note.get("author_id") != user["id"]:
+        raise HTTPException(status_code=403, detail="ניתן לערוך רק הערות שכתבת בעצמך")
+    db.table("year_closure_notes").update({
+        "content": content,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", note_id).eq("school_id", school_id).execute()
+    _sync_closure_notes_summary(db, school_id, note["academic_year"], note["scope"], note.get("division_type"), note.get("budget_name"))
+    return {"ok": True}
+
+
+@router.delete("/{school_id}/year-closure-notes/{note_id}")
+def delete_year_closure_note(
+    school_id: str,
+    note_id: str,
+    user: Annotated[dict, Depends(get_current_user)],
+):
+    db = get_admin_client()
+    _require_school_in_org(db, user, school_id)
+    note = _get_year_closure_note(db, school_id, note_id)
+    author_id = note.get("author_id")
+    allowed = (author_id == user["id"]) if author_id else (user["role"] == "owner")
+    if not allowed:
+        raise HTTPException(status_code=403, detail="ניתן למחוק רק הערות שכתבת בעצמך")
+    db.table("year_closure_notes").delete().eq("id", note_id).eq("school_id", school_id).execute()
+    _sync_closure_notes_summary(db, school_id, note["academic_year"], note["scope"], note.get("division_type"), note.get("budget_name"))
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
@@ -3440,6 +3634,7 @@ def review_update_request(
     req_id: str,
     body: ReviewRequestIn,
     user: Annotated[dict, Depends(get_current_user)],
+    background_tasks: BackgroundTasks,
 ):
     _require_manager(user)
     if body.status not in ("approved", "rejected"):
@@ -3509,7 +3704,15 @@ def review_update_request(
                 advisor_id = changes.pop("add_advisor_to_school")
                 db.table("advisor_schools").upsert({"advisor_id": advisor_id, "school_id": req["school_id"]}).execute()
             if changes:
-                db.table("schools").update(changes).eq("id", req["school_id"]).execute()
+                touches_phones = any(k in changes for k in (*_CONTACT_PHONE_FIELDS, "extra_contacts"))
+                old_phones = None
+                if touches_phones:
+                    old_res = db.table("schools").select(_CONTACT_PHONES_SELECT).eq("id", req["school_id"]).eq("org_id", user["org_id"]).execute()
+                    old_phones = _school_phone_suffixes(old_res.data[0]) if old_res.data else None
+                updated = db.table("schools").update(changes).eq("id", req["school_id"]).execute()
+                # A contact phone changed → calls with that number may belong to past meetings too.
+                if old_phones is not None and updated.data and _school_phone_suffixes(updated.data[0]) != old_phones:
+                    background_tasks.add_task(_resync_school_meetings_after_contact_change, user["org_id"], req["school_id"])
 
     # Phase 3: update request status — AFTER physical action succeeds
     from datetime import datetime, timezone
@@ -7846,6 +8049,76 @@ def _maybe_auto_complete_meeting(db, org_id: str, meeting_id: str) -> None:
         _apply_meeting_patch(db, org_id, m["school_id"], meeting_id, {"status": "completed"})
     except Exception as exc:
         logger.warning("_maybe_auto_complete_meeting failed (non-fatal) for meeting %s: %s", meeting_id, exc)
+
+
+_CONTACT_PHONE_FIELDS = ("school_phone", "principal_phone", "principal_chativa_phone", "secretary_phone", "finance_contact_phone")
+_CONTACT_PHONES_SELECT = ", ".join(_CONTACT_PHONE_FIELDS) + ", extra_contacts"
+_CONTACT_RESYNC_LOOKBACK_DAYS = 30
+
+
+def _school_phone_suffixes(school_row: dict | None) -> set:
+    """Normalized set of every phone number that resolves calls to this school (the same
+    fields calls_router._build_contact_map reads) — used to detect a contact-phone change."""
+    from routers.calls_router import _phone_suffix
+    if not school_row:
+        return set()
+    phones = [school_row.get(f) for f in _CONTACT_PHONE_FIELDS]
+    phones += [ec.get("phone") for ec in (school_row.get("extra_contacts") or []) if isinstance(ec, dict)]
+    return {s for s in (_phone_suffix(p) for p in phones) if s}
+
+
+def _resync_school_meetings_after_contact_change(org_id: str, school_id: str) -> int:
+    """Background job run after a school's contact phones change: re-attributes calls to the
+    school's meetings from the last _CONTACT_RESYNC_LOOKBACK_DAYS days (up to today), exactly
+    as the recompute-call-activity cron would have if the number had been known at call
+    time — then runs the same opt-in auto-completion check. The cron itself only covers
+    today/yesterday, so without this a number added retroactively never reaches older
+    meetings. Manual links are never overwritten (_recompute_meeting_call_activity).
+    Sequential, fully non-fatal. Returns the number of meeting dates re-synced."""
+    from zoneinfo import ZoneInfo
+    from routers.calls_router import _pull_org_calls
+
+    today_il = datetime.now(ZoneInfo("Asia/Jerusalem")).date()
+    since = (today_il - timedelta(days=_CONTACT_RESYNC_LOOKBACK_DAYS)).isoformat()
+    try:
+        db = get_admin_client()
+        rows = (
+            db.table("meetings").select("meeting_date")
+            .eq("school_id", school_id).gte("meeting_date", since).lte("meeting_date", today_il.isoformat())
+            .execute()
+        ).data or []
+    except Exception as exc:
+        logger.warning("contact-change meeting resync: failed to load meetings school=%s: %s", school_id, exc)
+        return 0
+
+    synced = 0
+    for date_str in sorted({r["meeting_date"] for r in rows if r.get("meeting_date")}):
+        try:
+            result = _pull_org_calls(org_id, f"{date_str}T00:00:00", f"{date_str}T23:59:59")
+        except HTTPException as exc:
+            if exc.status_code == 400:
+                return synced  # calls integration not configured/enabled for this org
+            logger.warning("contact-change meeting resync: pull failed org=%s date=%s: %s", org_id, date_str, exc.detail)
+            continue
+        except Exception as exc:
+            logger.warning("contact-change meeting resync: pull failed org=%s date=%s: %s", org_id, date_str, exc)
+            continue
+        calls_for_school = [
+            c for c in result["calls"]
+            if school_id not in (c.get("excluded_school_ids") or [])
+            and (c.get("school_id") == school_id or school_id in (c.get("linked_school_ids") or []))
+        ]
+        try:
+            db = get_admin_client()
+            affected = _recompute_meeting_call_activity(db, org_id, school_id, date_str, calls_for_school)
+        except Exception as exc:
+            logger.warning("contact-change meeting resync: recompute failed school=%s date=%s: %s", school_id, date_str, exc)
+            continue
+        for mid in affected:
+            _maybe_auto_complete_meeting(db, org_id, mid)
+        synced += 1
+    logger.info("contact-change meeting resync: school=%s re-synced %d meeting date(s)", school_id, synced)
+    return synced
 
 
 def _require_school_access_for_meeting_activity(db, user: dict, school_id: str) -> dict:

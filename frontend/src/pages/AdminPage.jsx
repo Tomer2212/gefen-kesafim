@@ -461,7 +461,7 @@ const BULK_OVERWRITE_YEAR_ADMIN_FIELDS = new Set([
   "service_type", "requested_price", "order_method", "order_method_other_text",
   "order_amount_gefen", "hours_ordered", "rate", "payment_received", "payment_requests_sent",
   "receipts_sent", "contract_sent", "contract_received",
-  "closure_parents_status", "closure_parents_notes", "closure_authority_status", "closure_authority_notes",
+  "closure_parents_status", "closure_authority_status",
   "meeting_allocation_gefen", "meeting_allocation_current", "meeting_allocation_district",
   "meeting_duration_gefen", "meeting_duration_current", "meeting_duration_district",
 ]);
@@ -2020,27 +2020,14 @@ const SchoolRow = memo(function SchoolRow({
           );
         }
         if (key === "closure_parents_notes" || key === "closure_authority_notes") {
-          const notesKey = `${school.id}:${key}`;
-          const isEditing = editingNotesKey === notesKey;
+          // Read-only: a server-maintained summary of the signed notes in the school card's
+          // "סגירת שנה" tab (newest note first, one line each) — notes are added there only.
           const text = yad[key] || "";
+          const latest = text.split("\n")[0];
           return bc(
-            isEditing ? (
-              <AdminNotesTextarea
-                initialValue={text}
-                ariaLabel={colLabel}
-                className={`${ADMIN_FIELD_CLS} w-48 resize-y`}
-                onCommit={(raw) => {
-                  const v = raw.trim() || null;
-                  setEditingNotesKey(null);
-                  if (v !== (text || null)) handlers.onSaveField(school.id, key, v);
-                }}
-              />
-            ) : (
-              <button type="button" onClick={() => setEditingNotesKey(notesKey)}
-                className="text-right text-slate-600 hover:text-blue-600 truncate max-w-[160px] block">
-                {text ? (text.length > 30 ? `${text.slice(0, 30)}…` : text) : "—"}
-              </button>
-            )
+            <span title={text || undefined} className="text-right text-slate-600 truncate max-w-[160px] block">
+              {latest ? (latest.length > 30 ? `${latest.slice(0, 30)}…` : latest) : "—"}
+            </span>
           );
         }
         if (key === "quarterly_notes_1" || key === "quarterly_notes_2" || key === "quarterly_notes_3" || key === "quarterly_notes_4") {

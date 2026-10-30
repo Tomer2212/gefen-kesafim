@@ -236,6 +236,22 @@ rows_finance_not_gefen JSONB
 rows_gefen_not_finance JSONB
 ```
 
+### `year_closure_notes` — signed notes in the school card's "סגירת שנה" tab
+```sql
+id UUID PRIMARY KEY
+school_id UUID (FK → schools, ON DELETE CASCADE)
+academic_year TEXT
+scope TEXT          -- 'parents' | 'authority' | 'gefen'
+division_type TEXT  -- only for scope='gefen'
+budget_name TEXT    -- only for scope='gefen'
+author_id UUID      -- FK → profiles; NULL = legacy note migrated with no known author
+is_legacy BOOLEAN
+content TEXT
+created_at TIMESTAMPTZ
+updated_at TIMESTAMPTZ
+```
+Every user (owner/manager included) may edit/delete only their own notes; a NULL-author note is deletable by the owner only. The old free-text columns `school_year_admin_data.closure_parents_notes` / `closure_authority_notes` and `gefen_year_closures.notes` are a **server-maintained summary** (newest first, `dd/mm/yy HH:MM · name: content` per line) rewritten by `_sync_closure_notes_summary` — never write them directly; the dashboard/admin columns and task field-conditions read them.
+
 ### `school_update_requests` — advisors request changes, owners approve
 ```sql
 id UUID PRIMARY KEY
@@ -361,6 +377,11 @@ POST   /schools/{id}/advisors             → assign advisor (manager+) — uses
 DELETE /schools/{id}/advisors/{uid}       → unassign advisor (manager+)
 
 GET    /schools/{id}/logs                 → check history for school
+
+GET    /schools/{id}/year-closure-notes?academic_year=   → signed "סגירת שנה" notes
+POST   /schools/{id}/year-closure-notes                  → add note (author = caller)
+PATCH  /schools/{id}/year-closure-notes/{note_id}        → edit own note only
+DELETE /schools/{id}/year-closure-notes/{note_id}        → delete own note (legacy no-author: owner only)
 
 POST   /schools/{id}/update-requests     → advisor submits change request
 GET    /schools/update-requests           → list requests (manager+ sees all; advisor sees own)
@@ -1032,7 +1053,7 @@ A passing run means, for every covered endpoint, both (a) a different org is rej
 4. If a failure appears: treat a cross-org test that unexpectedly passes as a real, reportable vulnerability (not a flaky test) — fix the underlying endpoint, re-run, and only then proceed. Never weaken/delete a failing test to make the suite green.
 5. This is app-level enforcement, not CI — it depends on this rule being followed each session. It does not replace the suite; it replaces relying on anyone's memory to run it.
 
-As of the most recent full audit (2026-10-24), the suite covers 107 tests across all endpoint groups fixed in that audit plus later additions (`test_idor_cross_org.py` + `test_idor_cross_org_extended.py`). **Note:** list endpoints with NO resource-id parameter (e.g. `GET /schools/year-admin-data`) are also a leak vector — a query filtered only by year/status on a school-scoped table (no `org_id` column) returns every org's rows; scope them with `schools!inner(org_id)` + `.eq("schools.org_id", ...)`. Keep this number roughly current when adding more coverage.
+As of the most recent full audit (2026-10-24), the suite covers 111 tests across all endpoint groups fixed in that audit plus later additions (`test_idor_cross_org.py` + `test_idor_cross_org_extended.py`). **Note:** list endpoints with NO resource-id parameter (e.g. `GET /schools/year-admin-data`) are also a leak vector — a query filtered only by year/status on a school-scoped table (no `org_id` column) returns every org's rows; scope them with `schools!inner(org_id)` + `.eq("schools.org_id", ...)`. Keep this number roughly current when adding more coverage.
 
 ### Recurring security cadence (MANDATORY — do not wait for the user to ask)
 

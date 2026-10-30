@@ -2853,6 +2853,8 @@ export default function SchoolPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [schoolId, academicYear, activeTab]);
 
+  // Only the "status" toggle goes through here — notes are signed entries saved by
+  // SchoolYearClosureTab itself via /year-closure-notes.
   async function saveGefenClosure(divisionType, budgetName, field, value) {
     setGefenClosures(prev => prev.map(c =>
       c.division_type === divisionType && c.budget_name === budgetName ? { ...c, [field]: value } : c
@@ -5370,6 +5372,8 @@ export default function SchoolPage() {
               gefenClosures={gefenClosures}
               saveGefenClosure={saveGefenClosure}
               academicYear={academicYear}
+              schoolId={schoolId}
+              currentUser={currentUser}
             />
           )}
 
