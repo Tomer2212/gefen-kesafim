@@ -330,6 +330,60 @@ def get_event(db, org_id: str, advisor_id: str, event_id: str) -> dict | str | N
     return {"start": e["start"]["dateTime"], "end": e["end"]["dateTime"], "subject": e.get("subject")}
 
 
+def list_events_in_range(db, org_id: str, advisor_id: str, start_iso: str, end_iso: str) -> dict | None:
+    """Bulk counterpart of get_event, for the periodic reconciliation poll: ONE calendarView
+    walk per advisor instead of one GET per synced meeting, so the poll's Graph-call count
+    scales with the number of advisors, not the number of meetings.
+
+    Returns {event_id: get_event-shaped result} — the same {start, end, subject} dict, or
+    None for an event Outlook marked cancelled. Returns None (not {}) if the listing could
+    not be completed in full (token/network/Graph error, or the page cap was hit), so the
+    caller never reads "absent from a partial listing" as anything.
+
+    Absence of an event id from a COMPLETE listing still does not mean "deleted" — it may
+    have been moved outside the window — callers must confirm absences via get_event.
+    """
+    try:
+        token = _get_app_only_token(db, org_id)
+    except Exception as exc:
+        logger.info("list_events_in_range skipped for org %s: %s", org_id, exc)
+        return None
+
+    email = _resolve_advisor_email(db, org_id, advisor_id)
+    if not email:
+        return None
+
+    url = f"{GRAPH_BASE}/users/{email}/calendarView"
+    params = {
+        "startDateTime": start_iso,
+        "endDateTime": end_iso,
+        "$select": "id,subject,start,end,isCancelled",
+        "$top": 500,
+    }
+    headers = {**_headers(token), "Prefer": 'outlook.timezone="Israel Standard Time"'}
+    results = {}
+    try:
+        # 40 pages x 500 = 20,000 events per advisor window — far beyond any real calendar.
+        for _ in range(40):
+            resp = _request_with_retry("GET", url, headers=headers, params=params, timeout=30)
+            resp.raise_for_status()
+            payload = resp.json()
+            for e in payload.get("value", []):
+                if e.get("isCancelled"):
+                    results[e["id"]] = None
+                else:
+                    results[e["id"]] = {"start": e["start"]["dateTime"], "end": e["end"]["dateTime"], "subject": e.get("subject")}
+            next_link = payload.get("@odata.nextLink")
+            if not next_link:
+                return results
+            url, params = next_link, None  # nextLink already carries all query params
+        logger.warning("list_events_in_range hit the page cap for advisor %s — treating listing as incomplete", advisor_id)
+        return None
+    except Exception as exc:
+        logger.warning("list_events_in_range failed for advisor %s: %s", advisor_id, exc)
+        return None
+
+
 def _event_payload(meeting: dict, subject: str | None, show_as: str | None = None, clear_attendees: bool = False) -> dict:
     subject = subject or "פגישת ליווי כלכלי"
     date = meeting.get("meeting_date")

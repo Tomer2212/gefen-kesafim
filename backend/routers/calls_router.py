@@ -2,8 +2,10 @@ import json
 import logging
 import os
 import secrets
+import threading
 import time
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 from zoneinfo import ZoneInfo
@@ -588,14 +590,41 @@ async def calls_webhook(org_id: str, secret: str, request: Request):
 _HISTORICAL_DAY_CACHE_TTL_SECONDS = 6 * 3600  # bounded, not forever — see module note above
 _RAW_CALLS_CACHE_MAX_ENTRIES = 500
 _raw_calls_day_cache: "OrderedDict[tuple[str, str, str], tuple[list[dict], float]]" = OrderedDict()
+# Days of one range are pulled concurrently (see _pull_raw_calls), so cache access is locked.
+_raw_calls_day_cache_lock = threading.Lock()
+# How many days of one range are requested from the provider at once. These threads only
+# talk to the provider over their own HTTP requests — never to the shared Supabase client,
+# so this doesn't conflict with the no-ThreadPoolExecutor-on-Supabase rule.
+_PARALLEL_DAY_PULLS = 6
 
 
 def _provider_pull_calls(provider: str, provider_config: dict, date_from: str, date_to: str) -> list[dict]:
     if provider == "voicenter":
-        return voicenter_adapter.pull_calls(provider_config, date_from, date_to)
+        return _voicenter_pull_split(provider_config, date_from, date_to)
     elif provider == "exm":
-        return exm_adapter.pull_calls(provider_config, date_from, date_to)
+        return _exm_pull_split(provider_config, date_from, date_to)
     raise HTTPException(status_code=500, detail="ספק שיחות לא נתמך")
+
+
+_VOICENTER_MAX_RESULTS = 10_000  # per-request cap, per the Call Log API docs
+
+
+def _voicenter_pull_split(provider_config: dict, date_from: str, date_to: str) -> list[dict]:
+    """Voicenter pull over [date_from, date_to]; a response that comes back full (possibly
+    truncated) is re-pulled as two halves, so a wide range can never silently lose calls."""
+    calls = voicenter_adapter.pull_calls(provider_config, date_from, date_to)
+    if len(calls) < _VOICENTER_MAX_RESULTS:
+        return calls
+    dt_from, dt_to = datetime.fromisoformat(date_from), datetime.fromisoformat(date_to)
+    if dt_to - dt_from < timedelta(hours=1):
+        logger.warning("voicenter pull: %s..%s still full after splitting — results may be truncated", date_from, date_to)
+        return calls
+    mid = dt_from + (dt_to - dt_from) / 2
+    fmt = "%Y-%m-%dT%H:%M:%S"
+    return (
+        _voicenter_pull_split(provider_config, date_from, mid.strftime(fmt))
+        + _voicenter_pull_split(provider_config, (mid + timedelta(seconds=1)).strftime(fmt), date_to)
+    )
 
 
 def _pull_raw_calls_for_day_cached(provider: str, provider_config: dict, org_id: str, day, chunk_from: str, chunk_to: str) -> list[dict]:
@@ -606,17 +635,18 @@ def _pull_raw_calls_for_day_cached(provider: str, provider_config: dict, org_id:
     a wrong or stale-forever result, which is why this doesn't run into the multi-worker
     correctness problem that ruled out in-memory run state elsewhere in this codebase."""
     key = (org_id, provider, day.isoformat())
-    now_mono = time.monotonic()
-    cached = _raw_calls_day_cache.get(key)
-    if cached and (now_mono - cached[1]) < _HISTORICAL_DAY_CACHE_TTL_SECONDS:
-        _raw_calls_day_cache.move_to_end(key)
-        return cached[0]
+    with _raw_calls_day_cache_lock:
+        cached = _raw_calls_day_cache.get(key)
+        if cached and (time.monotonic() - cached[1]) < _HISTORICAL_DAY_CACHE_TTL_SECONDS:
+            _raw_calls_day_cache.move_to_end(key)
+            return cached[0]
 
     calls = _provider_pull_calls(provider, provider_config, chunk_from, chunk_to)
-    _raw_calls_day_cache[key] = (calls, now_mono)
-    _raw_calls_day_cache.move_to_end(key)
-    while len(_raw_calls_day_cache) > _RAW_CALLS_CACHE_MAX_ENTRIES:
-        _raw_calls_day_cache.popitem(last=False)
+    with _raw_calls_day_cache_lock:
+        _raw_calls_day_cache[key] = (calls, time.monotonic())
+        _raw_calls_day_cache.move_to_end(key)
+        while len(_raw_calls_day_cache) > _RAW_CALLS_CACHE_MAX_ENTRIES:
+            _raw_calls_day_cache.popitem(last=False)
     return calls
 
 
@@ -644,31 +674,39 @@ def _pull_raw_calls(provider: str, provider_config: dict, org_id: str, date_from
     dt_to = min(dt_to, now_il)
     date_to = dt_to.strftime("%Y-%m-%dT%H:%M:%S")
 
-    if dt_to.date() == dt_from.date():
+    # Voicenter returns up to 10,000 calls per request but allows only 30 requests a minute
+    # (Call Log API docs), so day-by-day chunking would trip its rate limit on any wide range
+    # (a school card's academic year = dozens of requests). One request for the whole range,
+    # split only if it actually comes back full (_voicenter_pull_split).
+    if dt_to.date() == dt_from.date() or provider == "voicenter":
         return _provider_pull_calls(provider, provider_config, date_from, date_to)
 
     if (dt_to.date() - dt_from.date()).days > _MAX_CHUNK_RANGE_DAYS:
         raise HTTPException(status_code=400, detail=f"טווח התאריכים רחב מדי (מעל {_MAX_CHUNK_RANGE_DAYS} ימים) — יש לצמצם אותו")
 
     today = datetime.now(_IL_TZ).date()
-    all_calls: list[dict] = []
+    chunks = []
     day = dt_from.date()
     while day <= dt_to.date():
         day_start = datetime.combine(day, datetime.min.time())
         day_end = datetime.combine(day, datetime.max.time().replace(microsecond=0))
         chunk_from = max(day_start, dt_from)
         chunk_to = min(day_end, dt_to)
-        chunk_from_str = chunk_from.strftime("%Y-%m-%dT%H:%M:%S")
-        chunk_to_str = chunk_to.strftime("%Y-%m-%dT%H:%M:%S")
-
-        if day < today and chunk_from == day_start and chunk_to == day_end:
-            all_calls.extend(_pull_raw_calls_for_day_cached(provider, provider_config, org_id, day, chunk_from_str, chunk_to_str))
-        else:
-            all_calls.extend(_provider_pull_calls(provider, provider_config, chunk_from_str, chunk_to_str))
-
+        cacheable = day < today and chunk_from == day_start and chunk_to == day_end
+        chunks.append((day, chunk_from.strftime("%Y-%m-%dT%H:%M:%S"), chunk_to.strftime("%Y-%m-%dT%H:%M:%S"), cacheable))
         day += timedelta(days=1)
 
-    return all_calls
+    def _pull_chunk(chunk) -> list[dict]:
+        chunk_day, chunk_from_str, chunk_to_str, cacheable = chunk
+        if cacheable:
+            return _pull_raw_calls_for_day_cached(provider, provider_config, org_id, chunk_day, chunk_from_str, chunk_to_str)
+        return _provider_pull_calls(provider, provider_config, chunk_from_str, chunk_to_str)
+
+    # Days are independent requests, so they're pulled concurrently: total time ≈ the busiest
+    # day instead of the sum of all days. map() keeps day order and re-raises any failure.
+    with ThreadPoolExecutor(max_workers=min(_PARALLEL_DAY_PULLS, len(chunks))) as pool:
+        per_day = list(pool.map(_pull_chunk, chunks))
+    return [c for day_calls in per_day for c in day_calls]
 
 
 def _pull_org_calls(org_id: str, date_from: str, date_to: str) -> dict:
@@ -789,11 +827,11 @@ def _israel_naive(call_start_iso: str | None) -> str:
         return ""
 
 
-def _exm_search_number(provider_config: dict, number: str, date_from: str, date_to: str) -> list[dict]:
-    """EXM free-text search for one number over [date_from, date_to]. If a single request
-    hits the provider's page cap, the range is split in halves and each half re-searched,
-    so a busy number can never silently lose calls."""
-    calls, truncated = exm_adapter.pull_calls_checked(provider_config, date_from, date_to, freetext=number)
+def _exm_pull_split(provider_config: dict, date_from: str, date_to: str, freetext: str | None = None) -> list[dict]:
+    """EXM pull over [date_from, date_to] (optionally free-text filtered). If a single request
+    hits the provider's page cap, the range is split in halves and each half re-pulled, so a
+    busy day or number can never silently lose calls."""
+    calls, truncated = exm_adapter.pull_calls_checked(provider_config, date_from, date_to, freetext=freetext)
     if not truncated:
         return calls
     dt_from, dt_to = datetime.fromisoformat(date_from), datetime.fromisoformat(date_to)
@@ -802,8 +840,8 @@ def _exm_search_number(provider_config: dict, number: str, date_from: str, date_
     mid = dt_from + (dt_to - dt_from) / 2
     fmt = "%Y-%m-%dT%H:%M:%S"
     return (
-        _exm_search_number(provider_config, number, date_from, mid.strftime(fmt))
-        + _exm_search_number(provider_config, number, (mid + timedelta(seconds=1)).strftime(fmt), date_to)
+        _exm_pull_split(provider_config, date_from, mid.strftime(fmt), freetext)
+        + _exm_pull_split(provider_config, (mid + timedelta(seconds=1)).strftime(fmt), date_to, freetext)
     )
 
 
@@ -854,21 +892,49 @@ def _pull_school_calls(org_id: str, school_id: str, date_from: str, date_to: str
     ]
 
     provider_config = cfg.get("config") or {}
-    raw_by_id: dict = {}
+
+    def _search_number(suffix: str) -> list[dict]:
+        return [
+            c for c in _exm_pull_split(provider_config, date_from, date_to, freetext="0" + suffix)
+            if _phone_suffix(c.get("counterpart_phone")) == suffix
+        ]
+
+    def _fetch_linked(call_id: str) -> list[dict]:
+        return [
+            c for c in exm_adapter.pull_calls(provider_config, date_from, date_to, call_id=call_id)
+            if c.get("call_id") == call_id and date_from <= _israel_naive(c.get("start_time")) <= date_to
+        ]
+
     # Short codes (e.g. "*3") would free-text-match half the call log — real numbers only.
-    for suffix in sorted(s for s in suffixes if len(s) >= 7):
-        for c in _exm_search_number(provider_config, "0" + suffix, date_from, date_to):
-            if _phone_suffix(c.get("counterpart_phone")) == suffix:
-                raw_by_id[c["call_id"]] = c
-    for call_id in linked_ids:
-        if call_id in raw_by_id:
-            continue
-        for c in exm_adapter.pull_calls(provider_config, date_from, date_to, call_id=call_id):
-            if c.get("call_id") == call_id and date_from <= _israel_naive(c.get("start_time")) <= date_to:
-                raw_by_id[call_id] = c
+    # Each number / linked call is an independent provider request, so they run concurrently
+    # (provider-only threads, same as _pull_raw_calls).
+    tasks = [(_search_number, s) for s in sorted(s for s in suffixes if len(s) >= 7)]
+    tasks += [(_fetch_linked, cid) for cid in linked_ids]
+    raw_by_id: dict = {}
+    if tasks:
+        with ThreadPoolExecutor(max_workers=min(_PARALLEL_DAY_PULLS, len(tasks))) as pool:
+            for found in pool.map(lambda t: t[0](t[1]), tasks):
+                for c in found:
+                    raw_by_id[c["call_id"]] = c
 
     raw_calls = sorted(raw_by_id.values(), key=lambda c: c.get("start_time") or "", reverse=True)
     return _for_school(_enrich_raw_calls(org_id, provider, raw_calls))
+
+
+# ניהול-שיחות (day/week view) and ביצועים (Sun–Fri week) never need more than a week —
+# an org-wide pull grows with every extra day, so wider ranges are refused up front.
+_ADMIN_CALLS_MAX_SPAN_DAYS = 6
+# אזור אישי keeps its free date range; a month is the most that still loads in reasonable time.
+_MY_CALLS_MAX_SPAN_DAYS = 30
+
+
+def _require_span_within(date_from: str, date_to: str, max_span_days: int, detail: str) -> None:
+    try:
+        span_days = (datetime.fromisoformat(date_to).date() - datetime.fromisoformat(date_from).date()).days
+    except ValueError:
+        raise HTTPException(status_code=400, detail="תאריך לא תקין")
+    if span_days > max_span_days:
+        raise HTTPException(status_code=400, detail=detail)
 
 
 @router.get("/calls")
@@ -879,6 +945,7 @@ def list_calls(
     advisor_id: str | None = None,
 ):
     _require_manager(user)
+    _require_span_within(date_from, date_to, _ADMIN_CALLS_MAX_SPAN_DAYS, "ניתן להציג עד שבוע אחד בכל פעם")
     result = _pull_org_calls(user["org_id"], date_from, date_to)
     if advisor_id:
         result["calls"] = [c for c in result["calls"] if c["advisor_id"] == advisor_id]
@@ -902,6 +969,8 @@ def list_my_calls(
     """Personal-area variant of /calls — any authenticated user, scoped to their own calls
     only (advisor_id resolved server-side from the JWT, same friendly-empty-state pattern
     as schools_router.list_school_calls)."""
+    # Checked before the pull: the except below maps every 400 to "integration disabled".
+    _require_span_within(date_from, date_to, _MY_CALLS_MAX_SPAN_DAYS, "ניתן להציג עד 31 ימים בכל פעם — יש לצמצם את טווח התאריכים")
     try:
         result = _pull_org_calls(user["org_id"], date_from, date_to)
     except HTTPException as exc:

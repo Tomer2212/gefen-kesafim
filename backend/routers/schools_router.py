@@ -5254,7 +5254,7 @@ def process_booking_email_queue(request: Request):
     return {"ok": True, "sent": sent, "failed": failed, "batch_size": len(rows)}
 
 
-def _reconcile_meeting_from_outlook(db, org_id: str, meeting: dict) -> dict:
+def _reconcile_meeting_from_outlook(db, org_id: str, meeting: dict, prefetched: dict | None = None) -> dict:
     """Shared by the periodic poll (backup safety net) and the real-time webhook
     handler: checks every synced advisor's event for this meeting and applies any
     confirmed change (reschedule or cancellation) back onto the meeting row.
@@ -5265,8 +5265,14 @@ def _reconcile_meeting_from_outlook(db, org_id: str, meeting: dict) -> dict:
     just one, for multi-advisor meetings) — and any check that fails/errors is skipped
     rather than ever being treated as "deleted".
 
+    prefetched (poll only): {advisor_id: graph_client.list_events_in_range result}. An
+    event found in its advisor's listing is used as-is; an advisor whose listing failed
+    is inconclusive (skipped this round); an event absent from a complete listing is
+    confirmed individually via get_event — absence alone never cancels a meeting. The
+    webhook path passes nothing and queries each event directly, as before.
+
     Returns {"action": "updated"|"cancelled"|"skipped"|"none", "checked": N} where N
-    is the number of advisor events actually queried against Graph.
+    is the number of advisor events checked.
     """
     sync_map = meeting.get("calendar_sync") or {}
     advisor_results = {}
@@ -5276,6 +5282,14 @@ def _reconcile_meeting_from_outlook(db, org_id: str, meeting: dict) -> dict:
         if not event_id:
             continue
         checked += 1
+        if prefetched is not None and advisor_id in prefetched:
+            listing = prefetched[advisor_id]
+            if listing is None:
+                advisor_results[advisor_id] = graph_client.EVENT_CHECK_SKIPPED
+                continue
+            if event_id in listing:
+                advisor_results[advisor_id] = listing[event_id]
+                continue
         advisor_results[advisor_id] = graph_client.get_event(db, org_id, advisor_id, event_id)
 
     if not advisor_results:
@@ -5309,13 +5323,78 @@ def _reconcile_meeting_from_outlook(db, org_id: str, meeting: dict) -> dict:
     return {"action": "none", "checked": checked}
 
 
+def _run_outlook_poll(meetings: list[dict], schools_map: dict) -> dict:
+    """The Graph-facing half of poll_outlook_changes. Fetches each (org, advisor)
+    calendar ONCE via calendarView over the window spanning that advisor's synced
+    meetings, then reconciles every meeting against those listings — Graph calls scale
+    with the number of advisors, not meetings (the old per-meeting GET loop took >60s
+    once a bulk import brought hundreds of synced meetings, and the cron timed out)."""
+    from datetime import date, timedelta
+
+    db = get_admin_client()
+
+    # (org_id, advisor_id) -> [min meeting_date, max meeting_date]
+    windows: dict[tuple, list] = {}
+    for m in meetings:
+        org_id = schools_map.get(m.get("school_id"))
+        if not org_id or not m.get("meeting_date"):
+            continue
+        for advisor_id, entry in (m.get("calendar_sync") or {}).items():
+            if not (entry or {}).get("external_event_id"):
+                continue
+            w = windows.setdefault((org_id, advisor_id), [m["meeting_date"], m["meeting_date"]])
+            w[0] = min(w[0], m["meeting_date"])
+            w[1] = max(w[1], m["meeting_date"])
+
+    # A day of margin before and two after (midnight-crossing meetings, and calendarView
+    # reads offset-less bounds as UTC while our dates are Israel-local).
+    listings: dict[str, dict] = {}  # org_id -> {advisor_id: listing | None}
+    for (org_id, advisor_id), (lo, hi) in windows.items():
+        start = (date.fromisoformat(lo) - timedelta(days=1)).isoformat() + "T00:00:00"
+        end = (date.fromisoformat(hi) + timedelta(days=2)).isoformat() + "T00:00:00"
+        listings.setdefault(org_id, {})[advisor_id] = graph_client.list_events_in_range(db, org_id, advisor_id, start, end)
+
+    checked = updated = cancelled = skipped = 0
+    for m in meetings:
+        org_id = schools_map.get(m.get("school_id"))
+        if not org_id:
+            continue
+        try:
+            # Re-read the singleton per meeting: if a failure anywhere reset it mid-run, the
+            # rest of the run picks up the fresh client instead of reusing a broken one.
+            db = get_admin_client()
+            result = _reconcile_meeting_from_outlook(db, org_id, m, prefetched=listings.get(org_id, {}))
+        except Exception as exc:
+            logger.warning("poll_outlook_changes: reconcile failed for meeting %s (non-fatal): %s", m.get("id"), exc)
+            continue
+        checked += result["checked"]
+        if result["action"] == "updated":
+            updated += 1
+        elif result["action"] == "cancelled":
+            cancelled += 1
+        elif result["action"] == "skipped":
+            skipped += 1
+
+    failed_listings = sum(1 for per_org in listings.values() for v in per_org.values() if v is None)
+    summary = {
+        "meetings": len(meetings), "advisors": len(windows), "failed_listings": failed_listings,
+        "checked": checked, "updated": updated, "cancelled": cancelled, "skipped": skipped,
+    }
+    logger.info("poll_outlook_changes finished: %s", summary)
+    return summary
+
+
 @router.post("/meetings/poll-outlook-changes")
-def poll_outlook_changes(request: Request):
+def poll_outlook_changes(request: Request, background_tasks: BackgroundTasks):
     """Cron-triggered backup safety net (best-effort schedule, currently firing
     roughly every 1-3h in practice — see the real-time webhook handler in
     calendar_router.py for the primary, near-instant reconciliation path).
     Reconciles all synced future meetings via _reconcile_meeting_from_outlook,
-    catching anything a missed/lost webhook notification would otherwise leave stale."""
+    catching anything a missed/lost webhook notification would otherwise leave stale.
+
+    The DB reads run inline (a DB outage still fails the cron run visibly); the Graph
+    work runs as a background task so the caller never waits on Outlook. The work is
+    idempotent, so an occasional overlap with the next tick is harmless."""
     if not CRON_SECRET or request.headers.get("X-Cron-Secret") != CRON_SECRET:
         raise HTTPException(status_code=401, detail="unauthorized")
 
@@ -5329,6 +5408,7 @@ def poll_outlook_changes(request: Request):
             .select("id, school_id, meeting_date, start_time, end_time, status, calendar_sync")
             .eq("status", "scheduled")
             .gte("meeting_date", today)
+            .not_.is_("calendar_sync", "null")
             .execute()
             .data or []
         )
@@ -5338,7 +5418,7 @@ def poll_outlook_changes(request: Request):
 
     meetings = [m for m in meetings if m.get("calendar_sync")]
     if not meetings:
-        return {"checked": 0, "updated": 0, "cancelled": 0}
+        return {"queued": 0}
 
     school_ids = list({m["school_id"] for m in meetings if m.get("school_id")})
     schools_map = {}
@@ -5349,20 +5429,15 @@ def poll_outlook_changes(request: Request):
         except Exception as exc:
             logger.warning("poll_outlook_changes school lookup failed (non-fatal): %s", exc)
 
-    checked = updated = cancelled = 0
+    background_tasks.add_task(_run_outlook_poll_safely, meetings, schools_map)
+    return {"queued": len(meetings)}
 
-    for m in meetings:
-        org_id = schools_map.get(m.get("school_id"))
-        if not org_id:
-            continue
-        result = _reconcile_meeting_from_outlook(db, org_id, m)
-        checked += result["checked"]
-        if result["action"] == "updated":
-            updated += 1
-        elif result["action"] == "cancelled":
-            cancelled += 1
 
-    return {"checked": checked, "updated": updated, "cancelled": cancelled}
+def _run_outlook_poll_safely(meetings: list[dict], schools_map: dict) -> None:
+    try:
+        _run_outlook_poll(meetings, schools_map)
+    except Exception as exc:
+        logger.error("poll_outlook_changes background run failed: %s", exc, exc_info=True)
 
 
 @router.get("/meetings/{meeting_id}/reminder-status")
