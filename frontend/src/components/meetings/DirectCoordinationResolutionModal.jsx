@@ -4,6 +4,9 @@ import { useFocusTrap } from "../../hooks/useFocusTrap";
 import { buildSchoolContacts } from "./schoolContacts";
 import { COORDINATOR_ROLE_FIELDS, SLOT_LABELS, resolveMeetingCoordinatorForSlot } from "./meetingCoordinatorSlots";
 
+// Tags school-data writes for the school card's "תיעוד פעולות" log (backend school_activity.py).
+const SURFACE_HEADERS = { headers: { "X-Client-Surface": "task_resolution" } };
+
 // buildSchoolContacts uses "finance" as its participant key, while the meeting-coordinator
 // ref convention (mirrored from schools_router.py) uses "finance_contact" — deliberately
 // separate key spaces, see schoolContacts.js.
@@ -70,7 +73,7 @@ export function DirectCoordinationResolutionModal({ school, neededSlots, partici
         [fields.email]: draft.email.trim(),
         meeting_coordinators: { ...(school.meeting_coordinators || {}), [slot]: draft.role },
       };
-      await axios.put(`/schools/${school.id}`, patch);
+      await axios.put(`/schools/${school.id}`, patch, SURFACE_HEADERS);
       onSchoolUpdate(patch);
       setSlotDrafts(prev => { const next = { ...prev }; delete next[slot]; return next; });
     } catch {
@@ -102,7 +105,7 @@ export function DirectCoordinationResolutionModal({ school, neededSlots, partici
         [fields.phone]: draft.phone?.trim() || null,
         [fields.email]: draft.email.trim(),
       };
-      await axios.put(`/schools/${school.id}`, patch);
+      await axios.put(`/schools/${school.id}`, patch, SURFACE_HEADERS);
       onSchoolUpdate(patch);
       setParticipantDrafts(prev => {
         const next = { ...prev };

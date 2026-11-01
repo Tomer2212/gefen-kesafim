@@ -21,6 +21,7 @@ from pydantic import BaseModel
 
 import booking_token_logic
 import graph_client
+import school_activity
 import task_logic
 import whatsapp_twilio
 from routers import schools_router as _schools_router
@@ -772,7 +773,7 @@ async def import_missing_contacts(user: Annotated[dict, Depends(get_current_user
         symbol = str(row[1] or "").strip().split(".")[0] if len(row) > 1 else ""
         if not symbol:
             continue
-        school_rows = db.table("schools").select("id").eq("org_id", user["org_id"]).eq("symbol", symbol).execute().data or []
+        school_rows = db.table("schools").select(school_activity.TRACKED_SCHOOL_SELECT).eq("org_id", user["org_id"]).eq("symbol", symbol).execute().data or []
         if not school_rows:
             errors.append(f"שורה {i}: לא נמצא בית ספר עם סמל מוסד '{symbol}'")
             continue
@@ -783,6 +784,10 @@ async def import_missing_contacts(user: Annotated[dict, Depends(get_current_user
                 patch[field] = str(row[cell_idx]).strip()
         if patch:
             db.table("schools").update(patch).eq("id", school_rows[0]["id"]).execute()
+            school_activity.log_school_activity(
+                db, school_id=school_rows[0]["id"], org_id=user["org_id"], actor_id=user["id"],
+                source="tasks_contacts_import", action="updated", before=school_rows[0], after=patch,
+            )
             updated += 1
     return {"updated": updated, "errors": errors}
 
@@ -2279,6 +2284,10 @@ def put_school_contact_info(task_id: str, school_id: str, body: ContactInfoIn, u
         patch[phone_f] = body.phone
     if patch:
         db.table("schools").update(patch).eq("id", school_id).eq("org_id", user["org_id"]).execute()
+        school_activity.log_school_activity(
+            db, school_id=school_id, org_id=user["org_id"], actor_id=user["id"],
+            source="task_resolution", action="updated", before=school, after=patch,
+        )
     return {"ok": True, "resolved_role": resolved_role}
 
 

@@ -379,7 +379,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
       stage_scope: draft.stage_scope || null,
     };
     try {
-      const res = await axios.put(`/schools/${draft.school_id}/meetings/${draft.id}`, payload);
+      const res = await axios.put(`/schools/${draft.school_id}/meetings/${draft.id}`, payload, { headers: { "X-Client-Surface": "admin" } });
       const saved = { ...res.data, advisor_profiles: draft.advisor_profiles || [], school_name: draft.school_name, school_symbol: draft.school_symbol, school_city: draft.school_city, school_id: draft.school_id };
       setMeetings(prev => prev.map(m => m.id === draft.id ? saved : m));
     } catch (err) {
@@ -440,7 +440,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
       ...(stageScope === "tichon" || stageScope === "chativa" || stageScope === "both" ? { stage_scope: stageScope } : {}),
     };
     try {
-      const res = await axios.post(`/schools/${school.id}/meetings`, payload);
+      const res = await axios.post(`/schools/${school.id}/meetings`, payload, { headers: { "X-Client-Surface": "admin" } });
       const newMeeting = {
         ...res.data,
         advisor_profiles: defaultAdvisorProfiles,
@@ -499,7 +499,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
       academic_year: academicYear,
     };
     try {
-      const res = await axios.post(`/schools/${school.id}/meetings`, payload);
+      const res = await axios.post(`/schools/${school.id}/meetings`, payload, { headers: { "X-Client-Surface": "admin" } });
       const newMeeting = {
         ...res.data,
         advisor_profiles: [{ id: advisorId, full_name: advisorFullName }],
@@ -1114,6 +1114,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
         <div className="relative">
           {error && <p role="alert" className="text-red-600 text-sm mb-2">{error}</p>}
           <MeetingsTable
+            clientSurface="admin"
             meetings={displayedMeetings}
             usersWithAccessFor={usersWithAccessFor}
             usersWithoutAccessFor={usersWithoutAccessFor}

@@ -5,6 +5,9 @@ import { MEETING_SERVICE_TYPE_LABELS, formatDateDMY } from "./taskShared";
 import { DURATION_OPTIONS, formatDuration } from "./ConditionGroupsEditor";
 import { SLOT_LABELS } from "../meetings/meetingCoordinatorSlots";
 
+// Tags school-data writes for the school card's "תיעוד פעולות" log (backend school_activity.py).
+const SURFACE_HEADERS = { headers: { "X-Client-Surface": "task_resolution" } };
+
 // Fallback labels only — round 8: the backend sends a per-school school.participants.role_labels
 // map (aware of stage/principal_same_person, e.g. "מנהל/ת חט\"ע" vs "מנהל/ת חט\"ב"), which is
 // preferred wherever available so this file doesn't need to duplicate that logic.
@@ -201,7 +204,7 @@ export default function TaskMeetingResolutionModal({
         [fields.name]: draft.name.trim(),
         [fields.phone]: draft.phone?.trim() || null,
         [fields.email]: draft.email?.trim() || null,
-      });
+      }, SURFACE_HEADERS);
       markResolved(key);
       // Cross-resolve: a name + the channel field for this role also satisfies the
       // coordinator cascade directly (it tries principal/secretary/finance_contact regardless
@@ -258,7 +261,7 @@ export default function TaskMeetingResolutionModal({
         [`${draft.role}_email`]: draft.email?.trim() || null,
         meeting_coordinator: draft.role,
         meeting_coordinators: coordinators,
-      });
+      }, SURFACE_HEADERS);
       markResolved(key);
       // Cross-resolve the other direction: if this same role was also flagged as a missing
       // meeting participant, this save already fixed it too.
@@ -283,7 +286,7 @@ export default function TaskMeetingResolutionModal({
     setSavingKey(key);
     setSaveError(null);
     try {
-      await axios.post(`/schools/${school.school_id}/advisors/${type}`, { advisor_id: advisorId });
+      await axios.post(`/schools/${school.school_id}/advisors/${type}`, { advisor_id: advisorId }, SURFACE_HEADERS);
       markResolved(key);
     } catch {
       setSaveError(`שמירת היועץ עבור ${school.school_name} נכשלה — נסה שוב.`);
@@ -308,7 +311,7 @@ export default function TaskMeetingResolutionModal({
     setSavingKey(key);
     setSaveError(null);
     try {
-      await axios.put(`/schools/${school.school_id}/year-admin-data`, { [`meeting_duration_${type}`]: Number(minutes) }, { params: { academic_year: academicYear } });
+      await axios.put(`/schools/${school.school_id}/year-admin-data`, { [`meeting_duration_${type}`]: Number(minutes) }, { params: { academic_year: academicYear }, ...SURFACE_HEADERS });
       markResolved(key);
     } catch {
       setSaveError(`שמירת משך הפגישה עבור ${school.school_name} נכשלה — נסה שוב.`);

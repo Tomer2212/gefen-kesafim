@@ -5,7 +5,7 @@ import tempfile
 import time
 import traceback
 import uuid
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Annotated
 
@@ -1309,6 +1309,29 @@ async def retry_finance(
 # Background processing pipeline
 # ---------------------------------------------------------------------------
 
+def _record_check_activity(db, log_id: str, run_id: str, user_id: str, kind: str, at: str | None, files: dict) -> None:
+    """Appends (or replaces, keyed by run_id) one event in check_logs.activity — the
+    per-check "who did what, when" trail shown in the history table's "מבצע הבדיקה"
+    column. Keyed by run_id because _save_check_log runs more than once for the same
+    run (process, then classify/retry-finance), which must not look like extra updates.
+    Callers wrap this in a non-fatal try: it must never affect saving the check itself."""
+    cur = db.table("check_logs").select("activity").eq("id", log_id).execute()
+    existing = (cur.data or [{}])[0].get("activity") or []
+    # A repeat save for the same run (e.g. classify after a new check's first save, which
+    # callers pass as update_log_id) keeps the run's original kind and timestamp.
+    prev = next((e for e in existing if e.get("run_id") == run_id), None)
+    events = [e for e in existing if e.get("run_id") != run_id]
+    events.append({
+        "run_id": run_id,
+        "user_id": (prev or {}).get("user_id") or user_id or None,
+        "at": (prev or {}).get("at") or at or datetime.now(timezone.utc).isoformat(),
+        "kind": (prev or {}).get("kind") or kind,
+        "files": files,
+    })
+    events.sort(key=lambda e: e.get("at") or "")
+    db.table("check_logs").update({"activity": events}).eq("id", log_id).execute()
+
+
 def _save_check_log(run_id: str, user_id: str, school_id: str, gefen_account_id: str | None, update_log_id: str | None = None, run_data: dict | None = None, academic_year: str | None = None) -> None:
     run = run_data if run_data is not None else (_get_run(run_id) or {})
     if run.get("status") not in ("done", "saving"):
@@ -1405,6 +1428,22 @@ def _save_check_log(run_id: str, user_id: str, school_id: str, gefen_account_id:
                 run["saved_log_id"] = result.data[0]["id"]
                 saved_run_at = result.data[0].get("run_at")
                 _update_run(run_id, run)
+
+        try:
+            activity_log_id = update_log_id or run.get("saved_log_id")
+            if activity_log_id:
+                _record_check_activity(
+                    db, activity_log_id, run_id, user_id,
+                    "updated" if update_log_id else "created",
+                    None if update_log_id else saved_run_at,
+                    {
+                        "tikhnun": run.get("tikhnun_filenames") or [],
+                        "gefen": gefen_file_names,
+                        "finance": finance_file_name,
+                    },
+                )
+        except Exception as act_exc:
+            logger.warning("check activity record failed for log %s (non-fatal): %s", update_log_id or run.get("saved_log_id"), act_exc)
 
         year_final = academic_year or DEFAULT_ACADEMIC_YEAR
         _save_check_metrics(db, school_id, gefen_account_id, year_final, run)

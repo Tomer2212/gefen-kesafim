@@ -11,6 +11,7 @@ from uuid import uuid4
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
+import meeting_activity
 from auth import get_current_user
 from supabase_client import get_admin_client, reset_admin_client
 from routers.schools_router import _require_school_access_for_meeting_activity
@@ -191,7 +192,7 @@ async def upload_summary_recording(
         raise HTTPException(status_code=400, detail="סוג קובץ לא נתמך — יש להעלות קובץ שמע (mp3, m4a, wav וכו')")
 
     db = get_admin_client()
-    _require_meeting_access(db, user, meeting_id)
+    access_row = _require_meeting_access(db, user, meeting_id)
 
     tmp_dir = Path(tempfile.mkdtemp(prefix=f"meetingsummary_{meeting_id}_"))
     audio_path = tmp_dir / f"recording{ext}"
@@ -207,6 +208,11 @@ async def upload_summary_recording(
         "summary_updated_at": datetime.now(timezone.utc).isoformat(),
     }).eq("id", meeting_id).execute()
 
+    meeting_activity.log_meeting_activity(
+        db, meeting_id=meeting_id, school_id=(access_row or {}).get("school_id"), org_id=user["org_id"],
+        actor_id=user["id"], actor_type="user", source=None, action="summary_uploaded",
+        meta={"file_name": file.filename},
+    )
     background_tasks.add_task(_process_recording, meeting_id, tmp_dir, audio_path, api_key)
 
     return {"ok": True, "summary_status": "processing"}
@@ -241,6 +247,11 @@ def retry_summary(meeting_id: str, background_tasks: BackgroundTasks, user: Anno
         "summary_updated_at": datetime.now(timezone.utc).isoformat(),
     }).eq("id", meeting_id).execute()
 
+    meeting_activity.log_meeting_activity(
+        db, meeting_id=meeting_id, school_id=(meeting or {}).get("school_id"), org_id=user["org_id"],
+        actor_id=user["id"], actor_type="user", source=None, action="summary_uploaded",
+        meta={"retry": True},
+    )
     background_tasks.add_task(_process_recording, meeting_id, tmp_dir, audio_path, api_key)
 
     return {"ok": True, "summary_status": "processing"}

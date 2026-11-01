@@ -28,7 +28,10 @@ export default function MeetingReminderPopup({ reminder, onDismiss, onSuccess })
     setStatusUpdating(true);
     setStatusError(false);
     try {
-      await axios.put(`/schools/${reminder.school_id}/meetings/${reminder.id}`, { status });
+      // PATCH, not PUT: the full PUT rewrites participants/advisor_ids from the body, so a
+      // status-only PUT would wipe them.
+      await axios.patch(`/schools/${reminder.school_id}/meetings/${reminder.id}`, { status },
+        { headers: { "X-Client-Surface": "status_popup" } });
       onSuccess?.(`סטטוס הפגישה עודכן בהצלחה ל${STATUS_LABEL[status] || status}!`);
       onDismiss(reminder.id);
     } catch {

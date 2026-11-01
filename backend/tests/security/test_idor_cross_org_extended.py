@@ -1223,3 +1223,69 @@ def test_bulk_school_field_same_org_still_works(org_b_client, admin_db):
         assert r.json()["updated"][0]["data"]["finance_software_other_text"] == "בדיקה"
     finally:
         admin_db.table("schools").update(before).eq("id", ORG_B_SCHOOL_ID).execute()
+
+
+# ---------------------------------------------------------------------------
+# Meeting activity log — GET /schools/{school_id}/meetings/{meeting_id}/activity
+# ---------------------------------------------------------------------------
+
+def test_get_meeting_activity_cross_org_rejected(org_b_client):
+    resp = org_b_client.get(
+        f"/schools/{ORG_A_MEETING_SCHOOL_ID}/meetings/{ORG_A_MEETING_ID}/activity"
+    )
+    assert resp.status_code in (403, 404), resp.text
+
+
+def test_get_meeting_activity_same_org_still_works(org_a_client):
+    resp = org_a_client.get(
+        f"/schools/{ORG_A_MEETING_SCHOOL_ID}/meetings/{ORG_A_MEETING_ID}/activity"
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert isinstance(body["events"], list) and body["events"], body
+    assert body["events"][-1]["action"] == "created"
+
+
+# --- School-card activity log ("תיעוד פעולות") + update-request org checks ---------------------
+
+ORG_A_RESOLVED_UPDATE_REQUEST_ID = "de873156-0fe8-423f-a26c-181168b25379"  # approved, org A school
+
+
+def test_get_school_activity_cross_org_rejected(org_b_client):
+    resp = org_b_client.get(f"/schools/{ORG_A_SCHOOL_ID}/activity")
+    assert resp.status_code in (403, 404), resp.text
+
+
+def test_get_school_activity_same_org_still_works(org_a_client):
+    resp = org_a_client.get(f"/schools/{ORG_A_SCHOOL_ID}/activity")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert isinstance(body["events"], list) and body["events"], body
+    assert any(e["kind"] == "created" for e in body["events"])
+
+
+def test_submit_update_request_cross_org_rejected(org_b_client):
+    # Rejected before any insert — no side effects. (No same-org twin: a successful submit
+    # would create a real pending request + approver notifications in live data.)
+    resp = org_b_client.post(
+        f"/schools/{ORG_A_SCHOOL_ID}/update-requests",
+        json={"proposed_changes": {"city": "x"}},
+    )
+    assert resp.status_code in (403, 404), resp.text
+
+
+def test_review_update_request_cross_org_rejected(org_b_client):
+    resp = org_b_client.patch(
+        f"/schools/update-requests/{ORG_A_RESOLVED_UPDATE_REQUEST_ID}",
+        json={"status": "rejected"},
+    )
+    assert resp.status_code in (403, 404), resp.text
+
+
+def test_review_update_request_same_org_reaches_status_check(org_a_client):
+    # Same org passes the org check and stops at "already resolved" (400) — nothing is written.
+    resp = org_a_client.patch(
+        f"/schools/update-requests/{ORG_A_RESOLVED_UPDATE_REQUEST_ID}",
+        json={"status": "rejected"},
+    )
+    assert resp.status_code in (400, 403), resp.text

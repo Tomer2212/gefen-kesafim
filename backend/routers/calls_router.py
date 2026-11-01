@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+import school_activity
 from auth import get_current_user
 from integrations.calls import exm_adapter, voicenter_adapter
 from supabase_client import get_admin_client, reset_admin_client
@@ -1387,6 +1388,10 @@ def save_call_contact(
     if can_direct:
         try:
             db.table("schools").update({"extra_contacts": next_contacts}).eq("id", body.school_id).execute()
+            school_activity.log_school_activity(
+                db, school_id=body.school_id, org_id=user["org_id"], actor_id=user["id"], source="calls",
+                action="updated", before={"extra_contacts": existing}, after={"extra_contacts": next_contacts},
+            )
         except Exception as exc:
             logger.error("save_call_contact: direct update failed for school=%s: %s", body.school_id, exc, exc_info=True)
             raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
@@ -1402,6 +1407,7 @@ def save_call_contact(
             "school_id": body.school_id,
             "requester_id": user["id"],
             "proposed_changes": {"extra_contacts": next_contacts},
+            "original_values": {"extra_contacts": existing},
             "status": "pending",
         }).execute()
         req_id = row.data[0]["id"]

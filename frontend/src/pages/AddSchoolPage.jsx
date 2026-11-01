@@ -12,6 +12,9 @@ import { SLOT_LABELS, slotsForSchool } from "../components/meetings/meetingCoord
 import { GEFEN_FILES_SLOT_LABELS, gefenFilesSlotsForSchool, resolveGefenFilesResponsibleForSlot } from "../components/meetings/gefenFilesResponsibleSlots";
 import { QuestionTooltip } from "../components/QuestionTooltip";
 
+// Tags school-data writes for the school card's "תיעוד פעולות" log (backend school_activity.py).
+const SURFACE_HEADERS = { headers: { "X-Client-Surface": "add_school" } };
+
 // ── Shared visual language with SchoolPage.jsx's "פרטי בית הספר" tab ──
 const SECTION_TITLE_CLS = "text-[23px] font-bold text-black flex items-center gap-2";
 function sectionIcon(Icon, accentCls) {
@@ -503,7 +506,7 @@ export default function AddSchoolPage() {
         : parseInt(schoolForm.student_count, 10);
       let res;
       try {
-        res = await axios.post("/schools/", { ...schoolForm, ...chativaSync, ...legacyCoordinatorSync, stage: schoolStage, student_count: studentCountValue });
+        res = await axios.post("/schools/", { ...schoolForm, ...chativaSync, ...legacyCoordinatorSync, stage: schoolStage, student_count: studentCountValue }, SURFACE_HEADERS);
       } catch (err) {
         const detail = err?.response?.data?.detail;
         if (err?.response?.status === 409 && detail?.code === "duplicate_symbol") {
@@ -528,14 +531,14 @@ export default function AddSchoolPage() {
       if (canSeeAllUsers) {
         for (const type of ["gefen", "current", "district"]) {
           for (const advisorId of typedAdvisorIds[type]) {
-            await axios.post(`/schools/${newId}/advisors/${type}`, { advisor_id: advisorId });
+            await axios.post(`/schools/${newId}/advisors/${type}`, { advisor_id: advisorId }, SURFACE_HEADERS);
           }
         }
-        await axios.put(`/schools/${newId}/year-admin-data`, { ...yearAdminForm, academic_year: DEFAULT_ACADEMIC_YEAR });
+        await axios.put(`/schools/${newId}/year-admin-data`, { ...yearAdminForm, academic_year: DEFAULT_ACADEMIC_YEAR }, SURFACE_HEADERS);
       } else if (yearAdminForm.order_amount_gefen != null) {
         // Advisor role: only "מחיר כולל מע\"מ" is editable, matching the backend's allowlist
         // for non-manager callers of PUT .../year-admin-data.
-        await axios.put(`/schools/${newId}/year-admin-data`, { order_amount_gefen: yearAdminForm.order_amount_gefen, academic_year: DEFAULT_ACADEMIC_YEAR });
+        await axios.put(`/schools/${newId}/year-admin-data`, { order_amount_gefen: yearAdminForm.order_amount_gefen, academic_year: DEFAULT_ACADEMIC_YEAR }, SURFACE_HEADERS);
       }
 
       navigate(`/school/${newId}`);

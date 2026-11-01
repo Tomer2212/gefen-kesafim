@@ -2,6 +2,9 @@ import { useEffect, useState } from "react";
 import axios from "axios";
 import { goalShortLabel } from "../tasks/taskShared";
 
+// Tags school-data writes for the school card's "תיעוד פעולות" log (backend school_activity.py).
+const SURFACE_HEADERS = { headers: { "X-Client-Surface": "task_resolution" } };
+
 // Extracts the single condition a field-kind success_metric's criteria tree must reduce to for
 // inline editing to be possible ("one group, one condition") — anything more complex (multiple
 // AND'd conditions, or multiple OR'd groups) has no single obvious "the field to edit" and falls
@@ -209,7 +212,7 @@ function YearFieldMetricEditor({ cond, fieldDef, schoolId, academicYear, onSaved
   async function save(newValue) {
     setSaving(true);
     try {
-      await axios.put(`/schools/${schoolId}/year-admin-data`, { [cond.field]: newValue }, { params: { academic_year: academicYear } });
+      await axios.put(`/schools/${schoolId}/year-admin-data`, { [cond.field]: newValue }, { params: { academic_year: academicYear }, ...SURFACE_HEADERS });
       setValue(newValue);
       onSaved?.();
     } finally {

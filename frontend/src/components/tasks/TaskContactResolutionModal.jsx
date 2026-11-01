@@ -4,6 +4,9 @@ import { useFocusTrap } from "../../hooks/useFocusTrap";
 import { RECIPIENT_ROLE_OPTIONS } from "./taskShared";
 import { slotsForSchool } from "../meetings/meetingCoordinatorSlots";
 
+// Tags school-data writes for the school card's "תיעוד פעולות" log (backend school_activity.py).
+const SURFACE_HEADERS = { headers: { "X-Client-Surface": "task_resolution" } };
+
 const ROLE_OPTIONS = [
   { value: "principal", label: "מנהל/ת" },
   { value: "secretary", label: "מנהלנ/ית" },
@@ -123,7 +126,7 @@ export default function TaskContactResolutionModal({
         body.meeting_coordinator = draft.role;
         body.meeting_coordinators = coordinators;
       }
-      await axios.put(`/schools/${school.school_id}`, body);
+      await axios.put(`/schools/${school.school_id}`, body, SURFACE_HEADERS);
       setResolvedIds(prev => new Set(prev).add(school.school_id));
     } catch {
       setSaveError(`שמירת איש הקשר עבור ${school.school_name} נכשלה — נסה שוב.`);

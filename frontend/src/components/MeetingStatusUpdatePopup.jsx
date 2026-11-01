@@ -40,7 +40,7 @@ export default function MeetingStatusUpdatePopup({ reminder, onDismiss, userName
     try {
       await axios.patch(`/schools/${reminder.school_id}/meetings/${reminder.id}`, {
         status: "completed",
-      });
+      }, { headers: { "X-Client-Surface": "status_popup" } });
       onSuccess?.("סטטוס הפגישה עודכן בהצלחה לבוצעה!");
       onDismiss(reminder.id);
     } catch {
@@ -57,7 +57,7 @@ export default function MeetingStatusUpdatePopup({ reminder, onDismiss, userName
       await axios.patch(`/schools/${reminder.school_id}/meetings/${reminder.id}`, {
         status: selectedStatus,
         notes: appendNote(reminder.notes || "", noteText.trim(), userName),
-      });
+      }, { headers: { "X-Client-Surface": "status_popup" } });
       onSuccess?.(`סטטוס הפגישה עודכן בהצלחה ל${STATUS_LABEL[selectedStatus] || selectedStatus}!`);
       onDismiss(reminder.id);
     } catch {
@@ -75,7 +75,7 @@ export default function MeetingStatusUpdatePopup({ reminder, onDismiss, userName
         status: "completed",
         start_time: newStartTime,
         end_time: newEndTime,
-      });
+      }, { headers: { "X-Client-Surface": "status_popup" } });
       onSuccess?.("סטטוס הפגישה עודכן בהצלחה לבוצעה!");
       onDismiss(reminder.id);
     } catch {

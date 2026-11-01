@@ -17,7 +17,7 @@ from uuid import uuid4
 
 import httpx
 from bidi.algorithm import get_display
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, UploadFile, File, Form
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import Response
 from openpyxl import load_workbook, Workbook
 from pydantic import BaseModel
@@ -57,6 +57,8 @@ from meeting_labels import (
     resolve_participant_role_token,
 )
 from meeting_upload_logic import build_upload_checklist, get_or_create_upload_token
+import meeting_activity
+import school_activity
 from supabase_client import get_admin_client, reset_admin_client
 
 logger = logging.getLogger(__name__)
@@ -1186,6 +1188,7 @@ def _find_existing_school_by_symbol(db, org_id: str, symbol: str | None) -> dict
 def create_school(
     body: SchoolIn,
     user: Annotated[dict, Depends(get_current_user)],
+    x_client_surface: Annotated[str | None, Header()] = None,
 ):
     if user["role"] not in ("owner", "manager", "advisor"):
         raise HTTPException(status_code=403, detail="אין הרשאה לפעולה זו")
@@ -1214,6 +1217,10 @@ def create_school(
     row = db.table("schools").insert(payload).execute()
     new_school = row.data[0]
     new_school_id = new_school["id"]
+    school_activity.log_school_activity(
+        db, school_id=new_school_id, org_id=user["org_id"], actor_id=user["id"],
+        source=school_activity.client_surface(x_client_surface), action="created", after=new_school,
+    )
     # Auto-assign advisor creators so subsequent account creation is authorized
     if user["role"] == "advisor":
         try:
@@ -1254,6 +1261,7 @@ def create_school(
 def bulk_update_school_field(
     body: BulkSchoolFieldIn,
     user: Annotated[dict, Depends(get_current_user)],
+    x_client_surface: Annotated[str | None, Header()] = None,
 ):
     """Applies one field+value to many `schools` rows in a single upsert call. Used by
     AdminPage's bulk-edit — and its single-cell saves — for columns that live directly on
@@ -1290,6 +1298,7 @@ def bulk_update_school_field(
             ids_by_value: dict = {}
             for item in ok_items:
                 ids_by_value.setdefault(item.value, []).append(item.school_id)
+            before_by_id = school_activity.fetch_schools(db, [item.school_id for item in ok_items])
             updated = []
             for value, ids in ids_by_value.items():
                 patch = {body.field: value}
@@ -1302,6 +1311,12 @@ def bulk_update_school_field(
                     .execute()
                 )
                 updated.extend({"school_id": r["id"], "data": r} for r in (res.data or []))
+            school_activity.log_school_activity_bulk(db, [
+                dict(school_id=u["school_id"], org_id=user["org_id"], actor_id=user["id"],
+                     source=school_activity.client_surface(x_client_surface), action="updated",
+                     before=before_by_id.get(u["school_id"]), after=u["data"])
+                for u in updated
+            ])
             return {"field": body.field, "updated": updated, "failed": failed}
         except HTTPException:
             raise
@@ -1321,6 +1336,7 @@ def update_school(
     body: SchoolIn,
     user: Annotated[dict, Depends(get_current_user)],
     background_tasks: BackgroundTasks,
+    x_client_surface: Annotated[str | None, Header()] = None,
 ):
     db = get_admin_client()
     if user["role"] not in ("owner", "manager"):
@@ -1339,6 +1355,7 @@ def update_school(
     old_school = db.table("schools").select(f"name, restrict_access_to, {_CONTACT_PHONES_SELECT}").eq("id", school_id).eq("org_id", user["org_id"]).execute()
     old_restrict = set(old_school.data[0].get("restrict_access_to") or []) if old_school.data else set()
     school_name = old_school.data[0]["name"] if old_school.data else "בית ספר"
+    activity_before = school_activity.fetch_school(db, school_id) if old_school.data else None
 
     update_data = body.model_dump(exclude_none=True)
     # Allow explicitly clearing restrict_access_to (null = כולם)
@@ -1353,6 +1370,11 @@ def update_school(
     )
     if not row.data:
         raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
+    school_activity.log_school_activity(
+        db, school_id=school_id, org_id=user["org_id"], actor_id=user["id"],
+        source=school_activity.client_surface(x_client_surface), action="updated",
+        before=activity_before, after=row.data[0],
+    )
 
     # A contact phone changed → calls with that number may belong to past meetings too.
     if _school_phone_suffixes(old_school.data[0] if old_school.data else None) != _school_phone_suffixes(row.data[0]):
@@ -1415,6 +1437,11 @@ def delete_school(
         "deleted_at": datetime.now(timezone.utc).isoformat(),
         "deleted_by": user["id"],
     }).eq("id", school_id).eq("org_id", user["org_id"]).execute()
+    if school_row.data:
+        school_activity.log_school_activity(
+            db, school_id=school_id, org_id=user["org_id"], actor_id=user["id"],
+            source=None, action="deleted",
+        )
 
     # Cancel the Outlook events for this school's future meetings — a deleted school's
     # meetings shouldn't keep sitting on advisors' calendars. Restoring the school
@@ -1464,13 +1491,18 @@ def restore_school(
     for attempt in range(2):
         try:
             db = get_admin_client()
-            db.table("schools").update({
+            restored = db.table("schools").update({
                 "status": "active",
                 "deleted_at": None,
                 "restored_by": user["id"],
                 # A restored "historical" import stub becomes a normal active school.
                 "created_via": None,
             }).eq("id", school_id).eq("org_id", user["org_id"]).execute()
+            if restored.data:
+                school_activity.log_school_activity(
+                    db, school_id=school_id, org_id=user["org_id"], actor_id=user["id"],
+                    source=None, action="restored",
+                )
             break
         except Exception as exc:
             if attempt == 0:
@@ -1721,6 +1753,7 @@ def upsert_year_admin_data(
     body: SchoolYearAdminDataIn,
     user: Annotated[dict, Depends(get_current_user)],
     academic_year: str = DEFAULT_ACADEMIC_YEAR,
+    x_client_surface: Annotated[str | None, Header()] = None,
 ):
     from datetime import datetime, timezone
 
@@ -1733,12 +1766,14 @@ def upsert_year_admin_data(
 
             old_row = (
                 db.table("school_year_admin_data")
-                .select("order_amount_gefen")
+                .select("school_id, " + ", ".join(school_activity.TRACKED_YEAR_FIELDS))
                 .eq("school_id", school_id)
                 .eq("academic_year", academic_year)
                 .execute()
             )
             old_amount = old_row.data[0]["order_amount_gefen"] if old_row.data else None
+            activity_before = dict(old_row.data[0]) if old_row.data else {"school_id": school_id}
+            _fill_inherited_year_admin(db, [activity_before], academic_year)
 
             if "order_amount_gefen" in update_data and update_data["order_amount_gefen"] != old_amount:
                 update_data["order_amount_gefen_updated_by"] = user["id"]
@@ -1756,6 +1791,12 @@ def upsert_year_admin_data(
             data = row.data[0] if row.data else update_data
             _attach_updater_names(db, [data])
             _fill_inherited_year_admin(db, [data], academic_year)
+            school_activity.log_school_activity(
+                db, school_id=school_id, org_id=user["org_id"], actor_id=user["id"],
+                source=school_activity.client_surface(x_client_surface), action="updated",
+                before=activity_before, after=data, fields=school_activity.TRACKED_YEAR_FIELDS,
+                academic_year=academic_year,
+            )
             return data
         except HTTPException:
             raise
@@ -1773,6 +1814,7 @@ def upsert_year_admin_data(
 def bulk_upsert_year_admin_data(
     body: BulkYearAdminDataIn,
     user: Annotated[dict, Depends(get_current_user)],
+    x_client_surface: Annotated[str | None, Header()] = None,
 ):
     """Applies one field+value to many schools' year-admin-data rows in a single upsert call.
     Each item carries its own `value` (not a single shared value) so the exact same endpoint
@@ -1798,6 +1840,25 @@ def bulk_upsert_year_admin_data(
             if not ok_items:
                 return {"field": body.field, "academic_year": body.academic_year, "updated": [], "failed": failed}
 
+            tracked = body.field in school_activity.TRACKED_YEAR_FIELDS
+            before_by_school: dict = {}
+            if tracked:
+                try:
+                    ok_ids = [item.school_id for item in ok_items]
+                    prev = (
+                        db.table("school_year_admin_data")
+                        .select("school_id, " + ", ".join(school_activity.TRACKED_YEAR_FIELDS))
+                        .eq("academic_year", body.academic_year)
+                        .in_("school_id", ok_ids)
+                        .execute()
+                    ).data or []
+                    before_by_school = {sid: {"school_id": sid} for sid in ok_ids}
+                    before_by_school.update({r["school_id"]: dict(r) for r in prev})
+                    _fill_inherited_year_admin(db, list(before_by_school.values()), body.academic_year)
+                except Exception as exc:
+                    logger.warning("year admin activity before-state read failed (non-fatal): %s", exc)
+                    before_by_school = {}
+
             now = datetime.now(timezone.utc).isoformat()
             rows = [
                 {
@@ -1817,6 +1878,14 @@ def bulk_upsert_year_admin_data(
             _attach_updater_names(db, list(data_by_school.values()))
             _fill_inherited_year_admin(db, list(data_by_school.values()), body.academic_year)
             updated = [{"school_id": sid, "data": d} for sid, d in data_by_school.items()]
+            if tracked:
+                school_activity.log_school_activity_bulk(db, [
+                    dict(school_id=sid, org_id=user["org_id"], actor_id=user["id"],
+                         source=school_activity.client_surface(x_client_surface), action="updated",
+                         before=before_by_school.get(sid), after={body.field: d.get(body.field)},
+                         fields=school_activity.TRACKED_YEAR_FIELDS, academic_year=body.academic_year)
+                    for sid, d in data_by_school.items()
+                ])
             return {"field": body.field, "academic_year": body.academic_year, "updated": updated, "failed": failed}
         except HTTPException:
             raise
@@ -3264,6 +3333,24 @@ def _typed_advisor_table(service_type: str) -> str:
     return table
 
 
+def _log_typed_advisor_changes(db, user: dict, service_type: str, before: dict | None,
+                               school_ids: list[str], source: str | None) -> None:
+    """Logs `advisors_<type>` list changes (before → current DB state) for the given schools.
+    Non-fatal; `before` is None when its read failed (then nothing is logged)."""
+    if before is None:
+        return
+    after = school_activity.fetch_typed_advisors(db, _TYPED_ADVISOR_TABLES[service_type], school_ids)
+    if after is None:
+        return
+    field = f"advisors_{service_type}"
+    school_activity.log_school_activity_bulk(db, [
+        dict(school_id=sid, org_id=user["org_id"], actor_id=user["id"], source=source,
+             action="updated", before={field: before.get(sid, [])}, after={field: after.get(sid, [])},
+             fields=(field,))
+        for sid in school_ids
+    ])
+
+
 @router.get("/{school_id}/advisors/{service_type}")
 def list_typed_advisors(
     school_id: str,
@@ -3303,6 +3390,7 @@ def assign_typed_advisor(
     service_type: str,
     body: AdvisorAssignIn,
     user: Annotated[dict, Depends(get_current_user)],
+    x_client_surface: Annotated[str | None, Header()] = None,
 ):
     _require_manager(user)
     table = _typed_advisor_table(service_type)
@@ -3310,8 +3398,11 @@ def assign_typed_advisor(
     school_check = db.table("schools").select("id").eq("id", school_id).eq("org_id", user["org_id"]).execute()
     if not school_check.data:
         raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
+    advisors_before = school_activity.fetch_typed_advisors(db, table, [school_id])
     db.table(table).upsert({"advisor_id": body.advisor_id, "school_id": school_id}).execute()
     db.table("advisor_schools").upsert({"advisor_id": body.advisor_id, "school_id": school_id}).execute()
+    _log_typed_advisor_changes(db, user, service_type, advisors_before, [school_id],
+                               school_activity.client_surface(x_client_surface))
     try:
         school_row = db.table("schools").select("name").eq("id", school_id).execute()
         school_name = school_row.data[0]["name"] if school_row.data else "בית ספר"
@@ -3337,6 +3428,7 @@ def unassign_typed_advisor(
     service_type: str,
     advisor_id: str,
     user: Annotated[dict, Depends(get_current_user)],
+    x_client_surface: Annotated[str | None, Header()] = None,
 ):
     _require_manager(user)
     table = _typed_advisor_table(service_type)
@@ -3345,7 +3437,10 @@ def unassign_typed_advisor(
     if not school_check.data:
         raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
 
+    advisors_before = school_activity.fetch_typed_advisors(db, table, [school_id])
     db.table(table).delete().eq("advisor_id", advisor_id).eq("school_id", school_id).execute()
+    _log_typed_advisor_changes(db, user, service_type, advisors_before, [school_id],
+                               school_activity.client_surface(x_client_surface))
 
     # Only drop the advisor from the general advisor_schools access table if they're no longer
     # in ANY of the three typed lists for this school, and never if they're the school's last
@@ -3396,6 +3491,7 @@ def bulk_assign_typed_advisor(
     service_type: str,
     body: BulkAdvisorAssignIn,
     user: Annotated[dict, Depends(get_current_user)],
+    x_client_surface: Annotated[str | None, Header()] = None,
 ):
     """Adds one advisor to many schools' typed advisor list in a single call — ADDITIVE only,
     never removes other advisors already assigned there. Returns which schools were newly
@@ -3429,8 +3525,11 @@ def bulk_assign_typed_advisor(
 
     if newly_assigned:
         rows = [{"advisor_id": body.advisor_id, "school_id": sid} for sid in newly_assigned]
+        advisors_before = school_activity.fetch_typed_advisors(db, table, newly_assigned)
         db.table(table).upsert(rows).execute()
         db.table("advisor_schools").upsert(rows).execute()
+        _log_typed_advisor_changes(db, user, service_type, advisors_before, newly_assigned,
+                                   school_activity.client_surface(x_client_surface))
         try:
             school_rows = db.table("schools").select("id, name").in_("id", newly_assigned).execute()
             names = {r["id"]: r["name"] for r in (school_rows.data or [])}
@@ -3461,6 +3560,7 @@ def bulk_unassign_typed_advisor(
     service_type: str,
     body: BulkAdvisorUnassignIn,
     user: Annotated[dict, Depends(get_current_user)],
+    x_client_surface: Annotated[str | None, Header()] = None,
 ):
     """Used exclusively by the Undo of bulk_assign_typed_advisor — removes the advisor from
     exactly the given school_ids (the ones a prior bulk-assign newly added, never schools that
@@ -3479,7 +3579,10 @@ def bulk_unassign_typed_advisor(
     body.school_ids = [sid for sid in body.school_ids if sid in org_school_ids]
     if not body.school_ids:
         raise HTTPException(status_code=400, detail="לא נבחרו בתי ספר")
+    advisors_before = school_activity.fetch_typed_advisors(db, table, body.school_ids)
     db.table(table).delete().eq("advisor_id", body.advisor_id).in_("school_id", body.school_ids).execute()
+    _log_typed_advisor_changes(db, user, service_type, advisors_before, body.school_ids,
+                               school_activity.client_surface(x_client_surface))
 
     for school_id in body.school_ids:
         still_typed = False
@@ -3565,14 +3668,26 @@ def submit_update_request(
     user: Annotated[dict, Depends(get_current_user)],
 ):
     db = get_admin_client()
+    _require_school_in_org(db, user, school_id)
     is_delete_action = body.proposed_changes.get("_action") == "delete_school"
     if not is_delete_action and not _check_permission(db, user, "can_edit_school_directly"):
         if not _check_permission(db, user, "can_request_school_update"):
             raise HTTPException(status_code=403, detail="אין הרשאה להגיש בקשות עריכה")
+    # Snapshot the values being changed at submit time, so the school's activity log can show
+    # "before" for every requested field (also after the request is resolved). Non-fatal.
+    original_values = None
+    if not is_delete_action:
+        try:
+            snap = db.table("schools").select("*").eq("id", school_id).execute().data
+            if snap:
+                original_values = {k: snap[0].get(k) for k in body.proposed_changes if k != "_action"}
+        except Exception as exc:
+            logger.warning("update request original_values snapshot failed (non-fatal): %s", exc)
     row = db.table("school_update_requests").insert({
         "school_id": school_id,
         "requester_id": user["id"],
         "proposed_changes": body.proposed_changes,
+        "original_values": original_values,
         "status": "pending",
     }).execute()
     req_id = row.data[0]["id"]
@@ -3673,11 +3788,14 @@ def review_update_request(
             if not req_row.data:
                 raise HTTPException(status_code=404, detail="הבקשה לא נמצאה")
             req = req_row.data[0]
+            if req.get("school_id"):
+                school_row = db.table("schools").select("name").eq("id", req["school_id"]).eq("org_id", user["org_id"]).execute()
+                if not school_row.data:
+                    # Another org's request — never let a reviewer apply it to that org's school.
+                    raise HTTPException(status_code=404, detail="הבקשה לא נמצאה")
+                school_name = school_row.data[0]["name"]
             if req["status"] != "pending":
                 raise HTTPException(status_code=400, detail="הבקשה כבר טופלה")
-            if req.get("school_id"):
-                school_row = db.table("schools").select("name").eq("id", req["school_id"]).execute()
-                school_name = school_row.data[0]["name"] if school_row.data else "בית ספר"
             is_delete_req = req.get("proposed_changes", {}).get("_action") == "delete_school"
             break
         except HTTPException:
@@ -3706,6 +3824,10 @@ def review_update_request(
                         "deleted_by": user["id"],
                     }).eq("id", req["school_id"]).execute()
                     school_deleted = True
+                    school_activity.log_school_activity(
+                        db, school_id=req["school_id"], org_id=user["org_id"], actor_id=user["id"],
+                        source="update_request", action="deleted", request_id=req_id,
+                    )
                     break
                 except Exception as del_exc:
                     if del_attempt == 0:
@@ -3729,13 +3851,29 @@ def review_update_request(
                 if touches_phones:
                     old_res = db.table("schools").select(_CONTACT_PHONES_SELECT).eq("id", req["school_id"]).eq("org_id", user["org_id"]).execute()
                     old_phones = _school_phone_suffixes(old_res.data[0]) if old_res.data else None
+                activity_before = school_activity.fetch_school(db, req["school_id"])
                 updated = db.table("schools").update(changes).eq("id", req["school_id"]).execute()
+                if updated.data:
+                    school_activity.log_school_activity(
+                        db, school_id=req["school_id"], org_id=user["org_id"], actor_id=user["id"],
+                        source="update_request", action="updated", request_id=req_id,
+                        before=activity_before, after=updated.data[0],
+                    )
                 # A contact phone changed → calls with that number may belong to past meetings too.
                 if old_phones is not None and updated.data and _school_phone_suffixes(updated.data[0]) != old_phones:
                     background_tasks.add_task(_resync_school_meetings_after_contact_change, user["org_id"], req["school_id"])
 
     # Phase 3: update request status — AFTER physical action succeeds
     from datetime import datetime, timezone
+    # Per-field decision, persisted on the request so the school activity log can show
+    # "אושר/נדחה ע"י X" per row (partial approvals used to live only in notification data).
+    field_decisions = None
+    if not is_delete_req:
+        field_decisions = {
+            k: ("approved" if body.status == "approved"
+                and (body.approved_fields is None or k in body.approved_fields) else "rejected")
+            for k in (req.get("proposed_changes") or {}) if k != "_action"
+        }
     for status_attempt in range(2):
         try:
             db = get_admin_client()
@@ -3744,6 +3882,7 @@ def review_update_request(
                 "reviewer_id": user["id"],
                 "reviewer_note": body.reviewer_note,
                 "resolved_at": datetime.now(timezone.utc).isoformat(),
+                "field_decisions": field_decisions,
             }).eq("id", req_id).execute()
             break
         except Exception as exc:
@@ -4002,48 +4141,54 @@ def mark_notification_read(notification_id: str, user: Annotated[dict, Depends(g
 
 @router.get("/upcoming-meetings")
 def get_upcoming_meetings(user: Annotated[dict, Depends(get_current_user)]):
-    """Return today's meetings for the current user (for frontend meeting reminders)."""
-    from datetime import datetime, timezone
-    today = datetime.now(timezone.utc).date().isoformat()
-    try:
-        db = get_admin_client()
-        if user["role"] in ("owner", "manager"):
-            school_ids_res = db.table("schools").select("id").eq("org_id", user["org_id"]).execute()
-            school_ids = [r["id"] for r in (school_ids_res.data or [])]
-        else:
-            assigned = db.table("advisor_schools").select("school_id").eq("advisor_id", user["id"]).execute()
-            school_ids = [r["school_id"] for r in (assigned.data or [])]
+    """Return today's meetings where the current user is a performing advisor (for frontend
+    meeting reminders). Same for every role — an owner/manager must NOT get reminder popups
+    for other advisors' meetings just because they can see the whole org."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo("Asia/Jerusalem")).date().isoformat()
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            # Same "my meetings" definition as list_my_meetings: org-scoped via the embedded
+            # inner-join, filtered DB-side on advisor_ids containing the caller.
+            meetings = (
+                db.table("meetings")
+                .select("id, school_id, meeting_date, start_time, end_time, status, advisor_ids, notes, schools!inner(org_id, name)")
+                .eq("schools.org_id", user["org_id"])
+                .filter("advisor_ids", "cs", json.dumps([user["id"]]))
+                .eq("meeting_date", today)
+                # Both consumers (pre-meeting popup + end-of-meeting status popup) are only
+                # meaningful for a still-scheduled meeting — never remind about a cancelled one.
+                .eq("status", "scheduled")
+                .execute()
+                .data or []
+            )
+            break
+        except Exception as exc:
+            if attempt == 0:
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.warning("get_upcoming_meetings failed after 2 attempts (non-fatal): %s", exc)
+                return []
 
-        if not school_ids:
-            return []
-
-        meetings_res = (
-            db.table("meetings")
-            .select("id, school_id, meeting_date, start_time, end_time, status, advisor_ids, notes")
-            .in_("school_id", school_ids)
-            .eq("meeting_date", today)
-            .execute()
-        )
-        meetings = meetings_res.data or []
-
-        if user["role"] not in ("owner", "manager"):
-            meetings = [m for m in meetings if user["id"] in (m.get("advisor_ids") or [])]
-
-        if meetings:
+    for m in meetings:
+        m["school_name"] = (m.pop("schools", None) or {}).get("name", "")
+        m["school_advisor_ids"] = []
+    if meetings:
+        # Fetch school-level advisors so the frontend knows fallback recipients for status reminders
+        try:
             s_ids = list({m["school_id"] for m in meetings})
-            school_names = {r["id"]: r["name"] for r in (db.table("schools").select("id, name").in_("id", s_ids).execute().data or [])}
-            # Fetch school-level advisors so the frontend knows fallback recipients for status reminders
             school_advisors_rows = db.table("advisor_schools").select("school_id, advisor_id").in_("school_id", s_ids).execute().data or []
             school_advisors_map: dict = {}
             for row in school_advisors_rows:
                 school_advisors_map.setdefault(row["school_id"], []).append(row["advisor_id"])
             for m in meetings:
-                m["school_name"] = school_names.get(m["school_id"], "")
                 m["school_advisor_ids"] = school_advisors_map.get(m["school_id"], [])
-        return meetings
-    except Exception as exc:
-        logger.warning("get_upcoming_meetings failed (non-fatal): %s", exc)
-        return []
+        except Exception as exc:
+            logger.warning("get_upcoming_meetings school-advisors enrichment failed (non-fatal): %s", exc)
+    return meetings
 
 
 @router.patch("/users/me/notification-preferences")
@@ -5299,7 +5444,14 @@ def _reconcile_meeting_from_outlook(db, org_id: str, meeting: dict, prefetched: 
 
     if all(v is None for v in advisor_results.values()):
         try:
+            activity_before = meeting_activity.fetch_tracked(db, meeting["id"])
             db.table("meetings").update({"status": "cancelled"}).eq("id", meeting["id"]).execute()
+            meeting_activity.log_meeting_activity(
+                db, meeting_id=meeting["id"], school_id=meeting.get("school_id"), org_id=org_id,
+                actor_id=None, actor_type="outlook", source="outlook", action="updated",
+                before=activity_before, after={"status": "cancelled"},
+                meta={"calendar_owner_ids": list(advisor_results.keys()), "event_deleted": True},
+            )
             graph_client.persist_calendar_sync(db, meeting["id"], {})
             return {"action": "cancelled", "checked": checked}
         except Exception as exc:
@@ -5312,9 +5464,17 @@ def _reconcile_meeting_from_outlook(db, org_id: str, meeting: dict, prefetched: 
         new_date, new_start, new_end = result["start"][:10], result["start"][11:16], result["end"][11:16]
         if new_date != meeting.get("meeting_date") or new_start != meeting.get("start_time") or new_end != meeting.get("end_time"):
             try:
+                activity_before = meeting_activity.fetch_tracked(db, meeting["id"])
                 db.table("meetings").update({
                     "meeting_date": new_date, "start_time": new_start, "end_time": new_end,
                 }).eq("id", meeting["id"]).execute()
+                meeting_activity.log_meeting_activity(
+                    db, meeting_id=meeting["id"], school_id=meeting.get("school_id"), org_id=org_id,
+                    actor_id=None, actor_type="outlook", source="outlook", action="updated",
+                    before=activity_before,
+                    after={"meeting_date": new_date, "start_time": new_start, "end_time": new_end},
+                    meta={"calendar_owner_ids": [advisor_id]},
+                )
                 return {"action": "updated", "checked": checked}
             except Exception as exc:
                 logger.warning("_reconcile_meeting_from_outlook: failed to update meeting %s: %s", meeting["id"], exc)
@@ -6766,6 +6926,11 @@ def transfer_user_meetings(user_id: str, body: TransferMeetingsIn, user: Annotat
         conflict = False
         try:
             db.table("meetings").update({"advisor_ids": new_ids}).eq("id", m["id"]).execute()
+            meeting_activity.log_meeting_activity(
+                db, meeting_id=m["id"], school_id=m.get("school_id"), org_id=user["org_id"],
+                actor_id=user["id"], actor_type="user", source="user_transfer", action="updated",
+                before=m, after={"advisor_ids": new_ids},
+            )
             with graph_client.calendar_sync_lock(db, m["id"]) as acquired:
                 if acquired:
                     fresh = db.table("meetings").select("calendar_sync").eq("id", m["id"]).execute()
@@ -6828,6 +6993,11 @@ def cancel_user_future_meetings(user_id: str, user: Annotated[dict, Depends(get_
         except Exception as exc:
             logger.warning("calendar_event_index cleanup failed for meeting %s (non-fatal): %s", m["id"], exc)
         db.table("meetings").delete().eq("id", m["id"]).execute()
+        meeting_activity.log_meeting_activity(
+            db, meeting_id=m["id"], school_id=m.get("school_id"), org_id=user["org_id"],
+            actor_id=user["id"], actor_type="user", source="user_transfer", action="deleted", before=m,
+            meta={"reason": "cancel_user_future_meetings", "advisor_id": user_id},
+        )
     return {"cancelled": len(meetings)}
 
 
@@ -6949,7 +7119,10 @@ def list_logs(
     unpinned = [r for r in logs if not r.get("pinned_at")]
     logs = pinned + unpinned
     # Enrich with profile data (non-fatal — logs returned even if enrichment fails)
-    user_ids = list({r["run_by"] for r in logs if r.get("run_by")})
+    user_ids = list(
+        {r["run_by"] for r in logs if r.get("run_by")}
+        | {e["user_id"] for r in logs for e in (r.get("activity") or []) if e.get("user_id")}
+    )
     if user_ids:
         try:
             db = get_admin_client()
@@ -6962,6 +7135,11 @@ def list_logs(
             profiles_map = {p["id"]: p for p in (p_rows.data or [])}
             for row in logs:
                 row["profiles"] = profiles_map.get(row.get("run_by"))
+                row["activity_profiles"] = {
+                    e["user_id"]: profiles_map[e["user_id"]]
+                    for e in (row.get("activity") or [])
+                    if e.get("user_id") in profiles_map
+                }
         except Exception as exc:
             logger.warning("list_logs profile enrichment failed (non-fatal): %s", exc)
     return logs
@@ -8031,11 +8209,19 @@ def _recompute_meeting_aggregates(db, meeting_id: str) -> None:
     else:
         calls_start_time = None
         calls_duration_seconds = 0
+    activity_before = meeting_activity.fetch_tracked(db, meeting_id)
     db.table("meetings").update({
         "calls_start_time": calls_start_time,
         "calls_duration_seconds": calls_duration_seconds,
         "calls_synced_at": datetime.now(timezone.utc).isoformat(),
     }).eq("id", meeting_id).execute()
+    # Logged only when the call times really changed (no-op recomputes are dropped).
+    meeting_activity.log_meeting_activity(
+        db, meeting_id=meeting_id, school_id=(activity_before or {}).get("school_id"), org_id=None,
+        actor_id=None, actor_type="system", source="calls_sync", action="updated",
+        before=activity_before,
+        after={"calls_start_time": calls_start_time, "calls_duration_seconds": calls_duration_seconds},
+    )
 
 
 def _recompute_meeting_call_activity(db, org_id: str, school_id: str, meeting_date: str, calls_for_school: list[dict]) -> list[str]:
@@ -8135,7 +8321,8 @@ def _maybe_auto_complete_meeting(db, org_id: str, meeting_id: str) -> None:
         total = (m.get("calls_duration_seconds") or 0) + _sum_offline_seconds(m.get("offline_work_entries"))
         if total < 300:
             return
-        _apply_meeting_patch(db, org_id, m["school_id"], meeting_id, {"status": "completed"})
+        _apply_meeting_patch(db, org_id, m["school_id"], meeting_id, {"status": "completed"},
+                             actor_type="system", source="auto_complete")
     except Exception as exc:
         logger.warning("_maybe_auto_complete_meeting failed (non-fatal) for meeting %s: %s", meeting_id, exc)
 
@@ -8449,6 +8636,11 @@ def add_offline_work(school_id: str, meeting_id: str, body: OfflineWorkIn, user:
     }
     entries.append(entry)
     db.table("meetings").update({"offline_work_entries": entries}).eq("id", meeting_id).execute()
+    meeting_activity.log_meeting_activity(
+        db, meeting_id=meeting_id, school_id=school_id, org_id=user["org_id"],
+        actor_id=user["id"], actor_type="user", source=None, action="offline_added",
+        meta={"entry": {"start_time": entry.get("start_time"), "end_time": entry.get("end_time"), "notes": entry.get("notes")}},
+    )
     _maybe_auto_complete_meeting(db, user["org_id"], meeting_id)
     return {"ok": True, "entry": entry}
 
@@ -8464,8 +8656,10 @@ def update_offline_work(school_id: str, meeting_id: str, entry_id: str, body: Of
         raise HTTPException(status_code=400, detail="חייב להישאר לפחות משתמש אחד ברשומת עבודה עצמאית")
     entries = m_res.data[0].get("offline_work_entries") or []
     found = False
+    previous_entry = None
     for e in entries:
         if e.get("id") == entry_id:
+            previous_entry = dict(e)
             if body.start_time is not None: e["start_time"] = body.start_time
             if body.end_time is not None: e["end_time"] = body.end_time
             if body.notes is not None: e["notes"] = body.notes
@@ -8475,6 +8669,12 @@ def update_offline_work(school_id: str, meeting_id: str, entry_id: str, body: Of
     if not found:
         raise HTTPException(status_code=404, detail="רשומת עבודה עצמאית לא נמצאה")
     db.table("meetings").update({"offline_work_entries": entries}).eq("id", meeting_id).execute()
+    updated_entry = next((e for e in entries if e.get("id") == entry_id), {})
+    meeting_activity.log_meeting_activity(
+        db, meeting_id=meeting_id, school_id=school_id, org_id=user["org_id"],
+        actor_id=user["id"], actor_type="user", source=None, action="offline_edited",
+        meta={"entry": {"start_time": updated_entry.get("start_time"), "end_time": updated_entry.get("end_time"), "notes": updated_entry.get("notes")}, "previous": {"start_time": previous_entry.get("start_time"), "end_time": previous_entry.get("end_time"), "notes": previous_entry.get("notes")}},
+    )
     _maybe_auto_complete_meeting(db, user["org_id"], meeting_id)
     return {"ok": True}
 
@@ -8486,8 +8686,15 @@ def delete_offline_work(school_id: str, meeting_id: str, entry_id: str, user: An
     m_res = db.table("meetings").select("id, offline_work_entries").eq("id", meeting_id).eq("school_id", school_id).execute()
     if not m_res.data:
         raise HTTPException(status_code=404, detail="פגישה לא נמצאה")
+    deleted_entry = next((e for e in (m_res.data[0].get("offline_work_entries") or []) if e.get("id") == entry_id), {})
     entries = [e for e in (m_res.data[0].get("offline_work_entries") or []) if e.get("id") != entry_id]
     db.table("meetings").update({"offline_work_entries": entries}).eq("id", meeting_id).execute()
+    if deleted_entry:
+        meeting_activity.log_meeting_activity(
+            db, meeting_id=meeting_id, school_id=school_id, org_id=user["org_id"],
+            actor_id=user["id"], actor_type="user", source=None, action="offline_deleted",
+            meta={"entry": {"start_time": deleted_entry.get("start_time"), "end_time": deleted_entry.get("end_time"), "notes": deleted_entry.get("notes")}},
+        )
     _maybe_auto_complete_meeting(db, user["org_id"], meeting_id)
     return {"ok": True}
 
@@ -8678,7 +8885,8 @@ def _enforce_advisor_ids_for_role(db, user: dict, requested_ids: list[str] | Non
 
 
 @router.post("/{school_id}/meetings")
-def create_meeting(school_id: str, body: MeetingIn, user: Annotated[dict, Depends(get_current_user)]):
+def create_meeting(school_id: str, body: MeetingIn, user: Annotated[dict, Depends(get_current_user)],
+                   x_client_surface: Annotated[str | None, Header()] = None):
     db = get_admin_client()
     # Was missing entirely (no role or org check at all) — any authenticated user, including
     # a cross-org advisor, could create a meeting under any school_id.
@@ -8732,6 +8940,11 @@ def create_meeting(school_id: str, body: MeetingIn, user: Annotated[dict, Depend
 
     _sync_new_meeting_calendar(db, user["org_id"], school_id, meeting, user["id"])
 
+    meeting_activity.log_meeting_activity(
+        db, meeting_id=meeting["id"], school_id=school_id, org_id=user["org_id"],
+        actor_id=user["id"], actor_type="user", source=meeting_activity.client_surface(x_client_surface),
+        action="created", after=meeting,
+    )
     return meeting
 
 
@@ -9349,6 +9562,7 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
     import_batch_id = body.import_batch_id or str(uuid4())
     imported, past_count, future_count, future_unqueued = 0, 0, 0, 0
     errors: list[str] = []
+    activity_events: list[dict] = []
 
     for row, val in zip(active_rows, revalidated):
         data_ctx = val["data"]
@@ -9435,7 +9649,13 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
                 if true_date: insert_data["meeting_date"] = true_date
                 if resolved_start_time: insert_data["start_time"] = resolved_start_time
                 if resolved_end_time: insert_data["end_time"] = resolved_end_time
-                db.table("meetings").insert(insert_data).execute()
+                past_res = db.table("meetings").insert(insert_data).execute()
+                if past_res.data:
+                    activity_events.append(dict(
+                        meeting_id=past_res.data[0]["id"], school_id=school_id, org_id=user["org_id"],
+                        actor_id=user["id"], actor_type="user", source="import", action="created",
+                        after=past_res.data[0], meta={"import_batch_id": import_batch_id},
+                    ))
                 imported += 1
                 past_count += 1
             else:
@@ -9474,6 +9694,11 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
 
                 res = db.table("meetings").insert(insert_data).execute()
                 meeting = res.data[0]
+                activity_events.append(dict(
+                    meeting_id=meeting["id"], school_id=school_id, org_id=user["org_id"],
+                    actor_id=user["id"], actor_type="user", source="import", action="created",
+                    after=meeting, meta={"import_batch_id": import_batch_id},
+                ))
                 if advisor_id:
                     # Calendar sync for imported future meetings is queued, not sent inline —
                     # a bulk import can contain hundreds/thousands of rows, and calling Graph
@@ -9504,6 +9729,7 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
             logger.warning("meeting import row %s failed: %s", row.row_index, exc)
             errors.append(f"שורה {row.row_index}: {str(exc)}")
 
+    meeting_activity.log_meeting_activity_bulk(db, activity_events)
     return {
         "imported": imported, "past": past_count, "future": future_count, "errors": errors,
         "future_unqueued": future_unqueued,
@@ -9859,7 +10085,7 @@ def remap_import_values(body: RemapImportValuesIn, user: Annotated[dict, Depends
             if target not in canonical_values:
                 raise HTTPException(status_code=400, detail=f"ערך יעד לא חוקי '{target}' עבור השדה {field}")
             matched = _fetch_all_rows(
-                db.table("meetings").select("id, status, meeting_type, meeting_service_type, import_raw")
+                db.table("meetings").select("id, school_id, status, meeting_type, meeting_service_type, import_raw")
                 .eq("created_via", "import").in_("school_id", school_ids).eq(field, raw_value)
             )
             missing_raw = [m for m in matched if not m.get("import_raw")]
@@ -9873,7 +10099,13 @@ def remap_import_values(body: RemapImportValuesIn, user: Annotated[dict, Depends
                 }}).eq("id", m["id"]).execute()
             if matched:
                 ids = [m["id"] for m in matched]
+                activity_before = meeting_activity.fetch_tracked_many(db, ids)
                 db.table("meetings").update({field: target}).in_("id", ids).execute()
+                meeting_activity.log_meeting_activity_bulk(db, [dict(
+                    meeting_id=m["id"], school_id=m.get("school_id"), org_id=user["org_id"],
+                    actor_id=user["id"], actor_type="user", source="import_remap", action="updated",
+                    before=activity_before.get(m["id"]), after={field: target},
+                ) for m in matched])
             updated[f"{field}:{raw_value}"] = len(matched)
     return {"updated": updated}
 
@@ -10069,7 +10301,8 @@ def send_direct_coordination_request(
 
 
 @router.put("/{school_id}/meetings/{meeting_id}")
-def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annotated[dict, Depends(get_current_user)]):
+def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annotated[dict, Depends(get_current_user)],
+                   x_client_surface: Annotated[str | None, Header()] = None):
     db = get_admin_client()
     # Org check — the advisor branch below already validated ownership of the meeting
     # itself, but the owner/manager branch previously skipped any org check entirely,
@@ -10138,11 +10371,18 @@ def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annot
         except Exception as exc:
             logger.warning("update_meeting reminder auto-enable check failed (non-fatal): %s", exc)
 
+    activity_before = meeting_activity.fetch_tracked(db, meeting_id)
     try:
         res = db.table("meetings").update(data).eq("id", meeting_id).eq("school_id", school_id).execute()
         meeting = res.data[0] if res.data else {}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"שגיאת DB: {str(e)}")
+    if meeting:
+        meeting_activity.log_meeting_activity(
+            db, meeting_id=meeting_id, school_id=school_id, org_id=user["org_id"],
+            actor_id=user["id"], actor_type="user", source=meeting_activity.client_surface(x_client_surface),
+            action="updated", before=activity_before, after=meeting,
+        )
 
     try:
         with graph_client.calendar_sync_lock(db, meeting_id) as acquired:
@@ -10165,17 +10405,24 @@ def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annot
     return meeting
 
 
-def _apply_meeting_patch(db, org_id: str, school_id: str, meeting_id: str, patch_dict: dict) -> dict:
+def _apply_meeting_patch(db, org_id: str, school_id: str, meeting_id: str, patch_dict: dict,
+                         actor_id: str | None = None, actor_type: str = "system", source: str | None = None) -> dict:
     """Shared body of the lightweight meeting PATCH — used by the `patch_meeting` route AND
     internal callers (auto-complete-from-activity job/checks) that have no Request/user to go
     through HTTP with. Includes the same Outlook calendar-sync side effect as the route always
     has had — do not strip that out when calling this from a new internal context."""
     if not patch_dict:
         return {"ok": True}
+    activity_before = meeting_activity.fetch_tracked(db, meeting_id)
     try:
         db.table("meetings").update(patch_dict).eq("id", meeting_id).eq("school_id", school_id).execute()
     except Exception:
         raise HTTPException(status_code=500, detail="שגיאה בעדכון פגישה")
+    meeting_activity.log_meeting_activity(
+        db, meeting_id=meeting_id, school_id=school_id, org_id=org_id,
+        actor_id=actor_id, actor_type=actor_type, source=source, action="updated",
+        before=activity_before, after=patch_dict,
+    )
 
     try:
         with graph_client.calendar_sync_lock(db, meeting_id) as acquired:
@@ -10200,7 +10447,8 @@ def _apply_meeting_patch(db, org_id: str, school_id: str, meeting_id: str, patch
 
 
 @router.patch("/{school_id}/meetings/{meeting_id}")
-def patch_meeting(school_id: str, meeting_id: str, body: MeetingStatusPatchIn, user: Annotated[dict, Depends(get_current_user)]):
+def patch_meeting(school_id: str, meeting_id: str, body: MeetingStatusPatchIn, user: Annotated[dict, Depends(get_current_user)],
+                  x_client_surface: Annotated[str | None, Header()] = None):
     """Partial update — only updates the fields provided. Does not touch advisor_ids, participants, etc."""
     db = get_admin_client()
     school_check = db.table("schools").select("id").eq("id", school_id).eq("org_id", user["org_id"]).execute()
@@ -10228,7 +10476,9 @@ def patch_meeting(school_id: str, meeting_id: str, body: MeetingStatusPatchIn, u
     # silently flip it back. This is the ONLY path that turns the reminder off.
     if body.reminder_enabled is not None: data["reminder_enabled"] = body.reminder_enabled
     if body.requested_upload_years is not None: data["requested_upload_years"] = body.requested_upload_years
-    return _apply_meeting_patch(db, user["org_id"], school_id, meeting_id, data)
+    return _apply_meeting_patch(db, user["org_id"], school_id, meeting_id, data,
+                                actor_id=user["id"], actor_type="user",
+                                source=meeting_activity.client_surface(x_client_surface))
 
 
 @router.patch("/{school_id}/meetings/{meeting_id}/academic-year")
@@ -10266,11 +10516,17 @@ def move_meeting_academic_year(school_id: str, meeting_id: str, body: MeetingMov
             and _reminder_eligible(meeting.get("meeting_date"), meeting.get("participants"),
                                    _org_reminders_default_on(db, school_id))):
         data["reminder_enabled"] = True
+    activity_before = meeting_activity.fetch_tracked(db, meeting_id)
     try:
         db.table("meetings").update(data).eq("id", meeting_id).eq("school_id", school_id).execute()
     except Exception as exc:
         logger.error("move_meeting_academic_year failed for %s: %s", meeting_id, exc, exc_info=True)
         raise HTTPException(status_code=500, detail="שגיאה בהעברת הפגישה")
+    meeting_activity.log_meeting_activity(
+        db, meeting_id=meeting_id, school_id=school_id, org_id=user["org_id"],
+        actor_id=user["id"], actor_type="user", source=None, action="moved_year",
+        before=activity_before, after=data,
+    )
     return {
         "ok": True,
         "academic_year": target,
@@ -10302,7 +10558,13 @@ def join_meeting_as_advisor(school_id: str, meeting_id: str, user: Annotated[dic
     if user["id"] in existing_advisor_ids:
         return {"advisor_ids": existing_advisor_ids}
     new_advisor_ids = existing_advisor_ids + [user["id"]]
+    activity_before = meeting_activity.fetch_tracked(db, meeting_id)
     res = db.table("meetings").update({"advisor_ids": new_advisor_ids}).eq("id", meeting_id).eq("school_id", school_id).execute()
+    meeting_activity.log_meeting_activity(
+        db, meeting_id=meeting_id, school_id=school_id, org_id=user["org_id"],
+        actor_id=user["id"], actor_type="user", source=None, action="advisor_joined",
+        before=activity_before, after={"advisor_ids": new_advisor_ids},
+    )
     return res.data[0] if res.data else {"advisor_ids": new_advisor_ids}
 
 
@@ -10337,7 +10599,12 @@ def delete_meeting(school_id: str, meeting_id: str, user: Annotated[dict, Depend
         db.table("calendar_event_index").delete().eq("meeting_id", meeting_id).execute()
     except Exception as exc:
         logger.warning("calendar_event_index cleanup failed for deleted meeting %s (non-fatal): %s", meeting_id, exc)
+    activity_before = meeting_activity.fetch_tracked(db, meeting_id)
     db.table("meetings").delete().eq("id", meeting_id).eq("school_id", school_id).execute()
+    meeting_activity.log_meeting_activity(
+        db, meeting_id=meeting_id, school_id=school_id, org_id=user["org_id"],
+        actor_id=user["id"], actor_type="user", source=None, action="deleted", before=activity_before,
+    )
     return {"ok": True}
 
 
@@ -10373,6 +10640,7 @@ def reassign_meeting_school(meeting_id: str, body: MeetingReassignSchoolIn, user
             )
             if not m_check.data:
                 raise HTTPException(status_code=404, detail="פגישה לא נמצאה")
+            activity_before = meeting_activity.fetch_tracked(db, meeting_id)
             res = db.table("meetings").update({
                 "school_id": body.new_school_id,
                 "participants": [],
@@ -10402,6 +10670,20 @@ def reassign_meeting_school(meeting_id: str, body: MeetingReassignSchoolIn, user
     except Exception as exc:
         logger.warning("calendar sync failed for reassigned meeting %s (non-fatal): %s", meeting_id, exc)
 
+    school_names = {}
+    try:
+        old_school_id = (activity_before or {}).get("school_id")
+        ids = [i for i in (old_school_id, body.new_school_id) if i]
+        school_names = {r["id"]: r.get("name") for r in db.table("schools").select("id, name").in_("id", ids).execute().data or []}
+    except Exception as exc:
+        logger.warning("reassign activity school names failed (non-fatal): %s", exc)
+    meeting_activity.log_meeting_activity(
+        db, meeting_id=meeting_id, school_id=body.new_school_id, org_id=user["org_id"],
+        actor_id=user["id"], actor_type="user", source=None, action="reassigned_school",
+        before=activity_before, after=meeting,
+        meta={"from_school_name": school_names.get((activity_before or {}).get("school_id")),
+              "to_school_name": school_names.get(body.new_school_id)},
+    )
     return {"ok": True}
 
 
@@ -10495,6 +10777,299 @@ def get_meeting_notes(school_id: str, meeting_id: str, user: Annotated[dict, Dep
     return {"groups": _group_meeting_note_rows(rows, profiles_map)}
 
 
+_ACTIVITY_MERGE_WINDOW_SECONDS = 600
+
+
+def _parse_db_timestamp(value: str) -> datetime:
+    """PostgREST timestamptz strings can carry 1-6 fractional digits (e.g. '...:03.31+00:00');
+    pad to 6 so datetime.fromisoformat accepts them on every supported Python version."""
+    value = value.replace("Z", "+00:00")
+    m = re.match(r"^(.*T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(.*)$", value)
+    if m:
+        frac = (m.group(2) or "0")[:6].ljust(6, "0")
+        value = f"{m.group(1)}.{frac}{m.group(3)}"
+    return datetime.fromisoformat(value)
+
+
+def _merge_meeting_activity(events: list[dict]) -> list[dict]:
+    """Collapses consecutive 'updated' events by the same actor + source within 10 minutes
+    into one row (autosave fires per field on blur). Oldest-first in, oldest-first out; a
+    field changed and then changed back inside the window drops out of the merged row."""
+    merged: list[dict] = []
+    for ev in events:
+        prev = merged[-1] if merged else None
+        if (prev and ev["action"] == "updated" and prev["action"] == "updated"
+                and ev.get("actor_id") == prev.get("actor_id") and ev.get("actor_type") == prev.get("actor_type")
+                and ev.get("source") == prev.get("source")):
+            try:
+                gap = (_parse_db_timestamp(ev["created_at"]) - _parse_db_timestamp(prev["created_at"])).total_seconds()
+            except Exception:
+                gap = _ACTIVITY_MERGE_WINDOW_SECONDS + 1
+            if gap <= _ACTIVITY_MERGE_WINDOW_SECONDS:
+                changes = dict(prev.get("changes") or {})
+                for f, ch in (ev.get("changes") or {}).items():
+                    changes[f] = {"from": changes[f]["from"], "to": ch["to"]} if f in changes else ch
+                changes = {f: ch for f, ch in changes.items()
+                           if meeting_activity._norm(f, ch["from"]) != meeting_activity._norm(f, ch["to"])}
+                prev.update(changes=changes, snapshot=ev.get("snapshot"), created_at=ev["created_at"])
+                prev["merged_count"] = prev.get("merged_count", 1) + 1
+                if not changes:
+                    merged.pop()
+                continue
+        merged.append(dict(ev))
+    return merged
+
+
+@router.get("/{school_id}/meetings/{meeting_id}/activity")
+def get_meeting_activity(school_id: str, meeting_id: str, user: Annotated[dict, Depends(get_current_user)]):
+    """Activity log ("תיעוד פעילות") for one meeting — newest first. See meeting_activity.py."""
+    rows, meeting = [], None
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            _require_school_in_org(db, user, school_id)
+            m_rows = (db.table("meetings")
+                      .select("id, school_id, created_at, created_by, created_via, booking_token_id")
+                      .eq("id", meeting_id).eq("school_id", school_id).execute().data)
+            if not m_rows:
+                raise HTTPException(status_code=404, detail="פגישה לא נמצאה")
+            meeting = m_rows[0]
+            rows = (db.table("meeting_activity").select("*")
+                    .eq("meeting_id", meeting_id).eq("org_id", user["org_id"])
+                    .order("created_at").execute().data or [])
+            break
+        except HTTPException:
+            raise
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("get_meeting_activity attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.error("get_meeting_activity failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    events = _merge_meeting_activity(rows)
+
+    # Meetings created before the log existed: derive the creation row from the meeting itself.
+    if not any(e["action"] == "created" for e in events):
+        via = meeting.get("created_via")
+        source = "import" if via == "import" else ("booking_link" if meeting.get("booking_token_id") else None)
+        events.insert(0, {
+            "id": f"legacy-{meeting_id}",
+            "action": "created",
+            "legacy": True,
+            "actor_id": meeting.get("created_by"),
+            "actor_type": "user" if meeting.get("created_by") else ("school" if meeting.get("booking_token_id") else "unknown"),
+            "source": source,
+            "created_at": meeting.get("created_at"),
+            "changes": None,
+            "snapshot": None,
+            "meta": {"booking_token_id": meeting.get("booking_token_id")} if meeting.get("booking_token_id") else None,
+        })
+
+    # Enrichment (non-fatal): user names and task names referenced by the events.
+    user_ids, task_ids, token_ids = set(), set(), set()
+    for e in events:
+        if e.get("actor_id"):
+            user_ids.add(e["actor_id"])
+        for src in ((e.get("snapshot") or {}).get("advisor_ids") or [],
+                    *[(ch.get("from") or []) + (ch.get("to") or []) for f, ch in (e.get("changes") or {}).items() if f == "advisor_ids"]):
+            user_ids.update(a for a in src if isinstance(a, str))
+        meta = e.get("meta") or {}
+        user_ids.update(meta.get("calendar_owner_ids") or [])
+        for k in ("token_advisor_id", "author_id"):
+            if meta.get(k):
+                user_ids.add(meta[k])
+        if meta.get("task_id"):
+            task_ids.add(meta["task_id"])
+        if meta.get("booking_token_id"):
+            token_ids.add(meta["booking_token_id"])
+    profiles, tasks = {}, {}
+    try:
+        db = get_admin_client()
+        if token_ids:
+            for t in db.table("meeting_booking_tokens").select("id, task_id").in_("id", list(token_ids)).execute().data or []:
+                for e in events:
+                    if (e.get("meta") or {}).get("booking_token_id") == t["id"] and t.get("task_id"):
+                        e["source"] = "task_booking_link"
+                        e["meta"]["task_id"] = t["task_id"]
+                        task_ids.add(t["task_id"])
+        if user_ids:
+            profiles = {p["id"]: {"full_name": p.get("full_name"), "email": p.get("email")}
+                        for p in db.table("profiles").select("id, full_name, email").in_("id", list(user_ids)).execute().data or []}
+        if task_ids:
+            tasks = {t["id"]: t.get("name") for t in db.table("org_tasks").select("id, name")
+                     .in_("id", list(task_ids)).eq("org_id", user["org_id"]).execute().data or []}
+    except Exception as exc:
+        logger.warning("get_meeting_activity enrichment failed (non-fatal): %s", exc)
+
+    events.reverse()  # newest first
+    return {"events": events, "profiles": profiles, "tasks": tasks}
+
+
+_SCHOOL_ACTIVITY_LIST_FIELDS = ("restrict_access_to", *school_activity.ADVISOR_FIELDS)
+_REQUEST_INTERNAL_KEYS = {"_action", "add_advisor_to_school"}
+
+
+def _merge_school_activity(events: list[dict]) -> list[dict]:
+    """Collapses consecutive 'updated' events by the same actor + source + academic year within
+    10 minutes into one row (ליווי fields autosave one at a time; the advisors editor fires one
+    call per added/removed advisor). Oldest-first in and out; a field changed and then changed
+    back inside the window drops out."""
+    merged: list[dict] = []
+    for ev in events:
+        prev = merged[-1] if merged else None
+        if (prev and ev["action"] == "updated" and prev["action"] == "updated"
+                and not ev.get("request_id") and not prev.get("request_id")
+                and ev.get("actor_id") == prev.get("actor_id") and ev.get("source") == prev.get("source")
+                and ev.get("academic_year") == prev.get("academic_year")):
+            try:
+                gap = (_parse_db_timestamp(ev["created_at"]) - _parse_db_timestamp(prev["created_at"])).total_seconds()
+            except Exception:
+                gap = _ACTIVITY_MERGE_WINDOW_SECONDS + 1
+            if gap <= _ACTIVITY_MERGE_WINDOW_SECONDS:
+                changes = dict(prev.get("changes") or {})
+                for f, ch in (ev.get("changes") or {}).items():
+                    changes[f] = {"from": changes[f]["from"], "to": ch["to"]} if f in changes else ch
+                changes = {f: ch for f, ch in changes.items()
+                           if school_activity._norm(f, ch["from"]) != school_activity._norm(f, ch["to"])}
+                prev.update(changes=changes, created_at=ev["created_at"])
+                prev["merged_count"] = prev.get("merged_count", 1) + 1
+                if not changes:
+                    merged.pop()
+                continue
+        merged.append(dict(ev))
+    return merged
+
+
+@router.get("/{school_id}/activity")
+def get_school_activity(school_id: str, user: Annotated[dict, Depends(get_current_user)]):
+    """Activity log ("תיעוד פעולות") of the school card's "פרטי בית הספר" tab — newest first.
+    Merges direct changes (school_activity, see school_activity.py) with update requests
+    (school_update_requests: requester, per-field before/after and approve/reject decision)."""
+    school, rows, requests = None, [], []
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            _ensure_can_view_school_card(db, user)
+            _require_school_in_org(db, user, school_id)
+            school = (db.table("schools").select("id, created_at, created_via")
+                      .eq("id", school_id).eq("org_id", user["org_id"]).execute().data or [None])[0]
+            rows = (db.table("school_activity").select("*")
+                    .eq("school_id", school_id).eq("org_id", user["org_id"])
+                    .order("created_at").execute().data or [])
+            requests = (db.table("school_update_requests").select("*")
+                        .eq("school_id", school_id).order("created_at").execute().data or [])
+            break
+        except HTTPException:
+            raise
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("get_school_activity attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.3)
+            else:
+                logger.error("get_school_activity failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    # Changes applied by approving a request are shown inside that request's card, not twice.
+    applied_by_request: dict[str, dict] = {}
+    direct = []
+    for r in rows:
+        if r.get("request_id"):
+            applied_by_request.setdefault(r["request_id"], {}).update(r.get("changes") or {})
+        else:
+            direct.append(r)
+    events = []
+    for e in _merge_school_activity(direct):
+        events.append({**e, "kind": "change" if e["action"] == "updated" else e["action"]})
+
+    for req in requests:
+        proposed = req.get("proposed_changes") or {}
+        is_delete = proposed.get("_action") == "delete_school"
+        originals = req.get("original_values") or {}
+        decisions = req.get("field_decisions") or {}
+        applied = applied_by_request.get(req["id"], {})
+        req_rows = []
+        for f, to in proposed.items():
+            if f in _REQUEST_INTERNAL_KEYS:
+                continue
+            if f in originals:
+                frm, known = originals[f], True
+            elif f in applied:
+                frm, known = applied[f].get("from"), True
+            else:
+                frm, known = None, False
+            if req["status"] == "pending":
+                decision = "pending"
+            else:
+                decision = decisions.get(f) or ("approved" if req["status"] == "approved" else "rejected")
+            req_rows.append({"field": f, "from": frm, "from_known": known, "to": to, "decision": decision})
+        if not req_rows and not is_delete:
+            continue
+        events.append({
+            "id": req["id"],
+            "kind": "request",
+            "is_delete": is_delete,
+            "status": req["status"],
+            "actor_id": req.get("requester_id"),
+            "actor_type": "user",
+            "source": "update_request",
+            "created_at": req.get("resolved_at") or req.get("created_at"),
+            "submitted_at": req.get("created_at"),
+            "resolved_at": req.get("resolved_at"),
+            "reviewer_id": req.get("reviewer_id"),
+            "reviewer_note": req.get("reviewer_note"),
+            "rows": req_rows,
+        })
+
+    # Schools created before the log existed: derive the creation row from the school itself.
+    if school and not any(e["kind"] == "created" for e in events):
+        events.append({
+            "id": f"legacy-{school_id}",
+            "kind": "created",
+            "legacy": True,
+            "actor_id": None,
+            "actor_type": "unknown",
+            "source": "import" if (school.get("created_via") or "").startswith("import") else None,
+            "created_at": school.get("created_at"),
+            "changes": None,
+        })
+
+    oldest = datetime.min.replace(tzinfo=timezone.utc)
+
+    def _sort_key(e):
+        try:
+            return _parse_db_timestamp(e["created_at"]) if e.get("created_at") else oldest
+        except Exception:
+            return oldest
+    events.sort(key=_sort_key, reverse=True)
+
+    # Enrichment (non-fatal): names of actors, reviewers and of user ids inside list values.
+    user_ids: set[str] = set()
+    for e in events:
+        for k in ("actor_id", "reviewer_id"):
+            if e.get(k):
+                user_ids.add(e[k])
+        pairs = [(f, ch.get("from"), ch.get("to")) for f, ch in (e.get("changes") or {}).items()]
+        pairs += [(r["field"], r.get("from"), r.get("to")) for r in e.get("rows") or []]
+        for f, frm, to in pairs:
+            if f in _SCHOOL_ACTIVITY_LIST_FIELDS:
+                for v in (frm or []) + (to or []):
+                    if isinstance(v, str):
+                        user_ids.add(v)
+    profiles = {}
+    if user_ids:
+        try:
+            db = get_admin_client()
+            profiles = {p["id"]: {"full_name": p.get("full_name"), "email": p.get("email")}
+                        for p in db.table("profiles").select("id, full_name, email").in_("id", list(user_ids)).execute().data or []}
+        except Exception as exc:
+            logger.warning("get_school_activity enrichment failed (non-fatal): %s", exc)
+    return {"events": events, "profiles": profiles}
+
+
 class MeetingNoteCreateIn(BaseModel):
     content: str
 
@@ -10515,6 +11090,11 @@ def create_meeting_note(school_id: str, meeting_id: str, body: MeetingNoteCreate
         "content": content,
     }).execute()
     note = row.data[0]
+    meeting_activity.log_meeting_activity(
+        db, meeting_id=meeting_id, school_id=school_id, org_id=user["org_id"],
+        actor_id=user["id"], actor_type="user", source=None, action="note_added",
+        meta={"content": content},
+    )
 
     try:
         profiles = db.table("profiles").select("id, full_name").eq("org_id", user["org_id"]).execute().data or []
@@ -10574,10 +11154,20 @@ def edit_meeting_note_segment(school_id: str, meeting_id: str, segment_id: str, 
     author_id = _get_meeting_note_author(db, meeting_id, segment_id)
     if user["id"] != author_id:
         raise HTTPException(status_code=403, detail="ניתן לערוך רק הערות שכתבת בעצמך")
+    old_content = None
+    try:
+        old_content = (db.table("meeting_notes").select("content").eq("id", segment_id).execute().data or [{}])[0].get("content")
+    except Exception as exc:
+        logger.warning("note edit activity: old content read failed (non-fatal): %s", exc)
     db.table("meeting_notes").update({
         "content": content,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }).eq("id", segment_id).execute()
+    meeting_activity.log_meeting_activity(
+        db, meeting_id=meeting_id, school_id=school_id, org_id=user["org_id"],
+        actor_id=user["id"], actor_type="user", source=None, action="note_edited",
+        meta={"content": content, "previous_content": old_content},
+    )
     return {"ok": True}
 
 
@@ -10590,7 +11180,17 @@ def delete_meeting_note_segment(school_id: str, meeting_id: str, segment_id: str
     author_id = _get_meeting_note_author(db, meeting_id, segment_id)
     if user["id"] != author_id and user["role"] not in ("owner", "manager"):
         raise HTTPException(status_code=403, detail="ניתן למחוק רק הערות שכתבת בעצמך")
+    deleted_content = None
+    try:
+        deleted_content = (db.table("meeting_notes").select("content").eq("id", segment_id).execute().data or [{}])[0].get("content")
+    except Exception as exc:
+        logger.warning("note delete activity: content read failed (non-fatal): %s", exc)
     db.table("meeting_notes").delete().eq("id", segment_id).eq("meeting_id", meeting_id).execute()
+    meeting_activity.log_meeting_activity(
+        db, meeting_id=meeting_id, school_id=school_id, org_id=user["org_id"],
+        actor_id=user["id"], actor_type="user", source=None, action="note_deleted",
+        meta={"content": deleted_content, "author_id": author_id},
+    )
     return {"ok": True}
 
 

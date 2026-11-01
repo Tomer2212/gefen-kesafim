@@ -9,6 +9,9 @@ import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useDebouncedValue, useDebouncedCallback } from "../hooks/useDebouncedValue";
 import { useGefenOrganizedResults } from "../context/GefenOrganizedResultsContext";
 
+// Tags school-data writes for the school card's "תיעוד פעולות" log (backend school_activity.py).
+const SURFACE_HEADERS = { headers: { "X-Client-Surface": "collection" } };
+
 const COLLECTION_COLUMNS = [
   { key: "gefen_organized",          label: "גפן מסודר" },
   { key: "gefen_hours_reported",     label: "שעות גפן מדווחות" },
@@ -1032,7 +1035,7 @@ export default function AdminCollectionTab() {
       [schoolId]: { ...(prev[schoolId] || {}), school_id: schoolId, [field]: value },
     }));
     try {
-      const res = await axios.put(`/schools/${schoolId}/year-admin-data`, { [field]: value }, { params: { academic_year: academicYear } });
+      const res = await axios.put(`/schools/${schoolId}/year-admin-data`, { [field]: value }, { params: { academic_year: academicYear }, ...SURFACE_HEADERS });
       // Merge (not replace), and skip every field of this row whose own save is still in
       // flight (incl. this field if a newer save of it was sent) — otherwise this response's
       // older copy of those fields would clobber their optimistic values.

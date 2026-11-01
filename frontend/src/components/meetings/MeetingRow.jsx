@@ -279,6 +279,7 @@ function MeetingRowImpl({
   expanded, onToggleExpand, colSpanTotal,
   currentUserRole, currentUserId, onPermissionDenied,
   aiSummaryEnabled = true,
+  clientSurface, onRequestActivity,
 }) {
   const navigate = useNavigate();
   const PERMISSION_DENIED_MSG = "אין לך הרשאה לערוך פגישה זו — הפגישה משויכת ליועץ אחר";
@@ -441,7 +442,8 @@ function MeetingRowImpl({
     const dateStr = pendingYearsPrompt;
     setPendingYearsPrompt(null);
     try {
-      await axios.patch(`/schools/${meeting.school_id}/meetings/${meeting.id}`, { requested_upload_years: years });
+      await axios.patch(`/schools/${meeting.school_id}/meetings/${meeting.id}`, { requested_upload_years: years },
+        clientSurface ? { headers: { "X-Client-Surface": clientSurface } } : undefined);
       setDraft(p => ({ ...p, requested_upload_years: years }));
       onMeetingPatched?.(meeting.id, { requested_upload_years: years });
     } catch (err) {
@@ -458,7 +460,8 @@ function MeetingRowImpl({
   async function patchReminder(newVal) {
     setDraft(p => ({ ...p, reminder_enabled: newVal }));
     try {
-      await axios.patch(`/schools/${meeting.school_id}/meetings/${meeting.id}`, { reminder_enabled: newVal });
+      await axios.patch(`/schools/${meeting.school_id}/meetings/${meeting.id}`, { reminder_enabled: newVal },
+        clientSurface ? { headers: { "X-Client-Surface": clientSurface } } : undefined);
       onMeetingPatched?.(meeting.id, { reminder_enabled: newVal });
     } catch (err) {
       setDraft(p => ({ ...p, reminder_enabled: !newVal }));
@@ -1002,7 +1005,8 @@ function MeetingRowImpl({
           </td>
         )}
         {/* Actions */}
-        {(onRequestDelete || onSendStatusReminder || onRequestMoveYear) && (
+        {/* Always rendered — "תיעוד פעילות" is available to anyone who can see the row. */}
+        {(
           <td className="py-2.5 px-2 text-center">
             <div className="relative inline-block" ref={actionsMenuRef}>
               <button type="button" onClick={() => setShowActionsMenu(o => !o)} aria-label="פעולות"
@@ -1015,6 +1019,14 @@ function MeetingRowImpl({
               </button>
               {showActionsMenu && (
                 <ActionsMenu anchorRef={actionsMenuRef} onClose={() => setShowActionsMenu(false)}>
+                  {onRequestActivity && meeting.id && meeting.school_id && (
+                    <button type="button"
+                      onMouseDown={e => e.preventDefault()}
+                      onClick={() => { onRequestActivity({ meeting, waitForSaves: () => saveQueueRef.current }); setShowActionsMenu(false); }}
+                      className="w-full text-right px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 transition-colors whitespace-nowrap">
+                      תיעוד פעילות
+                    </button>
+                  )}
                   {onSendStatusReminder && isMeetingEligibleForStatusReminder(meeting) && (
                     <button type="button"
                       onMouseDown={e => { e.preventDefault(); onSendStatusReminder(meeting); setShowActionsMenu(false); }}

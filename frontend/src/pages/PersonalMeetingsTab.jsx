@@ -189,7 +189,7 @@ export default function PersonalMeetingsTab({ userId, role, canDeleteMeetings, u
       end_time: normalizeTimeValue(draft.end_time) || null,
     };
     try {
-      const res = await axios.put(`/schools/${school_id}/meetings/${id}`, payload);
+      const res = await axios.put(`/schools/${school_id}/meetings/${id}`, payload, { headers: { "X-Client-Surface": "personal" } });
       setMeetings(prev => prev.map(m => m.id === id ? { ...m, ...res.data } : m));
     } catch { /* silent */ }
   }
@@ -239,7 +239,7 @@ export default function PersonalMeetingsTab({ userId, role, canDeleteMeetings, u
       ...(stageScope === "tichon" || stageScope === "chativa" || stageScope === "both" ? { stage_scope: stageScope } : {}),
     };
     try {
-      const res = await axios.post(`/schools/${school.id}/meetings`, payload);
+      const res = await axios.post(`/schools/${school.id}/meetings`, payload, { headers: { "X-Client-Surface": "personal" } });
       const newMeeting = { ...res.data, advisor_profiles: [], school_name: school.name, school_symbol: school.symbol, school_city: school.city, school_district: school.district };
       setMeetings(prev => [newMeeting, ...prev]);
       sessionCreatedMeetingIdsRef.current.add(newMeeting.id);
@@ -671,6 +671,7 @@ export default function PersonalMeetingsTab({ userId, role, canDeleteMeetings, u
       ) : (
         <div className="relative">
           <MeetingsTable
+            clientSurface="personal"
             meetings={displayedMeetings}
             usersWithAccess={users || []}
             usersWithoutAccess={[]}

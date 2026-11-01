@@ -57,6 +57,10 @@ import { SLOT_LABELS, slotsForSchool } from "../components/meetings/meetingCoord
 import { GEFEN_FILES_SLOT_LABELS, gefenFilesSlotsForSchool, resolveGefenFilesResponsibleForSlot } from "../components/meetings/gefenFilesResponsibleSlots";
 import { QuestionTooltip } from "../components/QuestionTooltip";
 
+// Tags school-data writes with the screen they came from, for the school card's "תיעוד פעולות"
+// log (backend school_activity.py).
+const surface = (name) => ({ headers: { "X-Client-Surface": name } });
+
 // Plain-text-looking single-select dropdown (portal-based, like MultiSelectChips) used for the
 // "תפקיד" column — looks like static text until clicked, opens a wide modern popover instead of
 // the browser's native <select> list.
@@ -2658,7 +2662,7 @@ export default function AdminPage() {
       [schoolId]: { ...(prev[schoolId] || {}), school_id: schoolId, [field]: value },
     }));
     try {
-      const res = await axios.put(`/schools/${schoolId}/year-admin-data`, { [field]: value }, { params: { academic_year: year } });
+      const res = await axios.put(`/schools/${schoolId}/year-admin-data`, { [field]: value }, { params: { academic_year: year }, ...surface("admin_grid") });
       const data = res.data && typeof res.data === "object" ? res.data : {};
       const inflight = yearAdminSaveInflightRef.current;
       const skip = new Set(
@@ -2686,7 +2690,7 @@ export default function AdminPage() {
   async function saveSchoolField(schoolId, field, value) {
     setSchools(prev => prev.map(s => (s.id === schoolId ? { ...s, [field]: value } : s)));
     try {
-      const res = await axios.put("/schools/bulk-field", { field, items: [{ school_id: schoolId, value }] });
+      const res = await axios.put("/schools/bulk-field", { field, items: [{ school_id: schoolId, value }] }, surface("admin_grid"));
       const saved = res.data.updated?.[0]?.data;
       if (!saved) { loadSchools(); return; }
       setSchools(prev => prev.map(s => (s.id === schoolId ? { ...s, ...saved } : s)));
@@ -2709,8 +2713,8 @@ export default function AdminPage() {
       : s)));
     try {
       await Promise.all([
-        ...added.map(id => axios.post(`/schools/${schoolId}/advisors/${serviceType}`, { advisor_id: id })),
-        ...removed.map(id => axios.delete(`/schools/${schoolId}/advisors/${serviceType}/${id}`)),
+        ...added.map(id => axios.post(`/schools/${schoolId}/advisors/${serviceType}`, { advisor_id: id }, surface("admin_grid"))),
+        ...removed.map(id => axios.delete(`/schools/${schoolId}/advisors/${serviceType}/${id}`, surface("admin_grid"))),
       ]);
     } catch {
       loadSchools();
@@ -2815,7 +2819,7 @@ export default function AdminPage() {
     try {
       if (confirm.domain === "advisor") {
         const { serviceType, advisorId, advisorListField, otherSchoolIds } = confirm;
-        const res = await axios.post(`/schools/advisors/${serviceType}/bulk-assign`, { advisor_id: advisorId, school_ids: otherSchoolIds });
+        const res = await axios.post(`/schools/advisors/${serviceType}/bulk-assign`, { advisor_id: advisorId, school_ids: otherSchoolIds }, surface("admin_bulk"));
         const newlyAssigned = res.data.newly_assigned || [];
         const advisorUser = users.find(u => u.id === advisorId);
         if (newlyAssigned.length > 0) {
@@ -2851,7 +2855,7 @@ export default function AdminPage() {
         });
         const res = await axios.put("/schools/year-admin-data/bulk", {
           field, academic_year: adminAcademicYear, items: otherSchoolIds.map(id => ({ school_id: id, value })),
-        });
+        }, surface("admin_bulk"));
         const failedIds = new Set((res.data.failed || []).map(f => f.school_id));
         if (failedIds.size > 0) {
           setYearAdminData(prev => {
@@ -2870,7 +2874,7 @@ export default function AdminPage() {
         });
       } else {
         setSchools(prev => prev.map(s => (otherSchoolIds.includes(s.id) ? { ...s, [field]: value } : s)));
-        const res = await axios.put("/schools/bulk-field", { field, items: otherSchoolIds.map(id => ({ school_id: id, value })) });
+        const res = await axios.put("/schools/bulk-field", { field, items: otherSchoolIds.map(id => ({ school_id: id, value })) }, surface("admin_bulk"));
         const failedIds = new Set((res.data.failed || []).map(f => f.school_id));
         if (failedIds.size > 0) {
           setSchools(prev => prev.map(s => {
@@ -2907,7 +2911,7 @@ export default function AdminPage() {
           return next;
         });
         try {
-          await axios.put("/schools/year-admin-data/bulk", { field: undo.field, academic_year: undo.academic_year, items: undo.previousValues });
+          await axios.put("/schools/year-admin-data/bulk", { field: undo.field, academic_year: undo.academic_year, items: undo.previousValues }, surface("admin_undo"));
         } catch {
           loadYearAdminData(adminAcademicYear);
         }
@@ -2917,7 +2921,7 @@ export default function AdminPage() {
           return pv ? { ...s, [undo.field]: pv.value } : s;
         }));
         try {
-          await axios.put("/schools/bulk-field", { field: undo.field, items: undo.previousValues });
+          await axios.put("/schools/bulk-field", { field: undo.field, items: undo.previousValues }, surface("admin_undo"));
         } catch {
           loadSchools();
         }
@@ -2929,7 +2933,7 @@ export default function AdminPage() {
       try {
         await axios.post(`/schools/advisors/${undo.serviceType}/bulk-unassign`, {
           advisor_id: undo.advisorId, school_ids: undo.newlyAssignedSchoolIds,
-        });
+        }, surface("admin_undo"));
       } catch {
         loadSchools();
       }
@@ -3223,17 +3227,17 @@ export default function AdminPage() {
             const addedT = draftTypedAdvisorIds[t].filter(id => !originalTypedAdvisorIds[t].includes(id));
             const removedT = originalTypedAdvisorIds[t].filter(id => !draftTypedAdvisorIds[t].includes(id));
             for (const id of addedT) {
-              await axios.post(`/schools/${editingSchool.id}/advisors/${t}`, { advisor_id: id });
+              await axios.post(`/schools/${editingSchool.id}/advisors/${t}`, { advisor_id: id }, surface("admin_modal"));
             }
             for (const id of removedT) {
-              await axios.delete(`/schools/${editingSchool.id}/advisors/${t}/${id}`);
+              await axios.delete(`/schools/${editingSchool.id}/advisors/${t}/${id}`, surface("admin_modal"));
             }
           }
         } catch (err) {
           window.alert(err.response?.data?.detail || "שגיאה בעדכון היועצים המלווים");
           return false;
         }
-        await axios.put(`/schools/${editingSchool.id}`, { ...schoolForm, ...chativaSync, ...legacyCoordinatorSync, student_count: studentCountValue });
+        await axios.put(`/schools/${editingSchool.id}`, { ...schoolForm, ...chativaSync, ...legacyCoordinatorSync, student_count: studentCountValue }, surface("admin_modal"));
         // A school edited INTO "שש שנתי" needs BOTH תיכון and חטיבת ביניים gefen_accounts
         // to actually work (division-aware checks, tabs, the division-mismatch modal's
         // selector, etc.) — unlike creating a new school (which already auto-creates them,
@@ -3262,7 +3266,7 @@ export default function AdminPage() {
         if (yearAdminLoadState === "loaded" && yearAdminLoadForRef.current === editingSchool.id) {
           const yearAdminDiff = yearAdminFormDiff(yearAdminForm, yearAdminOriginal);
           if (Object.keys(yearAdminDiff).length > 0) {
-            await axios.put(`/schools/${editingSchool.id}/year-admin-data`, yearAdminDiff, { params: { academic_year: DEFAULT_ACADEMIC_YEAR } });
+            await axios.put(`/schools/${editingSchool.id}/year-admin-data`, yearAdminDiff, { params: { academic_year: DEFAULT_ACADEMIC_YEAR }, ...surface("admin_modal") });
           }
         }
         try {
@@ -3275,7 +3279,7 @@ export default function AdminPage() {
       } else {
         let res;
         try {
-          res = await axios.post("/schools/", { ...schoolForm, ...chativaSync, ...legacyCoordinatorSync, stage: schoolStage, student_count: studentCountValue });
+          res = await axios.post("/schools/", { ...schoolForm, ...chativaSync, ...legacyCoordinatorSync, stage: schoolStage, student_count: studentCountValue }, surface("admin_modal"));
         } catch (err) {
           const detail = err?.response?.data?.detail;
           if (err?.response?.status === 409 && detail?.code === "duplicate_symbol") {
@@ -3297,10 +3301,10 @@ export default function AdminPage() {
         }
         for (const t of ["gefen", "current", "district"]) {
           for (const advisorId of draftTypedAdvisorIds[t]) {
-            await axios.post(`/schools/${newId}/advisors/${t}`, { advisor_id: advisorId });
+            await axios.post(`/schools/${newId}/advisors/${t}`, { advisor_id: advisorId }, surface("admin_modal"));
           }
         }
-        await axios.put(`/schools/${newId}/year-admin-data`, yearAdminForm, { params: { academic_year: DEFAULT_ACADEMIC_YEAR } });
+        await axios.put(`/schools/${newId}/year-admin-data`, yearAdminForm, { params: { academic_year: DEFAULT_ACADEMIC_YEAR }, ...surface("admin_modal") });
       }
       setShowSchoolForm(false);
       setEditingSchool(null);
@@ -3514,10 +3518,10 @@ export default function AdminPage() {
     const current = (typedSchoolAdvisors[schoolId]?.[serviceType] || []).map(a => a.id);
     const added = newIds.filter(id => !current.includes(id));
     const removed = current.filter(id => !newIds.includes(id));
-    for (const id of added) await axios.post(`/schools/${schoolId}/advisors/${serviceType}`, { advisor_id: id });
+    for (const id of added) await axios.post(`/schools/${schoolId}/advisors/${serviceType}`, { advisor_id: id }, surface("admin_grid"));
     for (const id of removed) {
       try {
-        await axios.delete(`/schools/${schoolId}/advisors/${serviceType}/${id}`);
+        await axios.delete(`/schools/${schoolId}/advisors/${serviceType}/${id}`, surface("admin_grid"));
       } catch (err) {
         window.alert(err.response?.data?.detail || "שגיאה בהסרת היועץ");
       }
@@ -4140,17 +4144,17 @@ export default function AdminPage() {
       try {
         let newId;
         if (existingSchoolId) {
-          await axios.put(`/schools/${existingSchoolId}`, school);
+          await axios.put(`/schools/${existingSchoolId}`, school, surface("import"));
           newId = existingSchoolId;
         } else {
-          const res = await axios.post("/schools/", school);
+          const res = await axios.post("/schools/", school, surface("import"));
           newId = res.data.id;
         }
         imported++;
         const yearAdmin = r.final.yearAdmin || r.yearAdmin || {};
         if (Object.values(yearAdmin).some(v => v !== null && v !== undefined && v !== "")) {
           try {
-            await axios.put(`/schools/${newId}/year-admin-data`, yearAdmin, { params: { academic_year: DEFAULT_ACADEMIC_YEAR } });
+            await axios.put(`/schools/${newId}/year-admin-data`, yearAdmin, { params: { academic_year: DEFAULT_ACADEMIC_YEAR }, ...surface("import") });
           } catch {
             errors.push(`שורה ${r.excelRow} (${school.name}): שמירת נתוני השנה (סוג שירות / סטטוס / הקצאות) נכשלה`);
           }
@@ -4158,7 +4162,7 @@ export default function AdminPage() {
         for (const t of ["gefen", "current", "district"]) {
           for (const advisorId of (r.final.advisorIdsByType[t] || [])) {
             try {
-              await axios.post(`/schools/${newId}/advisors/${t}`, { advisor_id: advisorId });
+              await axios.post(`/schools/${newId}/advisors/${t}`, { advisor_id: advisorId }, surface("import"));
             } catch {
               const label = SERVICE_TYPE_TABS.find(s => s.key === t)?.label || t;
               errors.push(`שורה ${r.excelRow} (${school.name}): שיוך יועץ ${label} נכשל`);

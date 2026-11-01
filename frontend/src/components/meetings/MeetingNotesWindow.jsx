@@ -7,8 +7,9 @@ import { useFocusTrap } from "../../hooks/useFocusTrap";
 
 const MIN_WIDTH = 420;
 const MIN_HEIGHT = 340;
-const DEFAULT_WIDTH = 520;
-const DEFAULT_HEIGHT = 480;
+const DEFAULT_WIDTH_RATIO = 0.7;
+const DEFAULT_HEIGHT_RATIO = 0.88;
+const NOTE_EDITOR_HEIGHT = 150;
 const PILL_WIDTH = 260;
 const PILL_GAP = 10;
 const CASCADE_STEP = 28;
@@ -20,6 +21,14 @@ const NOTE_COLS = "72px 84px 1fr";
 // every user here can only touch their own note; everyone else's is view-only to them.
 function isOwnSegment(currentUser, seg) {
   return !!currentUser?.id && seg.author_id === currentUser.id;
+}
+
+// Opens large (relative to the viewport) so users don't have to resize it every time.
+function defaultSize() {
+  return {
+    width: Math.max(MIN_WIDTH, Math.round(window.innerWidth * DEFAULT_WIDTH_RATIO)),
+    height: Math.max(MIN_HEIGHT, Math.round(window.innerHeight * DEFAULT_HEIGHT_RATIO)),
+  };
 }
 
 function windowTitle(w) {
@@ -48,7 +57,7 @@ function MeetingNotesWindowItem({ win, minimizedOrder }) {
   const { id, meetingId, schoolId, minimized, highlightNoteId } = win;
   const { closeMeetingNotes, setMinimized } = useMeetingNotes();
   const [pos, setPos] = useState(null);
-  const [size, setSize] = useState({ width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT });
+  const [size, setSize] = useState(defaultSize);
   const [currentUser, setCurrentUser] = useState(null);
   const [mentionUsers, setMentionUsers] = useState([]);
   const [groups, setGroups] = useState([]);
@@ -157,8 +166,8 @@ function MeetingNotesWindowItem({ win, minimizedOrder }) {
   useEffect(() => {
     if (pos === null) {
       const cascade = (id % CASCADE_CYCLE) * CASCADE_STEP;
-      const x = Math.max(16, Math.round((window.innerWidth - DEFAULT_WIDTH) / 2) + cascade);
-      const y = Math.max(16, Math.round((window.innerHeight - DEFAULT_HEIGHT) / 3) + cascade);
+      const x = Math.max(16, Math.round((window.innerWidth - size.width) / 2) + cascade);
+      const y = Math.max(16, Math.round((window.innerHeight - size.height) / 3) + cascade);
       setPos({ x, y });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -291,9 +300,14 @@ function MeetingNotesWindowItem({ win, minimizedOrder }) {
             </div>
 
             <div className="flex-1 min-h-0 overflow-y-auto flex flex-col">
+              {/* With no existing notes the composer fills the window; once notes exist it gets a
+                  fixed, user-resizable height (drag handle on its bottom edge) instead of being
+                  squeezed by the notes below it. */}
               {newRecordText !== null && (
                 <div role="row" className="grid border-t border-slate-100"
-                  style={{ gridTemplateColumns: NOTE_COLS, flex: "1 1 auto", minHeight: "140px" }}>
+                  style={groups.length === 0
+                    ? { gridTemplateColumns: NOTE_COLS, flex: "1 1 auto", minHeight: "140px" }
+                    : { gridTemplateColumns: NOTE_COLS, flexShrink: 0 }}>
                   <div role="cell" className="px-2 py-2 text-xs text-slate-400">עכשיו</div>
                   <div role="cell" className="px-2 py-2 text-xs text-slate-700">{currentUser?.full_name}</div>
                   <div role="cell" className="px-2 py-2 flex flex-col min-h-0">
@@ -305,7 +319,9 @@ function MeetingNotesWindowItem({ win, minimizedOrder }) {
                       onBlur={saveNewRecord}
                       users={mentionUsers}
                       autoFocus
-                      fill
+                      fill={groups.length === 0}
+                      resizable={groups.length > 0}
+                      initialHeight={NOTE_EDITOR_HEIGHT}
                       placeholder="הכנס הערה כאן... השתמש ב-@ לתיוג משתמש"
                     />
                   </div>
@@ -358,7 +374,7 @@ function MeetingNotesWindowItem({ win, minimizedOrder }) {
                             setEditDraft({ segmentId: seg.id, groupId: group.group_id, text: seg.content });
                           }}>
                           {isEditing ? (
-                            <>
+                            <div className="flex-1 min-w-0">
                               <label htmlFor={`meeting-edit-note-${seg.id}`} className="sr-only">עריכת תוכן ההערה</label>
                               <MentionTextarea
                                 id={`meeting-edit-note-${seg.id}`}
@@ -366,10 +382,11 @@ function MeetingNotesWindowItem({ win, minimizedOrder }) {
                                 onChange={text => setEditDraft(d => ({ ...d, text }))}
                                 onBlur={() => saveEdit(seg.id, group.group_id, editDraft.text)}
                                 users={mentionUsers}
-                                rows={2}
+                                resizable
+                                initialHeight={NOTE_EDITOR_HEIGHT}
                                 autoFocus
                               />
-                            </>
+                            </div>
                           ) : (
                             <span className="flex-1" style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{seg.content}</span>
                           )}

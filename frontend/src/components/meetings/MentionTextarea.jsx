@@ -37,14 +37,56 @@ function renderHighlightedText(text, users) {
 // `fill` makes it stretch to the full height of its (flex) parent instead of sizing to `rows`
 // — used by the meeting-notes composer so a long note is fully visible while typing, down to
 // the bottom of the window, instead of being clipped to 2-3 visible lines.
-export function MentionTextarea({ id, value, onChange, onBlur, users, rows = 2, autoFocus, placeholder, fill = false }) {
+// `resizable` gives it a fixed full-width height (starting at `initialHeight`, or taller if the
+// existing content needs it, capped at MAX_AUTO_HEIGHT) with a drag handle along the bottom edge
+// (↕ cursor) that lets the user make it taller/shorter.
+const MIN_RESIZE_HEIGHT = 80;
+const MAX_AUTO_HEIGHT = 400;
+
+export function MentionTextarea({ id, value, onChange, onBlur, users, rows = 2, autoFocus, placeholder, fill = false, resizable = false, initialHeight = 150 }) {
   const [mentionQuery, setMentionQuery] = useState(null);
   const [mentionStart, setMentionStart] = useState(null);
   const [mentionIdx, setMentionIdx] = useState(0);
   const [focused, setFocused] = useState(false);
+  const [height, setHeight] = useState(initialHeight);
+  const [handleHover, setHandleHover] = useState(false);
   const textareaRef = useRef(null);
   const overlayRef = useRef(null);
   const mentionListRef = useRef(null);
+  const resizeRef = useRef(null);
+
+  useEffect(() => {
+    if (!resizable || !textareaRef.current) return;
+    const needed = Math.min(textareaRef.current.scrollHeight + 4, MAX_AUTO_HEIGHT);
+    if (needed > initialHeight) setHeight(needed);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function onResizeMove(e) {
+    const r = resizeRef.current;
+    if (!r) return;
+    setHeight(Math.max(MIN_RESIZE_HEIGHT, r.origH + (e.clientY - r.startY)));
+  }
+  function stopResize() {
+    resizeRef.current = null;
+    document.removeEventListener("mousemove", onResizeMove);
+    document.removeEventListener("mouseup", stopResize);
+  }
+  // preventDefault keeps focus in the textarea, so dragging the handle doesn't trigger the
+  // parent's onBlur-save mid-resize.
+  function startResize(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    resizeRef.current = { startY: e.clientY, origH: height };
+    document.addEventListener("mousemove", onResizeMove);
+    document.addEventListener("mouseup", stopResize);
+  }
+
+  useEffect(() => () => {
+    document.removeEventListener("mousemove", onResizeMove);
+    document.removeEventListener("mouseup", stopResize);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function handleChange(e) {
     const newVal = e.target.value;
@@ -112,7 +154,7 @@ export function MentionTextarea({ id, value, onChange, onBlur, users, rows = 2, 
   }
 
   return (
-    <div className="relative" style={fill ? { height: "100%", display: "flex", flexDirection: "column" } : undefined}>
+    <div className="relative" style={fill ? { height: "100%", display: "flex", flexDirection: "column" } : resizable ? { width: "100%" } : undefined}>
       <div style={{
         position: "relative",
         border: `1.5px solid ${focused ? "#0070F3" : "#e2e8f0"}`,
@@ -121,6 +163,7 @@ export function MentionTextarea({ id, value, onChange, onBlur, users, rows = 2, 
         boxShadow: focused ? "0 0 0 3px rgba(0,112,243,0.12)" : "none",
         transition: "all 0.18s ease",
         ...(fill ? { flex: "1 1 auto", minHeight: 0 } : null),
+        ...(resizable ? { height } : null),
       }}>
         <div ref={overlayRef} aria-hidden="true" style={{
           ...EDITOR_STYLE,
@@ -151,7 +194,7 @@ export function MentionTextarea({ id, value, onChange, onBlur, users, rows = 2, 
             color: "transparent",
             caretColor: "#1e293b",
             borderRadius: "0.6rem",
-            ...(fill ? { position: "absolute", inset: 0, height: "100%" } : null),
+            ...(fill || resizable ? { position: "absolute", inset: 0, height: "100%" } : null),
           }}
           value={value}
           onChange={handleChange}
@@ -161,6 +204,24 @@ export function MentionTextarea({ id, value, onChange, onBlur, users, rows = 2, 
           onScroll={e => { if (overlayRef.current) overlayRef.current.scrollTop = e.target.scrollTop; }}
           placeholder=""
         />
+        {resizable && (
+          <div
+            onMouseDown={startResize}
+            onMouseEnter={() => setHandleHover(true)}
+            onMouseLeave={() => setHandleHover(false)}
+            aria-hidden="true"
+            title="גרור לשינוי גובה"
+            style={{
+              position: "absolute", left: 0, right: 0, bottom: -4, height: 8,
+              cursor: "ns-resize", zIndex: 2, display: "flex", alignItems: "center",
+            }}
+          >
+            <div style={{
+              width: "100%", height: handleHover ? 3 : 0, borderRadius: 2,
+              background: "rgba(0,112,243,0.45)", transition: "height 0.12s ease",
+            }} />
+          </div>
+        )}
       </div>
       {filteredMentions.length > 0 && (
         <div ref={mentionListRef}

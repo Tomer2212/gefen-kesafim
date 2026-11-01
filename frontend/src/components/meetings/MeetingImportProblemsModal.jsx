@@ -16,6 +16,9 @@ import {
   MEETING_SERVICE_TYPE_OPTIONS,
 } from "./constants";
 
+// Tags school-data writes for the school card's "תיעוד פעולות" log (backend school_activity.py).
+const SURFACE_HEADERS = { headers: { "X-Client-Surface": "import" } };
+
 // The three free-text label fields a past-mode import may carry values for that don't match
 // the app's closed option lists — mapped once (per distinct value) in the section below.
 const UNRECOGNIZED_FIELD_CONFIG = {
@@ -159,18 +162,18 @@ function QuickAddSchoolForm({ row, orgUsers, academicYear, onCreated, onCancel }
       }
       if (autoSecretary) Object.assign(payload, autoSecretary);
 
-      const res = await axios.post("/schools/", payload);
+      const res = await axios.post("/schools/", payload, SURFACE_HEADERS);
       const newSchoolId = res.data.id;
 
       if (draft.service_type) {
         try {
-          await axios.put(`/schools/${newSchoolId}/year-admin-data`, { service_type: draft.service_type }, { params: { academic_year: academicYear } });
+          await axios.put(`/schools/${newSchoolId}/year-admin-data`, { service_type: draft.service_type }, { params: { academic_year: academicYear }, ...SURFACE_HEADERS });
         } catch (e) { /* non-fatal, matches CLAUDE.md enrichment rule */ }
       }
       for (const div of ["gefen", "current", "district"]) {
         const advisorId = draft[`advisor_${div}`];
         if (advisorId) {
-          try { await axios.post(`/schools/${newSchoolId}/advisors/${div}`, { advisor_id: advisorId }); } catch (e) { /* non-fatal */ }
+          try { await axios.post(`/schools/${newSchoolId}/advisors/${div}`, { advisor_id: advisorId }, SURFACE_HEADERS); } catch (e) { /* non-fatal */ }
         }
       }
       onCreated(newSchoolId, draft.name.trim());

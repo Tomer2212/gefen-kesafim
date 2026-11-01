@@ -14,6 +14,9 @@ import { CONTROL_LETTER_STATUS_MAP, CONTROL_LETTER_STATUS_OPTIONS } from "../com
 import { MEETING_SERVICE_TYPE_BREAKDOWN_COL_ORDER } from "../components/meetings/constants";
 import { diagnoseConnectionError } from "../lib/connectionError";
 
+// Tags school-data writes for the school card's "תיעוד פעולות" log (backend school_activity.py).
+const SURFACE_HEADERS = { headers: { "X-Client-Surface": "dashboard" } };
+
 // Fallback list so the summary-budget selector has real options even before check_metrics
 // has any rows for the org (brand-new table, only populated going forward by new checks) —
 // matches normalize_budget_name's target names in backend/zihuy_core.py.
@@ -1796,7 +1799,7 @@ function BulkAccessModal({ schools, users, loadingUsers, onClose, onSaved }) {
     let failed = 0;
     for (const s of schools) {
       try {
-        await axios.put(`/schools/${s.id}`, { name: s.name, restrict_access_to: value });
+        await axios.put(`/schools/${s.id}`, { name: s.name, restrict_access_to: value }, SURFACE_HEADERS);
       } catch {
         failed += 1;
       }

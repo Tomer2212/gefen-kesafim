@@ -29,7 +29,11 @@ import { AdvisorSearch } from "../components/AdvisorSearch";
 import { AccessSelector } from "../components/AccessSelector";
 import HourMinuteInput from "../components/HourMinuteInput";
 import { MultiSelectChips } from "../components/MultiSelectChips";
-import { Building2, Phone, Handshake, UsersRound, MessageSquareText, Folder, CalendarDays, Pencil } from "lucide-react";
+import { Building2, Phone, Handshake, UsersRound, MessageSquareText, Folder, CalendarDays, Pencil, History } from "lucide-react";
+import { SchoolActivityModal } from "../components/SchoolActivityModal";
+
+// Tags this page's school-data writes for the "תיעוד פעולות" log (backend school_activity.py).
+const SCHOOL_CARD_SURFACE = { headers: { "X-Client-Surface": "school_card" } };
 import { defaultMeetingServiceType, resolveDefaultAdvisorIds, personalDefaultServiceType } from "../components/meetings/constants";
 import { AdvisorCell } from "../components/meetings/AdvisorCell";
 import AdvisorAccessGrantModal from "../components/meetings/AdvisorAccessGrantModal";
@@ -1498,6 +1502,108 @@ function CheckLinkTooltip({ children }) {
   );
 }
 
+// ─── "מבצע הבדיקה" column ─────────────────────────────────────────────────────
+// Groups a check's activity events (check_logs.activity) by user: the creator first,
+// then any OTHER user who updated it. Falls back to run_by/run_at for a log with no
+// activity trail. Each name opens a banana-yellow tooltip listing that user's events.
+function groupCheckActivity(log) {
+  const events = Array.isArray(log.activity) && log.activity.length > 0
+    ? log.activity
+    : log.run_by
+      ? [{ user_id: log.run_by, at: log.run_at, kind: "created", files: {
+          tikhnun: log.summary?.tikhnun_filenames || [],
+          gefen: log.gefen_file_names || [],
+          finance: log.finance_file_name || null,
+        } }]
+      : [];
+  const profiles = { ...(log.activity_profiles || {}) };
+  if (log.run_by && log.profiles) profiles[log.run_by] = log.profiles;
+  const creatorId = events.find(e => e.kind === "created")?.user_id || log.run_by || null;
+  const groups = new Map();
+  if (creatorId) groups.set(creatorId, []);
+  for (const e of events) {
+    const uid = e.user_id || "";
+    if (!groups.has(uid)) groups.set(uid, []);
+    groups.get(uid).push(e);
+  }
+  return [...groups.entries()]
+    .filter(([, evs]) => evs.length > 0)
+    .map(([uid, evs]) => ({
+      userId: uid,
+      name: profiles[uid]?.full_name || profiles[uid]?.email || "משתמש לא ידוע",
+      events: evs,
+    }));
+}
+
+function PerformerTooltip({ name, events }) {
+  const [pos, setPos] = useState(null);
+  const anchorRef = useRef(null);
+
+  function show() {
+    const rect = anchorRef.current.getBoundingClientRect();
+    setPos({ top: rect.bottom + 6, left: rect.left });
+  }
+  function hide() { setPos(null); }
+
+  useEffect(() => {
+    if (!pos) return;
+    function onScroll() { hide(); }
+    document.addEventListener("scroll", onScroll, true);
+    return () => document.removeEventListener("scroll", onScroll, true);
+  }, [pos]);
+
+  return (
+    <span ref={anchorRef} tabIndex={0}
+      className="inline-block cursor-default text-slate-700 outline-none focus-visible:ring-2 focus-visible:ring-blue-400 rounded"
+      onMouseEnter={show} onMouseLeave={hide} onFocus={show} onBlur={hide}>
+      {name}
+      {pos && createPortal(
+        <span role="tooltip" dir="rtl"
+          className="fixed flex flex-col gap-1.5 text-xs text-slate-800 px-3 py-2 rounded-lg shadow-md"
+          style={{ background: "#FEF08A", border: "1px solid #EAB308", top: pos.top, left: pos.left, zIndex: 200, maxWidth: 560 }}>
+          {events.map((e, i) => {
+            const f = e.files || {};
+            const fileRows = [
+              ["תכנון", f.tikhnun || []],
+              ["דיווח", f.gefen || []],
+              ["כספים", f.finance ? [f.finance] : []],
+            ].filter(([, list]) => list.length > 0);
+            return (
+              <span key={e.run_id || i} className={i > 0 ? "block pt-1.5 border-t border-yellow-500/40" : "block"}>
+                <span className="block font-semibold whitespace-nowrap">
+                  {e.kind === "updated" ? "עדכן את הבדיקה" : "יצר את הבדיקה"} · {formatDateTime(e.at)}
+                </span>
+                {fileRows.length === 0
+                  ? <span className="block text-slate-600">לא נשמר פירוט קבצים</span>
+                  : fileRows.map(([label, list]) => (
+                      <span key={label} className="block">
+                        <span className="font-medium">{label}:</span> {list.join(", ")}
+                      </span>
+                    ))}
+              </span>
+            );
+          })}
+        </span>,
+        document.body
+      )}
+    </span>
+  );
+}
+
+function CheckPerformerCell({ log }) {
+  const groups = groupCheckActivity(log);
+  if (groups.length === 0) return <span className="text-slate-400">—</span>;
+  return (
+    <div className="flex flex-col items-start gap-0.5">
+      {groups.map((g, i) => (
+        <span key={g.userId || i} className={i === 0 ? "text-sm" : "text-xs"}>
+          <PerformerTooltip name={g.name} events={g.events} />
+        </span>
+      ))}
+    </div>
+  );
+}
+
 // ─── StageMismatchModal ───────────────────────────────────────────────────────
 const STAGE_DIV_MAP = { tikkon: "tikkon", beinayim: "beinayim", yesodi: "yesodi" };
 const DIV_HEB  = { tikkon: "תיכון", beinayim: "חטיבת ביניים", yesodi: "יסודי" };
@@ -1546,7 +1652,8 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
 
   const [colOrder, setColOrder] = useState(DEFAULT_CHECK_COL_ORDER);
   const [colVisible, setColVisible] = useState(
-    Object.fromEntries(DEFAULT_CHECK_COL_ORDER.map(k => [k, true]))
+    // "performer" is a fixed (non-draggable) column, so it lives in colVisible but not colOrder.
+    Object.fromEntries([...DEFAULT_CHECK_COL_ORDER, "performer"].map(k => [k, true]))
   );
   const [showColPicker, setShowColPicker] = useState(false);
   const [colPickerQuery, setColPickerQuery] = useState("");
@@ -2046,6 +2153,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
       seenGroups.add(group.header);
       items.push({ key: group.header, label: group.header, keys: group.keys });
     }
+    items.push({ key: "performer", label: "מבצע הבדיקה", keys: ["performer"] });
     return items;
   })();
 
@@ -2246,6 +2354,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
                       </th>
                     );
                   })}
+                  {colVisible.performer && <th scope="col" rowSpan={2} className={thBase}>מבצע הבדיקה</th>}
                   {canDelete && <th scope="col" rowSpan={2} className={thBase} />}
                 </tr>
                 {/* Row 2: file sub-headers + group sub-labels */}
@@ -2342,6 +2451,11 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
                         </>
                       );
                     })()}
+                    {colVisible.performer && (
+                      <td className="px-3 py-3 whitespace-nowrap text-sm text-slate-700">
+                        {meUser?.full_name || meUser?.email || <span className="text-slate-400">—</span>}
+                      </td>
+                    )}
                     {canDelete && <td className="border-r border-slate-100" />}
                   </tr>
                 )}
@@ -2351,7 +2465,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
                 items={historyVirtualItems}
                 padTop={historyPadTop}
                 padBottom={historyPadBottom}
-                colSpan={4 + visibleColOrder.length + (canDelete ? 1 : 0)}
+                colSpan={4 + visibleColOrder.length + (colVisible.performer ? 1 : 0) + (canDelete ? 1 : 0)}
                 measureElement={historyRowVirtualizer.measureElement}
                 rows={filteredLogs}
                 rowKey={l => l.id}
@@ -2420,6 +2534,12 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
                           {renderCheckLogCellForBudget(log, key, selectedHistBudget, () => setAddFileModal({ log }), stageLabel)}
                         </td>
                       ))}
+
+                      {colVisible.performer && (
+                        <td className="px-3 py-3 whitespace-nowrap">
+                          <CheckPerformerCell log={log} />
+                        </td>
+                      )}
 
                       {canDelete && (
                         <td className="px-2 py-3 border-r border-slate-100 relative" data-log-menu>
@@ -2806,7 +2926,7 @@ export default function SchoolPage() {
     yearAdminInflightRef.current[field] = (yearAdminInflightRef.current[field] || 0) + 1;
     setYearAdminData(prev => ({ ...prev, [field]: value }));
     try {
-      const res = await axios.put(`/schools/${schoolId}/year-admin-data`, { [field]: value }, { params: { academic_year: academicYear } });
+      const res = await axios.put(`/schools/${schoolId}/year-admin-data`, { [field]: value }, { params: { academic_year: academicYear }, ...SCHOOL_CARD_SURFACE });
       if (yearAdminCtxRef.current !== ctx) return;
       const data = res.data && typeof res.data === "object" ? res.data : {};
       const skip = busyYearAdminFields(field);
@@ -2915,6 +3035,7 @@ export default function SchoolPage() {
   const [originalTypedAdvisorIds, setOriginalTypedAdvisorIds] = useState(emptyTypedAdvisorIds);
 
   const [isEditing, setIsEditing] = useState(false);
+  const [showActivity, setShowActivity] = useState(false);
   const [originalForm, setOriginalForm] = useState(null);
   const [accessLinkedToAdvisors, setAccessLinkedToAdvisors] = useState(false);
   const [canDeleteSchool, setCanDeleteSchool] = useState(false);
@@ -3285,7 +3406,7 @@ export default function SchoolPage() {
       ...(stageScope === "tichon" || stageScope === "chativa" || stageScope === "both" ? { stage_scope: stageScope } : {}),
     };
     try {
-      const res = await axios.post(`/schools/${schoolId}/meetings`, payload);
+      const res = await axios.post(`/schools/${schoolId}/meetings`, payload, { headers: { "X-Client-Surface": "school_card" } });
       // advisor_profiles must reflect what the server actually persisted (advisor_ids), not
       // what was requested — the server silently coerces an advisor-role user's advisor_ids
       // to themselves, so trusting the pre-request defaultAdvisorProfiles here would show a
@@ -3369,7 +3490,7 @@ export default function SchoolPage() {
       stage_scope: draft.stage_scope || null,
     };
     try {
-      const res = await axios.put(`/schools/${schoolId}/meetings/${draft.id}`, payload);
+      const res = await axios.put(`/schools/${schoolId}/meetings/${draft.id}`, payload, { headers: { "X-Client-Surface": "school_card" } });
       // Same rule as createMeetingRow: advisor_profiles must reflect what the server actually
       // persisted (advisor_ids), not the pre-request draft — the server may have silently
       // coerced an advisor-role user's advisor_ids back to themselves.
@@ -3618,10 +3739,10 @@ export default function SchoolPage() {
           const addedT = draftTypedAdvisorIds[t].filter(id => !originalTypedAdvisorIds[t].includes(id));
           const removedT = originalTypedAdvisorIds[t].filter(id => !draftTypedAdvisorIds[t].includes(id));
           for (const id of addedT) {
-            await axios.post(`/schools/${schoolId}/advisors/${t}`, { advisor_id: id });
+            await axios.post(`/schools/${schoolId}/advisors/${t}`, { advisor_id: id }, SCHOOL_CARD_SURFACE);
           }
           for (const id of removedT) {
-            await axios.delete(`/schools/${schoolId}/advisors/${t}/${id}`);
+            await axios.delete(`/schools/${schoolId}/advisors/${t}/${id}`, SCHOOL_CARD_SURFACE);
           }
         }
       }
@@ -3661,7 +3782,7 @@ export default function SchoolPage() {
       const studentCountValue = editForm.student_count === "" || editForm.student_count == null
         ? null
         : parseInt(editForm.student_count, 10);
-      await axios.put(`/schools/${schoolId}`, { ...editForm, ...chativaSync, ...legacyCoordinatorSync, student_count: studentCountValue });
+      await axios.put(`/schools/${schoolId}`, { ...editForm, ...chativaSync, ...legacyCoordinatorSync, student_count: studentCountValue }, SCHOOL_CARD_SURFACE);
       let updatedAdvisors = schoolAdvisors;
       if (managingAdvisors) {
         const updatedTyped = {
@@ -4129,11 +4250,20 @@ export default function SchoolPage() {
                     בקש עדכון פרטים
                   </button>
                 )}
+                <button onClick={() => setShowActivity(true)}
+                  className="flex items-center gap-1.5 bg-white border border-slate-200 text-slate-700 font-medium text-sm rounded-xl px-3.5 py-2 hover:bg-slate-50 transition-colors">
+                  <History className="w-3.5 h-3.5" strokeWidth={2} aria-hidden="true" />
+                  תיעוד פעולות
+                </button>
               </div>
             )}
             <div className="pb-1.5">
               <AcademicYearSelector value={academicYear} onChange={setAcademicYear} />
             </div>
+            {showActivity && (
+              <SchoolActivityModal schoolId={schoolId} schoolName={school?.name} academicYear={academicYear}
+                onClose={() => setShowActivity(false)} />
+            )}
           </div>
 
           {/* ─── TAB: פרטי בית הספר ─── */}
@@ -5298,6 +5428,7 @@ export default function SchoolPage() {
                   );
                 })()}
                 <MeetingsTable
+                  clientSurface="school_card"
                   meetings={meetings}
                   usersWithAccess={users.filter(u => u.role === "owner" || u.role === "manager" || advisorHasAccess(u.id))}
                   usersWithoutAccess={users.filter(u => u.role === "advisor" && !advisorHasAccess(u.id))}

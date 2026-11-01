@@ -3,6 +3,7 @@ import axios from "axios";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { DeleteMeetingModal } from "./DeleteMeetingModal";
 import { MoveMeetingYearModal } from "./MoveMeetingYearModal";
+import { MeetingActivityModal } from "./MeetingActivityModal";
 import { MeetingRow } from "./MeetingRow";
 import { MEETING_SERVICE_TYPE_BREAKDOWN, formatMeetingMinutes } from "./constants";
 import {
@@ -106,6 +107,7 @@ export function MeetingsTable({
   schoolStage, schoolStageFor,
   currentUserRole, currentUserId,
   aiSummaryEnabled = true,
+  clientSurface,
 }) {
   // Excel-style per-column filter + stacked multi-column sort (see meetingColumnMenu.jsx).
   // Local state only — intentionally not persisted, resets on remount / tab change.
@@ -114,6 +116,8 @@ export function MeetingsTable({
   const [openMenuKey, setOpenMenuKey] = useState(null);
   const [pendingDeleteId, setPendingDeleteId] = useState(null);
   const [pendingMoveMeeting, setPendingMoveMeeting] = useState(null);
+  // Held here (not in MeetingRow) so a virtualized row unmounting can't close an open log.
+  const [activityTarget, setActivityTarget] = useState(null); // { meeting, waitForSaves } | null
   const [movedYearToast, setMovedYearToast] = useState(null);
   const [reminderToast, setReminderToast] = useState(false);
   const [permissionDeniedMsg, setPermissionDeniedMsg] = useState(null);
@@ -129,7 +133,8 @@ export function MeetingsTable({
 
   // The ⋮ actions column also holds "העבר לשנת לימודים אחרת", which any editor may use —
   // so it can't depend on the delete permission alone.
-  const showActionsColumn = canDeleteMeetings || !!onMeetingMovedYear;
+  // Always shown: "תיעוד פעילות" (first item) is available to anyone who can see the row.
+  const showActionsColumn = true;
 
   async function moveMeetingYear(meeting, academicYear) {
     const res = await axios.patch(`/schools/${meeting.school_id}/meetings/${meeting.id}/academic-year`, { academic_year: academicYear });
@@ -231,6 +236,13 @@ export function MeetingsTable({
         <DeleteMeetingModal
           onConfirm={() => { onDelete(pendingDeleteId); setPendingDeleteId(null); }}
           onCancel={() => setPendingDeleteId(null)}
+        />
+      )}
+      {activityTarget && (
+        <MeetingActivityModal
+          meeting={activityTarget.meeting}
+          waitForSaves={activityTarget.waitForSaves}
+          onClose={() => setActivityTarget(null)}
         />
       )}
       {pendingMoveMeeting && (
@@ -345,6 +357,8 @@ export function MeetingsTable({
                           showCalendarColumn={showCalendarColumn}
                           onOpenSummary={onOpenSummary}
                           aiSummaryEnabled={aiSummaryEnabled}
+                          clientSurface={clientSurface}
+                          onRequestActivity={setActivityTarget}
                           typedAdvisors={typedAdvisorsFor ? typedAdvisorsFor(m) : null}
                           schoolStage={schoolStageFor ? schoolStageFor(m) : schoolStage}
                           expanded={expandedIds.has(m.id)}

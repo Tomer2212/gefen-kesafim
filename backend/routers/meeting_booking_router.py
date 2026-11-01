@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException
 
 import graph_client
+import meeting_activity
 from academic_years import DEFAULT_ACADEMIC_YEAR
 from supabase_client import get_admin_client, reset_admin_client
 
@@ -374,6 +375,17 @@ def get_booking_freebusy(token: str, month: str | None = None, range_key: str | 
     return {"days": days, "ok": True}
 
 
+def _log_booking_activity(db, token_row: dict, meeting: dict) -> None:
+    """Activity log entry for a meeting the school booked itself via a public link."""
+    meeting_activity.log_meeting_activity(
+        db, meeting_id=meeting["id"], school_id=token_row.get("school_id"), org_id=token_row.get("org_id"),
+        actor_id=None, actor_type="school",
+        source="task_booking_link" if token_row.get("task_id") else "booking_link",
+        action="created", after=meeting,
+        meta={"task_id": token_row.get("task_id"), "token_advisor_id": token_row.get("advisor_id")},
+    )
+
+
 @router.post("/public/meeting-booking/{token}/book")
 def book_meeting_slot(token: str, body: dict):
     db = get_admin_client()
@@ -441,6 +453,7 @@ def book_meeting_slot(token: str, body: dict):
     except Exception as exc:
         logger.error("book_meeting_slot insert failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=503, detail="שגיאה זמנית בשמירת הפגישה, נסה שוב")
+    _log_booking_activity(db, token_row, meeting)
 
     calendar_synced = False
     try:
@@ -549,6 +562,7 @@ def _book_range_slot(db, token_row: dict, range_key: str, body: dict) -> dict:
     except Exception as exc:
         logger.error("_book_range_slot insert failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=503, detail="שגיאה זמנית בשמירת הפגישה, נסה שוב")
+    _log_booking_activity(db, token_row, meeting)
 
     calendar_synced = False
     try:

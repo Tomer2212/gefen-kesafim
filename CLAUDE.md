@@ -235,6 +235,7 @@ in_gefen_not_finance_count INT
 summary JSONB
 rows_finance_not_gefen JSONB
 rows_gefen_not_finance JSONB
+activity JSONB  -- [{run_id, user_id, at, kind: 'created'|'updated', files: {tikhnun[], gefen[], finance}}] — written by _record_check_activity (non-fatal); one event per run_id; shown in the "מבצע הבדיקה" column
 ```
 
 ### `year_closure_notes` — signed notes in the school card's "סגירת שנה" tab
@@ -253,6 +254,22 @@ updated_at TIMESTAMPTZ
 ```
 Every user (owner/manager included) may edit/delete only their own notes; a NULL-author note is deletable by the owner only. The old free-text columns `school_year_admin_data.closure_parents_notes` / `closure_authority_notes` and `gefen_year_closures.notes` are a **server-maintained summary** (newest first, `dd/mm/yy HH:MM · name: content` per line) rewritten by `_sync_closure_notes_summary` — never write them directly; the dashboard/admin columns and task field-conditions read them.
 
+### `meeting_activity` — per-meeting activity log ("תיעוד פעילות")
+```sql
+id UUID PRIMARY KEY
+meeting_id UUID      -- NO FK on purpose: the log outlives a deleted meeting
+school_id UUID, org_id UUID
+actor_id UUID        -- NULL for school (public booking link) / system / Outlook
+actor_type TEXT      -- 'user' | 'school' | 'system' | 'outlook'
+source TEXT          -- school_card | personal | admin | status_popup | import | import_remap | booking_link | task_booking_link | outlook | auto_complete | calls_sync | user_transfer | NULL
+action TEXT          -- created | updated | deleted | moved_year | reassigned_school | advisor_joined | note_added/edited/deleted | offline_added/edited/deleted | summary_uploaded
+changes JSONB        -- {field: {from, to}} — only tracked fields that really changed
+snapshot JSONB       -- tracked fields after the action
+meta JSONB           -- note content, offline entry, task_id, Outlook calendar owners, …
+created_at TIMESTAMPTZ
+```
+service_role only (no `authenticated` grant; RLS on with a deny-all policy). Written exclusively via `backend/meeting_activity.py` → `log_meeting_activity` / `log_meeting_activity_bulk` (always non-fatal). Read via `GET /schools/{id}/meetings/{mid}/activity`, which merges consecutive same-actor/same-source `updated` events within 10 min and synthesizes a `legacy` "created" row (from `meetings.created_by/created_at/created_via/booking_token_id`) for meetings that predate the log. **Any new code path that writes `meetings` (or meeting notes / offline work / summary) MUST call `log_meeting_activity` after its write** — read the before-state with `meeting_activity.fetch_tracked` first. An `updated` with no real change is dropped automatically, so calling it on every autosave is fine. Frontend meeting create/PUT/PATCH calls send an `X-Client-Surface` header (`school_card` / `personal` / `admin` / `status_popup`) so the log can say where a change came from — keep sending it from any new meetings surface (`MeetingsTable` takes a `clientSurface` prop).
+
 ### `school_update_requests` — advisors request changes, owners approve
 ```sql
 id UUID PRIMARY KEY
@@ -262,9 +279,26 @@ proposed_changes JSONB
 status TEXT  -- 'pending' | 'approved' | 'rejected'
 reviewer_id UUID
 reviewer_note TEXT
+original_values JSONB  -- {field: value at submit time} — shown as "before" in the school activity log
+field_decisions JSONB  -- {field: 'approved'|'rejected'} — written on review (partial approvals)
 created_at TIMESTAMPTZ
 resolved_at TIMESTAMPTZ
 ```
+Submit and review both verify the school belongs to the caller's org.
+
+### `school_activity` — "תיעוד פעולות" of the school card's "פרטי בית הספר" tab
+```sql
+id UUID PRIMARY KEY
+school_id UUID, org_id UUID
+academic_year TEXT  -- only for year-scoped ("פרטי ליווי" / allocation / duration) changes
+actor_id UUID, actor_type TEXT  -- 'user' | 'system' | 'unknown'
+source TEXT         -- X-Client-Surface value (school_card | add_school | admin_modal | admin_grid | admin_bulk | admin_undo | import | dashboard | task_resolution | collection) or tasks_contacts_import | calls | update_request
+action TEXT         -- created | updated | deleted | restored
+changes JSONB       -- {field: {from, to}} — tracked fields that really changed (incl. virtual advisors_<type> id lists)
+request_id UUID     -- set when the change came from approving an update request (folded into that request's card)
+created_at TIMESTAMPTZ
+```
+service_role only (RLS on, deny-all policy). Written exclusively via `backend/school_activity.py` → `log_school_activity` / `log_school_activity_bulk` (always non-fatal; an `updated` with no real change is dropped). Tracked: the tab's `schools` columns (`TRACKED_SCHOOL_FIELDS`), its `school_year_admin_data` fields (`TRACKED_YEAR_FIELDS`) and the typed advisor lists. Read via `GET /schools/{id}/activity`, which merges consecutive same-actor/source/year changes within 10 min and interleaves update requests (per-field before/after + decision). **Any new code path that writes the tab's data MUST read the before-state and call `log_school_activity` after its write**, and frontend callers send `X-Client-Surface` (see the list above). Labels/formatting for these fields live in `frontend/src/components/schoolFieldLabels.js` (shared with NotificationsPage).
 
 ---
 
@@ -378,6 +412,9 @@ POST   /schools/{id}/advisors             → assign advisor (manager+) — uses
 DELETE /schools/{id}/advisors/{uid}       → unassign advisor (manager+)
 
 GET    /schools/{id}/logs                 → check history for school
+
+GET    /schools/{id}/meetings/{mid}/activity → meeting activity log ("תיעוד פעילות", ⋯ menu in every meetings table)
+GET    /schools/{id}/activity            → school-card change log ("תיעוד פעולות" button in the "פרטי בית הספר" tab)
 
 GET    /schools/{id}/year-closure-notes?academic_year=   → signed "סגירת שנה" notes
 POST   /schools/{id}/year-closure-notes                  → add note (author = caller)
@@ -1054,7 +1091,7 @@ A passing run means, for every covered endpoint, both (a) a different org is rej
 4. If a failure appears: treat a cross-org test that unexpectedly passes as a real, reportable vulnerability (not a flaky test) — fix the underlying endpoint, re-run, and only then proceed. Never weaken/delete a failing test to make the suite green.
 5. This is app-level enforcement, not CI — it depends on this rule being followed each session. It does not replace the suite; it replaces relying on anyone's memory to run it.
 
-As of the most recent full audit (2026-10-24), the suite covers 111 tests across all endpoint groups fixed in that audit plus later additions (`test_idor_cross_org.py` + `test_idor_cross_org_extended.py`). **Note:** list endpoints with NO resource-id parameter (e.g. `GET /schools/year-admin-data`) are also a leak vector — a query filtered only by year/status on a school-scoped table (no `org_id` column) returns every org's rows; scope them with `schools!inner(org_id)` + `.eq("schools.org_id", ...)`. Keep this number roughly current when adding more coverage.
+As of the most recent full audit (2026-10-24), the suite covers 121 tests across all endpoint groups fixed in that audit plus later additions (`test_idor_cross_org.py` + `test_idor_cross_org_extended.py`). **Note:** list endpoints with NO resource-id parameter (e.g. `GET /schools/year-admin-data`) are also a leak vector — a query filtered only by year/status on a school-scoped table (no `org_id` column) returns every org's rows; scope them with `schools!inner(org_id)` + `.eq("schools.org_id", ...)`. Keep this number roughly current when adding more coverage.
 
 ### Recurring security cadence (MANDATORY — do not wait for the user to ask)
 
