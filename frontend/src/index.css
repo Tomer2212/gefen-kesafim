@@ -279,3 +279,46 @@
 .animate-slide-in-left {
   animation: slideInLeft 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
+
+/* Rich-text meeting notes — shared by RichNoteEditor (TipTap) and RichNoteView (saved HTML). */
+.rich-note {
+  font-size: 0.75rem;
+  line-height: 1.55;
+  color: inherit;
+  word-break: break-word;
+  text-align: right;
+}
+.rich-note > :first-child { margin-top: 0; }
+.rich-note > :last-child { margin-bottom: 0; }
+.rich-note p { margin: 0; min-height: 1.2em; }
+.rich-note h1 { font-size: 1.15rem; font-weight: 700; margin: 0.5rem 0 0.3rem; }
+.rich-note h2 { font-size: 1rem; font-weight: 700; margin: 0.45rem 0 0.25rem; }
+.rich-note h3 { font-size: 0.875rem; font-weight: 700; margin: 0.4rem 0 0.2rem; }
+.rich-note ul { list-style: disc; padding-inline-start: 1.4rem; margin: 0.2rem 0 0.35rem; }
+.rich-note ol { list-style: decimal; padding-inline-start: 1.4rem; margin: 0.2rem 0 0.35rem; }
+.rich-note li > p { margin: 0; }
+.rich-note ul[data-type="taskList"] { list-style: none; padding-inline-start: 0.1rem; }
+.rich-note ul[data-type="taskList"] li { display: flex; align-items: flex-start; gap: 0.45rem; }
+.rich-note ul[data-type="taskList"] li > label { flex-shrink: 0; margin-top: 0.2rem; user-select: none; }
+.rich-note ul[data-type="taskList"] li > label input { accent-color: #0070F3; width: 0.85rem; height: 0.85rem; cursor: pointer; }
+.rich-note ul[data-type="taskList"] li > div { flex: 1 1 auto; min-width: 0; }
+.rich-note ul[data-type="taskList"] li[data-checked="true"] > div { color: #94a3b8; text-decoration: line-through; }
+.rich-note blockquote { border-inline-start: 3px solid #93c5fd; background: rgba(239, 246, 255, 0.7); padding: 0.3rem 0.6rem; margin: 0.35rem 0; color: #334155; border-radius: 0.25rem; }
+.rich-note hr { border: 0; border-top: 1.5px solid #cbd5e1; margin: 0.6rem 0; }
+.rich-note a { color: #2563eb; text-decoration: underline; cursor: pointer; }
+.rich-note mark { border-radius: 0.15rem; padding: 0 0.1rem; color: inherit; }
+.rich-note .rt-mention { color: #2563eb; font-weight: 600; }
+.rich-note table { border-collapse: collapse; margin: 0.4rem 0; width: 100%; table-layout: fixed; }
+.rich-note th, .rich-note td { border: 1px solid #cbd5e1; padding: 0.25rem 0.4rem; vertical-align: top; min-width: 3rem; position: relative; }
+.rich-note th { background: #f1f5f9; font-weight: 700; }
+.rich-note th > p, .rich-note td > p { margin: 0; }
+.rich-note .tableWrapper { overflow-x: auto; }
+.rich-note .selectedCell::after { content: ""; position: absolute; inset: 0; background: rgba(0, 112, 243, 0.12); pointer-events: none; }
+.rich-note.ProseMirror { outline: none; }
+.rich-note p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: right;
+  height: 0;
+  color: #94a3b8;
+  pointer-events: none;
+}

@@ -84,7 +84,7 @@ function requestStatusPill(ev) {
   return { text: "אושרה", cls: "bg-green-100 text-green-700" };
 }
 
-function DecisionCell({ decision, reviewer, resolvedAt }) {
+export function DecisionCell({ decision, reviewer, resolvedAt }) {
   if (decision === "pending") return <span className="text-amber-700 font-medium">⏳ ממתין לאישור</span>;
   const approved = decision === "approved";
   return (

@@ -292,7 +292,7 @@ def _resolve_contact_for_call(contact_map: dict, profile_phone_map: dict, resolu
 def _upsert_known_agents(org_id: str, provider: str, calls: list[dict]) -> None:
     """Records every (agent_key, agent_label) pair seen in a batch of already-enriched
     calls (as returned by _pull_org_calls) — feeds the known-agents picker in
-    ניהול-משתמשים. Called both by the 15-min cron (process_new_calls) and live from
+    ניהול-משתמשים. Called both by the scheduled scan (process_new_calls) and live from
     list_known_reps, so the picker never depends solely on the cron having already run
     (important right after connecting a brand-new line/number that's never been scanned)."""
     seen = {c["representative_code"]: c.get("representative_name") for c in calls if c.get("representative_code")}
@@ -1277,6 +1277,52 @@ def list_my_unknown_call_prompts(user: Annotated[dict, Depends(get_current_user)
     } for r in rows]}
 
 
+# Older open ambiguous calls stay in the notifications bell only — a popup about a call
+# from days ago is noise (the advisor no longer remembers it either way).
+AMBIGUOUS_PROMPT_MAX_AGE = timedelta(hours=48)
+
+
+@router.get("/calls/ambiguous/my-prompts")
+def list_my_ambiguous_call_prompts(user: Annotated[dict, Depends(get_current_user)]):
+    """Open 'which school was this call with?' prompts for calls the current user made or
+    received (contact number shared by several schools) — feeds the Sidebar poll that raises
+    AmbiguousCallPopup. Owners/managers notified only as a fallback (unmapped line) keep
+    the bell notification, not the popup."""
+    since = (datetime.now(timezone.utc) - AMBIGUOUS_PROMPT_MAX_AGE).isoformat()
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            rows = (
+                db.table("calls_call_contact_resolutions")
+                .select("call_id, call_time, call_direction, call_duration_seconds, counterpart_phone, contact_name, candidate_schools")
+                .eq("org_id", user["org_id"])
+                .eq("kind", "ambiguous")
+                .eq("caller_advisor_id", user["id"])
+                .is_("resolved_school_id", "null")
+                .gte("call_time", since)
+                .order("call_time", desc=True)
+                .execute()
+            ).data or []
+            break
+        except Exception as exc:
+            if attempt == 0:
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.warning("list_my_ambiguous_call_prompts failed after 2 attempts: %s", exc)
+                return {"prompts": []}
+
+    return {"prompts": [{
+        "call_id": r["call_id"],
+        "call_time": r.get("call_time"),
+        "direction": r.get("call_direction"),
+        "duration_seconds": r.get("call_duration_seconds"),
+        "contact_name": r.get("contact_name"),
+        "counterpart_phone_display": _fmt_phone(r.get("counterpart_phone")) if r.get("counterpart_phone") else "",
+        "candidate_schools": r.get("candidate_schools") or [],
+    } for r in rows]}
+
+
 @router.post("/calls/{call_id}/dismiss-unknown")
 def dismiss_unknown_call(call_id: str, user: Annotated[dict, Depends(get_current_user)]):
     """Advisor answered 'not a school'. Per-user: mutes this number for THIS advisor only,
@@ -1677,7 +1723,7 @@ def delete_mapping(user: Annotated[dict, Depends(get_current_user)], mapping_id:
 @router.get("/known-reps")
 def list_known_reps(user: Annotated[dict, Depends(get_current_user)]):
     """Every (agent_key, agent_label) pair ever seen in this org's calls — populated by
-    process_new_calls (every 15 min) AND, right here, by a live top-up pull of the last
+    process_new_calls (every 5 min) AND, right here, by a live top-up pull of the last
     7 days. The live top-up matters for a line/number that was JUST connected and has
     never been scanned by the cron yet (e.g. right after wiring up a brand-new EXM line)
     — without it, the mapping picker in ניהול-משתמשים would show an empty dropdown with
@@ -1729,15 +1775,62 @@ def list_known_reps(user: Annotated[dict, Depends(get_current_user)]):
 # ---------------------------------------------------------------------------
 # Scheduled job — detects new calls with an ambiguous contact (same phone number
 # is a contact at more than one school) and notifies who needs to resolve it.
-# Cron-secured (GitHub Actions, every 15 min — see voicenter-poll-calls.yml).
+# Cron-secured. Primary trigger: Supabase pg_cron + pg_net, every 5 min (job
+# 'calls-process-new-calls'); GitHub Actions (voicenter-poll-calls.yml) is only a
+# backup — its schedule was measured lagging 3-7 hours. Safe to run concurrently
+# or twice: a per-org lease (calls_integrations.scan_lock_until) prevents overlap
+# and calls_scan_processed records every call already handled.
 # ---------------------------------------------------------------------------
+
+# A call only appears in the provider's log once it has ENDED, but the provider filters
+# by start time — so each scan re-pulls a lookback long enough to cover a long call that
+# was still in progress during the previous scan, then keeps only calls that ended
+# recently. calls_scan_processed makes the resulting overlap harmless, so the end margin
+# can be generous (covers a provider that logs a call a while after it ended).
+_SCAN_LOOKBACK = timedelta(hours=3)
+_SCAN_END_MARGIN = timedelta(minutes=30)
+_SCAN_LOCK_TTL = timedelta(minutes=4)
+_SCAN_PROCESSED_RETENTION = timedelta(days=3)
+
+
+def _call_end_utc(call: dict) -> datetime | None:
+    try:
+        start = datetime.fromisoformat(str(call.get("start_time") or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    return start + timedelta(seconds=call.get("duration_seconds") or 0)
+
+
+def _utc_filter_value(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _acquire_scan_lock(db, org_id: str, now: datetime) -> bool:
+    """Takes the org's scan lease unless another run holds an unexpired one. Conditional
+    update = atomic in Postgres, so two overlapping cron runs can't both get it."""
+    res = (
+        db.table("calls_integrations")
+        .update({"scan_lock_until": (now + _SCAN_LOCK_TTL).isoformat()})
+        .eq("org_id", org_id)
+        .or_(f"scan_lock_until.is.null,scan_lock_until.lt.{_utc_filter_value(now)}")
+        .execute()
+    )
+    return bool(res.data)
+
+
+def _release_scan_lock(db, org_id: str) -> None:
+    try:
+        db.table("calls_integrations").update({"scan_lock_until": None}).eq("org_id", org_id).execute()
+    except Exception as exc:
+        logger.warning("process_new_calls: failed to release scan lock for org=%s (expires on its own): %s", org_id, exc)
+
 
 @router.post("/process-new-calls")
 def process_new_calls(request: Request):
     if not CRON_SECRET or request.headers.get("X-Cron-Secret") != CRON_SECRET:
         raise HTTPException(status_code=403, detail="אין הרשאה")
-
-    from routers.schools_router import _create_notifications
 
     db = get_admin_client()
     now = datetime.now(timezone.utc)
@@ -1747,237 +1840,38 @@ def process_new_calls(request: Request):
         logger.error("process_new_calls: failed to load integrations: %s", exc, exc_info=True)
         raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת")
 
-    processed_orgs = 0
-    new_ambiguous_calls = 0
-    new_unknown_calls = 0
-    new_rep_unmapped = 0
+    totals = {"processed_orgs": 0, "new_ambiguous_calls": 0, "new_unknown_calls": 0, "new_rep_unmapped": 0}
 
     for org in orgs:
         org_id = org["org_id"]
-        provider = org["provider"]
-        last_scan = org.get("last_call_scan_at")
-        # First run for this org: only look back 1 hour, to avoid a flood of historical
-        # ambiguous-contact notifications on rollout.
-        window_start = (datetime.fromisoformat(last_scan) if last_scan else now - timedelta(hours=1)) - timedelta(minutes=5)
-        date_from = window_start.astimezone(_IL_TZ).strftime("%Y-%m-%dT%H:%M:%S")
-        date_to = now.astimezone(_IL_TZ).strftime("%Y-%m-%dT%H:%M:%S")
-
+        # Fresh per org — earlier orgs' processing time must not shorten this org's lease.
+        org_now = datetime.now(timezone.utc)
         try:
-            result = _pull_org_calls(org_id, date_from, date_to)
-        except HTTPException as exc:
-            logger.warning("process_new_calls: skipping org=%s (pull failed: %s)", org_id, exc.detail)
+            locked = _acquire_scan_lock(db, org_id, org_now)
+        except Exception as exc:
+            logger.warning("process_new_calls: skipping org=%s (lock failed: %s)", org_id, exc)
             continue
-        except Exception as exc:
-            logger.warning("process_new_calls: skipping org=%s (unexpected error: %s)", org_id, exc)
+        if not locked:
+            logger.info("process_new_calls: skipping org=%s (another scan is still running)", org_id)
             continue
-
-        # Record every agent key/label seen in this scan window — feeds the option list for
-        # the mapping picker in ניהול-משתמשים (see list_known_reps above, which also does
-        # its own live top-up). Non-fatal: a failure here must never block the
-        # ambiguous-contact notification logic below.
-        _upsert_known_agents(org_id, provider, result["calls"])
-
-        ambiguous_calls = [c for c in result["calls"] if c.get("pending_school_resolution")]
-        if ambiguous_calls:
-            call_ids = [c["call_id"] for c in ambiguous_calls]
-            try:
-                already_tracked = set(_get_call_resolutions_or_raise(org_id, call_ids).keys())
-            except Exception as exc:
-                # Treating a failed lookup as "nothing tracked yet" would re-notify every
-                # already-resolved ambiguous call for this org — skip this org for this run
-                # instead (next run, 15 min later, retries with a fresh lookup).
-                logger.warning("process_new_calls: skipping org=%s (resolutions lookup failed: %s)", org_id, exc)
-                continue
-
-            managers_and_owners: list[str] = []
-            try:
-                rows = db.table("profiles").select("id").in_("role", ["owner", "manager"]).eq("org_id", org_id).execute().data or []
-                managers_and_owners = [r["id"] for r in rows]
-            except Exception as exc:
-                logger.warning("process_new_calls: failed to load owners/managers for org=%s: %s", org_id, exc)
-
-            for c in ambiguous_calls:
-                if c["call_id"] in already_tracked:
-                    continue
-                recipient_ids = [c["advisor_id"]] if c.get("advisor_id") else managers_and_owners
-                if not recipient_ids:
-                    continue
-
-                try:
-                    db.table("calls_call_contact_resolutions").insert({
-                        "org_id": org_id,
-                        "call_id": c["call_id"],
-                        "call_time": c["start_time"],
-                        "contact_phone_suffix": _phone_suffix(c["counterpart_phone"]),
-                        "contact_name": c["contact_name"],
-                        "candidate_schools": c["candidate_schools"],
-                        "caller_advisor_id": c.get("advisor_id"),
-                        "notified_recipient_ids": recipient_ids,
-                    }).execute()
-                except Exception as exc:
-                    logger.warning("process_new_calls: failed to insert resolution row for call=%s: %s", c["call_id"], exc)
-                    continue
-
-                school_names = " ו-".join(s["name"] for s in c["candidate_schools"] if s.get("name"))
-                notif_rows = [{
-                    "recipient_id": rid,
-                    "type": "call_contact_ambiguous",
-                    "data": {
-                        "title": f"שיחה עם {c['contact_name']} — יש לשייך לבית ספר",
-                        "contact_name": c["contact_name"],
-                        "call_id": c["call_id"],
-                        "candidate_schools": c["candidate_schools"],
-                        "text": f"{c['contact_name']} שאיתו/ה דיברת הוא/היא איש/אשת קשר גם ב{school_names}. יש לשייך את השיחה לבית הספר הנכון.",
-                    },
-                } for rid in recipient_ids]
-                _create_notifications(db, notif_rows, pref_key="notify_call_contact_ambiguous")
-                new_ambiguous_calls += 1
-
-        # --- owners/managers for this org (shared by both tracks below) ---
-        owners_managers: list[str] = []
+        started = time.monotonic()
         try:
-            om_rows = db.table("profiles").select("id").in_("role", ["owner", "manager"]).eq("org_id", org_id).execute().data or []
-            owners_managers = [r["id"] for r in om_rows]
-        except Exception as exc:
-            logger.warning("process_new_calls: failed to load owners/managers for org=%s: %s", org_id, exc)
+            counts = _process_org_new_calls(db, org, org_now)
+        finally:
+            _release_scan_lock(db, org_id)
+        logger.info("process_new_calls: org=%s took %.1fs", org_id, time.monotonic() - started)
+        if counts is None:
+            continue
+        totals["processed_orgs"] += 1
+        for key in ("new_ambiguous_calls", "new_unknown_calls", "new_rep_unmapped"):
+            totals[key] += counts[key]
 
-        # --- Track A: org-side agent (rep code / line) not mapped to any user ---
-        # An agent_key seen in calls but with no calls_agent_mappings row can't be attributed
-        # to an advisor. Alert owners/managers once (they own ניהול-משתמשים → mapping); the
-        # marker is cleared by upsert_mapping so a future gap re-alerts.
-        try:
-            seen_now = {}
-            for c in result["calls"]:
-                code = c.get("representative_code")
-                if code and code not in seen_now:
-                    seen_now[code] = c
-            codes = list(seen_now.keys())
-            if codes:
-                mapped = {
-                    m["agent_key"]
-                    for m in (db.table("calls_agent_mappings").select("agent_key")
-                              .eq("org_id", org_id).eq("provider", provider).in_("agent_key", codes).execute().data or [])
-                }
-                known = {
-                    r["agent_key"]: r
-                    for r in (db.table("calls_known_agents").select("agent_key, unmapped_alert_sent_at")
-                              .eq("org_id", org_id).eq("provider", provider).in_("agent_key", codes).execute().data or [])
-                }
-                to_alert = [
-                    code for code in codes
-                    if code not in mapped and not (known.get(code) or {}).get("unmapped_alert_sent_at")
-                ]
-                for code in to_alert:
-                    if not owners_managers:
-                        break
-                    c = seen_now[code]
-                    notif_rows = [{
-                        "recipient_id": rid,
-                        "type": "voicenter_rep_unmapped",
-                        "data": {
-                            "title": "נרשמה שיחה ממספר ארגוני שאינו משויך לאף משתמש",
-                            "representative_code": code,
-                            "representative_name": c.get("representative_name"),
-                            "call_id": c.get("call_id"),
-                            "call_time": c.get("start_time"),
-                            "counterpart_phone": c.get("counterpart_phone"),
-                            "direction": c.get("direction"),
-                            "text": f"נציג {c.get('representative_name') or code} אינו משויך למשתמש. יש לשייך אותו באזור 'משתמשים'.",
-                            "deeplink": "/admin?tab=users",
-                        },
-                    } for rid in owners_managers]
-                    _create_notifications(db, notif_rows, pref_key="notify_voicenter_rep_unmapped")
-                    db.table("calls_known_agents").update(
-                        {"unmapped_alert_sent_at": now.isoformat()}
-                    ).eq("org_id", org_id).eq("provider", provider).eq("agent_key", code).execute()
-                    new_rep_unmapped += 1
-        except Exception as exc:
-            logger.warning("process_new_calls: Track A (agent unmapped) failed for org=%s: %s", org_id, exc)
-
-        # --- Track B: counterpart number matches no school — prompt the advisor ---
-        unknown_calls = [
-            c for c in result["calls"]
-            if c.get("advisor_id") and not c.get("school_id")
-            and not c.get("pending_school_resolution")
-            and not c.get("linked_school_ids")
-            and c.get("direction") != "internal"
-            and (c.get("duration_seconds") or 0) >= UNKNOWN_CALL_MIN_SECONDS
-        ]
-        unknown_tracked = set(_get_call_resolutions(org_id, [c["call_id"] for c in unknown_calls]).keys())
-        for c in unknown_calls:
-            advisor_id = c["advisor_id"]
-            suffix = _phone_suffix(c.get("counterpart_phone"))
-            if not suffix or c["call_id"] in unknown_tracked:
-                continue
-            try:
-                open_row = (
-                    db.table("calls_call_contact_resolutions")
-                    .select("id, missed_calls_since_prompt")
-                    .eq("org_id", org_id).eq("kind", "unknown")
-                    .eq("caller_advisor_id", advisor_id).eq("contact_phone_suffix", suffix)
-                    .is_("resolved_school_id", "null").is_("dismissed_at", "null")
-                    .limit(1).execute()
-                ).data
-                if open_row:
-                    db.table("calls_call_contact_resolutions").update({
-                        "missed_calls_since_prompt": (open_row[0].get("missed_calls_since_prompt") or 0) + 1,
-                    }).eq("id", open_row[0]["id"]).execute()
-                    continue
-
-                state = (
-                    db.table("calls_unknown_number_state").select("*")
-                    .eq("org_id", org_id).eq("advisor_id", advisor_id).eq("phone_suffix", suffix)
-                    .limit(1).execute()
-                ).data
-                state = state[0] if state else None
-                if state and state.get("muted") and (state.get("calls_since_prompt") or 0) < UNKNOWN_CALL_REPROMPT_AFTER:
-                    db.table("calls_unknown_number_state").update({
-                        "calls_since_prompt": (state.get("calls_since_prompt") or 0) + 1,
-                        "updated_at": now.isoformat(),
-                    }).eq("id", state["id"]).execute()
-                    continue
-
-                db.table("calls_unknown_number_state").upsert({
-                    "org_id": org_id, "advisor_id": advisor_id, "phone_suffix": suffix,
-                    "muted": False, "calls_since_prompt": 0,
-                    "last_prompt_at": now.isoformat(), "updated_at": now.isoformat(),
-                }, on_conflict="org_id,advisor_id,phone_suffix").execute()
-
-                db.table("calls_call_contact_resolutions").insert({
-                    "org_id": org_id,
-                    "call_id": c["call_id"],
-                    "kind": "unknown",
-                    "call_time": c["start_time"],
-                    "contact_phone_suffix": suffix,
-                    "counterpart_phone": c.get("counterpart_phone"),
-                    "call_direction": c.get("direction"),
-                    "call_duration_seconds": c.get("duration_seconds") or 0,
-                    "candidate_schools": None,
-                    "caller_advisor_id": advisor_id,
-                    "notified_recipient_ids": [advisor_id],
-                }).execute()
-
-                _create_notifications(db, [{
-                    "recipient_id": advisor_id,
-                    "type": "voicenter_unknown_call",
-                    "data": {
-                        "title": "שיחה עם מספר לא מוכר — האם לשייך לבית ספר?",
-                        "call_id": c["call_id"],
-                        "counterpart_phone": c.get("counterpart_phone"),
-                        "call_time": c.get("start_time"),
-                        "text": "זיהינו שיחה עם מספר שאינו מופיע באנשי הקשר של אף בית ספר. ניתן לשייך אותה לבית ספר.",
-                    },
-                }], pref_key="notify_voicenter_unknown_call")
-                new_unknown_calls += 1
-            except Exception as exc:
-                logger.warning("process_new_calls: Track B (unknown call) failed for call=%s: %s", c.get("call_id"), exc)
-
-        try:
-            db.table("calls_integrations").update({"last_call_scan_at": now.isoformat()}).eq("org_id", org_id).execute()
-        except Exception as exc:
-            logger.warning("process_new_calls: failed to update cursor for org=%s: %s", org_id, exc)
-
-        processed_orgs += 1
+    try:
+        db.table("calls_scan_processed").delete().lt(
+            "processed_at", (now - _SCAN_PROCESSED_RETENTION).isoformat()
+        ).execute()
+    except Exception as exc:
+        logger.warning("process_new_calls: calls_scan_processed cleanup failed (non-fatal): %s", exc)
 
     # Auto-dismiss stale 'unknown' prompts (>14 days, never acted on) — the underlying call
     # has likely aged out of the provider's log window, so the popup can no longer be useful.
@@ -1990,10 +1884,286 @@ def process_new_calls(request: Request):
     except Exception as exc:
         logger.warning("process_new_calls: stale unknown-prompt cleanup failed (non-fatal): %s", exc)
 
-    return {
-        "ok": True,
-        "processed_orgs": processed_orgs,
-        "new_ambiguous_calls": new_ambiguous_calls,
-        "new_unknown_calls": new_unknown_calls,
-        "new_rep_unmapped": new_rep_unmapped,
-    }
+    return {"ok": True, **totals}
+
+
+def _process_org_new_calls(db, org: dict, now: datetime) -> dict | None:
+    """One org's share of process_new_calls (caller holds the org's scan lease). Returns
+    the new-notification counts, or None when the org was skipped — in which case the
+    cursor and calls_scan_processed are left untouched so the next run retries."""
+    from routers.schools_router import _create_notifications
+
+    org_id = org["org_id"]
+    provider = org["provider"]
+    last_scan = org.get("last_call_scan_at")
+    counts = {"new_ambiguous_calls": 0, "new_unknown_calls": 0, "new_rep_unmapped": 0}
+
+    # First run for this org: only look back 1 hour, to avoid a flood of historical
+    # ambiguous-contact notifications on rollout.
+    if last_scan:
+        cursor = datetime.fromisoformat(last_scan)
+        window_start = cursor - _SCAN_LOOKBACK
+    else:
+        cursor = window_start = now - timedelta(hours=1)
+    date_from = window_start.astimezone(_IL_TZ).strftime("%Y-%m-%dT%H:%M:%S")
+    date_to = now.astimezone(_IL_TZ).strftime("%Y-%m-%dT%H:%M:%S")
+
+    try:
+        result = _pull_org_calls(org_id, date_from, date_to)
+    except HTTPException as exc:
+        logger.warning("process_new_calls: skipping org=%s (pull failed: %s)", org_id, exc.detail)
+        return None
+    except Exception as exc:
+        logger.warning("process_new_calls: skipping org=%s (unexpected error: %s)", org_id, exc)
+        return None
+
+    # Record every agent key/label seen in this scan window — feeds the option list for
+    # the mapping picker in ניהול-משתמשים (see list_known_reps above, which also does
+    # its own live top-up). Non-fatal: a failure here must never block the
+    # ambiguous-contact notification logic below.
+    _upsert_known_agents(org_id, provider, result["calls"])
+
+    # Only calls that ended since (just before) the previous scan, minus any a previous
+    # (overlapping) scan already handled.
+    end_floor = cursor - _SCAN_END_MARGIN
+    recent = [
+        c for c in result["calls"]
+        if c.get("call_id") and ((_call_end_utc(c) or now) > end_floor)
+    ]
+    try:
+        seen = {
+            r["call_id"]
+            for r in (db.table("calls_scan_processed").select("call_id")
+                      .eq("org_id", org_id).in_("call_id", [c["call_id"] for c in recent]).execute().data or [])
+        } if recent else set()
+    except Exception as exc:
+        # Treating a failed lookup as "nothing seen" would re-count Track B calls — skip
+        # this org for this run instead.
+        logger.warning("process_new_calls: skipping org=%s (processed-calls lookup failed: %s)", org_id, exc)
+        return None
+    new_calls = [c for c in recent if c["call_id"] not in seen]
+    # Calls whose ambiguous-contact row failed to save — left out of calls_scan_processed so
+    # the next run retries them (safe: that row is unique per (org_id, call_id)).
+    retry_call_ids: set[str] = set()
+
+    ambiguous_calls = [c for c in new_calls if c.get("pending_school_resolution")]
+    if ambiguous_calls:
+        call_ids = [c["call_id"] for c in ambiguous_calls]
+        try:
+            already_tracked = set(_get_call_resolutions_or_raise(org_id, call_ids).keys())
+        except Exception as exc:
+            # Treating a failed lookup as "nothing tracked yet" would re-notify every
+            # already-resolved ambiguous call for this org — skip this org for this run
+            # instead (the next run retries with a fresh lookup).
+            logger.warning("process_new_calls: skipping org=%s (resolutions lookup failed: %s)", org_id, exc)
+            return None
+
+        managers_and_owners: list[str] = []
+        try:
+            rows = db.table("profiles").select("id").in_("role", ["owner", "manager"]).eq("org_id", org_id).execute().data or []
+            managers_and_owners = [r["id"] for r in rows]
+        except Exception as exc:
+            logger.warning("process_new_calls: failed to load owners/managers for org=%s: %s", org_id, exc)
+
+        for c in ambiguous_calls:
+            if c["call_id"] in already_tracked:
+                continue
+            recipient_ids = [c["advisor_id"]] if c.get("advisor_id") else managers_and_owners
+            if not recipient_ids:
+                continue
+
+            try:
+                # Unique (org_id, call_id): an empty result means the row already existed,
+                # so the notification below was already sent.
+                inserted = db.table("calls_call_contact_resolutions").upsert({
+                    "org_id": org_id,
+                    "call_id": c["call_id"],
+                    "call_time": c["start_time"],
+                    "contact_phone_suffix": _phone_suffix(c["counterpart_phone"]),
+                    "contact_name": c["contact_name"],
+                    "candidate_schools": c["candidate_schools"],
+                    "caller_advisor_id": c.get("advisor_id"),
+                    "notified_recipient_ids": recipient_ids,
+                    "call_direction": c.get("direction"),
+                    "call_duration_seconds": c.get("duration_seconds") or 0,
+                    "counterpart_phone": c.get("counterpart_phone"),
+                }, on_conflict="org_id,call_id", ignore_duplicates=True).execute()
+            except Exception as exc:
+                logger.warning("process_new_calls: failed to insert resolution row for call=%s: %s", c["call_id"], exc)
+                retry_call_ids.add(c["call_id"])
+                continue
+            if not inserted.data:
+                continue
+
+            school_names = " ו-".join(s["name"] for s in c["candidate_schools"] if s.get("name"))
+            notif_rows = [{
+                "recipient_id": rid,
+                "type": "call_contact_ambiguous",
+                "data": {
+                    "title": f"שיחה עם {c['contact_name']} — יש לשייך לבית ספר",
+                    "contact_name": c["contact_name"],
+                    "call_id": c["call_id"],
+                    "candidate_schools": c["candidate_schools"],
+                    "text": f"{c['contact_name']} שאיתו/ה דיברת הוא/היא איש/אשת קשר גם ב{school_names}. יש לשייך את השיחה לבית הספר הנכון.",
+                },
+            } for rid in recipient_ids]
+            _create_notifications(db, notif_rows, pref_key="notify_call_contact_ambiguous")
+            counts["new_ambiguous_calls"] += 1
+
+    # --- owners/managers for this org (shared by both tracks below) ---
+    owners_managers: list[str] = []
+    try:
+        om_rows = db.table("profiles").select("id").in_("role", ["owner", "manager"]).eq("org_id", org_id).execute().data or []
+        owners_managers = [r["id"] for r in om_rows]
+    except Exception as exc:
+        logger.warning("process_new_calls: failed to load owners/managers for org=%s: %s", org_id, exc)
+
+    # --- Track A: org-side agent (rep code / line) not mapped to any user ---
+    # An agent_key seen in calls but with no calls_agent_mappings row can't be attributed
+    # to an advisor. Alert owners/managers once (they own ניהול-משתמשים → mapping); the
+    # marker is cleared by upsert_mapping so a future gap re-alerts.
+    try:
+        seen_now = {}
+        for c in new_calls:
+            code = c.get("representative_code")
+            if code and code not in seen_now:
+                seen_now[code] = c
+        codes = list(seen_now.keys())
+        if codes:
+            mapped = {
+                m["agent_key"]
+                for m in (db.table("calls_agent_mappings").select("agent_key")
+                          .eq("org_id", org_id).eq("provider", provider).in_("agent_key", codes).execute().data or [])
+            }
+            known = {
+                r["agent_key"]: r
+                for r in (db.table("calls_known_agents").select("agent_key, unmapped_alert_sent_at")
+                          .eq("org_id", org_id).eq("provider", provider).in_("agent_key", codes).execute().data or [])
+            }
+            to_alert = [
+                code for code in codes
+                if code not in mapped and not (known.get(code) or {}).get("unmapped_alert_sent_at")
+            ]
+            for code in to_alert:
+                if not owners_managers:
+                    break
+                c = seen_now[code]
+                notif_rows = [{
+                    "recipient_id": rid,
+                    "type": "voicenter_rep_unmapped",
+                    "data": {
+                        "title": "נרשמה שיחה ממספר ארגוני שאינו משויך לאף משתמש",
+                        "representative_code": code,
+                        "representative_name": c.get("representative_name"),
+                        "call_id": c.get("call_id"),
+                        "call_time": c.get("start_time"),
+                        "counterpart_phone": c.get("counterpart_phone"),
+                        "direction": c.get("direction"),
+                        "text": f"נציג {c.get('representative_name') or code} אינו משויך למשתמש. יש לשייך אותו באזור 'משתמשים'.",
+                        "deeplink": "/admin?tab=users",
+                    },
+                } for rid in owners_managers]
+                _create_notifications(db, notif_rows, pref_key="notify_voicenter_rep_unmapped")
+                db.table("calls_known_agents").update(
+                    {"unmapped_alert_sent_at": now.isoformat()}
+                ).eq("org_id", org_id).eq("provider", provider).eq("agent_key", code).execute()
+                counts["new_rep_unmapped"] += 1
+    except Exception as exc:
+        logger.warning("process_new_calls: Track A (agent unmapped) failed for org=%s: %s", org_id, exc)
+
+    # --- Track B: counterpart number matches no school — prompt the advisor ---
+    unknown_calls = [
+        c for c in new_calls
+        if c.get("advisor_id") and not c.get("school_id")
+        and not c.get("pending_school_resolution")
+        and not c.get("linked_school_ids")
+        and c.get("direction") != "internal"
+        and (c.get("duration_seconds") or 0) >= UNKNOWN_CALL_MIN_SECONDS
+    ]
+    unknown_tracked = set(_get_call_resolutions(org_id, [c["call_id"] for c in unknown_calls]).keys())
+    for c in unknown_calls:
+        advisor_id = c["advisor_id"]
+        suffix = _phone_suffix(c.get("counterpart_phone"))
+        if not suffix or c["call_id"] in unknown_tracked:
+            continue
+        try:
+            open_row = (
+                db.table("calls_call_contact_resolutions")
+                .select("id, missed_calls_since_prompt")
+                .eq("org_id", org_id).eq("kind", "unknown")
+                .eq("caller_advisor_id", advisor_id).eq("contact_phone_suffix", suffix)
+                .is_("resolved_school_id", "null").is_("dismissed_at", "null")
+                .limit(1).execute()
+            ).data
+            if open_row:
+                db.table("calls_call_contact_resolutions").update({
+                    "missed_calls_since_prompt": (open_row[0].get("missed_calls_since_prompt") or 0) + 1,
+                }).eq("id", open_row[0]["id"]).execute()
+                continue
+
+            state = (
+                db.table("calls_unknown_number_state").select("*")
+                .eq("org_id", org_id).eq("advisor_id", advisor_id).eq("phone_suffix", suffix)
+                .limit(1).execute()
+            ).data
+            state = state[0] if state else None
+            if state and state.get("muted") and (state.get("calls_since_prompt") or 0) < UNKNOWN_CALL_REPROMPT_AFTER:
+                db.table("calls_unknown_number_state").update({
+                    "calls_since_prompt": (state.get("calls_since_prompt") or 0) + 1,
+                    "updated_at": now.isoformat(),
+                }).eq("id", state["id"]).execute()
+                continue
+
+            db.table("calls_unknown_number_state").upsert({
+                "org_id": org_id, "advisor_id": advisor_id, "phone_suffix": suffix,
+                "muted": False, "calls_since_prompt": 0,
+                "last_prompt_at": now.isoformat(), "updated_at": now.isoformat(),
+            }, on_conflict="org_id,advisor_id,phone_suffix").execute()
+
+            db.table("calls_call_contact_resolutions").insert({
+                "org_id": org_id,
+                "call_id": c["call_id"],
+                "kind": "unknown",
+                "call_time": c["start_time"],
+                "contact_phone_suffix": suffix,
+                "counterpart_phone": c.get("counterpart_phone"),
+                "call_direction": c.get("direction"),
+                "call_duration_seconds": c.get("duration_seconds") or 0,
+                "candidate_schools": None,
+                "caller_advisor_id": advisor_id,
+                "notified_recipient_ids": [advisor_id],
+            }).execute()
+
+            _create_notifications(db, [{
+                "recipient_id": advisor_id,
+                "type": "voicenter_unknown_call",
+                "data": {
+                    "title": "שיחה עם מספר לא מוכר — האם לשייך לבית ספר?",
+                    "call_id": c["call_id"],
+                    "counterpart_phone": c.get("counterpart_phone"),
+                    "call_time": c.get("start_time"),
+                    "text": "זיהינו שיחה עם מספר שאינו מופיע באנשי הקשר של אף בית ספר. ניתן לשייך אותה לבית ספר.",
+                },
+            }], pref_key="notify_voicenter_unknown_call")
+            counts["new_unknown_calls"] += 1
+        except Exception as exc:
+            logger.warning("process_new_calls: Track B (unknown call) failed for call=%s: %s", c.get("call_id"), exc)
+
+    processed_rows = [{"org_id": org_id, "call_id": c["call_id"]} for c in new_calls if c["call_id"] not in retry_call_ids]
+    if processed_rows:
+        try:
+            db.table("calls_scan_processed").upsert(
+                processed_rows,
+                on_conflict="org_id,call_id", ignore_duplicates=True,
+            ).execute()
+        except Exception as exc:
+            # Next run re-sees these calls; ambiguous/unknown rows are deduped by their own
+            # (org_id, call_id) unique index, so the worst case is a re-counted Track B call.
+            logger.warning("process_new_calls: failed to record processed calls for org=%s: %s", org_id, exc)
+
+    try:
+        db.table("calls_integrations").update({"last_call_scan_at": now.isoformat()}).eq("org_id", org_id).execute()
+    except Exception as exc:
+        logger.warning("process_new_calls: failed to update cursor for org=%s: %s", org_id, exc)
+
+    return counts

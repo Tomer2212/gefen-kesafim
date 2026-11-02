@@ -48,6 +48,7 @@ import { getMissingCriticalFields, isMeetingIncomplete } from "../components/mee
 import { NoParticipantsModal } from "../components/meetings/NoParticipantsModal";
 import MeetingUploadComparisonModal from "../components/meetings/MeetingUploadComparisonModal";
 import { ParticipantsSelector } from "../components/meetings/ParticipantsSelector";
+import { buildSchoolContacts } from "../components/meetings/schoolContacts";
 import { StageScopeModal } from "../components/meetings/StageScopeModal";
 import { TimeInput } from "../components/meetings/TimeInput";
 import { AcademicYearSelector } from "../components/AcademicYearSelector";
@@ -3528,21 +3529,10 @@ export default function SchoolPage() {
     }
   }
 
+  // Shared with the personal/admin meeting tabs — includes phone, so it's frozen into the
+  // meeting's participant snapshot too.
   function getSchoolContacts() {
-    const contacts = [];
-    const isSheshsSnatiSchool = school?.stage === "sheshshnati";
-    if (school?.principal_name) {
-      contacts.push({ key: "principal", label: isSheshsSnatiSchool ? "מנהל/ת חט\"ע" : "מנהל/ת", name: school.principal_name, email: school.principal_email || "" });
-    }
-    if (isSheshsSnatiSchool && school?.principal_same_person === false && school?.principal_chativa_name) {
-      contacts.push({ key: "principal_chativa", label: "מנהל/ת חט\"ב", name: school.principal_chativa_name, email: school.principal_chativa_email || "" });
-    }
-    if (school?.secretary_name) contacts.push({ key: "secretary", label: "מנהלנ/ית", name: school.secretary_name, email: school.secretary_email || "" });
-    if (school?.finance_contact_name) contacts.push({ key: "finance", label: "אחראי/ת כספים", name: school.finance_contact_name, email: school.finance_contact_email || "" });
-    (school?.extra_contacts || []).forEach((ec, i) => {
-      if (ec.name) contacts.push({ key: `extra_${i}`, label: ec.role || "איש קשר נוסף", name: ec.name, email: ec.email || "" });
-    });
-    return contacts;
+    return buildSchoolContacts(school);
   }
 
   function advisorHasAccess(advisorId) {
@@ -5432,7 +5422,7 @@ export default function SchoolPage() {
                   meetings={meetings}
                   usersWithAccess={users.filter(u => u.role === "owner" || u.role === "manager" || advisorHasAccess(u.id))}
                   usersWithoutAccess={users.filter(u => u.role === "advisor" && !advisorHasAccess(u.id))}
-                  contacts={getSchoolContacts()}
+                  contacts={school ? getSchoolContacts() : null}
                   schoolStage={school?.stage}
                   onSave={updateMeeting}
                   onMeetingPatched={(id, patch) => setMeetings(prev => prev.map(m => m.id === id ? { ...m, ...patch } : m))}

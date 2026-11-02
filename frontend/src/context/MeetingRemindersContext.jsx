@@ -58,6 +58,17 @@ export function MeetingRemindersProvider({ children }) {
     setActiveKey(prev => prev ?? key);
   }, []);
 
+  // "לאיזה בית ספר שייכת השיחה?" — a call with a contact listed at several schools.
+  // Keyed by call_id so each ambiguous call stacks as its own toast.
+  const addAmbiguousCallReminder = useCallback((m) => {
+    const key = `call-ambiguous-${m.call_id}`;
+    setReminders(prev => {
+      if (prev.some(r => r._key === key)) return prev;
+      return [...prev, { ...m, _type: "call-ambiguous", _key: key }];
+    });
+    setActiveKey(prev => prev ?? key);
+  }, []);
+
   // "X יעדים עודכנו אוטומטית לפי בדיקה" — an ephemeral popup (no bell entry) fired by
   // Sidebar polling when the goals automation changed something after a check. Keyed by the
   // backing notification id so each check's summary stacks as its own toast.
@@ -89,8 +100,8 @@ export function MeetingRemindersProvider({ children }) {
   return (
     <MeetingRemindersCtx.Provider value={{
       reminders, activeKey, setActiveKey,
-      addMeetingReminder, addStatusReminder, addTaskReminder, addCallAttribReminder, addGoalUpdateReminder,
-      addReconciliationCompletedReminder, dismiss,
+      addMeetingReminder, addStatusReminder, addTaskReminder, addCallAttribReminder, addAmbiguousCallReminder,
+      addGoalUpdateReminder, addReconciliationCompletedReminder, dismiss,
       userName, setUserName,
     }}>
       {children}

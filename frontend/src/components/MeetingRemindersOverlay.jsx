@@ -4,6 +4,7 @@ import MeetingReminderPopup from "./MeetingReminderPopup";
 import MeetingStatusUpdatePopup from "./MeetingStatusUpdatePopup";
 import TaskReminderPopup from "./TaskReminderPopup";
 import UnknownCallPopup from "./UnknownCallPopup";
+import AmbiguousCallPopup from "./AmbiguousCallPopup";
 import GoalUpdatePopup from "./GoalUpdatePopup";
 import ReconciliationCompletedPopup from "./ReconciliationCompletedPopup";
 
@@ -12,6 +13,7 @@ const HEADER_META = {
   task: { icon: "✅", label: "משימה לביצוע", cls: "bg-blue-50 border-blue-100 text-blue-800 hover:bg-blue-100" },
   reminder: { icon: "🗓️", label: "תזכורת", cls: "bg-amber-50 border-amber-100 text-amber-800 hover:bg-amber-100" },
   "call-attrib": { icon: "📞", label: "שיחה ממספר לא מוכר", cls: "bg-violet-50 border-violet-100 text-violet-800 hover:bg-violet-100" },
+  "call-ambiguous": { icon: "📞", label: "שיוך שיחה לבית ספר", cls: "bg-indigo-50 border-indigo-100 text-indigo-800 hover:bg-indigo-100" },
   "goal-update": { icon: "🎯", label: "עדכון יעדים", cls: "bg-emerald-50 border-emerald-100 text-emerald-800 hover:bg-emerald-100" },
   "reconciliation-completed": { icon: "✅", label: "תוצאת בדיקה", cls: "bg-emerald-50 border-emerald-100 text-emerald-800 hover:bg-emerald-100" },
 };
@@ -91,6 +93,9 @@ export default function MeetingRemindersOverlay() {
         }
         if (r._type === "call-attrib") {
           return <UnknownCallPopup key={r._key} reminder={r} onDismiss={onDismiss} onSuccess={showSuccess} />;
+        }
+        if (r._type === "call-ambiguous") {
+          return <AmbiguousCallPopup key={r._key} reminder={r} onDismiss={onDismiss} onSuccess={showSuccess} />;
         }
         return r._type === "reminder"
           ? <MeetingReminderPopup key={r._key} reminder={r} onDismiss={onDismiss} onSuccess={showSuccess} />

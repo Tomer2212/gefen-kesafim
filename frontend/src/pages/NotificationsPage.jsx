@@ -9,6 +9,8 @@ import { useMeetingReminders } from "../context/MeetingRemindersContext";
 import { useMeetingNotes } from "../context/MeetingNotesContext";
 import { useRowVirtualizer } from "../hooks/useRowVirtualizer";
 import { FIELD_LABEL, formatFieldValue } from "../components/schoolFieldLabels";
+import { DecisionCell } from "../components/SchoolActivityModal";
+import { formatUpdateDate } from "../components/SchoolNotesModal";
 
 const NOTIF_PAGE_SIZE = 25;
 const NOTIF_SCROLL_THRESHOLD = 300;
@@ -56,13 +58,18 @@ const TYPE_ICON = {
 // school card's "תיעוד פעולות" log).
 const formatValue = formatFieldValue;
 
-function ProposedChangesDiff({ changes, currentValues, fieldDecisions, onDecide }) {
+// `resolution` ({decisions, reviewer, resolvedAt}) is set once the request was reviewed — adds a
+// read-only "החלטה" column (same cell as the school card's "תיעוד פעולות" log).
+function ProposedChangesDiff({ changes, currentValues, fieldDecisions, onDecide, resolution }) {
   if (!changes || Object.keys(changes).filter(k => k !== "_action").length === 0) return null;
   const entries = Object.entries(changes).filter(([k]) => k !== "_action");
   const hasCurrentValues = currentValues && Object.keys(currentValues).length > 0;
-  const isInteractive = !!onDecide && entries.length > 1;
+  const isInteractive = !resolution && !!onDecide && entries.length > 1;
+  if (resolution) fieldDecisions = resolution.decisions;
 
-  const cols = isInteractive
+  const cols = resolution
+    ? (hasCurrentValues ? "grid-cols-4" : "grid-cols-3")
+    : isInteractive
     ? (hasCurrentValues ? "grid-cols-[1fr_1fr_1fr_auto]" : "grid-cols-[1fr_1fr_auto]")
     : (hasCurrentValues ? "grid-cols-3" : "grid-cols-2");
 
@@ -73,6 +80,7 @@ function ProposedChangesDiff({ changes, currentValues, fieldDecisions, onDecide 
         {hasCurrentValues && <span>ערך נוכחי</span>}
         <span>ערך חדש</span>
         {isInteractive && <span />}
+        {resolution && <span>החלטה</span>}
       </div>
       {entries.map(([k, v]) => {
         const decision = fieldDecisions?.[k] ?? "pending";
@@ -81,13 +89,18 @@ function ProposedChangesDiff({ changes, currentValues, fieldDecisions, onDecide 
         return (
           <div key={k}
             className={`grid ${cols} text-sm px-3 py-1.5 border-b border-slate-100 last:border-0 items-center transition-colors
-              ${isRejected ? "bg-red-50/50 opacity-50" : isApproved ? "bg-green-50/50" : ""}`}
+              ${isRejected ? (resolution ? "bg-red-50/40" : "bg-red-50/50 opacity-50") : isApproved ? "bg-green-50/50" : ""}`}
           >
             <span className={`text-slate-500 ${isRejected ? "line-through" : ""}`}>{FIELD_LABEL[k] || k}</span>
             {hasCurrentValues && (
               <span className="text-slate-400">{formatValue(currentValues[k], k)}</span>
             )}
             <span className={`text-slate-800 font-medium ${isRejected ? "line-through" : ""}`}>{formatValue(v, k)}</span>
+            {resolution && (
+              <span className="text-xs">
+                <DecisionCell decision={decision} reviewer={resolution.reviewer} resolvedAt={resolution.resolvedAt} />
+              </span>
+            )}
             {isInteractive && (
               <div className="flex gap-1 justify-end">
                 <button
@@ -509,12 +522,24 @@ function NotificationRow({ notif, isExpanded, onToggle, onRead, onReload, onDele
   const { openTask } = useTasks();
   const { addCallAttribReminder } = useMeetingReminders();
   const { openMeetingNotes } = useMeetingNotes();
-  const isUnread  = !notif.read_at;
   const icon      = TYPE_ICON[notif.type] || "🔔";
   const title     = notif.data?.title || "התראה";
   const data      = notif.data || {};
   const isProfileRequest = notif.type === "profile_update_request_submitted";
   const isActionable = notif.type === "update_request_submitted" || isProfileRequest;
+  // A request already reviewed (by anyone) needs no attention — never show it as unread.
+  const isRequestResolved = isActionable && !!data.request_status && data.request_status !== "pending";
+  const isUnread  = !notif.read_at && !isRequestResolved;
+  // Per-field "החלטה" column data — stored decisions, else derived from the overall status.
+  const resolution = isRequestResolved ? {
+    reviewer: data.request_reviewer_name || null,
+    resolvedAt: data.request_resolved_at || null,
+    decisions: Object.fromEntries(
+      Object.keys(data.proposed_changes || {}).filter(k => k !== "_action").map(k => [
+        k, data.request_field_decisions?.[k] || (data.request_status === "rejected" ? "rejected" : "approved"),
+      ])
+    ),
+  } : null;
   const isResultExpandable = (
     notif.type === "update_request_approved" ||
     notif.type === "update_request_rejected" ||
@@ -744,11 +769,20 @@ function NotificationRow({ notif, isExpanded, onToggle, onRead, onReload, onDele
                   currentValues={data.current_values}
                   fieldDecisions={isMultiField ? fieldDecisions : undefined}
                   onDecide={isMultiField && !reviewed ? setFieldDecision : undefined}
+                  resolution={resolution}
                 />
               );
             })()}
 
-            {reviewed ? (
+            {resolution ? (
+              isDeleteRequest && (
+                <p className="mt-4 text-sm text-slate-700">
+                  בקשת המחיקה {data.request_status === "approved" ? "אושרה" : "נדחתה"}
+                  {resolution.reviewer && <> ע"י {resolution.reviewer}</>}
+                  {resolution.resolvedAt && <span className="text-slate-400"> · {formatUpdateDate(resolution.resolvedAt)}</span>}
+                </p>
+              )
+            ) : reviewed ? (
               <div
                 role="status"
                 aria-label={
@@ -819,6 +853,9 @@ function NotificationRow({ notif, isExpanded, onToggle, onRead, onReload, onDele
 
             {data.reviewer_note && !reviewed && (
               <p className="text-xs text-slate-500 mt-3 italic">הערת סוקר: {data.reviewer_note}</p>
+            )}
+            {resolution && data.request_reviewer_note && (
+              <p className="text-xs text-slate-600 mt-3 bg-slate-50 rounded px-2 py-1">הערת המאשר/ת: {data.request_reviewer_note}</p>
             )}
           </div>
         );

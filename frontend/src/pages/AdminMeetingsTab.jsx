@@ -1118,7 +1118,12 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
             meetings={displayedMeetings}
             usersWithAccessFor={usersWithAccessFor}
             usersWithoutAccessFor={usersWithoutAccessFor}
-            contactsFor={m => buildSchoolContacts(schools.find(s => s.id === m.school_id))}
+            contactsFor={m => {
+              // null = contacts unknown (school list still loading / not in the list), so
+              // the participants cell doesn't flag every saved participant as changed.
+              const s = schools.find(s => s.id === m.school_id);
+              return s ? buildSchoolContacts(s) : null;
+            }}
             schoolStageFor={m => schools.find(s => s.id === m.school_id)?.stage}
             onSave={updateMeeting}
             onMeetingPatched={(id, patch) => setMeetings(prev => prev.map(m => m.id === id ? { ...m, ...patch } : m))}

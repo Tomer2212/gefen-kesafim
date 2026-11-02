@@ -16,6 +16,7 @@ from typing import Annotated, Any
 from uuid import uuid4
 
 import httpx
+import nh3
 from bidi.algorithm import get_display
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import Response
@@ -3874,6 +3875,7 @@ def review_update_request(
                 and (body.approved_fields is None or k in body.approved_fields) else "rejected")
             for k in (req.get("proposed_changes") or {}) if k != "_action"
         }
+    status_saved = False
     for status_attempt in range(2):
         try:
             db = get_admin_client()
@@ -3884,6 +3886,7 @@ def review_update_request(
                 "resolved_at": datetime.now(timezone.utc).isoformat(),
                 "field_decisions": field_decisions,
             }).eq("id", req_id).execute()
+            status_saved = True
             break
         except Exception as exc:
             if status_attempt == 0:
@@ -3892,6 +3895,17 @@ def review_update_request(
                 time.sleep(0.1)
             else:
                 logger.warning("status update failed after 2 attempts (non-fatal — action already applied): %s", exc)
+
+    # The request no longer needs action from anyone — mark every approver's copy of the
+    # "submitted" notification as read, not just the reviewer's (non-fatal). Only once the
+    # status is saved: a request still 'pending' in the DB must stay highlighted for the others.
+    if status_saved:
+        try:
+            db = get_admin_client()
+            db.table("notifications").update({"read_at": datetime.now(timezone.utc).isoformat()}) \
+                .eq("type", "update_request_submitted").eq("ref_id", req_id).is_("read_at", "null").execute()
+        except Exception as exc:
+            logger.warning("mark submitted notifications read failed (non-fatal): %s", exc)
 
     # Phase 4: notifications — each section independently non-fatal
     action_label = "מחיקת" if is_delete_req else "עריכת"
@@ -4018,32 +4032,46 @@ def get_notifications(
             items = items[:limit]
             # Enrich update_request_submitted notifications with the current request status
             # so the frontend can show the correct reviewed state on remount (non-fatal)
+            # (plus who decided, when, and per-field decisions for the "החלטה" column).
             try:
+                req_cols = "id, status, reviewer_id, resolved_at, field_decisions, reviewer_note"
+                req_map = {}
                 action_ids = [n["ref_id"] for n in items
                               if n.get("type") == "update_request_submitted" and n.get("ref_id")]
                 if action_ids:
                     req_rows = (db.table("school_update_requests")
-                                .select("id, status")
+                                .select(req_cols)
                                 .in_("id", action_ids)
                                 .execute())
-                    status_map = {r["id"]: r["status"] for r in (req_rows.data or [])}
-                    for n in items:
-                        if n.get("type") == "update_request_submitted" and n.get("ref_id"):
-                            n["data"] = {**(n.get("data") or {}),
-                                         "request_status": status_map.get(n["ref_id"])}
+                    req_map.update({("update_request_submitted", r["id"]): r for r in (req_rows.data or [])})
                 # Same enrichment for the parallel profile-update-request flow
                 p_action_ids = [n["ref_id"] for n in items
                                 if n.get("type") == "profile_update_request_submitted" and n.get("ref_id")]
                 if p_action_ids:
                     p_rows = (db.table("profile_update_requests")
-                              .select("id, status")
+                              .select(req_cols)
                               .in_("id", p_action_ids)
                               .execute())
-                    p_status_map = {r["id"]: r["status"] for r in (p_rows.data or [])}
-                    for n in items:
-                        if n.get("type") == "profile_update_request_submitted" and n.get("ref_id"):
-                            n["data"] = {**(n.get("data") or {}),
-                                         "request_status": p_status_map.get(n["ref_id"])}
+                    req_map.update({("profile_update_request_submitted", r["id"]): r for r in (p_rows.data or [])})
+                reviewer_names = {}
+                reviewer_ids = list({r["reviewer_id"] for r in req_map.values() if r.get("reviewer_id")})
+                if reviewer_ids:
+                    try:
+                        rv_rows = db.table("profiles").select("id, full_name, email").in_("id", reviewer_ids).execute()
+                        reviewer_names = {p["id"]: p.get("full_name") or p.get("email") or "" for p in (rv_rows.data or [])}
+                    except Exception as rv_exc:
+                        logger.warning("reviewer name enrichment failed (non-fatal): %s", rv_exc)
+                for n in items:
+                    key = (n.get("type"), n.get("ref_id"))
+                    if key[0] not in ("update_request_submitted", "profile_update_request_submitted") or not key[1]:
+                        continue
+                    r = req_map.get(key) or {}
+                    n["data"] = {**(n.get("data") or {}),
+                                 "request_status": r.get("status"),
+                                 "request_reviewer_name": reviewer_names.get(r.get("reviewer_id")),
+                                 "request_resolved_at": r.get("resolved_at"),
+                                 "request_field_decisions": r.get("field_decisions"),
+                                 "request_reviewer_note": r.get("reviewer_note")}
             except Exception as enrich_exc:
                 logger.warning("request status enrichment failed (non-fatal): %s", enrich_exc)
             # goal_auto_updated / reconciliation_check_completed are delivered ONLY as
@@ -6091,6 +6119,13 @@ def review_profile_update_request(
 
     # Phase 3: update request status
     from datetime import datetime, timezone
+    # Per-field decision, persisted so the approvers' notification can show "אושר/נדחה ע"י X" per row.
+    field_decisions = {
+        k: ("approved" if body.status == "approved"
+            and (body.approved_fields is None or k in body.approved_fields) else "rejected")
+        for k in all_field_keys
+    }
+    status_saved = False
     for status_attempt in range(2):
         try:
             db = get_admin_client()
@@ -6099,7 +6134,9 @@ def review_profile_update_request(
                 "reviewer_id": user["id"],
                 "reviewer_note": body.reviewer_note,
                 "resolved_at": datetime.now(timezone.utc).isoformat(),
+                "field_decisions": field_decisions,
             }).eq("id", req_id).execute()
+            status_saved = True
             break
         except Exception as exc:
             if status_attempt == 0:
@@ -6107,6 +6144,16 @@ def review_profile_update_request(
                 time.sleep(0.1)
             else:
                 logger.warning("profile request status update failed after 2 attempts (non-fatal): %s", exc)
+
+    # The request no longer needs action from anyone — mark every approver's copy read (non-fatal),
+    # only once the status is saved (a still-pending request must stay highlighted).
+    if status_saved:
+        try:
+            db = get_admin_client()
+            db.table("notifications").update({"read_at": datetime.now(timezone.utc).isoformat()}) \
+                .eq("type", "profile_update_request_submitted").eq("ref_id", req_id).is_("read_at", "null").execute()
+        except Exception as exc:
+            logger.warning("mark profile submitted notifications read failed (non-fatal): %s", exc)
 
     # Phase 4: notify the requester
     approved_fields_list = body.approved_fields
@@ -8045,7 +8092,9 @@ def _build_meeting_subject(db, school_id: str, participants: list[dict] | None, 
             db.table("schools")
             .select("name, city, principal_name, principal_phone, principal_chativa_name, "
                      "principal_chativa_phone, secretary_name, secretary_phone, "
-                     "finance_contact_name, finance_contact_phone, extra_contacts")
+                     "secretary_chativa_name, secretary_chativa_phone, "
+                     "finance_contact_name, finance_contact_phone, "
+                     "finance_contact_chativa_name, finance_contact_chativa_phone, extra_contacts")
             .eq("id", school_id)
             .execute()
         )
@@ -8062,6 +8111,10 @@ def _build_meeting_subject(db, school_id: str, participants: list[dict] | None, 
         "principal_chativa": (school.get("principal_chativa_name"), school.get("principal_chativa_phone")),
         "secretary": (school.get("secretary_name"), school.get("secretary_phone")),
         "finance": (school.get("finance_contact_name"), school.get("finance_contact_phone")),
+        # Tasks-domain participant keys (tasks_router._build_school_contacts).
+        "finance_contact": (school.get("finance_contact_name"), school.get("finance_contact_phone")),
+        "secretary_chativa": (school.get("secretary_chativa_name"), school.get("secretary_chativa_phone")),
+        "finance_contact_chativa": (school.get("finance_contact_chativa_name"), school.get("finance_contact_chativa_phone")),
     }
     for i, ec in enumerate(school.get("extra_contacts") or []):
         contact_map[f"extra_{i}"] = (ec.get("name"), ec.get("phone"))
@@ -8076,6 +8129,16 @@ def _build_meeting_subject(db, school_id: str, participants: list[dict] | None, 
             key = participants[0].get("key")
 
     name, phone = contact_map.get(key, (None, None)) if key else (None, None)
+    # Prefer the participant snapshot frozen on the meeting over the school's CURRENT
+    # contact for that role — contacts get replaced over time (a principal leaves), and
+    # a past meeting's Outlook event must keep showing whoever actually took part. The
+    # current card's phone is used only when it still belongs to the same person.
+    snap = next((p for p in participants if p.get("key") == key), None) if key else None
+    if snap and (snap.get("name") or "").strip():
+        snap_name = snap["name"].strip()
+        same_person = " ".join((name or "").split()) == " ".join(snap_name.split())
+        phone = (snap.get("phone") or "").strip() or (phone if same_person else None)
+        name = snap_name
     if name:
         base = f"{base} - {name} - {phone or ''}".rstrip(" -")
 
@@ -10798,6 +10861,23 @@ def _merge_meeting_activity(events: list[dict]) -> list[dict]:
     merged: list[dict] = []
     for ev in events:
         prev = merged[-1] if merged else None
+        # Notes are saved repeatedly while being written (save-and-continue / Ctrl+S): consecutive
+        # saves of the same note by the same user within the window collapse into one row — an
+        # add followed by edits stays "note_added" with the final text; edits keep the first
+        # "before" and the last "after".
+        ev_note = (ev.get("meta") or {}).get("note_id")
+        if (prev and ev_note and ev["action"] == "note_edited" and prev["action"] in ("note_added", "note_edited")
+                and (prev.get("meta") or {}).get("note_id") == ev_note
+                and ev.get("actor_id") == prev.get("actor_id")):
+            try:
+                gap = (_parse_db_timestamp(ev["created_at"]) - _parse_db_timestamp(prev["created_at"])).total_seconds()
+            except Exception:
+                gap = _ACTIVITY_MERGE_WINDOW_SECONDS + 1
+            if gap <= _ACTIVITY_MERGE_WINDOW_SECONDS:
+                prev["meta"] = {**(prev.get("meta") or {}), "content": (ev.get("meta") or {}).get("content")}
+                prev["created_at"] = ev["created_at"]
+                prev["merged_count"] = prev.get("merged_count", 1) + 1
+                continue
         if (prev and ev["action"] == "updated" and prev["action"] == "updated"
                 and ev.get("actor_id") == prev.get("actor_id") and ev.get("actor_type") == prev.get("actor_type")
                 and ev.get("source") == prev.get("source")):
@@ -11072,6 +11152,47 @@ def get_school_activity(school_id: str, user: Annotated[dict, Depends(get_curren
 
 class MeetingNoteCreateIn(BaseModel):
     content: str
+    content_html: str | None = None
+
+
+# Allowlist for the rich-text meeting notes (RichNoteEditor / TipTap output). `content` stays
+# the plain-text version (mentions, notification previews, activity log); `content_html` is only
+# ever rendered by RichNoteView, which runs DOMPurify with the same allowlist as a second layer.
+_NOTE_HTML_TAGS = {
+    "p", "br", "strong", "b", "em", "i", "u", "s", "span", "mark", "a", "h1", "h2", "h3",
+    "ul", "ol", "li", "blockquote", "hr", "table", "colgroup", "col", "tbody", "thead", "tr", "th", "td",
+    "label", "input", "div",
+}
+_NOTE_HTML_ATTRS = {
+    "*": {"dir", "style", "class", "data-type"},
+    "a": {"href", "target"},
+    "mark": {"data-color"},
+    "li": {"data-checked"},
+    "input": {"type", "checked"},
+    "th": {"colspan", "rowspan"},
+    "td": {"colspan", "rowspan"},
+    "ol": {"start"},
+    "span": {"data-id", "data-label", "data-mention-suggestion-char"},
+}
+_NOTE_HTML_STYLES = {"color", "background-color", "font-size", "text-align", "min-width", "width"}
+_NOTE_HTML_MAX_LEN = 200_000
+
+
+def _sanitize_note_html(html: str | None) -> str | None:
+    if not html or not html.strip():
+        return None
+    if len(html) > _NOTE_HTML_MAX_LEN:
+        raise HTTPException(status_code=400, detail="ההערה ארוכה מדי")
+    cleaned = nh3.clean(
+        html,
+        tags=_NOTE_HTML_TAGS,
+        clean_content_tags={"script", "style"},
+        attributes=_NOTE_HTML_ATTRS,
+        url_schemes={"http", "https", "mailto"},
+        link_rel="noopener noreferrer",
+        filter_style_properties=_NOTE_HTML_STYLES,
+    )
+    return cleaned or None
 
 
 @router.post("/{school_id}/meetings/{meeting_id}/notes")
@@ -11079,6 +11200,7 @@ def create_meeting_note(school_id: str, meeting_id: str, body: MeetingNoteCreate
     content = body.content.strip()
     if not content:
         raise HTTPException(status_code=400, detail="לא ניתן לשמור הערה ריקה")
+    content_html = _sanitize_note_html(body.content_html)
     db = get_admin_client()
     # Was missing entirely (no access check at all).
     _require_school_in_org(db, user, school_id)
@@ -11088,19 +11210,29 @@ def create_meeting_note(school_id: str, meeting_id: str, body: MeetingNoteCreate
         "group_id": str(uuid4()),
         "author_id": user["id"],
         "content": content,
+        "content_html": content_html,
     }).execute()
     note = row.data[0]
     meeting_activity.log_meeting_activity(
         db, meeting_id=meeting_id, school_id=school_id, org_id=user["org_id"],
         actor_id=user["id"], actor_type="user", source=None, action="note_added",
-        meta={"content": content},
+        meta={"content": content, "note_id": note["id"]},
     )
+    _notify_note_mentions(db, user, school_id, meeting_id, note["id"], content)
+    return note
 
+
+def _notify_note_mentions(db, user: dict, school_id: str, meeting_id: str, note_id: str,
+                          content: str, previous_content: str = "") -> None:
+    """Sends a "mention" notification to every org user tagged (@Full Name) in `content` who was
+    NOT already tagged in `previous_content` — so a note saved repeatedly while being written
+    (save-and-continue) notifies each person once, when they are first tagged. Non-fatal."""
     try:
         profiles = db.table("profiles").select("id, full_name").eq("org_id", user["org_id"]).execute().data or []
         mentioned_ids = [
             p["id"] for p in profiles
-            if p.get("full_name") and f'@{p["full_name"]}' in content and p["id"] != user["id"]
+            if p.get("full_name") and f'@{p["full_name"]}' in content
+            and f'@{p["full_name"]}' not in (previous_content or "") and p["id"] != user["id"]
         ]
         if mentioned_ids:
             school_row = db.table("schools").select("name, authority, symbol").eq("id", school_id).execute()
@@ -11118,20 +11250,19 @@ def create_meeting_note(school_id: str, meeting_id: str, body: MeetingNoteCreate
                     "school_symbol": school.get("symbol"),
                     "sender_name": user.get("full_name", ""),
                     "note_preview": content[:100],
-                    "note_id": note["id"],
+                    "note_id": note_id,
                     "meeting_id": meeting_id,
-                    "deeplink": f"/school/{school_id}?tab=meetings&meeting={meeting_id}&note={note['id']}",
+                    "deeplink": f"/school/{school_id}?tab=meetings&meeting={meeting_id}&note={note_id}",
                 },
             } for uid in mentioned_ids]
             _create_notifications(db, notif_rows, pref_key="notify_mention")
     except Exception as exc:
-        logger.warning("create_meeting_note mention notify failed (non-fatal): %s", exc)
-
-    return note
+        logger.warning("meeting note mention notify failed (non-fatal): %s", exc)
 
 
 class MeetingNoteSegmentIn(BaseModel):
     content: str
+    content_html: str | None = None
 
 
 def _get_meeting_note_author(db, meeting_id: str, segment_id: str) -> str:
@@ -11150,6 +11281,7 @@ def edit_meeting_note_segment(school_id: str, meeting_id: str, segment_id: str, 
     content = body.content.strip()
     if not content:
         raise HTTPException(status_code=400, detail="לא ניתן לשמור הערה ריקה")
+    content_html = _sanitize_note_html(body.content_html)
     db = get_admin_client()
     author_id = _get_meeting_note_author(db, meeting_id, segment_id)
     if user["id"] != author_id:
@@ -11161,14 +11293,18 @@ def edit_meeting_note_segment(school_id: str, meeting_id: str, segment_id: str, 
         logger.warning("note edit activity: old content read failed (non-fatal): %s", exc)
     db.table("meeting_notes").update({
         "content": content,
+        "content_html": content_html,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }).eq("id", segment_id).execute()
     meeting_activity.log_meeting_activity(
         db, meeting_id=meeting_id, school_id=school_id, org_id=user["org_id"],
         actor_id=user["id"], actor_type="user", source=None, action="note_edited",
-        meta={"content": content, "previous_content": old_content},
+        meta={"content": content, "previous_content": old_content, "note_id": segment_id},
     )
-    return {"ok": True}
+    # Only when the previous content is known — otherwise every existing tag would re-notify.
+    if old_content is not None:
+        _notify_note_mentions(db, user, school_id, meeting_id, segment_id, content, old_content)
+    return {"ok": True, "content_html": content_html}
 
 
 @router.delete("/{school_id}/meetings/{meeting_id}/notes/segments/{segment_id}")

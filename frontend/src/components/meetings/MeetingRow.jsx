@@ -125,8 +125,8 @@ function ChooseContactModal({ options, onChoose, onClose }) {
         <h2 id="contact-modal-title" className="text-base font-bold text-slate-900 mb-1">למי מהמשתתפים צריך להתקשר?</h2>
         <p className="text-sm text-slate-500 mb-4">השם והטלפון שייבחרו יופיעו בכותרת הפגישה ביומן ה-Outlook.</p>
         <div className="flex flex-col gap-2">
-          {options.map(p => (
-            <button key={p.key} type="button" onClick={() => onChoose(p.key)}
+          {options.map((p, i) => (
+            <button key={`${p.key}-${i}`} type="button" onClick={() => onChoose(p)}
               className="w-full text-right px-3 py-2 rounded-xl border border-slate-200 hover:border-blue-400 hover:bg-blue-50 transition-colors text-sm text-slate-700">
               {p.name} <span className="text-slate-400 text-xs">({p.label})</span>
             </button>
@@ -620,8 +620,14 @@ function MeetingRowImpl({
       {contactPickerOptions && (
         <ChooseContactModal
           options={contactPickerOptions}
-          onChoose={key => {
-            const nd = { ...draft, primary_contact_key: key };
+          onChoose={p => {
+            // Two participants can share a role key (e.g. the former principal kept on the
+            // meeting next to the new one). The subject uses the first saved participant
+            // with primary_contact_key, so move the chosen person to the front.
+            const others = (draft.participants || []).filter(x => x !== p);
+            const participants = (draft.participants || []).includes(p) && others.some(x => x.key === p.key)
+              ? [p, ...others] : draft.participants;
+            const nd = { ...draft, participants, primary_contact_key: p.key };
             setDraft(nd);
             setContactPickerOptions(null);
             saveDraft(nd);
@@ -855,6 +861,7 @@ function MeetingRowImpl({
             </div>
           )}
           <ParticipantsSelector contacts={contacts} selected={draft.participants || []}
+            isPast={!!draft.meeting_date && draft.meeting_date < new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Jerusalem" })}
             onChange={v => {
               const reminderOff = v.length === 0 && draft.reminder_enabled;
               // Who to call for the Outlook event subject: if exactly one principal-like

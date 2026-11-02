@@ -303,7 +303,7 @@ export default function Sidebar({ dark = false }) {
   const [isSuperAdmin, setIsSuperAdmin] = useState(false);
   const [notifCount, setNotifCount] = useState(0);
   const [toasts, setToasts] = useState([]);
-  const { addMeetingReminder, addStatusReminder, addTaskReminder, addCallAttribReminder, addGoalUpdateReminder, addReconciliationCompletedReminder, setUserName: setCtxUserName } = useMeetingReminders();
+  const { addMeetingReminder, addStatusReminder, addTaskReminder, addCallAttribReminder, addAmbiguousCallReminder, addGoalUpdateReminder, addReconciliationCompletedReminder, setUserName: setCtxUserName } = useMeetingReminders();
   const prevCountRef = useRef(0);
   const lastPollTimeRef = useRef(Date.now());
   const notifPrefsRef = useRef({ meeting_reminder: true, meeting_reminder_minutes: 10 });
@@ -538,10 +538,30 @@ export default function Sidebar({ dark = false }) {
       }
     }
 
+    // Ambiguous-contact call prompts — "which school was this call with?" for a contact
+    // listed at several schools. Detected by the 5-min calls scan; surfaced here.
+    async function checkAmbiguousCallPrompts() {
+      if (wakeRefreshRef.current) await wakeRefreshRef.current;
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!sessionIsValid(session)) return;
+      try {
+        const res = await axios.get("/calls/calls/ambiguous/my-prompts");
+        for (const p of (res.data?.prompts || [])) {
+          const key = `call-ambiguous-${p.call_id}`;
+          if (sessionStorage.getItem(key)) continue;
+          sessionStorage.setItem(key, "1");
+          addAmbiguousCallReminder({ ...p });
+        }
+      } catch {
+        // silent — must never block other polling
+      }
+    }
+
     fetchCount();
     checkMeetingReminders();
     checkUnknownCallPrompts();
-    const t = setInterval(() => { fetchCount(); checkMeetingReminders(); checkUnknownCallPrompts(); }, 60000);
+    checkAmbiguousCallPrompts();
+    const t = setInterval(() => { fetchCount(); checkMeetingReminders(); checkUnknownCallPrompts(); checkAmbiguousCallPrompts(); }, 60000);
     return () => clearInterval(t);
   }, []);
 

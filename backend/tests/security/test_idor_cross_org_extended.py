@@ -1289,3 +1289,49 @@ def test_review_update_request_same_org_reaches_status_check(org_a_client):
         json={"status": "rejected"},
     )
     assert resp.status_code in (400, 403), resp.text
+
+
+# ===========================================================================
+# calls_router — ambiguous-contact call prompts (AmbiguousCallPopup feed)
+# ===========================================================================
+
+def _insert_sandbox_ambiguous_prompt(admin_db, caller_id: str) -> str:
+    """An open ambiguous-contact row in Org B (sandbox) addressed to `caller_id`."""
+    from datetime import datetime, timezone
+    call_id = f"idor-test-ambiguous-{uuid.uuid4()}"
+    admin_db.table("calls_call_contact_resolutions").insert({
+        "org_id": ORG_B_ID,
+        "call_id": call_id,
+        "kind": "ambiguous",
+        "call_time": datetime.now(timezone.utc).isoformat(),
+        "contact_name": "idor test",
+        "candidate_schools": [{"id": ORG_B_SCHOOL_ID, "name": "sandbox"}],
+        "caller_advisor_id": caller_id,
+        "notified_recipient_ids": [caller_id],
+    }).execute()
+    return call_id
+
+
+def test_ambiguous_call_prompts_cross_org_hidden(org_a_client, admin_db):
+    # Org B row deliberately addressed to the Org A user's id — the org filter alone must
+    # keep it out of Org A's feed.
+    call_id = _insert_sandbox_ambiguous_prompt(admin_db, ORG_A_MANAGER_ID)
+    try:
+        resp = org_a_client.get("/calls/calls/ambiguous/my-prompts")
+        assert resp.status_code == 200, resp.text
+        assert call_id not in [p["call_id"] for p in resp.json()["prompts"]]
+    finally:
+        admin_db.table("calls_call_contact_resolutions").delete() \
+            .eq("org_id", ORG_B_ID).eq("call_id", call_id).execute()
+
+
+def test_ambiguous_call_prompts_same_org_visible(org_b_client, admin_db):
+    call_id = _insert_sandbox_ambiguous_prompt(admin_db, ORG_B_OWNER_ID)
+    try:
+        resp = org_b_client.get("/calls/calls/ambiguous/my-prompts")
+        assert resp.status_code == 200, resp.text
+        prompt = next(p for p in resp.json()["prompts"] if p["call_id"] == call_id)
+        assert prompt["candidate_schools"][0]["id"] == ORG_B_SCHOOL_ID
+    finally:
+        admin_db.table("calls_call_contact_resolutions").delete() \
+            .eq("org_id", ORG_B_ID).eq("call_id", call_id).execute()
