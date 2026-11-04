@@ -21,7 +21,7 @@ import { getMissingCriticalFields, isMeetingIncomplete } from "../components/mee
 import { buildSchoolContacts } from "../components/meetings/schoolContacts";
 import { useMeetingsPolling } from "../hooks/useMeetingsPolling";
 import { useAiSummaryEnabled } from "../hooks/useAiSummaryEnabled";
-import { mergeMeetingsSilently, visibleDateBounds } from "../components/meetings/mergeMeetings";
+import { mergeMeetingsSilently, recentDateBounds, visibleDateBounds } from "../components/meetings/mergeMeetings";
 import { useMeetingNotes } from "../context/MeetingNotesContext";
 
 const TODAY = new Date().toISOString().slice(0, 10);
@@ -178,7 +178,12 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
       params.academic_year = year;
       const res = await axios.get("/schools/meetings/all", { params });
       if (silent) {
-        setMeetings(prev => mergeMeetingsSilently(prev, res.data || []));
+        // See recentDateBounds — non-fatal, the main poll's result still applies without it.
+        const recent = activeFilters.status
+          ? await axios.get("/schools/meetings/all", { params: { ...params, status: undefined, ...recentDateBounds() } })
+              .then(r => r.data || []).catch(() => [])
+          : [];
+        setMeetings(prev => mergeMeetingsSilently(mergeMeetingsSilently(prev, res.data || []), recent));
       } else {
         setMeetings(res.data || []);
       }
@@ -364,7 +369,8 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
     setMeetings(prev => prev.map(m => m.id === draft.id ? { ...m, ...draft } : m));
     const payload = {
       meeting_date: draft.meeting_date || null,
-      status: draft.status || "scheduled",
+      // Present only when the user changed it — see MeetingRow.performSave.
+      ...(draft.status ? { status: draft.status, status_changed: true } : {}),
       start_time: normalizeTime(draft.start_time),
       end_time: normalizeTime(draft.end_time),
       advisor_ids: draft.advisor_ids || [],
@@ -686,7 +692,8 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
     await Promise.allSettled(ids.map(id => {
       const m = meetings.find(x => x.id === id);
       if (!m) return Promise.reject();
-      return updateMeeting({ ...m, advisor_ids: [advisorId], advisor_profiles: advisor ? [advisor] : [] });
+      const { status: _unchangedStatus, ...withoutStatus } = m;
+      return updateMeeting({ ...withoutStatus, advisor_ids: [advisorId], advisor_profiles: advisor ? [advisor] : [] });
     }));
     setSelectedIds({});
   }

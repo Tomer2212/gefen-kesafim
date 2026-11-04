@@ -86,7 +86,7 @@ def test_found_moved_updates_meeting(get_event_calls):
     r = schools_router._reconcile_meeting_from_outlook(
         db, ORG, _meeting({"adv1": {"external_event_id": EV_A}}), prefetched={"adv1": {EV_A: OUTLOOK_MOVED}})
     assert r["action"] == "updated"
-    assert db.updates == [("meetings", {"meeting_date": "2026-11-06", "start_time": "11:30", "end_time": "12:30"})]
+    assert db.updates == [("meetings", {"meeting_date": "2026-11-06", "start_time": "11:30", "end_time": "12:30", "auto_complete_blocked": False})]
 
 
 def test_failed_listing_is_skipped_never_cancelled(get_event_calls):

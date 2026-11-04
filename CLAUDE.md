@@ -271,7 +271,30 @@ created_at TIMESTAMPTZ
 service_role only (no `authenticated` grant; RLS on with a deny-all policy). Written exclusively via `backend/meeting_activity.py` → `log_meeting_activity` / `log_meeting_activity_bulk` (always non-fatal). Read via `GET /schools/{id}/meetings/{mid}/activity`, which merges consecutive same-actor/same-source `updated` events within 10 min and synthesizes a `legacy` "created" row (from `meetings.created_by/created_at/created_via/booking_token_id`) for meetings that predate the log. **Any new code path that writes `meetings` (or meeting notes / offline work / summary) MUST call `log_meeting_activity` after its write** — read the before-state with `meeting_activity.fetch_tracked` first. An `updated` with no real change is dropped automatically, so calling it on every autosave is fine. Frontend meeting create/PUT/PATCH calls send an `X-Client-Surface` header (`school_card` / `personal` / `admin` / `status_popup`) so the log can say where a change came from — keep sending it from any new meetings surface (`MeetingsTable` takes a `clientSurface` prop).
 
 ### Calls scan — `POST /calls/process-new-calls` (ambiguous / unknown-number call prompts)
-Triggered **every 5 min by Supabase pg_cron + pg_net** (job `calls-process-new-calls`, `CRON_SECRET` read from Supabase Vault secret `cron_secret`); `.github/workflows/voicenter-poll-calls.yml` is only a backup (GitHub's schedule lagged 3-7 h — the cause of day-late "which school?" prompts). Change frequency with `cron.alter_job` — no deploy needed. Overlap-safe: per-org lease `calls_integrations.scan_lock_until`, and `calls_scan_processed (org_id, call_id)` (service_role only, deny-all RLS, rows pruned after 3 days) records calls already handled, because each scan re-pulls a 3 h lookback (providers filter by call START, but a call only appears once it ENDS) and keeps calls that ended after `last_call_scan_at − 30 min`. `calls_call_contact_resolutions` is unique on `(org_id, call_id)`. The caller advisor sees an `AmbiguousCallPopup` (feed: `GET /calls/calls/ambiguous/my-prompts`, calls from the last 48 h) in addition to the bell notification.
+Triggered **every 3 min by Supabase pg_cron + pg_net** (job `calls-process-new-calls`, `CRON_SECRET` read from Supabase Vault secret `cron_secret`); `.github/workflows/voicenter-poll-calls.yml` is only a backup (GitHub's schedule lagged 3-7 h — the cause of day-late "which school?" prompts). Change frequency with `cron.alter_job` — no deploy needed. Overlap-safe: per-org lease `calls_integrations.scan_lock_until`, and `calls_scan_processed (org_id, call_id)` (service_role only, deny-all RLS, rows pruned after 3 days) records calls already handled, because each scan re-pulls a 3 h lookback (providers filter by call START, but a call only appears once it ENDS) and keeps calls that ended after `last_call_scan_at − 30 min`. `calls_call_contact_resolutions` is unique on `(org_id, call_id)`. The caller advisor sees an `AmbiguousCallPopup` (feed: `GET /calls/calls/ambiguous/my-prompts`, calls from the last 48 h) in addition to the bell notification.
+
+### Meeting "בפועל" + auto-completion — how it stays near-real-time (target: ≤5 min from call end)
+- **New calls:** the scan above attributes them to same-day meetings (`_attribute_new_calls_to_meetings`, no extra provider request; a failure is retried next scan) and runs `_sweep_auto_complete_meetings` (DB-only, today + yesterday).
+- **Safety net:** pg_cron job `meetings-recompute-call-activity` (every 15 min) calls `POST /schools/meetings/recompute-call-activity`, which catches e.g. a meeting created after the call. `.github/workflows/meeting-call-activity-recompute.yml` is only a backup (GitHub's schedule was measured at every 4-8 h).
+- **Rule (`_maybe_auto_complete_meeting`):** org automation on + status `scheduled` + scheduled **start_time** passed + calls + offline ≥ 5 min + not `meetings.auto_complete_blocked`.
+- **`meetings.auto_complete_blocked`:** set when a user moves a meeting from `completed` back to `scheduled` (PUT/PATCH, `_apply_auto_complete_block`), so automation never re-closes it; cleared when the meeting's date changes (including from Outlook). Manually marking it completed always works.
+- **`status` is written by `PUT /meetings/{id}` only when the client sent it** (`model_fields_set`), and `MeetingRow.performSave` sends it, with `status_changed: true`, only when the user changed it. Do not restore a `"scheduled"` default or send the row's status on every autosave: a row that hasn't yet seen a server-side auto-completion would silently reopen the meeting. A PUT with `completed` → `scheduled` and no `status_changed` comes from a tab loaded before this rule, and that status is dropped.
+- `actual-detail` returns `meeting_patch` so opening a row updates its columns and status at once. Under a status filter, silent polls (admin/personal) add a second unfiltered request for today + yesterday only (`recentDateBounds`), so a just-closed row keeps refreshing. Do not drop the status filter from the main poll: that returned ~1,900 rows instead of ~26, every 20 s per tab.
+
+### `meeting_reminders` + `meeting_upload_followups` — what was emailed for a meeting (the "נשלח ל..." popover)
+Both tables also hold `message_type` ('reminder' | 'upload_request' | 'upload_followup'), `recipient_role`, `subject`, `body_html`, `open_token`, `opened_at` (followups also `recipient_name`). Rows from before 2026-11-04 have these empty; `GET /schools/meetings/{id}/messages` (`MeetingMessagesPopover.jsx`, via `MeetingRow`) infers their type/role and shows "לא תועד" for the rest.
+- **Follow-ups must stay out of `meeting_reminders`:** `send_due_reminders` skips any meeting with a row there, so a logged follow-up would cancel the day-before send.
+- **Open tracking (`backend/email_tracking.py`):** `add_open_pixel` returns the html to send + token; store the ORIGINAL html in `body_html`, so previewing never counts as an open. `GET /public/email-open/{token}.gif` records the first open, ignoring hits under 15 s after sending (mail scanners). Requires `BACKEND_PUBLIC_URL`; without it `open_token` is null and no opens are recorded. The UI says "נשלחה" until an open is detected, never "not opened", since a missing open proves nothing. Any new meeting email should follow the same pattern.
+- **`request-missing-files` recipients** come only from `_upload_request_recipients` (logged file-request recipients, then legacy fallbacks); the optional `recipient_email` is validated against that set, so a client can never direct mail to an arbitrary address.
+
+### Meeting file requests per division (six-year schools)
+- **`meeting_upload_tokens`** has `recipient_email`, `recipient_name`, `division_scope` (JSONB; null = whole meeting). Each file-request recipient has their own link; `get_or_create_upload_token` reuses by meeting + recipient + scope. Older links have no recipient and show the whole meeting.
+- **`send_due_reminders`** derives the responsibles from `stage_scope` (`_gefen_files_slots_for_meeting`), and each one's scope from the slots they hold (`recipient_division_scope`): one person on both divisions = null, one email, full list.
+- **`build_upload_checklist(..., division_scope)`** narrows the list; **always pass the token's scope** on recipient-facing paths. Its `multi_division` flag is what keeps a one-division list from accepting another division's files, so don't derive that from the scoped `divisions`.
+- **Files are one shared pool per meeting + year:** `compute_upload_comparison` counts a file for every division it serves (`file_divisions`: detected `division_type`, now also set for finance and planning files, plus `meeting_upload_files.covers_divisions`). That's how a combined file isn't requested twice. This works because `reconcile()` already filters a finance file by the report codes of the division being checked.
+- **`covers_divisions`** is set only by an advisor (`PATCH .../uploaded-files/{fid}/coverage`, "השתמש בקובץ הקיים" in the popover) and only on finance files: a combined export looks single-division when the other division had no expenses. Gefen and planning files are excluded because marking them would leave that division with no data in the check. Files from earlier checks are deliberately never reused, since they'd be out of date.
+- **`GET .../upload-comparison`** (notifications, school card) goes through `_meeting_upload_comparison`: once recipients have scopes it shows the union of what they were asked, not the whole-school list, which would ask a one-division meeting for the other division's files.
+- A combined gefen file is still checked as one run, not split per division; combined + single-division gefen files in one check still return `gefen_division_ambiguous`.
 
 ### `school_update_requests` — advisors request changes, owners approve
 ```sql
@@ -418,6 +441,9 @@ GET    /schools/{id}/logs                 → check history for school
 
 GET    /schools/{id}/meetings/{mid}/activity → meeting activity log ("תיעוד פעילות", ⋯ menu in every meetings table)
 GET    /schools/{id}/activity            → school-card change log ("תיעוד פעולות" button in the "פרטי בית הספר" tab)
+GET    /schools/meetings/{mid}/messages  → emails sent for a meeting + uploaded/missing files per year ("נשלח ל..." popover)
+POST   /schools/meetings/{mid}/request-missing-files → re-request missing files, each recipient only their own; optional body {recipient_email}
+PATCH  /schools/meetings/{mid}/uploaded-files/{fid}/coverage → advisor confirms a finance file also serves a division; body {division} (null clears)
 
 GET    /schools/{id}/year-closure-notes?academic_year=   → signed "סגירת שנה" notes
 POST   /schools/{id}/year-closure-notes                  → add note (author = caller)
@@ -650,6 +676,8 @@ Fields currently requiring this pattern (all fixed):
 - `StatusPicker` → `onMouseDown` ✓ (was already correct)
 
 If you add a new interactive element to `MeetingRow` that uses `onMouseDown` + `e.preventDefault()`, always call `saveDraft(nd)` directly — never assume blur will handle it.
+
+**Blur only saves real edits:** `handleRowBlur` compares `BLUR_SAVED_FIELDS` (user-editable fields, `MeetingRow.jsx`) with the last saved values — not the whole `meeting`, whose server-maintained fields change constantly through polling and would make an untouched row re-send its stale draft and re-sync Outlook. A new row field that relies on blur to save MUST be added to `BLUR_SAVED_FIELDS`.
 
 ### Meetings Feature — Changes Apply Across All Three Scheduling Surfaces (MANDATORY)
 
@@ -995,6 +1023,14 @@ Endpoints that require this pattern: `get_notifications`, any future stats/badge
 
 ---
 
+### 10. A Background `_process()` Run Must Handle `pending_identification`
+
+`status == "done"` does **not** mean a check was saved. `_process()` deliberately skips `_save_check_log` while rows await manual classification (`_any_tikhnun_pending`), and only `POST /analyze/classify/{run_id}` (or `/retry-finance`) saves it afterward; `_save_check_log` also swallows its own failures. `SchoolPage.jsx` handles this by opening `ClassifyModal`, but any path that runs `_process()` with no such UI must handle it itself, or the check silently never appears.
+
+**Rule:** treat a check as saved only when `saved_log_id` is set (on each per-division sub-run for a six-year split). Follow `_run_meeting_check_and_notify` / `_summarize_meeting_check`: tell the user the check awaits classification and link to `/school/{id}?tab=checks&resume_run={run_id}`, which reopens `ClassifyModal`. Files in `_zihuy_ctx` are gone by classification time (`_process()` deletes its temp dir) — `_restore_zihuy_paths` re-downloads them from `stored_file_paths`. Rows that merely list a planned response with nothing reported against it (no code, invoice, supplier or amount) never reach classification: `_without_placeholder_doch_rows` drops them, since no answer about them changes any number.
+
+---
+
 ## Plan Presentation Rule (MANDATORY)
 
 Whenever a plan is presented to the user (plan mode, `ExitPlanMode`, or any "here's what I'm going to do" summary), it must be written **entirely in Hebrew** — no English.
@@ -1094,7 +1130,7 @@ A passing run means, for every covered endpoint, both (a) a different org is rej
 4. If a failure appears: treat a cross-org test that unexpectedly passes as a real, reportable vulnerability (not a flaky test) — fix the underlying endpoint, re-run, and only then proceed. Never weaken/delete a failing test to make the suite green.
 5. This is app-level enforcement, not CI — it depends on this rule being followed each session. It does not replace the suite; it replaces relying on anyone's memory to run it.
 
-As of the most recent full audit (2026-10-24), the suite covers 121 tests across all endpoint groups fixed in that audit plus later additions (`test_idor_cross_org.py` + `test_idor_cross_org_extended.py`). **Note:** list endpoints with NO resource-id parameter (e.g. `GET /schools/year-admin-data`) are also a leak vector — a query filtered only by year/status on a school-scoped table (no `org_id` column) returns every org's rows; scope them with `schools!inner(org_id)` + `.eq("schools.org_id", ...)`. Keep this number roughly current when adding more coverage.
+As of the most recent full audit (2026-10-24), the suite covers 128 tests across all endpoint groups fixed in that audit plus later additions (`test_idor_cross_org.py` + `test_idor_cross_org_extended.py`). **Note:** list endpoints with NO resource-id parameter (e.g. `GET /schools/year-admin-data`) are also a leak vector — a query filtered only by year/status on a school-scoped table (no `org_id` column) returns every org's rows; scope them with `schools!inner(org_id)` + `.eq("schools.org_id", ...)`. Keep this number roughly current when adding more coverage.
 
 ### Recurring security cadence (MANDATORY — do not wait for the user to ask)
 

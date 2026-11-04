@@ -88,7 +88,7 @@ def harness(monkeypatch):
     sent = []
 
     def fake_resend(to_email, subject, html, reply_to=None, attachments=None):
-        sent.append({"to": to_email, "subject": subject, "reply_to": reply_to})
+        sent.append({"to": to_email, "subject": subject, "reply_to": reply_to, "html": html})
 
     def no_smtp(*_a, **_k):
         raise AssertionError("meeting email must not be sent via SMTP (support mailbox)")
@@ -104,7 +104,7 @@ def harness(monkeypatch):
         lambda _s, _slot: {"name": "מזכירה", "email": SECRETARY_EMAIL},
     )
     monkeypatch.setattr(schools_router, "resolve_inherited_year_admin", lambda *_a: {SCHOOL_ID: {"client_status": "active"}})
-    monkeypatch.setattr(schools_router, "get_or_create_upload_token", lambda *_a: "tok")
+    monkeypatch.setattr(schools_router, "get_or_create_upload_token", lambda *_a, **_k: "tok")
     monkeypatch.setattr(schools_router, "resolve_requested_upload_years", lambda _m: ["תשפ\"ז"])
     monkeypatch.setattr(schools_router, "build_upload_checklist", lambda *_a: {"items": [], "no_baseline_this_year": False})
     monkeypatch.setattr(task_logic, "fetch_opted_out_emails", lambda *_a: set())
@@ -124,6 +124,22 @@ def test_reminder_and_upload_request_both_go_via_resend_with_advisor_reply_to(ha
     assert all(s["reply_to"] == ADVISOR_EMAIL for s in sent)
     logged = [row for table, row in db.inserted if table == "meeting_reminders"]
     assert {r["status"] for r in logged} == {"sent"}
+    by_logged_recipient = {r["recipient_email"]: r for r in logged}
+    assert by_logged_recipient[PRINCIPAL_EMAIL]["message_type"] == "reminder"
+    assert by_logged_recipient[SECRETARY_EMAIL]["message_type"] == "upload_request"
+    assert by_logged_recipient[PRINCIPAL_EMAIL]["recipient_role"] == "מנהל/ת"
+    assert all(r["subject"] and r["body_html"] for r in logged)
+
+
+def test_stored_email_copy_never_contains_the_open_pixel(harness, monkeypatch):
+    db, sent = harness
+    monkeypatch.setenv("BACKEND_PUBLIC_URL", "https://api.example.com")
+
+    schools_router.send_due_reminders(_FakeRequest())
+
+    logged = [row for table, row in db.inserted if table == "meeting_reminders"]
+    assert all(r["open_token"] and "email-open" not in r["body_html"] for r in logged)
+    assert all("email-open" in s["html"] for s in sent)
 
 
 def test_gmail_reminder_helper_is_gone():

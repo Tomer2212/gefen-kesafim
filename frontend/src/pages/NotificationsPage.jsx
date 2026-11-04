@@ -384,6 +384,7 @@ function MeetingFilesArrivedDetail({ meetingId, schoolId, academicYear }) {
   const [files, setFiles] = useState([]);
   const [error, setError] = useState("");
   const [actionState, setActionState] = useState("idle"); // idle | working | sent | failed | started
+  const [actionError, setActionError] = useState("");
 
   useEffect(() => {
     Promise.all([
@@ -413,6 +414,7 @@ function MeetingFilesArrivedDetail({ meetingId, schoolId, academicYear }) {
 
   async function handleRequestMissing() {
     setActionState("working");
+    setActionError("");
     try {
       await axios.post(`/schools/meetings/${meetingId}/request-missing-files`);
       setActionState("sent");
@@ -429,7 +431,9 @@ function MeetingFilesArrivedDetail({ meetingId, schoolId, academicYear }) {
     try {
       await axios.post(`/analyze/meetings/${meetingId}/run-check-from-uploads`, null, { params: { academic_year: academicYear } });
       setActionState("started");
-    } catch {
+    } catch (err) {
+      const detail = err.response?.data?.detail;
+      setActionError(typeof detail === "string" ? detail : "");
       setActionState("failed");
     }
   }
@@ -493,7 +497,7 @@ function MeetingFilesArrivedDetail({ meetingId, schoolId, academicYear }) {
       )}
       {actionState === "failed" && (
         <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mb-2" role="alert">
-          אירעה שגיאה. נסה שוב.
+          {actionError || "אירעה שגיאה. נסה שוב."}
         </p>
       )}
 

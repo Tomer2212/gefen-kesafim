@@ -17,7 +17,7 @@ import { buildSchoolContacts } from "../components/meetings/schoolContacts";
 import { normalizeTimeValue } from "../components/meetings/TimeInput";
 import { useMeetingsPolling } from "../hooks/useMeetingsPolling";
 import { useAiSummaryEnabled } from "../hooks/useAiSummaryEnabled";
-import { mergeMeetingsSilently, visibleDateBounds } from "../components/meetings/mergeMeetings";
+import { mergeMeetingsSilently, recentDateBounds, visibleDateBounds } from "../components/meetings/mergeMeetings";
 import { useMeetingNotes } from "../context/MeetingNotesContext";
 
 const TODAY = new Date().toISOString().slice(0, 10);
@@ -143,7 +143,17 @@ export default function PersonalMeetingsTab({ userId, role, canDeleteMeetings, u
       params.set("academic_year", academicYear);
       const res = await axios.get(`/schools/meetings/my?${params}`);
       if (silent) {
-        setMeetings(prev => mergeMeetingsSilently(prev, res.data || []));
+        // See recentDateBounds — non-fatal, the main poll's result still applies without it.
+        let recent = [];
+        if (activeFilters.status) {
+          const recentParams = new URLSearchParams(params);
+          recentParams.delete("status");
+          const bounds = recentDateBounds();
+          recentParams.set("date_from", bounds.date_from);
+          recentParams.set("date_to", bounds.date_to);
+          recent = await axios.get(`/schools/meetings/my?${recentParams}`).then(r => r.data || []).catch(() => []);
+        }
+        setMeetings(prev => mergeMeetingsSilently(mergeMeetingsSilently(prev, res.data || []), recent));
       } else {
         setMeetings(res.data || []);
       }
@@ -185,6 +195,8 @@ export default function PersonalMeetingsTab({ userId, role, canDeleteMeetings, u
     const { id, school_id, reminder_enabled, ...rest } = draft;
     const payload = {
       ...rest,
+      // status is present only when the user changed it — see MeetingRow.performSave.
+      ...(draft.status ? { status_changed: true } : {}),
       start_time: normalizeTimeValue(draft.start_time) || null,
       end_time: normalizeTimeValue(draft.end_time) || null,
     };

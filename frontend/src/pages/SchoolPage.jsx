@@ -1641,7 +1641,31 @@ function StageMismatchModal({ detectedDivision, schoolStage, onConfirm, onCancel
 }
 
 // ─── ChecksTab ────────────────────────────────────────────────────────────────
-function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsError, logsLoading, onReloadLogs, activeSubTab, setActiveSubTab, academicYear, setAcademicYear }) {
+function classifyQueueForRun(r, runId) {
+  const queue = [];
+  if (r?.tikhnun?.pending_identification) queue.push({ tikhnun: r.tikhnun, division: "main", runId });
+  if (r?.tikhnun_tikkon?.pending_identification) queue.push({ tikhnun: r.tikhnun_tikkon, division: "tikkon", runId });
+  if (r?.tikhnun_beinayim?.pending_identification) queue.push({ tikhnun: r.tikhnun_beinayim, division: "beinayim", runId });
+  return queue;
+}
+
+// A six-year split holds its results in per-division sub-runs, each of which already carries
+// its own tikhnun under tikhnun_tikkon/tikhnun_beinayim — "main" is only for a sub-run without.
+async function classifyQueueForSplitRun(r) {
+  const subIds = r.division_run_ids || {};
+  const queue = [];
+  for (const dt of Object.keys(subIds)) {
+    try {
+      const { data: subR } = await axios.get(`/analyze/result/${subIds[dt]}`);
+      if (subR?.tikhnun_tikkon?.pending_identification) queue.push({ tikhnun: subR.tikhnun_tikkon, division: "tikkon", runId: subIds[dt] });
+      if (subR?.tikhnun_beinayim?.pending_identification) queue.push({ tikhnun: subR.tikhnun_beinayim, division: "beinayim", runId: subIds[dt] });
+      if (subR?.tikhnun?.pending_identification && !subR?.tikhnun_tikkon && !subR?.tikhnun_beinayim) queue.push({ tikhnun: subR.tikhnun, division: "main", runId: subIds[dt] });
+    } catch { /* non-fatal — sub-run result fetch failed, skip its classify check */ }
+  }
+  return queue;
+}
+
+function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsError, logsLoading, onReloadLogs, activeSubTab, setActiveSubTab, academicYear, setAcademicYear, resumeRunId, onResumeRunHandled }) {
   const isSheshsSnati = schoolStage === "sheshshnati";
   // Only worth naming the division in "missing file" messages when the school
   // actually has more than one (שש-שנתי) — a single-division school's checks
@@ -1667,6 +1691,8 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
   const [addFileModal, setAddFileModal] = useState(null); // { log }
   const [pendingRun, setPendingRun] = useState(null);
   const [classifyQueue, setClassifyQueue] = useState([]);
+  const [resumeNotice, setResumeNotice] = useState("");
+  const resumeHandledRef = useRef(null);
   const pollRef = useRef(null);
 
   const [meUser, setMeUser] = useState(null);
@@ -1723,6 +1749,26 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
   }, []);
 
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+
+  // Deep link from ReconciliationCompletedPopup: a background check from uploaded meeting files
+  // finished but can't be saved until its rows are classified, so reopen that same run here.
+  useEffect(() => {
+    if (!resumeRunId || resumeHandledRef.current === resumeRunId) return;
+    resumeHandledRef.current = resumeRunId;
+    setResumeNotice("");
+    (async () => {
+      try {
+        const { data: r } = await axios.get(`/analyze/result/${resumeRunId}`);
+        const queue = r.split_divisions ? await classifyQueueForSplitRun(r) : classifyQueueForRun(r, resumeRunId);
+        if (queue.length > 0) setClassifyQueue(queue);
+        else setResumeNotice("הסיווג של בדיקה זו כבר הושלם — הבדיקה מופיעה בטבלה.");
+      } catch {
+        setResumeNotice("לא ניתן לפתוח את הבדיקה הממתינה. אפשר להפעיל אותה שוב מההתראה על הקבצים.");
+      }
+    })();
+    onResumeRunHandled?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resumeRunId]);
 
   const canDelete = meUser && !!meUser.can_delete_own_meetings;
 
@@ -1870,16 +1916,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
               // gate applies here (both are "correct" relative to themselves).
               setPendingRun(null);
               onReloadLogs(yearOverride);
-              const subIds = r.division_run_ids || {};
-              const queue = [];
-              for (const dt of Object.keys(subIds)) {
-                try {
-                  const { data: subR } = await axios.get(`/analyze/result/${subIds[dt]}`);
-                  if (subR?.tikhnun_tikkon?.pending_identification) queue.push({ tikhnun: subR.tikhnun_tikkon, division: "tikkon", runId: subIds[dt] });
-                  if (subR?.tikhnun_beinayim?.pending_identification) queue.push({ tikhnun: subR.tikhnun_beinayim, division: "beinayim", runId: subIds[dt] });
-                  if (subR?.tikhnun?.pending_identification && !subR?.tikhnun_tikkon && !subR?.tikhnun_beinayim) queue.push({ tikhnun: subR.tikhnun, division: "main", runId: subIds[dt] });
-                } catch { /* non-fatal — sub-run result fetch failed, skip its classify check */ }
-              }
+              const queue = await classifyQueueForSplitRun(r);
               if (queue.length > 0) setClassifyQueue(queue);
               return;
             }
@@ -1896,10 +1933,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
             setPendingRun(prev => ({ ...prev, status: "done", result: r }));
             onReloadLogs(yearOverride);
             // Pending identification — show classify modal
-            const queue = [];
-            if (r.tikhnun?.pending_identification) queue.push({ tikhnun: r.tikhnun, division: "main", runId });
-            if (r.tikhnun_tikkon?.pending_identification) queue.push({ tikhnun: r.tikhnun_tikkon, division: "tikkon", runId });
-            if (r.tikhnun_beinayim?.pending_identification) queue.push({ tikhnun: r.tikhnun_beinayim, division: "beinayim", runId });
+            const queue = classifyQueueForRun(r, runId);
             if (queue.length > 0) setClassifyQueue(queue);
           } else if (r.status === "error") {
             clearInterval(pollRef.current);
@@ -1970,10 +2004,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
             // For update runs: clear immediately so the existing (updated) row takes over
             setPendingRun(prev => prev?.updateLogId ? null : { ...prev, status: "done", result: r });
             onReloadLogs();
-            const queue = [];
-            if (r.tikhnun?.pending_identification) queue.push({ tikhnun: r.tikhnun, division: "main", runId });
-            if (r.tikhnun_tikkon?.pending_identification) queue.push({ tikhnun: r.tikhnun_tikkon, division: "tikkon", runId });
-            if (r.tikhnun_beinayim?.pending_identification) queue.push({ tikhnun: r.tikhnun_beinayim, division: "beinayim", runId });
+            const queue = classifyQueueForRun(r, runId);
             if (queue.length > 0) setClassifyQueue(queue);
           } else if (r.status === "error") {
             clearInterval(pollRef.current);
@@ -2075,10 +2106,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
     const { result, runId } = stageMismatch;
     setStageMismatch(null);
     onReloadLogs();
-    const queue = [];
-    if (result?.tikhnun?.pending_identification) queue.push({ tikhnun: result.tikhnun, division: "main", runId });
-    if (result?.tikhnun_tikkon?.pending_identification) queue.push({ tikhnun: result.tikhnun_tikkon, division: "tikkon", runId });
-    if (result?.tikhnun_beinayim?.pending_identification) queue.push({ tikhnun: result.tikhnun_beinayim, division: "beinayim", runId });
+    const queue = classifyQueueForRun(result, runId);
     if (queue.length > 0) setClassifyQueue(queue);
   }
 
@@ -2191,6 +2219,11 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
 
   return (
     <div dir="rtl" className="flex flex-col" style={{ height: "calc(100vh - 260px)" }}>
+      {resumeNotice && (
+        <p role="status" className="flex-shrink-0 text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">
+          {resumeNotice}
+        </p>
+      )}
       {/* Toolbar: budget type tabs (right) + action buttons (left) */}
       <div className="flex items-end border-b border-slate-200 mb-4 gap-1 flex-shrink-0">
         {/* Budget type tabs — styled like main page tabs */}
@@ -3476,7 +3509,8 @@ export default function SchoolPage() {
     setMeetings(prev => prev.map(m => m.id === draft.id ? { ...m, ...draft } : m));
     const payload = {
       meeting_date: draft.meeting_date || null,
-      status: draft.status || "scheduled",
+      // Present only when the user changed it — see MeetingRow.performSave.
+      ...(draft.status ? { status: draft.status, status_changed: true } : {}),
       start_time: normalizeTime(draft.start_time),
       end_time: normalizeTime(draft.end_time),
       advisor_ids: draft.advisor_ids || [],
@@ -5504,6 +5538,13 @@ export default function SchoolPage() {
               setActiveSubTab={setActiveSubTab}
               academicYear={academicYear}
               setAcademicYear={setAcademicYear}
+              resumeRunId={searchParams.get("resume_run")}
+              onResumeRunHandled={() => setSearchParams(prev => {
+                // Single-use deep-link param, same as "meeting" above.
+                const p = new URLSearchParams(prev);
+                p.delete("resume_run");
+                return p;
+              }, { replace: true })}
             />
           )}
 

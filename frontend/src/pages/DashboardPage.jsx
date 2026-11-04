@@ -289,6 +289,7 @@ const GENERAL_COLUMNS = [
   { key: "advisor_gefen",       label: "יועץ מלווה [גפן]" },
   { key: "advisor_current",     label: "יועץ מלווה [שוטף]" },
   { key: "advisor_district",    label: "יועץ מלווה [מחוז]" },
+  { key: "advisor_all",         label: "יועץ מלווה [כל הסוגים]" },
 ];
 const ALLOCATION_COLUMNS = [
   { key: "meeting_allocation_gefen",    label: "הקצאת פגישות [גפן]" },
@@ -318,6 +319,7 @@ const NEWLY_ADDED_MOVABLE_COLUMNS = [
   { key: "client_status",       label: "סטטוס לקוח" },
   { key: "order_method",        label: "אמצעי הזמנה" },
   { key: "order_amount_gefen",  label: 'מחיר כולל מע"מ' },
+  { key: "advisor_all",         label: "יועץ מלווה [כל הסוגים]" },
 ];
 
 // Optional columns showing summary data from the last real check run (check_metrics),
@@ -443,6 +445,7 @@ const FILTER_COLUMN_META = [
   { key: "advisor_gefen",   label: "יועץ מלווה [גפן]",  fmt: "textMulti" },
   { key: "advisor_current", label: "יועץ מלווה [שוטף]", fmt: "textMulti" },
   { key: "advisor_district",label: "יועץ מלווה [מחוז]", fmt: "textMulti" },
+  { key: "advisor_all",     label: "יועץ מלווה [כל הסוגים]", fmt: "textMulti" },
   // "אנשי קשר" group — principal_name is textMulti since a שש-שנתי school with a separate
   // חט"ב principal (principal_same_person === false) surfaces two names for one column.
   { key: "principal_name",        label: "מנהל/ת",        fmt: "textMulti" },
@@ -634,6 +637,19 @@ function principalNames(school) {
   ].filter(Boolean);
 }
 
+// "יועץ מלווה [כל הסוגים]" column — union of the three typed advisor lists, one entry per
+// person even when assigned to several types. advisor_schools is deliberately excluded: it
+// grants access (including temporary access), which doesn't make someone an accompanying advisor.
+function allTypedAdvisorNames(school) {
+  const byId = new Map();
+  for (const p of [
+    ...(school.advisors_gefen || []), ...(school.advisors_current || []), ...(school.advisors_district || []),
+  ]) {
+    if (!byId.has(p.id)) byId.set(p.id, p.full_name || p.email);
+  }
+  return [...byId.values()];
+}
+
 // "מתאם פגישות" / "אחראי/ת קבצי גפן" dashboard columns — built from the per-slot display
 // dicts the backend attaches to each school (meeting_coordinators_display /
 // gefen_files_responsible_display, see schools_router.py's _resolve_slot_display). A slot
@@ -715,6 +731,7 @@ function computeFilterValues(school, combo, meetingsStats, activeSummaryBudget, 
   out.advisor_gefen = (school.advisors_gefen || []).map(p => p.full_name || p.email);
   out.advisor_current = (school.advisors_current || []).map(p => p.full_name || p.email);
   out.advisor_district = (school.advisors_district || []).map(p => p.full_name || p.email);
+  out.advisor_all = allTypedAdvisorNames(school);
   out.principal_name = principalNames(school);
   out.secretary_name = school.secretary_name || null;
   out.finance_contact_name = school.finance_contact_name || null;
@@ -1398,6 +1415,8 @@ function renderCell(school, key, meetingsStats = {}, combo = null, activeSummary
       return (school.advisors_current || []).map(p => p.full_name || p.email).join(", ") || "—";
     case "advisor_district":
       return (school.advisors_district || []).map(p => p.full_name || p.email).join(", ") || "—";
+    case "advisor_all":
+      return allTypedAdvisorNames(school).join(", ") || "—";
     case "principal_name":
       return principalNames(school).join(", ") || "—";
     case "secretary_name":
@@ -1531,6 +1550,8 @@ function renderCellText(school, key, meetingsStats = {}, combo = null, activeSum
       return (school.advisors_current || []).map(p => p.full_name || p.email).join(", ") || "";
     case "advisor_district":
       return (school.advisors_district || []).map(p => p.full_name || p.email).join(", ") || "";
+    case "advisor_all":
+      return allTypedAdvisorNames(school).join(", ") || "";
     case "principal_name":
       return principalNames(school).join(", ") || "";
     case "secretary_name":
@@ -1950,6 +1971,7 @@ export default function DashboardPage() {
   const didMountAcademicYearRef = useRef(false);
   const [filtersPersistKey, setFiltersPersistKey] = useState(null);
   const [colOrder, setColOrder] = useState(DEFAULT_COL_ORDER);
+  const colPrefsLoadedRef = useRef(false);
   const [colVisible, setColVisible] = useState(() => ({
     ...Object.fromEntries(MOVABLE_COLUMNS.map(c => [c.key, DEFAULT_VISIBLE_MOVABLE_KEYS.includes(c.key)])),
     ...Object.fromEntries(SUMMARY_COLUMNS.map(c => [c.key, false])),
@@ -2231,7 +2253,10 @@ export default function DashboardPage() {
   // SUMMARY_COLUMNS) so they show up in "עמודות להצגה" without disturbing already-restored
   // user preferences. colOrder/colVisible are deps (not just goalColumns) specifically so this
   // also re-runs once right after restoration overwrites them — the missing-check guard makes
-  // this converge after one extra render instead of looping.
+  // this converge after one extra render instead of looping. Persisting waits for the profile
+  // prefs read (colPrefsLoadedRef): saving earlier would overwrite the user's saved prefs with
+  // defaults or with this browser's possibly stale localStorage copy. Restoration re-runs this
+  // effect, so keys still missing from the saved prefs get persisted right after it.
   useEffect(() => {
     const candidates = [...NEWLY_ADDED_MOVABLE_COLUMNS, ...MEETING_TYPE_BREAKDOWN_COLUMNS, ...CLOSURE_COLUMNS, ...CONTROL_LETTER_COLUMNS, ...CONTACT_COLUMNS, ...goalColumns, ...gefenClosureColumns];
     const missingOrder = candidates.map(c => c.key).filter(k => !colOrder.includes(k));
@@ -2243,7 +2268,7 @@ export default function DashboardPage() {
       : colVisible;
     setColOrder(nextOrder);
     setColVisible(nextVisible);
-    saveColPrefs(nextOrder, nextVisible);
+    if (colPrefsLoadedRef.current) saveColPrefs(nextOrder, nextVisible);
   }, [goalColumns, gefenClosureColumns, colOrder, colVisible]);
 
   useEffect(() => {
@@ -2336,6 +2361,7 @@ export default function DashboardPage() {
       }
       if (prefsResult.status === "fulfilled") {
         const prefs = prefsResult.value.data;
+        if (!prefsResult.value.error) colPrefsLoadedRef.current = true;
         if (prefs?.col_order && Array.isArray(prefs.col_order) &&
             prefs.col_order.length > 0 && prefs.col_order.every(isKnownColumnKey)) {
           setColOrder(prefs.col_order);

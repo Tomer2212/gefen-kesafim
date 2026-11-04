@@ -44,6 +44,7 @@ from academic_years import (
 )
 from auth import get_current_user, invalidate_profile_cache
 from email_resend import send_resend_email
+from email_tracking import add_open_pixel
 from meeting_labels import (
     CANONICAL_LABELS,
     MEETING_SERVICE_TYPE_LABELS,
@@ -57,7 +58,7 @@ from meeting_labels import (
     normalize_meeting_type,
     resolve_participant_role_token,
 )
-from meeting_upload_logic import build_upload_checklist, get_or_create_upload_token
+from meeting_upload_logic import build_upload_checklist, get_or_create_upload_token, recipient_division_scope
 import meeting_activity
 import school_activity
 from supabase_client import get_admin_client, reset_admin_client
@@ -367,6 +368,7 @@ class AdvisorAssignIn(BaseModel):
 class MeetingIn(BaseModel):
     meeting_date: str | None = None
     status: str | None = "scheduled"
+    status_changed: bool | None = None  # PUT only: the user changed status — see _apply_auto_complete_block
     start_time: str | None = None
     end_time: str | None = None
     advisor_id: str | None = None      # legacy single-advisor field (kept for compat)
@@ -848,6 +850,28 @@ def _gefen_files_slots_for_meeting(school: dict, normalized_stage_scope: str | N
     if normalized_stage_scope == "chativa":
         return ["beinayim"]
     return ["tichon", "beinayim"]  # "both" or unrecognized/missing — best-effort union, never skip
+
+
+def _participant_role_label(participant: dict, school: dict) -> str | None:
+    """Hebrew role of a meeting-email recipient. Prefers the label saved on the participant,
+    then derives it from the participant key ('finance' is the participants' spelling of the
+    school's finance_contact fields; extra_<n> is an index into schools.extra_contacts)."""
+    label = (participant.get("role_label") or participant.get("label") or "").strip()
+    if label:
+        return label
+    key = participant.get("key") or ""
+    if key == "gefen_files_responsible":
+        return _GEFEN_FILES_SLOT_LABELS["default"]
+    fields = _COORDINATOR_REF_FIELDS.get("finance_contact" if key == "finance" else key)
+    if fields:
+        return fields[3]
+    if key.startswith("extra_"):
+        extras = school.get("extra_contacts") or []
+        try:
+            return extras[int(key.split("_", 1)[1])].get("role") or "איש קשר נוסף"
+        except (ValueError, IndexError):
+            return "איש קשר נוסף"
+    return None
 
 
 @router.get("/")
@@ -5030,7 +5054,7 @@ def send_due_reminders(request: Request, school_id: str | None = None):
             db = get_admin_client()
             query = (
                 db.table("meetings")
-                .select("id, school_id, meeting_date, start_time, end_time, status, participants, advisor_ids, meeting_service_type, meeting_type, reminder_enabled, academic_year, requested_upload_years")
+                .select("id, school_id, meeting_date, start_time, end_time, status, participants, advisor_ids, meeting_service_type, meeting_type, reminder_enabled, academic_year, requested_upload_years, stage_scope")
                 .eq("status", "scheduled")
                 .in_("meeting_date", due_dates)
             )
@@ -5156,14 +5180,16 @@ def send_due_reminders(request: Request, school_id: str | None = None):
                 for slot in gefen_slots:
                     contact = _resolve_gefen_files_responsible_for_slot(school, slot)
                     if contact and contact.get("email"):
-                        upload_contacts_by_email[contact["email"].strip().lower()] = contact
+                        # One person may hold several slots — then they answer for all of them.
+                        entry = upload_contacts_by_email.setdefault(contact["email"].strip().lower(), {**contact, "slots": []})
+                        entry["slots"].append(slot)
 
             # Fold any resolved gefen-files contact not already in participants into the list as
             # a synthetic participant, so the existing per-participant send/log logic below
             # handles them identically — no duplicated sending code needed.
             participant_emails_lower = {p["email"].strip().lower() for p in participants}
             participants = participants + [
-                {"name": c.get("name"), "email": c["email"], "key": "gefen_files_responsible"}
+                {"name": c.get("name"), "email": c["email"], "key": "gefen_files_responsible", "role_label": c.get("role_label")}
                 for email_lower, c in upload_contacts_by_email.items()
                 if email_lower not in participant_emails_lower
             ]
@@ -5227,6 +5253,8 @@ def send_due_reminders(request: Request, school_id: str | None = None):
                         db.table("meeting_reminders").insert({
                             "meeting_id": m["id"], "school_id": m["school_id"],
                             "recipient_email": email_addr, "recipient_name": p.get("name"),
+                            "recipient_role": _participant_role_label(p, school),
+                            "message_type": "upload_request" if is_upload_contact else "reminder",
                             "status": "skipped",
                             "error_message": "recipient opted out (client_status not active)" if is_opted_out else None,
                         }).execute()
@@ -5240,11 +5268,18 @@ def send_due_reminders(request: Request, school_id: str | None = None):
                     email_lower = email_addr.lower()
                     opt_out_link = f"{os.getenv('APP_URL', '')}/tasks/opt-out?email={email_lower}&token={task_logic.make_optout_token(email_lower)}"
 
+                # What was actually sent, stored for the meeting-messages popover.
+                message_subject, body_html, open_token = None, None, None
                 if send_mode == "upload":
                     try:
-                        token = get_or_create_upload_token(db, m["id"], m["meeting_date"])
+                        # Each recipient gets their own link and only their own divisions' files.
+                        division_scope = recipient_division_scope(upload_contacts_by_email[email_addr.lower()]["slots"])
+                        token = get_or_create_upload_token(
+                            db, m["id"], m["meeting_date"],
+                            recipient_email=email_addr, recipient_name=p.get("name"), division_scope=division_scope,
+                        )
                         upload_years = resolve_requested_upload_years(m)
-                        year_checklists = [(y, build_upload_checklist(db, school, y)) for y in upload_years]
+                        year_checklists = [(y, build_upload_checklist(db, school, y, division_scope)) for y in upload_years]
                         # Grouped by academic year — each year gets its own "עבור שנת הלימודים
                         # X:" header followed by that year's own file list, rather than
                         # suffixing the year onto every single line.
@@ -5263,8 +5298,10 @@ def send_due_reminders(request: Request, school_id: str | None = None):
                             opt_out_link=opt_out_link,
                         )
                         status, error = "sent", None
+                        message_subject, body_html = f"בקשת קבצים לפגישה {when_bet}", html
+                        tracked_html, open_token = add_open_pixel(html)
                         try:
-                            send_resend_email(email_addr, f"בקשת קבצים לפגישה {when_bet}", html, reply_to=reply_to)
+                            send_resend_email(email_addr, message_subject, tracked_html, reply_to=reply_to)
                             sent += 1
                         except Exception as email_exc:
                             status, error = "failed", str(email_exc)
@@ -5289,8 +5326,10 @@ def send_due_reminders(request: Request, school_id: str | None = None):
                         opt_out_link=opt_out_link,
                     )
                     status, error = "sent", None
+                    message_subject, body_html = subject, html
+                    tracked_html, open_token = add_open_pixel(html)
                     try:
-                        send_resend_email(email_addr, subject, html, reply_to=reply_to)
+                        send_resend_email(email_addr, subject, tracked_html, reply_to=reply_to)
                         sent += 1
                     except Exception as email_exc:
                         status, error = "failed", str(email_exc)
@@ -5303,6 +5342,11 @@ def send_due_reminders(request: Request, school_id: str | None = None):
                         "school_id": m["school_id"],
                         "recipient_email": email_addr,
                         "recipient_name": p.get("name"),
+                        "recipient_role": _participant_role_label(p, school),
+                        "message_type": "upload_request" if send_mode == "upload" else "reminder",
+                        "subject": message_subject,
+                        "body_html": body_html,
+                        "open_token": open_token,
                         "status": status,
                         "error_message": error,
                     }).execute()
@@ -5493,9 +5537,10 @@ def _reconcile_meeting_from_outlook(db, org_id: str, meeting: dict, prefetched: 
         if new_date != meeting.get("meeting_date") or new_start != meeting.get("start_time") or new_end != meeting.get("end_time"):
             try:
                 activity_before = meeting_activity.fetch_tracked(db, meeting["id"])
-                db.table("meetings").update({
-                    "meeting_date": new_date, "start_time": new_start, "end_time": new_end,
-                }).eq("id", meeting["id"]).execute()
+                update = {"meeting_date": new_date, "start_time": new_start, "end_time": new_end}
+                if new_date != meeting.get("meeting_date"):
+                    update["auto_complete_blocked"] = False  # a new occurrence — see _apply_auto_complete_block
+                db.table("meetings").update(update).eq("id", meeting["id"]).execute()
                 meeting_activity.log_meeting_activity(
                     db, meeting_id=meeting["id"], school_id=meeting.get("school_id"), org_id=org_id,
                     actor_id=None, actor_type="outlook", source="outlook", action="updated",
@@ -8342,6 +8387,9 @@ def _recompute_meeting_call_activity(db, org_id: str, school_id: str, meeting_da
     return meeting_ids
 
 
+_AUTO_COMPLETE_MIN_SECONDS = 300
+
+
 def _sum_offline_seconds(entries: list[dict] | None) -> int:
     total = 0
     for e in (entries or []):
@@ -8359,35 +8407,125 @@ def _sum_offline_seconds(entries: list[dict] | None) -> int:
 
 def _maybe_auto_complete_meeting(db, org_id: str, meeting_id: str) -> None:
     """Auto-flips a meeting to 'completed' when: the org's automation toggle is on, the
-    meeting is still 'scheduled', its scheduled end_time has already passed, and its total
+    meeting is still 'scheduled', its scheduled start_time has already passed, and its total
     invested time (calls + offline work) reaches 5 minutes. Never touches cancelled/postponed
-    meetings, and never reverses a completion that already happened."""
+    meetings, never reverses a completion that already happened, and never re-closes a
+    meeting a user deliberately moved back to 'scheduled' (auto_complete_blocked)."""
     try:
         org_res = db.table("organizations").select("auto_complete_meetings_from_activity_enabled").eq("id", org_id).execute()
         org = org_res.data[0] if org_res.data else None
         if not org or not org.get("auto_complete_meetings_from_activity_enabled"):
             return
         m_res = db.table("meetings").select(
-            "id, school_id, status, meeting_date, end_time, calls_duration_seconds, offline_work_entries"
+            "id, school_id, status, meeting_date, start_time, calls_duration_seconds, offline_work_entries, auto_complete_blocked"
         ).eq("id", meeting_id).execute()
         m = m_res.data[0] if m_res.data else None
-        if not m or m.get("status") != "scheduled" or not m.get("meeting_date") or not m.get("end_time"):
+        if not m or m.get("status") != "scheduled" or not m.get("meeting_date") or not m.get("start_time"):
+            return
+        if m.get("auto_complete_blocked"):
             return
         from zoneinfo import ZoneInfo
         now_il = datetime.now(ZoneInfo("Asia/Jerusalem"))
         try:
-            meeting_end = datetime.fromisoformat(f"{m['meeting_date']}T{m['end_time']}:00").replace(tzinfo=ZoneInfo("Asia/Jerusalem"))
+            meeting_start = datetime.fromisoformat(f"{m['meeting_date']}T{m['start_time']}:00").replace(tzinfo=ZoneInfo("Asia/Jerusalem"))
         except ValueError:
             return
-        if now_il < meeting_end:
+        if now_il < meeting_start:
             return
         total = (m.get("calls_duration_seconds") or 0) + _sum_offline_seconds(m.get("offline_work_entries"))
-        if total < 300:
+        if total < _AUTO_COMPLETE_MIN_SECONDS:
             return
         _apply_meeting_patch(db, org_id, m["school_id"], meeting_id, {"status": "completed"},
                              actor_type="system", source="auto_complete")
     except Exception as exc:
         logger.warning("_maybe_auto_complete_meeting failed (non-fatal) for meeting %s: %s", meeting_id, exc)
+
+
+def _apply_auto_complete_block(db, school_id: str, meeting_id: str, data: dict, status_is_deliberate: bool = True) -> None:
+    """Adjusts a user's meeting edit in place: moving a meeting from 'completed' back to
+    'scheduled' blocks auto-completion from re-closing it; moving it to another date makes it
+    a new occurrence, which clears the block. A PUT that sends status without status_changed
+    comes from a browser tab loaded before this rule existed (those send the row's possibly
+    stale status on every save), so 'completed' -> 'scheduled' from it is dropped rather than
+    reopening and permanently blocking the meeting. Non-fatal — on a failed read the edit
+    itself still goes through."""
+    if "status" not in data and "meeting_date" not in data:
+        return
+    try:
+        rows = db.table("meetings").select("status, meeting_date") \
+            .eq("id", meeting_id).eq("school_id", school_id).execute().data
+    except Exception as exc:
+        logger.warning("auto-complete block check failed (non-fatal) for meeting %s: %s", meeting_id, exc)
+        return
+    if not rows:
+        return
+    reverted = rows[0].get("status") == "completed" and data.get("status") == "scheduled"
+    if reverted and not status_is_deliberate:
+        del data["status"]
+        reverted = False
+    if data.get("meeting_date") and data["meeting_date"] != rows[0].get("meeting_date"):
+        data["auto_complete_blocked"] = False
+    elif reverted:
+        data["auto_complete_blocked"] = True
+
+
+def _attribute_new_calls_to_meetings(db, org_id: str, calls: list[dict]) -> set[str]:
+    """Called by the process-new-calls scan with the calls it hasn't handled yet: attributes
+    them to their school's same-day meetings and runs the auto-completion check, so a call is
+    reflected within one scan with no extra provider request. _recompute_meeting_call_activity
+    re-aggregates from every stored link, so passing only the new calls is enough. Returns the
+    call ids whose attribution failed, for the scan to retry on its next run."""
+    from routers.calls_router import _israel_naive
+
+    groups: dict = {}
+    for c in calls:
+        date_str = _israel_naive(c.get("start_time"))[:10]
+        if not date_str:
+            continue
+        school_ids = {c.get("school_id"), *(c.get("linked_school_ids") or [])}
+        school_ids -= {None, *(c.get("excluded_school_ids") or [])}
+        for school_id in school_ids:
+            groups.setdefault((school_id, date_str), []).append(c)
+
+    failed: set[str] = set()
+    for (school_id, date_str), group in groups.items():
+        try:
+            db = get_admin_client()
+            affected = _recompute_meeting_call_activity(db, org_id, school_id, date_str, group)
+        except Exception as exc:
+            logger.warning("new-call attribution failed org=%s school=%s date=%s: %s", org_id, school_id, date_str, exc)
+            failed.update(c["call_id"] for c in group)
+            continue
+        for mid in affected:
+            _maybe_auto_complete_meeting(db, org_id, mid)
+    return failed
+
+
+def _sweep_auto_complete_meetings(db, org_id: str) -> None:
+    """DB-only pass over today's + yesterday's 'scheduled' meetings that already reached the
+    5-minute threshold, for those no new call will trigger — e.g. the threshold was reached
+    before the scheduled start time, which has only now passed. Fully non-fatal."""
+    from zoneinfo import ZoneInfo
+
+    today_il = datetime.now(ZoneInfo("Asia/Jerusalem")).date()
+    dates = [today_il.isoformat(), (today_il - timedelta(days=1)).isoformat()]
+    try:
+        db = get_admin_client()
+        org_rows = db.table("organizations").select("auto_complete_meetings_from_activity_enabled").eq("id", org_id).execute().data
+        if not org_rows or not org_rows[0].get("auto_complete_meetings_from_activity_enabled"):
+            return
+        rows = (
+            db.table("meetings").select("id, calls_duration_seconds, offline_work_entries, schools!inner(org_id)")
+            .eq("status", "scheduled").eq("auto_complete_blocked", False)
+            .in_("meeting_date", dates).eq("schools.org_id", org_id).execute()
+        ).data or []
+    except Exception as exc:
+        logger.warning("auto-complete sweep failed (non-fatal) org=%s: %s", org_id, exc)
+        return
+    for m in rows:
+        total = (m.get("calls_duration_seconds") or 0) + _sum_offline_seconds(m.get("offline_work_entries"))
+        if total >= _AUTO_COMPLETE_MIN_SECONDS:
+            _maybe_auto_complete_meeting(db, org_id, m["id"])
 
 
 _CONTACT_PHONE_FIELDS = ("school_phone", "principal_phone", "principal_chativa_phone", "secretary_phone", "finance_contact_phone")
@@ -8501,11 +8639,12 @@ def get_meeting_actual_detail(school_id: str, meeting_id: str, user: Annotated[d
     """Powers the meeting row's expanded 'בפועל' panel: calls attributed to this meeting +
     manually logged offline-work entries.
 
-    For today's/yesterday's meetings, ALWAYS re-syncs from Voicenter before returning — same
-    "pull fresh on open" behavior as the שיחות and ביצועים tabs, so a call placed minutes ago
-    shows up immediately instead of waiting for the 10-minute cron (recompute-call-activity)
-    to catch up. Older meetings only bootstrap once (first-ever open) since their calls are
-    long settled and re-pulling them on every view would be pure waste."""
+    For today's/yesterday's meetings, ALWAYS re-syncs from the calls provider before returning
+    — same "pull fresh on open" behavior as the שיחות and ביצועים tabs, so a call placed
+    minutes ago shows up immediately instead of waiting for the next process-new-calls scan.
+    Older meetings only bootstrap once (first-ever open) since their calls are long settled
+    and re-pulling them on every view would be pure waste. Also runs the opt-in auto-completion
+    check and returns the row's refreshed columns (meeting_patch) so the row updates at once."""
     from zoneinfo import ZoneInfo
 
     db = get_admin_client()
@@ -8522,17 +8661,23 @@ def get_meeting_actual_detail(school_id: str, meeting_id: str, user: Annotated[d
     meeting_date = meeting.get("meeting_date")
     is_recent = meeting_date in (today_il, yesterday_il)
     should_sync = meeting_date and meeting_date <= today_il and (is_recent or not meeting.get("calls_synced_at"))
+    affected = [meeting_id]
     if should_sync:
         try:
             from routers.calls_router import _pull_school_calls
             d = meeting["meeting_date"]
             calls_for_school = _pull_school_calls(user["org_id"], school_id, f"{d}T00:00:00", f"{d}T23:59:59")
-            _recompute_meeting_call_activity(db, user["org_id"], school_id, d, calls_for_school)
-            refreshed = db.table("meetings").select("*").eq("id", meeting_id).execute()
-            if refreshed.data:
-                meeting = refreshed.data[0]
+            affected = _recompute_meeting_call_activity(db, user["org_id"], school_id, d, calls_for_school)
         except Exception as exc:
             logger.warning("actual-detail on-demand recompute failed (non-fatal) for meeting %s: %s", meeting_id, exc)
+    for mid in affected:
+        _maybe_auto_complete_meeting(db, user["org_id"], mid)
+    try:
+        refreshed = db.table("meetings").select("*").eq("id", meeting_id).execute()
+        if refreshed.data:
+            meeting = refreshed.data[0]
+    except Exception as exc:
+        logger.warning("actual-detail refresh failed (non-fatal) for meeting %s: %s", meeting_id, exc)
 
     link_rows = db.table("meeting_call_links").select("*").eq("meeting_id", meeting_id).order("call_time").execute().data or []
 
@@ -8607,6 +8752,13 @@ def get_meeting_actual_detail(school_id: str, meeting_id: str, user: Annotated[d
         "calls": calls_out,
         "offline_entries": offline_entries,
         "other_meetings_same_day": other_meetings_same_day,
+        "meeting_patch": {
+            "status": meeting.get("status"),
+            "calls_start_time": meeting.get("calls_start_time"),
+            "calls_duration_seconds": calls_seconds,
+            "calls_synced_at": meeting.get("calls_synced_at"),
+            "offline_work_entries": offline_entries,
+        },
     }
 
 
@@ -8764,11 +8916,13 @@ def delete_offline_work(school_id: str, meeting_id: str, entry_id: str, user: An
 
 @router.post("/meetings/recompute-call-activity")
 def recompute_meeting_call_activity(request: Request):
-    """Scheduled job (every 10 min, see .github/workflows/meeting-call-activity-recompute.yml):
-    for every org, refreshes today's + yesterday's meetings' 'בפועל' call data (one Voicenter
-    pull per org per day — cheap regardless of how many schools/meetings that covers) and
-    runs the opt-in auto-completion check. Sequential — no ThreadPoolExecutor on the shared
-    Supabase client."""
+    """Scheduled safety net (primary trigger: Supabase pg_cron job
+    'meetings-recompute-call-activity', every 15 min; .github/workflows/meeting-call-activity-recompute.yml
+    is only a backup). New calls are attributed by the process-new-calls scan; this catches
+    what that can't, e.g. a meeting created after the call. For every org, refreshes today's +
+    yesterday's meetings' 'בפועל' call data (one provider pull per org per day — cheap
+    regardless of how many schools/meetings that covers) and runs the opt-in auto-completion
+    check. Sequential — no ThreadPoolExecutor on the shared Supabase client."""
     if not CRON_SECRET or request.headers.get("X-Cron-Secret") != CRON_SECRET:
         raise HTTPException(status_code=403, detail="אין הרשאה")
 
@@ -8853,6 +9007,11 @@ def recompute_meeting_call_activity(request: Request):
                 for mid in affected:
                     _maybe_auto_complete_meeting(db, org_id, mid)
                 processed += 1
+
+        # Here too, not only in the process-new-calls scan: that scan skips orgs without a
+        # calls integration and runs that fail to pull from the provider, and offline work
+        # alone must still close a meeting once its start time passes.
+        _sweep_auto_complete_meetings(db, org_id)
 
     return {"ok": True, "processed_school_days": processed}
 
@@ -10386,9 +10545,13 @@ def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annot
         if user["id"] not in existing_advisor_ids:
             raise HTTPException(status_code=403, detail="אין לך הרשאה לערוך פגישה זו — הפגישה משויכת ליועץ אחר")
     data = {
-        "status": body.status or "scheduled",
         "participants": body.participants if body.participants is not None else [],
     }
+    # status is written only when the client explicitly sent it, which MeetingRow does only
+    # when the user changed it — otherwise a field autosave from a row that hasn't seen a
+    # server-side auto-completion yet would silently flip the meeting back to 'scheduled'.
+    if "status" in body.model_fields_set and body.status:
+        data["status"] = body.status
     # reminder_enabled is deliberately NOT mirrored from the PUT body here — every field
     # autosave carries the row's current toggle value, so a save that races a server-side
     # auto-enable (below) would wipe it. The toggle itself writes via PATCH /meetings/{id}.
@@ -10434,6 +10597,7 @@ def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annot
         except Exception as exc:
             logger.warning("update_meeting reminder auto-enable check failed (non-fatal): %s", exc)
 
+    _apply_auto_complete_block(db, school_id, meeting_id, data, status_is_deliberate=bool(body.status_changed))
     activity_before = meeting_activity.fetch_tracked(db, meeting_id)
     try:
         res = db.table("meetings").update(data).eq("id", meeting_id).eq("school_id", school_id).execute()
@@ -10539,6 +10703,7 @@ def patch_meeting(school_id: str, meeting_id: str, body: MeetingStatusPatchIn, u
     # silently flip it back. This is the ONLY path that turns the reminder off.
     if body.reminder_enabled is not None: data["reminder_enabled"] = body.reminder_enabled
     if body.requested_upload_years is not None: data["requested_upload_years"] = body.requested_upload_years
+    _apply_auto_complete_block(db, school_id, meeting_id, data)
     return _apply_meeting_patch(db, user["org_id"], school_id, meeting_id, data,
                                 actor_id=user["id"], actor_type="user",
                                 source=meeting_activity.client_surface(x_client_surface))

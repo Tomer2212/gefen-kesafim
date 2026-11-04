@@ -24,3 +24,13 @@ export function visibleDateBounds(meetings) {
     date_to: dates.reduce((a, b) => (a > b ? a : b)),
   };
 }
+
+// Under a status filter a row that just changed status no longer comes back from the
+// filtered poll, so it would stay frozen on screen. Auto-completion only touches today's
+// and yesterday's meetings, so an unfiltered extra poll over just those two dates keeps such
+// rows fresh — dropping the status filter from the main poll would instead return every
+// meeting of every status in the visible range (measured: ~1,900 rows instead of ~26).
+export function recentDateBounds() {
+  const israelDate = ms => new Date(ms).toLocaleDateString("en-CA", { timeZone: "Asia/Jerusalem" });
+  return { date_from: israelDate(Date.now() - 24 * 60 * 60 * 1000), date_to: israelDate(Date.now()) };
+}

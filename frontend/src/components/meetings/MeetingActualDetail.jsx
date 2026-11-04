@@ -101,7 +101,7 @@ function OfflineTimeInput({ value, ariaLabel, onSave }) {
   );
 }
 
-export function MeetingActualDetail({ meeting }) {
+export function MeetingActualDetail({ meeting, onMeetingPatched }) {
   const { openCallNote } = useCallNoteWindows();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -119,6 +119,9 @@ export function MeetingActualDetail({ meeting }) {
     try {
       const res = await axios.get(`/schools/${meeting.school_id}/meetings/${meeting.id}/actual-detail`);
       setDetail(res.data);
+      // Opening the row re-syncs calls server-side — push the result into the row's own
+      // "בפועל" columns and status right away instead of waiting for the next poll.
+      if (res.data.meeting_patch) onMeetingPatched?.(meeting.id, res.data.meeting_patch);
     } catch {
       setError("שגיאה בטעינת פירוט הפעילות — נסה לרענן");
     } finally {

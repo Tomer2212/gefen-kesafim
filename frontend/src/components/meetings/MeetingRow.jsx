@@ -12,6 +12,7 @@ import { ParticipantsSelector } from "./ParticipantsSelector";
 import { TimeInput, normalizeTimeValue } from "./TimeInput";
 import { AdvisorReassignModal } from "./AdvisorReassignModal";
 import { MeetingActualDetail } from "./MeetingActualDetail";
+import { MeetingMessagesBadge } from "./MeetingMessagesPopover";
 import BlockedDateConfirmModal from "./BlockedDateConfirmModal";
 import RequestedUploadYearsModal from "./RequestedUploadYearsModal";
 import { getAcademicYearForDate, isAcademicYearSeam, DEFAULT_ACADEMIC_YEAR } from "../../constants/academicYears";
@@ -57,6 +58,22 @@ import { computeFreeWindows, computeSegments, fetchDayBusy, findNextEvent, inval
 import { useFocusTrap } from "../../hooks/useFocusTrap";
 
 const TODAY = new Date().toISOString().slice(0, 10);
+
+// What a blur-triggered save compares: only what the user can edit in the row and blur
+// saves. Server-maintained fields (calls_*, offline_work_entries, calendar_sync, ...) change
+// constantly via polling and must not make an untouched row re-send its whole stale draft.
+// status/reminder_enabled are left out too — they save the moment they change, never on blur.
+const BLUR_SAVED_FIELDS = [
+  "meeting_date", "start_time", "end_time", "advisor_ids", "participants", "meeting_type",
+  "meeting_service_type", "actual_duration", "notes", "primary_contact_key", "stage_scope",
+];
+
+function blurSavedSnapshot(meeting) {
+  const snapshot = Object.fromEntries(BLUR_SAVED_FIELDS.map(f => [f, meeting[f]]));
+  snapshot.start_time = normalizeTimeValue(meeting.start_time);
+  snapshot.end_time = normalizeTimeValue(meeting.end_time);
+  return snapshot;
+}
 
 // Contact keys that represent "the principal" for a school — a six-year school has two
 // (חט"ע / חט"ב). Used to decide who automatically wins the Outlook subject-line contact.
@@ -313,7 +330,7 @@ function MeetingRowImpl({
   const rowRef = useRef(null);
   const actionsMenuRef = useRef(null);
   // Track what was last sent so blur doesn't double-save after an immediate save
-  const lastSentRef = useRef(null);
+  const lastSentRef = useRef(blurSavedSnapshot(meeting));
   // Serializes saveDraft calls for this row so their PUT requests always reach the backend
   // in the order they were triggered. Without this, two saves fired close together (e.g. the
   // "סוג" change followed almost immediately by the advisor-reassign modal's choice) can
@@ -321,7 +338,7 @@ function MeetingRowImpl({
   // silently overwrites the newer, correct data with stale values.
   const saveQueueRef = useRef(Promise.resolve());
 
-  useEffect(() => { setDraft({ ...meeting }); lastSentRef.current = null; }, [meeting.id]);
+  useEffect(() => { setDraft({ ...meeting }); lastSentRef.current = blurSavedSnapshot(meeting); }, [meeting.id]);
 
   // The server may auto-enable the reminder toggle when a meeting first becomes eligible
   // (gains its first participant / a future date). `draft` only re-syncs on an id change,
@@ -347,10 +364,21 @@ function MeetingRowImpl({
     const wasClean = draft.start_time === prev.start_time && draft.end_time === prev.end_time && draft.meeting_date === prev.meeting_date;
     if (wasClean) {
       setDraft(d => ({ ...d, start_time: meeting.start_time, end_time: meeting.end_time, meeting_date: meeting.meeting_date }));
+      const { start_time, end_time, meeting_date } = blurSavedSnapshot(meeting);
+      lastSentRef.current = { ...lastSentRef.current, start_time, end_time, meeting_date };
     }
     prevMeetingRef.current = meeting;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [meeting.start_time, meeting.end_time, meeting.meeting_date]);
+
+  // Same for status: auto-completion flips it server-side, and the badge renders from
+  // `draft`. Only pulled through when the row has no unsaved status change of its own.
+  const prevStatusRef = useRef(meeting.status);
+  useEffect(() => {
+    const prevStatus = prevStatusRef.current;
+    setDraft(d => (d.status === prevStatus ? { ...d, status: meeting.status } : d));
+    prevStatusRef.current = meeting.status;
+  }, [meeting.status]);
 
   // Fetch the advisor's Outlook busy ranges for this specific meeting date — used both
   // to warn/block saving on a real overlap, and to power the schedule hover tooltips.
@@ -409,12 +437,10 @@ function MeetingRowImpl({
   }
 
   useEffect(() => {
-    // Fetch the sent/failed badge data when the toggle is on, OR when a גפן/מחוז meeting has
-    // a secretary/finance contact — automation 2 can send her the file-upload request even
-    // with the toggle off, and that send should still surface in the badge.
-    const mightHaveUploadReminder =
-      (meeting.meeting_service_type || "gefen") !== "current" &&
-      (meeting.participants || []).some(p => p.key === "secretary" || p.key === "finance");
+    // Fetch the sent/failed badge data when the toggle is on, OR for any non-שוטף meeting —
+    // automation 2 can send the school's "אחראי/ת קבצי גפן" the file-upload request even with
+    // the toggle off and even if they aren't a participant, and that send should still surface.
+    const mightHaveUploadReminder = (meeting.meeting_service_type || "gefen") !== "current";
     if (!meeting.reminder_enabled && !mightHaveUploadReminder) { setReminderStatus(null); return; }
     let cancelled = false;
     axios.get(`/schools/meetings/${meeting.id}/reminder-status`)
@@ -545,14 +571,17 @@ function MeetingRowImpl({
         newEvent: { startHM: draftToSave.start_time, endHM: draftToSave.end_time, subject },
       });
     }
-    lastSentRef.current = JSON.stringify(draftToSave);
+    lastSentRef.current = blurSavedSnapshot(draftToSave);
     // Invalidate the freebusy cache only *after* onSave's PUT round-trip (and the
     // Outlook sync it triggers server-side) actually completes — not before. Clearing
     // it earlier leaves a window where a freebusy fetch can slip in before the backend
     // has actually written the change, cache the pre-save snapshot, and then sit there
     // looking authoritative for the full cache TTL even though it's now stale again.
+    // status is sent only when the user actually changed it, so a save from a row that
+    // hasn't seen a server-side auto-completion yet can't flip the meeting back to "scheduled".
+    const { status: _unchangedStatus, ...withoutStatus } = draftToSave;
     try {
-      await onSave(draftToSave);
+      await onSave(draftToSave.status === meeting.status ? withoutStatus : draftToSave);
     } catch (err) {
       if (err?.response?.status === 403) onPermissionDenied?.(err.response.data?.detail || PERMISSION_DENIED_MSG);
       throw err;
@@ -572,9 +601,7 @@ function MeetingRowImpl({
       start_time: normalizeTimeValue(draft.start_time),
       end_time: normalizeTimeValue(draft.end_time),
     };
-    const curr = JSON.stringify(normalized);
-    const baseline = lastSentRef.current ?? JSON.stringify(meeting);
-    if (baseline !== curr) {
+    if (JSON.stringify(lastSentRef.current) !== JSON.stringify(blurSavedSnapshot(normalized))) {
       setDraft(normalized);
       saveDraft(normalized);
     }
@@ -956,27 +983,7 @@ function MeetingRowImpl({
               </div>
             )}
             {reminderStatus && reminderStatus.length > 0 && (
-              <div className="relative inline-block mr-1" onMouseEnter={() => setShowReminderTip("sent")} onMouseLeave={() => setShowReminderTip(false)}>
-                <span
-                  className={`text-[11px] font-semibold px-1.5 py-0.5 rounded-full border ${
-                    reminderStatus.every(r => r.status === "sent")
-                      ? "bg-blue-50 border-blue-300 text-blue-700"
-                      : "bg-amber-50 border-amber-300 text-amber-700"
-                  }`}>
-                  נשלח ל-{reminderStatus.filter(r => r.status === "sent").length}/{reminderStatus.length}
-                </span>
-                {showReminderTip === "sent" && (
-                  <div role="tooltip"
-                    className="absolute z-40 text-xs text-slate-800 leading-relaxed p-2 rounded-lg shadow-md pointer-events-none text-right"
-                    style={{ background: "white", border: "1px solid #cbd5e1", top: "calc(100% + 4px)", left: 0, width: 200, whiteSpace: "normal" }}>
-                    {reminderStatus.map((r, i) => (
-                      <div key={i} className={r.status === "sent" ? "text-blue-700" : "text-red-600"}>
-                        {r.recipient_name || r.recipient_email}: {r.status === "sent" ? "נשלח" : "נכשל"}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
+              <MeetingMessagesBadge meetingId={meeting.id} statuses={reminderStatus} />
             )}
           </div>
         </td>
@@ -1066,7 +1073,7 @@ function MeetingRowImpl({
       {expanded && (
         <tr>
           <td colSpan={colSpanTotal} className="p-0 border-b border-slate-300 bg-slate-50/50">
-            <MeetingActualDetail meeting={meeting} />
+            <MeetingActualDetail meeting={meeting} onMeetingPatched={onMeetingPatched} />
           </td>
         </tr>
       )}

@@ -1194,34 +1194,34 @@ def resolve_call_contact_school(
                 logger.error("resolve_call_contact_school: update failed for call=%s: %s", call_id, exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
-    if kind == "unknown":
-        # Immediately attribute the newly-linked call to a same-day meeting + run the opt-in
-        # auto-completion check, so the effect is visible now instead of after the 10-min cron.
-        # Non-fatal: the link write above already succeeded and the cron will catch up anyway.
-        try:
-            from routers.schools_router import (
-                _maybe_auto_complete_meeting,
-                _recompute_meeting_call_activity,
-            )
-            call_time_iso = resolution.get("call_time")
-            if call_time_iso:
-                dt = datetime.fromisoformat(str(call_time_iso).replace("Z", "+00:00"))
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                from zoneinfo import ZoneInfo
-                date_str = dt.astimezone(ZoneInfo("Asia/Jerusalem")).date().isoformat()
-                result = _pull_org_calls(user["org_id"], f"{date_str}T00:00:00", f"{date_str}T23:59:59")
-                calls_for_school = [
-                    c for c in result["calls"]
-                    if body.school_id not in (c.get("excluded_school_ids") or [])
-                    and (c.get("school_id") == body.school_id or body.school_id in (c.get("linked_school_ids") or []))
-                ]
-                db = get_admin_client()
-                affected = _recompute_meeting_call_activity(db, user["org_id"], body.school_id, date_str, calls_for_school)
-                for mid in affected:
-                    _maybe_auto_complete_meeting(db, user["org_id"], mid)
-        except Exception as exc:
-            logger.warning("resolve_call_contact_school: inline meeting recompute failed (non-fatal): %s", exc)
+    # Immediately attribute the newly-resolved call to a same-day meeting + run the opt-in
+    # auto-completion check, so the effect is visible now — the scan already handled this call
+    # while its school was still unresolved, and the recompute cron only covers today/yesterday.
+    # Non-fatal: the resolution write above already succeeded.
+    try:
+        from routers.schools_router import (
+            _maybe_auto_complete_meeting,
+            _recompute_meeting_call_activity,
+        )
+        call_time_iso = resolution.get("call_time")
+        if call_time_iso:
+            dt = datetime.fromisoformat(str(call_time_iso).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            from zoneinfo import ZoneInfo
+            date_str = dt.astimezone(ZoneInfo("Asia/Jerusalem")).date().isoformat()
+            result = _pull_org_calls(user["org_id"], f"{date_str}T00:00:00", f"{date_str}T23:59:59")
+            calls_for_school = [
+                c for c in result["calls"]
+                if body.school_id not in (c.get("excluded_school_ids") or [])
+                and (c.get("school_id") == body.school_id or body.school_id in (c.get("linked_school_ids") or []))
+            ]
+            db = get_admin_client()
+            affected = _recompute_meeting_call_activity(db, user["org_id"], body.school_id, date_str, calls_for_school)
+            for mid in affected:
+                _maybe_auto_complete_meeting(db, user["org_id"], mid)
+    except Exception as exc:
+        logger.warning("resolve_call_contact_school: inline meeting recompute failed (non-fatal): %s", exc)
 
     return {"ok": True}
 
@@ -1774,8 +1774,9 @@ def list_known_reps(user: Annotated[dict, Depends(get_current_user)]):
 
 # ---------------------------------------------------------------------------
 # Scheduled job — detects new calls with an ambiguous contact (same phone number
-# is a contact at more than one school) and notifies who needs to resolve it.
-# Cron-secured. Primary trigger: Supabase pg_cron + pg_net, every 5 min (job
+# is a contact at more than one school) and notifies who needs to resolve it, and
+# attributes new calls to same-day meetings (+ the auto-completion check).
+# Cron-secured. Primary trigger: Supabase pg_cron + pg_net, every 3 min (job
 # 'calls-process-new-calls'); GitHub Actions (voicenter-poll-calls.yml) is only a
 # backup — its schedule was measured lagging 3-7 hours. Safe to run concurrently
 # or twice: a per-org lease (calls_integrations.scan_lock_until) prevents overlap
@@ -1891,7 +1892,11 @@ def _process_org_new_calls(db, org: dict, now: datetime) -> dict | None:
     """One org's share of process_new_calls (caller holds the org's scan lease). Returns
     the new-notification counts, or None when the org was skipped — in which case the
     cursor and calls_scan_processed are left untouched so the next run retries."""
-    from routers.schools_router import _create_notifications
+    from routers.schools_router import (
+        _attribute_new_calls_to_meetings,
+        _create_notifications,
+        _sweep_auto_complete_meetings,
+    )
 
     org_id = org["org_id"]
     provider = org["provider"]
@@ -2149,7 +2154,14 @@ def _process_org_new_calls(db, org: dict, now: datetime) -> dict | None:
         except Exception as exc:
             logger.warning("process_new_calls: Track B (unknown call) failed for call=%s: %s", c.get("call_id"), exc)
 
-    processed_rows = [{"org_id": org_id, "call_id": c["call_id"]} for c in new_calls if c["call_id"] not in retry_call_ids]
+    # --- Track C: attribute new calls to same-day meetings + auto-completion check ---
+    # This scan is what keeps the meetings' 'בפועל' columns and status near-real-time; a failed
+    # attribution is retried next run (safe: Tracks A/B dedupe, and neither acts on calls that
+    # already have a school).
+    retry_call_ids |= _attribute_new_calls_to_meetings(db, org_id, new_calls)
+    _sweep_auto_complete_meetings(db, org_id)
+
+    processed_rows =[{"org_id": org_id, "call_id": c["call_id"]} for c in new_calls if c["call_id"] not in retry_call_ids]
     if processed_rows:
         try:
             db.table("calls_scan_processed").upsert(

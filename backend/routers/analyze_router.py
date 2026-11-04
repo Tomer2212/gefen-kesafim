@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import re
 import shutil
@@ -8,6 +9,7 @@ import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import quote
 
 from pydantic import BaseModel
 
@@ -517,52 +519,145 @@ async def run_check_from_uploads(
     _check_school_access(db, user, meeting.get("school_id"))
     academic_year = academic_year or resolve_requested_upload_years(meeting)[0]
 
-    files_res = db.table("meeting_upload_files").select("storage_key, original_filename").eq("meeting_id", meeting_id).eq("academic_year", academic_year).execute()
-    stored_files = files_res.data or []
-    if not stored_files:
+    files_res = db.table("meeting_upload_files").select("storage_key, original_filename, identified_type").eq("meeting_id", meeting_id).eq("academic_year", academic_year).execute()
+    uploaded_files = files_res.data or []
+    if not uploaded_files:
         raise HTTPException(status_code=400, detail="לא נמצאו קבצים שהועלו עבור פגישה זו ועבור שנת הלימודים המבוקשת")
+    # The portal used to accept unidentified files, and _classify_files() fails the whole run
+    # on any such file — so one stray PDF would make the check impossible to ever run. They're
+    # left out here and named in the completion popup.
+    stored_files = [f for f in uploaded_files if f.get("identified_type") != "unknown"]
+    skipped_files = [f.get("original_filename") for f in uploaded_files if f.get("identified_type") == "unknown"]
+    if not stored_files:
+        raise HTTPException(status_code=400, detail="לא נמצאו קבצים מזוהים מבין הקבצים שהועלו — יש לבקש מבית הספר את הקבצים המקוריים")
 
     run_id = str(uuid.uuid4())
     run_dir = Path(tempfile.mkdtemp(prefix=f"gefen_{run_id}_"))
     all_paths: list[Path] = []
-    for f in stored_files:
+    seen_contents: set[str] = set()
+    for i, f in enumerate(stored_files):
         fname = Path(f.get("original_filename") or Path(f["storage_key"]).name).name
-        dest = run_dir / fname
+        # Numbered subdirectory, same reason as /upload: several reports are commonly named
+        # the same (doch.xlsx), and a flat directory would silently keep only the last one.
+        dest = run_dir / str(i) / fname
+        dest.parent.mkdir(parents=True, exist_ok=True)
         try:
-            dest.write_bytes(db.storage.from_("check-files").download(f["storage_key"]))
+            content = db.storage.from_("check-files").download(f["storage_key"])
+            # Each recipient uploads through their own link, so two of them may send the very
+            # same file; counted twice, two identical planning files can't pair into divisions.
+            digest = hashlib.sha256(content).hexdigest()
+            if digest in seen_contents:
+                continue
+            seen_contents.add(digest)
+            dest.write_bytes(content)
             all_paths.append(dest)
         except Exception as exc:
             logger.error("run_check_from_uploads: failed to download %s (storage_key=%s): %s", fname, f["storage_key"], exc, exc_info=True)
+            shutil.rmtree(run_dir, ignore_errors=True)
             raise HTTPException(status_code=500, detail="שגיאה בהורדת הקובץ")
 
     _update_run(run_id, {"status": "processing", "_school_ctx": {"school_id": meeting["school_id"]}})
     background_tasks.add_task(
         _run_meeting_check_and_notify, run_id, all_paths, run_dir,
-        user["id"], meeting["school_id"], academic_year,
+        user["id"], meeting["school_id"], academic_year, skipped_files,
     )
     return {"run_id": run_id}
 
 
-def _run_meeting_check_and_notify(run_id: str, paths: list[Path], run_dir: Path, user_id: str, school_id: str, academic_year: str | None) -> None:
+# The background meeting-upload check has no acknowledgment UI, and the portal already accepted
+# these files knowingly (see meeting_upload_router._validate_uploaded_file) — a "warn" entry must
+# not become a dead end here. "block" entries are unaffected by acknowledgment.
+_MEETING_CHECK_ACKNOWLEDGED_ROLES = {"tikhnun", "gefen", "kesafim2000", "payscool", "schoolcash"}
+
+_FILE_ISSUE_ROLE_LABELS = {
+    "tikhnun": "קובץ התכנון",
+    "gefen": "קובץ דיווח הביצוע",
+    "kesafim2000": "קובץ כספים2000",
+    "payscool": "קובץ פייסקול",
+    "schoolcash": "קובץ סקולקאש",
+}
+
+
+def _file_issues_reason(run: dict) -> str:
+    """Spells out a file_issues error for a surface with no file-issues modal to show it in."""
+    expected = run.get("expected_academic_year")
+    lines = []
+    for entry in run.get("file_issues") or []:
+        if entry.get("severity") != "block":
+            continue
+        status = entry.get("status")
+        names = ", ".join(entry.get("filenames") or [])
+        subject = _FILE_ISSUE_ROLE_LABELS.get(entry.get("file_role"), "הקובץ") + (f" ({names})" if names else "")
+        if status == "missing":
+            lines.append("לא התקבל קובץ תכנון, והוא נדרש לביצוע הבדיקה.")
+        elif status == "recognized":
+            lines.append(f"{subject} שייך לשנת הלימודים {entry.get('detected_academic_year')} ולא ל-{expected}.")
+        elif status == "unscoped_budget":
+            lines.append(f"{subject} כללי ואינו ממוקד לפי תקציב.")
+        elif status == "unreadable_raw_file":
+            lines.append(f"{subject} אינו קריא.")
+        else:
+            lines.append(f"לא ניתן לזהות לאיזו שנת לימודים {subject} שייך.")
+    return "\n".join(lines) or run.get("error") or "יש בעיה באחד או יותר מהקבצים."
+
+
+def _pending_row_count(run: dict) -> int:
+    # tikhnun is usually the same result as tikhnun_tikkon/tikhnun_beinayim, so rows are
+    # counted by key rather than summed.
+    keys = set()
+    for k in ("tikhnun", "tikhnun_tikkon", "tikhnun_beinayim"):
+        result = run.get(k) or {}
+        if result.get("pending_identification"):
+            keys.update(r.get("union_key") for r in result.get("unidentified_rows") or [])
+    return len(keys)
+
+
+def _summarize_meeting_check(run: dict, sub_runs: list[dict]) -> dict:
+    """What the advisor should be told about a finished background check. status="done" alone
+    doesn't mean the check was saved: _process() deliberately holds the save back while rows
+    await manual classification, and _save_check_log() swallows its own failures. sub_runs are
+    the per-division runs of a six-year split (the parent run holds no results of its own)."""
+    if run.get("status") != "done":
+        if run.get("error_code") == "file_issues":
+            return {"outcome": "failure", "reason": _file_issues_reason(run)}
+        return {"outcome": "failure", "reason": run.get("user_message") or run.get("error") or "שגיאה לא ידועה"}
+    results = sub_runs if run.get("split_divisions") else [run]
+    pending_rows = sum(_pending_row_count(r) for r in results if _any_tikhnun_pending(r))
+    if any(_any_tikhnun_pending(r) for r in results):
+        return {"outcome": "needs_classification", "pending_rows": pending_rows}
+    if results and all(r.get("saved_log_id") for r in results):
+        return {"outcome": "success"}
+    return {"outcome": "failure", "reason": "הבדיקה הסתיימה אך לא נשמרה עקב תקלה זמנית. יש להפעיל אותה שוב."}
+
+
+def _run_meeting_check_and_notify(run_id: str, paths: list[Path], run_dir: Path, user_id: str, school_id: str, academic_year: str | None, skipped_files: list[str] | None = None) -> None:
     """Wraps _process() for the "click and continue" meeting-upload check flow: the advisor
     who triggered it never polls /analyze/result themselves (unlike SchoolPage.jsx's own
     upload flow), so this reads the final run_states row back after _process() returns and
     fires a durable notification either way — reusing the same bottom-left-popup mechanism
     as goal_auto_updated (see _maybe_auto_update_goals) instead of leaving the advisor with
-    no signal at all when a background run fails."""
-    _process(run_id, paths, run_dir, user_id, school_id, None, None, academic_year)
+    no signal at all when a background run fails. A run awaiting classification gets a
+    deeplink (resume_run) that opens ClassifyModal, since nothing else would ever save it."""
+    _process(run_id, paths, run_dir, user_id, school_id, None, None, academic_year, _MEETING_CHECK_ACKNOWLEDGED_ROLES)
     try:
         db = get_admin_client()
         run = _get_run(run_id) or {}
+        sub_runs = [_get_run(sub_id) or {} for sub_id in (run.get("division_run_ids") or {}).values()]
         school = db.table("schools").select("name, authority, symbol").eq("id", school_id).single().execute().data or {}
         school_label = " ".join(filter(None, [school.get("name"), school.get("authority"), school.get("symbol") and f"(סמל {school['symbol']})"]))
-        if run.get("status") == "done":
+        summary = _summarize_meeting_check(run, sub_runs)
+        year_param = f"&year={quote(academic_year)}" if academic_year else ""
+        deeplink = f"/school/{school_id}?tab=checks{year_param}"
+        if summary["outcome"] == "success":
             title = f"הבדיקה עבור {school_label} הועלתה בהצלחה"
-            data = {"title": title, "deeplink": f"/school/{school_id}?tab=checks", "school_name": school.get("name"), "outcome": "success"}
+        elif summary["outcome"] == "needs_classification":
+            title = f"הבדיקה עבור {school_label} ממתינה לסיווג"
+            deeplink += f"&resume_run={run_id}"
         else:
-            reason = run.get("error") or "שגיאה לא ידועה"
             title = f"הבדיקה עבור {school_label} נכשלה"
-            data = {"title": title, "deeplink": f"/school/{school_id}?tab=checks", "school_name": school.get("name"), "outcome": "failure", "reason": reason}
+        data = {"title": title, "deeplink": deeplink, "school_name": school.get("name"), **summary}
+        if skipped_files:
+            data["skipped_files"] = skipped_files
         db.table("notifications").insert({
             "recipient_id": user_id,
             "type": "reconciliation_check_completed",
@@ -1020,6 +1115,36 @@ class ClassifyRequest(BaseModel):
     division: str = "main"       # "main" | "tikkon" | "beinayim"
 
 
+def _restore_zihuy_paths(run: dict, gefen_paths: list[Path], finance_paths: list[Path], restore_dir: Path) -> tuple[list[Path], list[Path]]:
+    """_zihuy_ctx keeps the paths the run was processed from, but _process() deletes that temp
+    directory as soon as it finishes — always before the user gets to classify, and on another
+    worker's disk anyway. Re-downloads each missing file from the run's stored_file_paths into
+    restore_dir (owned and cleaned up by the caller). A file that can't be restored keeps its
+    original path, so the caller's own non-fatal handling of a failed load still applies."""
+    remaining = [sp for sp in (run.get("stored_file_paths") or []) if isinstance(sp, dict)]
+    counter = 0
+
+    def restore(path: Path) -> Path:
+        nonlocal counter
+        if path.exists():
+            return path
+        match = next((sp for sp in remaining if sp.get("name") == path.name), None)
+        if not match:
+            return path
+        remaining.remove(match)
+        counter += 1
+        dest = restore_dir / str(counter) / path.name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            dest.write_bytes(get_admin_client().storage.from_("check-files").download(match["path"]))
+        except Exception as exc:
+            logger.warning("could not restore %s from storage: %s", path.name, exc)
+            return path
+        return dest
+
+    return [restore(p) for p in gefen_paths], [restore(p) for p in finance_paths]
+
+
 @router.post("/classify/{run_id}")
 async def classify_rows(
     run_id: str,
@@ -1099,7 +1224,9 @@ async def classify_rows(
     finance_paths_cl = [Path(p) for p in ctx.get("finance_paths", [])]
     finance_type_cl  = ctx.get("finance_type") or run.get("finance_type")
     if gefen_paths_cl and finance_paths_cl and finance_type_cl:
+        restore_dir = Path(tempfile.mkdtemp(prefix=f"gefen_classify_{run_id}_"))
         try:
+            gefen_paths_cl, finance_paths_cl = _restore_zihuy_paths(run, gefen_paths_cl, finance_paths_cl, restore_dir)
             _cl_stage = _get_school_stage(run.get("_school_ctx", {}).get("gefen_account_id"))
             df_gefen_cl, _, _ = _load_gefen_files(gefen_paths_cl, run.get("_school_ctx", {}).get("academic_year"))
             per_combo = _run_per_combo_reconciliation(
@@ -1109,9 +1236,13 @@ async def classify_rows(
                 academic_year=run.get("_school_ctx", {}).get("academic_year"),
             )
             if per_combo:
-                run["per_combo_results"] = per_combo
+                # Merged: with two plan files each division is classified on its own, and
+                # the later one must not wipe the earlier one's results.
+                run["per_combo_results"] = {**(run.get("per_combo_results") or {}), **per_combo}
         except Exception as exc:
             logger.warning("per_combo_results in classify_rows failed: %s", exc)
+        finally:
+            shutil.rmtree(restore_dir, ignore_errors=True)
 
     for k in ("pending_identification", "unidentified_rows", "available_budgets", "_zihuy_ctx",
               "needs_finance_upload", "missing_budgets", "covered_budgets", "finance_invalid_reason"):
@@ -1239,20 +1370,29 @@ async def retry_finance(
             gefen_paths_rc   = [Path(p) for p in ctx.get("gefen_paths", [])]
             finance_paths_rc = [Path(p) for p in ctx.get("finance_paths", [])]
             finance_type_rc  = ctx.get("finance_type") or run.get("finance_type")
-            if gefen_paths_rc and finance_paths_rc and finance_type_rc:
+            # The file just uploaded here counts too: it usually covers a budget the original
+            # finance file didn't, and leaving it out would report that budget's reports as
+            # missing from finance. A file of a different software can't be merged, so that
+            # case gets no per-budget results rather than wrong ones.
+            if gefen_paths_rc and finance_paths_rc and finance_type_rc == finance_type:
+                restore_dir = Path(tempfile.mkdtemp(prefix=f"gefen_retry_{run_id}_"))
                 try:
+                    gefen_paths_rc, finance_paths_rc = _restore_zihuy_paths(run, gefen_paths_rc, finance_paths_rc, restore_dir)
                     _rc_stage = _get_school_stage(run.get("_school_ctx", {}).get("gefen_account_id"))
                     df_gefen_rc, _, _ = _load_gefen_files(gefen_paths_rc, run.get("_school_ctx", {}).get("academic_year"))
                     per_combo = _run_per_combo_reconciliation(
-                        df_gefen_rc, finance_paths_rc, finance_type_rc,
+                        df_gefen_rc, finance_paths_rc + tmp_paths, finance_type_rc,
                         results_clean, _get_finance_col_map(finance_type_rc),
                         school_stage=_rc_stage,
                         academic_year=run.get("_school_ctx", {}).get("academic_year"),
                     )
                     if per_combo:
-                        run["per_combo_results"] = per_combo
+                        # Merged for the same reason as in classify_rows.
+                        run["per_combo_results"] = {**(run.get("per_combo_results") or {}), **per_combo}
                 except Exception as exc:
                     logger.warning("per_combo_results in retry_finance failed: %s", exc)
+                finally:
+                    _shutil.rmtree(restore_dir, ignore_errors=True)
 
             for k in ("pending_identification", "unidentified_rows", "available_budgets", "_zihuy_ctx",
                       "needs_finance_upload", "missing_budgets", "covered_budgets", "finance_invalid_reason"):
@@ -1696,6 +1836,21 @@ def _maybe_auto_update_goals(db, school_id: str, gefen_account_id: str | None, a
                 logger.warning("goal_auto_updated notification failed (non-fatal): %s", exc)
     except Exception as exc:
         logger.warning("auto goal update failed (non-fatal) for school %s: %s", school_id, exc)
+
+
+def _without_placeholder_doch_rows(results_clean: list) -> list:
+    """Drops doch rows that list a planned response with nothing reported against it: no report
+    code, invoice, supplier or amount. They can't be identified, and the classification screen
+    would show them as all-dashes rows blocking the check from being saved, though no answer
+    there changes any number. Identified rows are never touched, and this runs after identify()
+    so its sequence rules still see the file as it is."""
+    def is_placeholder(r: dict) -> bool:
+        orig = r.get("orig") or ()
+        if r.get("budget") or len(orig) <= 11:
+            return False
+        return all(orig[i] is None or not str(orig[i]).strip() for i in (1, 4, 6, 11))
+
+    return [r for r in results_clean if not is_placeholder(r)]
 
 
 def _any_tikhnun_pending(run_dict: dict) -> bool:
@@ -3177,6 +3332,7 @@ def _compute_multi_budget_tikhnun(
         try:
             doch_str = [str(p) for p in doch_paths]
             results_clean, _warn, _miss, _all = _zihuy_identify(doch_str, [plan_fpath], academic_year)
+            results_clean = _without_placeholder_doch_rows(results_clean)
         except Exception as exc:
             logger.error("Zihuy identification failed: %s", exc)
             _finalize_tikhnun_metrics(tikhnun_result, [], budgets_raw, perut_rows)
@@ -3220,6 +3376,7 @@ def _compute_multi_budget_tikhnun(
             try:
                 doch_str_rev = list(reversed(doch_str))
                 results_clean_rev, _warn_rev, _miss_rev, _all_rev = _zihuy_identify(doch_str_rev, [plan_fpath], academic_year)
+                results_clean_rev = _without_placeholder_doch_rows(results_clean_rev)
                 unidentified_rev = [r for r in results_clean_rev if not r.get("budget")]
                 if not unidentified_rev:
                     logger.info(
@@ -4481,8 +4638,8 @@ def _classify_files(paths: list[Path]) -> tuple[list[Path], list[Path], str | No
             gefen.append(p)
         elif ftype in ("kesafim2000", "payscool", "schoolcash"):
             if finance_list:
-                # Multiple kesafim2000 and schoolcash files are allowed and will be merged; payscool must be single
-                if ftype != finance_type or ftype not in ("kesafim2000", "schoolcash"):
+                # Multiple files of one finance software are allowed and will be merged
+                if ftype != finance_type:
                     raise ValueError("התקבלו קבצי כספים מסוגים שונים. אנא העלה קבצי כספים מאותו סוג בלבד.")
             finance_list.append(p)
             finance_type = ftype
@@ -4541,6 +4698,26 @@ def _detect_gefen_division(df: pd.DataFrame, academic_year: str | None = None) -
     if has_beinayim and not has_tikkon:
         return "beinayim"
     return "both"
+
+
+def _detect_finance_division(path: Path, finance_type: str, academic_year: str | None = None) -> str | None:
+    """Which division(s) a finance file serves, from its report codes — the same codes
+    reconcile() later filters it by, so a combined file really does serve both. None when no
+    code is division-specific, or on any read error (a broken file is the pipeline's to report)."""
+    try:
+        df, _label, _stats = _load_finance_raw([path], finance_type)
+        tikkon_only, beinayim_only, _ = _lists_for_year(academic_year)
+        codes = set(pd.to_numeric(df["report_code"], errors="coerce").dropna().astype(int).tolist())
+    except Exception as exc:
+        logger.warning("_detect_finance_division failed for %s: %s", path, exc)
+        return None
+    has_tikkon = bool(codes & set(tikkon_only))
+    has_beinayim = bool(codes & set(beinayim_only))
+    if has_tikkon and has_beinayim:
+        return "both"
+    if has_tikkon:
+        return "tikkon"
+    return "beinayim" if has_beinayim else None
 
 
 def _load_gefen_files_unmerged(paths: list[Path], academic_year: str | None = None) -> tuple[list[pd.DataFrame], list[bool], list[dict]]:
@@ -4612,7 +4789,7 @@ def _load_gefen_files(paths: list[Path], academic_year: str | None = None) -> tu
 
 def _load_finance_raw(paths: list[Path], ftype: str) -> tuple[pd.DataFrame, str, dict]:
     """Load finance file(s) without renaming columns — reconciler needs 'report_code' intact.
-    Multiple paths are supported only for kesafim2000; the DataFrames are concatenated and deduplicated.
+    Multiple paths are concatenated and deduplicated.
     """
     if ftype == "kesafim2000":
         dfs = [load_kesafim(str(p)) for p in paths]
@@ -4626,14 +4803,16 @@ def _load_finance_raw(paths: list[Path], ftype: str) -> tuple[pd.DataFrame, str,
         filename = ", ".join(p.name for p in paths)
         stats = {"filename": filename, "software": "סקולקאש", "cancelled_rows": None}
         return df, "סקולקאש", stats
-    df, cancelled = load_payscool(str(paths[0]))
+    loaded = [load_payscool(str(p)) for p in paths]
+    df = loaded[0][0] if len(loaded) == 1 else pd.concat([d for d, _ in loaded], ignore_index=True).drop_duplicates()
+    cancelled = sum(c for _, c in loaded)
     paren_normalized = 0
     if "מספר חשבונית" in df.columns:
         paren_normalized = int(df["מספר חשבונית"].apply(
             lambda v: canonical_payscool_invoice(v) != ("" if v is None else str(v).strip())
         ).sum())
     stats = {
-        "filename": paths[0].name,
+        "filename": ", ".join(p.name for p in paths),
         "software": "פייסקול",
         "cancelled_rows": cancelled,
         "paren_invoice_normalized": paren_normalized,

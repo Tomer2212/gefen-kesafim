@@ -3,10 +3,11 @@ name: Voicenter Poll New Calls
 on:
   schedule:
     # BACKUP trigger only. The primary trigger is Supabase pg_cron (job
-    # 'calls-process-new-calls', every 5 min) — GitHub's schedule was measured running
+    # 'calls-process-new-calls', every 3 min) — GitHub's schedule was measured running
     # this only every 3-7 hours. Detects new calls whose counterpart phone number matches
-    # a contact shared by more than one school, and notifies who needs to resolve which
-    # school the call belongs to. Safe to double-fire (per-org lease + calls_scan_processed).
+    # a contact shared by more than one school, notifies who needs to resolve which school
+    # the call belongs to, and attributes new calls to same-day meetings. Safe to double-fire
+    # (per-org lease + calls_scan_processed).
     - cron: '*/15 * * * *'
   workflow_dispatch: {}
 

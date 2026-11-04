@@ -138,7 +138,7 @@ function RowItem({ row, index, selectedYear, selectedDivision, isSheshsSnati, on
   );
 }
 
-function SwapFileButton({ rowId, disabled, onPick, label = "החלף קובץ" }) {
+export function SwapFileButton({ rowId, disabled, onPick, label = "החלף קובץ" }) {
   const inputRef = useRef(null);
   return (
     <>

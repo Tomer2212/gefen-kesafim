@@ -1011,6 +1011,48 @@ def test_uploaded_file_download_same_org_passes_org_check(org_a_client):
     )
 
 
+def test_meeting_messages_cross_org_rejected(org_b_client):
+    resp = org_b_client.get(f"/schools/meetings/{ORG_A_MEETING_ID}/messages")
+    assert resp.status_code == 404, resp.text
+    assert resp.json().get("detail") == "הפגישה לא נמצאה", resp.json()
+
+
+def test_meeting_messages_same_org_works(org_a_client):
+    resp = org_a_client.get(f"/schools/meetings/{ORG_A_MEETING_ID}/messages")
+    assert resp.status_code == 200, resp.text
+    assert "messages" in resp.json()
+
+
+def test_uploaded_file_coverage_cross_org_rejected(org_b_client):
+    resp = org_b_client.patch(
+        f"/schools/meetings/{ORG_A_MEETING_ID}/uploaded-files/00000000-0000-0000-0000-000000000000/coverage",
+        json={"division": "beinayim"},
+    )
+    assert resp.status_code == 404, resp.text
+    assert resp.json().get("detail") == "הפגישה לא נמצאה", resp.json()
+
+
+def test_uploaded_file_coverage_same_org_passes_org_check(org_a_client):
+    # Org check passes for a same-org caller; the made-up file_id then 404s with the
+    # FILE-not-found detail, so nothing is written.
+    resp = org_a_client.patch(
+        f"/schools/meetings/{ORG_A_MEETING_ID}/uploaded-files/00000000-0000-0000-0000-000000000000/coverage",
+        json={"division": "beinayim"},
+    )
+    assert resp.status_code == 404, resp.text
+    assert resp.json().get("detail") == "הקובץ לא נמצא", resp.json()
+
+
+def test_request_missing_files_with_recipient_cross_org_rejected(org_b_client):
+    """Negative-only, like the test below: a same-org call could send a real email."""
+    resp = org_b_client.post(
+        f"/schools/meetings/{ORG_A_MEETING_ID}/request-missing-files",
+        json={"recipient_email": "attacker@example.com"},
+    )
+    assert resp.status_code == 404, resp.text
+    assert resp.json().get("detail") == "הפגישה לא נמצאה", resp.json()
+
+
 def test_request_missing_files_cross_org_rejected(org_b_client):
     """Negative-only: a positive (same-org) call would send a real outbound email to
     whatever secretary/finance contact email is on file for the meeting's participants —
