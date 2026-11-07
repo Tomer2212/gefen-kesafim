@@ -3,7 +3,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import TaskDateTimeInput from "./TaskDateTimeInput";
 import DirectStyleDateInput from "./DirectStyleDateInput";
 import FieldPickerButton from "./FieldPickerButton";
-import { formatDateDMY } from "./taskShared";
+import { formatDateDMY, STAGE_SCOPE_OPTIONS } from "./taskShared";
 import { MEETING_STATUS_OPTIONS, MEETING_TYPE_OPTIONS } from "../meetings/constants";
 import { ACADEMIC_YEARS, DEFAULT_ACADEMIC_YEAR } from "../../constants/academicYears";
 
@@ -43,6 +43,9 @@ const EMPTY_MEETING_CONDITION = {
   // "principal" is a chosen participant_role (see isMeetingRequirementComplete below) —
   // "שוטף" is school-wide and never stage-dependent, so it's never asked there.
   stage_scope: null,
+  // "התאמה אישית" — {school_id: scope} exceptions only; every six-year school without an entry
+  // gets stage_scope above, which is why stage_scope stays mandatory even when this is filled.
+  stage_scope_by_school: null,
   // Required yes/no — whether the school may re-search with a narrower time window on the
   // public booking page ("אפשרויות נוספות"). null (unanswered) until explicitly set; see
   // isMeetingRequirementComplete below.
@@ -61,21 +64,11 @@ const MEETING_TYPE_PILLS = [{ value: "gefen", label: "גפן" }, { value: "curre
 const PARTICIPANT_ROLE_OPTIONS = [
   { value: "principal", label: "מנהל/ת" }, { value: "secretary", label: "מנהלנ/ית" }, { value: "finance_contact", label: "אחראי/ת כספים" },
 ];
-// Round 16 — "separate" mirrors StageScopeModal.jsx's existing "שתי פגישות נפרדות" option
-// (frontend/src/components/meetings/StageScopeModal.jsx), which this task-level requirement
-// previously had no equivalent for: _build_meeting_booking_link now builds two independent
-// bookable ranges (one per principal) instead of merging both into one range's participant list.
-const STAGE_SCOPE_PILLS = [
-  { value: "tichon", label: "תיכון" },
-  { value: "chativa", label: 'חט"ב' },
-  { value: "both", label: "שניהם (פגישה אחת)" },
-  { value: "separate", label: "שתי פגישות נפרדות" },
-];
 // Generalized (meeting-coordinator redesign): secretary/finance_contact now split by division
 // on a six-year school too (each via its own *_same_person flag), same as principal already
 // did — so the חטיבה pills must show whenever ANY splittable role is selected, not principal
 // only, or a manager could never express "only the תיכון secretary" for that participant.
-function needsStageScope(cond) {
+export function needsStageScope(cond) {
   return cond.meeting_service_type && cond.meeting_service_type !== "current"
     && (cond.participant_roles || []).some(r => ["principal", "secretary", "finance_contact"].includes(r));
 }
@@ -391,6 +384,11 @@ export default function ConditionGroupsEditor({
   // caller except TaskCreateWizard.jsx's forceMeetingNegateFalse instance (the only one that
   // actually sets it) keeps the original always-shown-when-applicable behavior.
   schoolsIncludeSixYear = true,
+  // The wizard's "התאמה אישית" button (leftmost in the חטיבה row). The modal itself is rendered
+  // by TaskCreateWizard outside its dialog element, so this dialog's focus trap and Esc handling
+  // don't also fire for it. countStageScopeOverrides(cond) = the button's counter.
+  onCustomizeStageScope,
+  countStageScopeOverrides,
 }) {
   function updateCondition(gi, ci, patch) {
     setGroups(prev => prev.map((g, i) => i !== gi ? g : {
@@ -714,16 +712,16 @@ export default function ConditionGroupsEditor({
 
                     {needsStageScope(cond) && schoolsIncludeSixYear && (
                       <fieldset className="flex flex-col gap-1.5">
-                        <legend className="text-xs font-medium text-black">חטיבה</legend>
+                        <legend className="text-xs font-medium text-black">עבור בתי ספר שש שנתיים בלבד</legend>
                         <p className="text-[11px] text-slate-400">
-                          רלוונטי לבתי ספר שש-שנתיים בלבד, לשאר בתי הספר תיקבע פגישה עם המנהל היחיד שלהם.
+                          לאילו מהחטיבות תרצו לקבוע פגישה?
                         </p>
-                        <div className={`flex gap-2 ${showValidationErrors && !cond.stage_scope ? "border border-red-400 rounded-lg p-1.5 -m-1.5" : ""}`}>
-                          {STAGE_SCOPE_PILLS.map(opt => (
+                        <div className={`flex flex-wrap gap-2 ${showValidationErrors && !cond.stage_scope ? "border border-red-400 rounded-lg p-1.5 -m-1.5" : ""}`}>
+                          {STAGE_SCOPE_OPTIONS.map(opt => (
                             <button key={opt.value} type="button"
                               aria-pressed={cond.stage_scope === opt.value}
                               onClick={() => updateCondition(gi, ci, { stage_scope: opt.value })}
-                              className={`text-sm px-4 py-1.5 rounded-lg border transition-colors ${
+                              className={`text-[13px] px-2.5 py-1.5 rounded-lg border whitespace-nowrap transition-colors ${
                                 cond.stage_scope === opt.value
                                   ? "bg-blue-600 border-blue-600 text-white font-semibold"
                                   : "border-black text-black hover:bg-slate-50"
@@ -731,9 +729,27 @@ export default function ConditionGroupsEditor({
                               {opt.label}
                             </button>
                           ))}
+                          {onCustomizeStageScope && (() => {
+                            const overrideCount = countStageScopeOverrides ? countStageScopeOverrides(cond) : 0;
+                            return (
+                              <button type="button"
+                                onClick={() => onCustomizeStageScope(gi, ci)}
+                                className={`text-[13px] px-2.5 py-1.5 rounded-lg border whitespace-nowrap transition-colors ${
+                                  overrideCount > 0
+                                    ? "border-blue-600 text-blue-700 bg-blue-50 font-semibold"
+                                    : "border-black text-black hover:bg-slate-50"
+                                }`}>
+                                התאמה אישית{overrideCount > 0 ? ` (${overrideCount})` : ""}
+                              </button>
+                            );
+                          })()}
                         </div>
                         {showValidationErrors && !cond.stage_scope && (
-                          <p role="alert" className="text-[11px] text-red-600">יש לבחור לאיזו חטיבה מיועדת הפגישה (רלוונטי לבתי ספר שש-שנתיים)</p>
+                          <p role="alert" className="text-[11px] text-red-600">
+                            {onCustomizeStageScope && countStageScopeOverrides?.(cond) > 0
+                              ? "יש לבחור אפשרות שתחול על בתי הספר השש-שנתיים שלא נבחרו בהתאמה האישית"
+                              : "יש לבחור לאילו חטיבות מיועדת הפגישה (רלוונטי לבתי ספר שש-שנתיים)"}
+                          </p>
                         )}
                       </fieldset>
                     )}

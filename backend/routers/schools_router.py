@@ -8916,9 +8916,8 @@ def delete_offline_work(school_id: str, meeting_id: str, entry_id: str, user: An
 
 @router.post("/meetings/recompute-call-activity")
 def recompute_meeting_call_activity(request: Request):
-    """Scheduled safety net (primary trigger: Supabase pg_cron job
-    'meetings-recompute-call-activity', every 15 min; .github/workflows/meeting-call-activity-recompute.yml
-    is only a backup). New calls are attributed by the process-new-calls scan; this catches
+    """Scheduled safety net, triggered only by .github/workflows/meeting-call-activity-recompute.yml
+    (no pg_cron job, by decision). New calls are attributed by the process-new-calls scan; this catches
     what that can't, e.g. a meeting created after the call. For every org, refreshes today's +
     yesterday's meetings' 'בפועל' call data (one provider pull per org per day — cheap
     regardless of how many schools/meetings that covers) and runs the opt-in auto-completion

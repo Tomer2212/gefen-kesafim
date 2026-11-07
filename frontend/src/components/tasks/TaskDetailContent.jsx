@@ -9,7 +9,7 @@ import OutlookLimitModal from "./OutlookLimitModal";
 import TaskMeetingResolutionModal from "./TaskMeetingResolutionModal";
 import ConditionGroupsEditor, { newConditionGroup } from "./ConditionGroupsEditor";
 import ColumnPickerButton, { loadColVisible } from "./ColumnPickerButton";
-import { describeCondition, describeConditionColumn, firstDisplayGroupConditions, formatDateDMY } from "./taskShared";
+import { describeCondition, describeConditionColumn, firstDisplayGroupConditions, formatDateDMY, stageScopeLabel } from "./taskShared";
 
 // The per-school table's middle band — every column between the fixed "בית ספר" (always first)
 // and the fixed "הערות" onward. Toggle visibility + drag-reorder among themselves, same idea as
@@ -125,11 +125,23 @@ function meetingLinkStatusLabel(sendStatus) {
 // still resolve to a single ok/not-ok via _resolve_condition, so this loses no information
 // about whether the condition is met, only the intermediate count breakdown).
 function renderConditionCell(res) {
-  return res.ok ? (
-    <span aria-hidden="true" className="text-emerald-600 font-bold">✓</span>
-  ) : (
-    <span aria-hidden="true" className="text-red-500 font-bold">✕</span>
+  return (
+    <>
+      {res.ok ? (
+        <span aria-hidden="true" className="text-emerald-600 font-bold">✓</span>
+      ) : (
+        <span aria-hidden="true" className="text-red-500 font-bold">✕</span>
+      )}
+      {res.requested_scope && (
+        <span className="block text-[10px] text-slate-500 whitespace-nowrap">{stageScopeLabel(res.requested_scope)}</span>
+      )}
+    </>
   );
+}
+
+// Excel counterpart of the caption in renderConditionCell.
+function withRequestedScope(text, res) {
+  return res.requested_scope ? `${text} (${stageScopeLabel(res.requested_scope)})` : text;
 }
 
 // Extracted out of TaskPanel.jsx (round: Tasks-table redesign) so the exact same per-school
@@ -541,7 +553,7 @@ export default function TaskDetailContent({ taskId, onTaskChange }) {
           ...visibleMovableCols.map(c => c.value(r, r.stage_label)),
           ...r.condition_results.map((res, i) => (
             conditions[i]?.type === "meeting"
-              ? (res.meeting_exists ? "יש" : "אין")
+              ? withRequestedScope(res.meeting_exists ? "יש" : "אין", res)
               : (res.ok ? "בוצע" : "טרם בוצע")
           )),
           sendLabel(r), r.note || "",
@@ -551,7 +563,7 @@ export default function TaskDetailContent({ taskId, onTaskChange }) {
         r.school_name || "",
         ...visibleMovableCols.map(c => c.value(r, sr.stage_label)),
         ...sr.condition_results.map((res, i) => (
-          res.not_applicable ? "—" : conditions[i]?.type === "meeting" ? (res.ok ? "יש" : "אין") : (res.ok ? "בוצע" : "טרם בוצע")
+          res.not_applicable ? "—" : conditions[i]?.type === "meeting" ? withRequestedScope(res.ok ? "יש" : "אין", res) : (res.ok ? "בוצע" : "טרם בוצע")
         )),
         sendLabel(r), r.note || "",
       ]);

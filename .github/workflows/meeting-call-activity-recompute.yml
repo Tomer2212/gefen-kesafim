@@ -2,9 +2,8 @@ name: Recompute Meeting Call Activity
 
 on:
   schedule:
-    # BACKUP trigger only. The primary trigger is Supabase pg_cron (job
-    # 'meetings-recompute-call-activity', every 15 min) — GitHub's schedule was measured
-    # running this only every 4-8 hours — and new calls reach meetings within one
+    # The only trigger (no pg_cron job, by decision). GitHub's schedule was measured running
+    # this only every 4-8 hours, which is enough because new calls reach meetings within one
     # process-new-calls scan anyway. Refreshes the "בפועל" (calls/offline-work) display cache
     # on today's and yesterday's meetings for every org, and runs the opt-in auto-completion
     # check for any scheduled meeting whose start_time has passed. Older/never-synced meetings are instead

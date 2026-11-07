@@ -1,0 +1,23 @@
+name: Recompute Task Progress
+
+on:
+  schedule:
+    # BACKUP trigger only. The primary trigger is Supabase pg_cron (job 'tasks-recompute-progress',
+    # every 5 minutes) — GitHub's schedule isn't punctual enough for this. Keeps every task's status
+    # and cached progress current without anyone opening it or sending anything.
+    - cron: '*/30 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call tasks recompute-progress endpoint
+        run: |
+          URL="${BACKEND_URL%/}"
+          curl -sf -X POST "${URL}/tasks/recompute-progress" \
+            -H "X-Cron-Secret: ${CRON_SECRET}" \
+            --max-time 180
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}

@@ -23,6 +23,7 @@ import uuid
 import pytest
 
 from conftest import (
+    ORG_A_ID,
     ORG_A_SCHOOL_ID,
     ORG_A_MEETING_ID,
     ORG_A_MEETING_SCHOOL_ID,
@@ -1377,3 +1378,47 @@ def test_ambiguous_call_prompts_same_org_visible(org_b_client, admin_db):
     finally:
         admin_db.table("calls_call_contact_resolutions").delete() \
             .eq("org_id", ORG_B_ID).eq("call_id", call_id).execute()
+
+
+# ---------------------------------------------------------------------------
+# Meeting task "התאמה אישית" — per-school division overrides are keyed by school_id from the
+# request body. Tested at the validator, which is read-only: POST /tasks/ itself queues real sends.
+# ---------------------------------------------------------------------------
+
+
+def _six_year_school_id(admin_db, org_id):
+    rows = admin_db.table("schools").select("id").eq("org_id", org_id).eq("stage", "sheshshnati") \
+        .eq("status", "active").limit(1).execute().data
+    return rows[0]["id"]
+
+
+def test_stage_scope_override_cross_org_school_dropped(admin_db):
+    from routers.tasks_router import _prepare_meeting_conditions
+    foreign_id = _six_year_school_id(admin_db, ORG_A_ID)
+    criteria = {"groups": [{"conditions": [
+        {"type": "meeting", "stage_scope": "both", "stage_scope_by_school": {foreign_id: "tichon"}},
+    ]}]}
+    _prepare_meeting_conditions(criteria, ORG_B_ID)
+    assert criteria["groups"][0]["conditions"][0]["stage_scope_by_school"] == {}
+
+
+def test_stage_scope_override_same_org_school_kept(admin_db):
+    from routers.tasks_router import _prepare_meeting_conditions
+    own_id = _six_year_school_id(admin_db, ORG_B_ID)
+    criteria = {"groups": [{"conditions": [
+        {"type": "meeting", "stage_scope": "both", "stage_scope_by_school": {own_id: "tichon"}},
+    ]}]}
+    _prepare_meeting_conditions(criteria, ORG_B_ID)
+    assert criteria["groups"][0]["conditions"][0]["stage_scope_by_school"] == {own_id: "tichon"}
+
+
+def test_task_preview_six_year_enrichment_stays_in_org(org_b_client, admin_db):
+    foreign_id = _six_year_school_id(admin_db, ORG_A_ID)
+    own_id = _six_year_school_id(admin_db, ORG_B_ID)
+    resp = org_b_client.post("/tasks/preview", json={
+        "criteria": {"groups": []}, "manual_school_ids": [foreign_id, own_id],
+    })
+    assert resp.status_code == 200, resp.text
+    schools = resp.json()["schools"]
+    assert [s["school_id"] for s in schools] == [own_id]
+    assert isinstance(schools[0]["principal_same_person"], bool)

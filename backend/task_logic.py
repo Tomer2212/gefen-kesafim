@@ -315,7 +315,7 @@ _ADVISOR_TABLES = {"gefen": "school_advisors_gefen", "current": "school_advisors
 
 
 def _fetch_schools_and_meetings(
-    org_id: str, academic_year: str,
+    org_id: str, academic_year: str, only_school_ids: list[str] | None = None,
 ) -> tuple[list[dict], list[dict], dict[str, dict], dict[str, list[dict]], dict[str, list[dict]]]:
     """One bounded query for active schools, one for their year-admin-data rows, one for their
     meetings, one per advisor-type table (attached directly onto each school dict), one for
@@ -323,11 +323,14 @@ def _fetch_schools_and_meetings(
     control_letters — mirrors the pattern in booking_logic.find_schools_missing_meetings /
     schools_router.list_schools' enrichment queries. Returns
     (schools, meetings, year_map, goal_map, control_letter_map) — goal_map/control_letter_map
-    are {school_id: [rows]}, same shape as _meetings_for_school expects for meetings."""
+    are {school_id: [rows]}, same shape as _meetings_for_school expects for meetings.
+    only_school_ids narrows everything to those schools, for callers that know their audience."""
+    if only_school_ids is not None and not only_school_ids:
+        return [], [], {}, {}, {}
     for attempt in range(2):
         try:
             db = get_admin_client()
-            schools = (
+            schools_query = (
                 db.table("schools")
                 .select(
                     "id, name, symbol, city, authority, stage, district, finance_software, "
@@ -339,9 +342,10 @@ def _fetch_schools_and_meetings(
                 )
                 .eq("org_id", org_id)
                 .eq("status", "active")
-                .execute()
-                .data or []
             )
+            if only_school_ids is not None:
+                schools_query = schools_query.in_("id", only_school_ids)
+            schools = schools_query.execute().data or []
             school_ids = [s["id"] for s in schools]
             if not school_ids:
                 return [], [], {}, {}, {}
@@ -513,6 +517,32 @@ def _eval_meeting_condition(cond: dict, school_meetings: list[dict]) -> bool:
     return (not matched) if cond.get("negate") else matched
 
 
+def effective_stage_scope(cond: dict, school: dict | None) -> str | None:
+    """The division choice for THIS school: its own entry in the condition's
+    stage_scope_by_school (the wizard's "התאמה אישית"), otherwise the condition-level
+    stage_scope. That default also covers any school with no entry, e.g. one that only joined
+    the audience when a scheduled task activated. Every read of a task condition's division
+    choice must go through this; a condition with no overrides returns stage_scope as before."""
+    overrides = cond.get("stage_scope_by_school") or {}
+    return overrides.get((school or {}).get("id")) or cond.get("stage_scope")
+
+
+def stage_scope_is_covered(requested_scope: str, meeting_scopes) -> bool:
+    """Whether a school's meetings (given by their stage_scope values) satisfy a requested
+    division choice. The single rule shared by task progress and the public booking page, so
+    the two can't disagree: a meeting counts only for the division it is explicitly marked for,
+    "both" covers both divisions, and an unmarked (NULL) meeting counts for nothing. "both" and
+    "separate" require each division to be covered."""
+    scopes = set(meeting_scopes)
+    has_tichon = bool(scopes & {"tichon", "both"})
+    has_chativa = bool(scopes & {"chativa", "both"})
+    if requested_scope == "tichon":
+        return has_tichon
+    if requested_scope == "chativa":
+        return has_chativa
+    return has_tichon and has_chativa
+
+
 def _required_count_for_condition(cond: dict, school: dict | None = None) -> int:
     """Round 17 — default required count for a meeting condition. A stage_scope="separate"
     requirement needs exactly 2 (one per principal) ONLY for a six-year (sheshshnati) school —
@@ -524,7 +554,7 @@ def _required_count_for_condition(cond: dict, school: dict | None = None) -> int
     on the send side). Every other meeting condition uses the manager's required_count if set,
     otherwise 1 — matching _meeting_exists's original ">=1 match" behavior exactly, so this is a
     no-op for every condition that doesn't use these new features."""
-    if cond.get("type") == "meeting" and cond.get("stage_scope") == "separate" and (school or {}).get("stage") == "sheshshnati":
+    if cond.get("type") == "meeting" and effective_stage_scope(cond, school) == "separate" and (school or {}).get("stage") == "sheshshnati":
         return 2
     return cond.get("required_count") or 1
 
@@ -534,20 +564,40 @@ def _fulfilled_count_for_meeting_condition(
 ) -> int:
     """Round 17 — for stage_scope="separate" on a six-year school, counts DISTINCT principal
     slots fulfilled (0-2) via each matching meeting's own stage_scope, not the raw row count —
-    booking only the tichon principal's meeting must not count as 2/2. A "both"-scoped (or
-    legacy/unscoped) meeting counts toward either slot, since it covers both principals at once.
-    For a non-six-year school (or any other condition), this is just the raw match count
-    (identical to _count_matching_meetings) — bug fix: a non-six-year school's single booked
-    meeting is stored with stage_scope=None (see _build_meeting_ranges), which never matches
-    "tichon"/"chativa"/"both", so the distinct-slot counting used to always read 0 fulfilled for
-    such a school even after it booked its one and only meeting.
+    booking only the tichon principal's meeting must not count as 2/2. A "both"-scoped meeting
+    counts toward either slot, since it covers both principals at once. On a condition stamped
+    explicit_stage_scope_only (every task created since that rule), "tichon"/"chativa"/"both" on a
+    six-year school follow the same stage_scope_is_covered rule, so a chativa meeting doesn't
+    satisfy a tichon requirement and an unmarked meeting satisfies none of them; older conditions
+    keep the raw count, so a task's results never change after the fact.
+    For a non-six-year school (or a condition with no division choice), this is just the raw
+    match count (identical to _count_matching_meetings) — bug fix: a non-six-year school's single
+    booked meeting is stored with stage_scope=None (see _build_meeting_ranges), which never
+    matches "tichon"/"chativa"/"both", so the distinct-slot counting used to always read 0
+    fulfilled for such a school even after it booked its one and only meeting.
     task_token_ids: see _matching_meetings — threaded through for "require_additional_meeting"."""
     matches = _matching_meetings(cond, school_meetings, task_token_ids)
-    if cond.get("stage_scope") == "separate" and (school or {}).get("stage") == "sheshshnati":
-        has_tichon = any(m.get("stage_scope") in ("tichon", "both") for m in matches)
-        has_chativa = any(m.get("stage_scope") in ("chativa", "both") for m in matches)
-        return int(has_tichon) + int(has_chativa)
+    if (school or {}).get("stage") == "sheshshnati":
+        scope = effective_stage_scope(cond, school)
+        meeting_scopes = [m.get("stage_scope") for m in matches]
+        if scope == "separate":
+            return int(stage_scope_is_covered("tichon", meeting_scopes)) + int(stage_scope_is_covered("chativa", meeting_scopes))
+        if cond.get("explicit_stage_scope_only"):
+            if scope == "both":
+                return int(stage_scope_is_covered("both", meeting_scopes))
+            if scope in ("tichon", "chativa"):
+                return sum(1 for s in meeting_scopes if s in (scope, "both"))
     return len(matches)
+
+
+def _meeting_exists_for_school(cond: dict, school_meetings: list[dict], school: dict | None) -> bool:
+    """The results table's "יש/אין" for one school. On a six-year school with a division choice
+    this follows the same coverage rule as progress, so the cell can't read "יש" next to a
+    requirement that a meeting of the other division doesn't actually satisfy. Like
+    _meeting_exists, it doesn't apply the "require_additional_meeting" token filter."""
+    if cond.get("explicit_stage_scope_only") and (school or {}).get("stage") == "sheshshnati" and effective_stage_scope(cond, school):
+        return _fulfilled_count_for_meeting_condition(cond, school_meetings, None, school) > 0
+    return _meeting_exists(cond, school_meetings)
 
 
 def _coerce_bool(value) -> bool:
@@ -862,7 +912,10 @@ def find_matching_schools(
     return matched
 
 
-def compute_task_progress(org_id: str, task: dict, academic_year: str = DEFAULT_ACADEMIC_YEAR) -> dict:
+def compute_task_progress(
+    org_id: str, task: dict, academic_year: str = DEFAULT_ACADEMIC_YEAR,
+    prefetched: tuple | None = None, task_token_ids: set[str] | None = None,
+) -> dict:
     """Live re-evaluation, scoped only to the task's frozen `matched_school_ids` snapshot.
 
     "Success" (is_done/progress_pct/which schools still need a reminder) is now walked over
@@ -875,9 +928,13 @@ def compute_task_progress(org_id: str, task: dict, academic_year: str = DEFAULT_
     Per-condition status is computed against the FIRST group of the success tree only when
     multiple groups exist, for column display purposes — the group actually satisfied is
     reported per school so the frontend can show which OR-branch a school completed under.
+
+    prefetched / task_token_ids: refresh_task_progress_for_org evaluates many tasks at once, so it
+    passes one shared _fetch_schools_and_meetings result and each task's token ids instead of a
+    query per task. Omitted, both are fetched here as usual.
     """
     track_success = task.get("track_success", True)
-    schools, meetings, year_map, goal_map, cl_map = _fetch_schools_and_meetings(org_id, academic_year)
+    schools, meetings, year_map, goal_map, cl_map = prefetched or _fetch_schools_and_meetings(org_id, academic_year)
     schools_by_id = {s["id"]: s for s in schools}
     matched_ids = set(task.get("matched_school_ids") or [])
 
@@ -886,13 +943,14 @@ def compute_task_progress(org_id: str, task: dict, academic_year: str = DEFAULT_
     # of them (see _matching_meetings) rather than accept any pre-existing meeting. Non-fatal:
     # a failed lookup degrades to "no token counts yet" (empty set), which is the safe direction
     # — such a condition just stays unresolved (red ✕) rather than wrongly marked done.
-    task_token_ids: set[str] = set()
-    try:
-        db = get_admin_client()
-        token_rows = db.table("meeting_booking_tokens").select("id").eq("task_id", task["id"]).execute().data or []
-        task_token_ids = {r["id"] for r in token_rows}
-    except Exception as exc:
-        _log.warning("compute_task_progress: task_token_ids lookup failed (non-fatal) for task %s: %s", task.get("id"), exc)
+    if task_token_ids is None:
+        task_token_ids = set()
+        try:
+            db = get_admin_client()
+            token_rows = db.table("meeting_booking_tokens").select("id").eq("task_id", task["id"]).execute().data or []
+            task_token_ids = {r["id"] for r in token_rows}
+        except Exception as exc:
+            _log.warning("compute_task_progress: task_token_ids lookup failed (non-fatal) for task %s: %s", task.get("id"), exc)
 
     if not track_success:
         rows = []
@@ -927,11 +985,14 @@ def compute_task_progress(org_id: str, task: dict, academic_year: str = DEFAULT_
     completed_count = 0
     required_actions_total = 0
     completed_actions_total = 0
+    meetings_by_school: dict[str, list[dict]] = {}
+    for m in meetings:
+        meetings_by_school.setdefault(m["school_id"], []).append(m)
     for school_id in matched_ids:
         school = schools_by_id.get(school_id)
         if not school:
             continue
-        school_meetings = _meetings_for_school(meetings, school_id)
+        school_meetings = meetings_by_school.get(school_id, [])
         year_row = year_map.get(school_id)
         goal_rows = _rows_for_school(goal_map, school_id)
         cl_rows = _rows_for_school(cl_map, school_id)
@@ -948,12 +1009,14 @@ def compute_task_progress(org_id: str, task: dict, academic_year: str = DEFAULT_
         condition_results = [
             (
                 {
-                    "ok": _resolve_condition(c, school, school_meetings, year_row, goal_rows, cl_rows, task_token_ids), "meeting_exists": _meeting_exists(c, school_meetings),
+                    "ok": _resolve_condition(c, school, school_meetings, year_row, goal_rows, cl_rows, task_token_ids), "meeting_exists": _meeting_exists_for_school(c, school_meetings, school),
                     # Round 17: required-count-aware — always >=1 for a meeting condition now
                     # (was raw match count / manager-set-or-None), so a "separate" split
                     # condition shows 0-2 distinct-slot progress instead of a raw row count that
                     # could misleadingly read "1/1" after only one of two principals was booked.
                     "actual_count": _fulfilled_count_for_meeting_condition(c, school_meetings, task_token_ids, school), "required_count": _required_count_for_condition(c, school),
+                    # What was asked of THIS school — differs per school under "התאמה אישית".
+                    "requested_scope": effective_stage_scope(c, school) if school.get("stage") == "sheshshnati" else None,
                 }
                 if c.get("type") == "meeting"
                 else {"ok": _resolve_condition(c, school, school_meetings, year_row, goal_rows, cl_rows, task_token_ids), "meeting_exists": None, "actual_count": None, "required_count": None}
@@ -986,14 +1049,14 @@ def compute_task_progress(org_id: str, task: dict, academic_year: str = DEFAULT_
         stage_rows = None
         is_six_year_split = (
             school.get("stage") == "sheshshnati" and not school.get("principal_same_person")
-            and any(c.get("type") == "meeting" and c.get("stage_scope") in ("tichon", "chativa", "separate") for c in conds)
+            and any(c.get("type") == "meeting" and effective_stage_scope(c, school) in ("tichon", "chativa", "separate") for c in conds)
         )
         if is_six_year_split:
             stage_rows = []
             for row_stage, row_label in (("tichon", "תיכון"), ("chativa", "חטיבת ביניים")):
                 row_results = []
                 for c, base_res in zip(conds, condition_results):
-                    cond_stage_scope = c.get("stage_scope")
+                    cond_stage_scope = effective_stage_scope(c, school)
                     if c.get("type") == "meeting" and cond_stage_scope in ("tichon", "chativa", "separate"):
                         if cond_stage_scope == "separate":
                             matches = _matching_meetings(c, school_meetings, task_token_ids)
@@ -1004,7 +1067,7 @@ def compute_task_progress(org_id: str, task: dict, academic_year: str = DEFAULT_
                         else:
                             row_results.append({"ok": None, "merged": False, "not_applicable": True})
                     else:
-                        row_results.append({"ok": base_res["ok"], "merged": True, "not_applicable": False})
+                        row_results.append({"ok": base_res["ok"], "merged": True, "not_applicable": False, "requested_scope": base_res.get("requested_scope")})
                 stage_rows.append({"stage_label": row_label, "condition_results": row_results})
 
         rows.append({
@@ -1037,7 +1100,10 @@ def compute_task_progress(org_id: str, task: dict, academic_year: str = DEFAULT_
 _OK_SKIP_REASONS_FOR_COMPLETION = {"already_done", "opted_out"}
 
 
-def recompute_task_status_and_cache(db, org_id: str, task: dict) -> dict | None:
+def recompute_task_status_and_cache(
+    db, org_id: str, task: dict, prefetched: tuple | None = None,
+    task_token_ids: set[str] | None = None, skip_unchanged: bool = False,
+) -> dict | None:
     """Single source of truth for the 3-state status transition (active <-> archived, i.e.
     open <-> closed/"סגורה") AND the cached progress columns (cached_total_schools/
     cached_actions_needed/cached_actions_completed/cached_progress_pct) — computed together so
@@ -1046,12 +1112,14 @@ def recompute_task_status_and_cache(db, org_id: str, task: dict) -> dict | None:
     list_tasks, so the tasks list stays a cheap read of stored columns regardless of org size.
     Self-healing both directions — a task can reopen (archived -> active) if it later becomes
     incomplete again (e.g. a newly-matched school, or a message needing resend). No-ops for
-    'scheduled' tasks (nothing to evaluate before activation). Non-fatal: never raises."""
+    'scheduled' tasks (nothing to evaluate before activation). Non-fatal: never raises.
+    skip_unchanged: don't write when nothing changed — the scheduled refresh would otherwise
+    rewrite every task of every org. prefetched / task_token_ids: see compute_task_progress."""
     if task.get("status") == "scheduled":
         return None
     try:
         academic_year = task.get("academic_year") or DEFAULT_ACADEMIC_YEAR
-        progress = compute_task_progress(org_id, task, academic_year)
+        progress = compute_task_progress(org_id, task, academic_year, prefetched, task_token_ids)
         matched_ids = [r["school_id"] for r in progress["schools"]]
         total = len(matched_ids)
 
@@ -1131,11 +1199,49 @@ def recompute_task_status_and_cache(db, org_id: str, task: dict) -> dict | None:
             "cached_progress_pct": progress_pct,
             "cache_updated_at": "now()",
         }
+        if skip_unchanged and not _task_cache_changed(task, patch):
+            return patch
         db.table("org_tasks").update(patch).eq("id", task["id"]).execute()
         return patch
     except Exception as exc:
         _log.warning("recompute_task_status_and_cache failed (non-fatal) for task %s: %s", task.get("id"), exc)
         return None
+
+
+def _task_cache_changed(task: dict, patch: dict) -> bool:
+    return any(task.get(k) != v for k, v in patch.items() if k != "cache_updated_at")
+
+
+def refresh_task_progress_for_org(db, org_id: str, tasks: list[dict]) -> int:
+    """Brings one org's tasks' status and cached progress up to date, whatever changed the
+    underlying data (a booking, a meeting edit or cancellation, an import, Outlook, ...). Returns
+    how many tasks changed. One data fetch per academic year, however many tasks share it, and
+    only for the schools those tasks actually cover.
+    A failed token lookup raises rather than degrading: with no token ids a "פגישה נוספת" task
+    would read as incomplete and a closed one would reopen, so the org just waits for the next run."""
+    token_rows = (
+        db.table("meeting_booking_tokens").select("id, task_id")
+        .in_("task_id", [t["id"] for t in tasks]).execute().data or []
+    )
+    tokens_by_task: dict[str, set[str]] = {}
+    for r in token_rows:
+        tokens_by_task.setdefault(r["task_id"], set()).add(r["id"])
+
+    tasks_by_year: dict[str, list[dict]] = {}
+    for t in tasks:
+        tasks_by_year.setdefault(t.get("academic_year") or DEFAULT_ACADEMIC_YEAR, []).append(t)
+
+    changed = 0
+    for academic_year, year_tasks in tasks_by_year.items():
+        school_ids = list({sid for t in year_tasks for sid in t.get("matched_school_ids") or []})
+        prefetched = _fetch_schools_and_meetings(org_id, academic_year, school_ids)
+        for t in year_tasks:
+            patch = recompute_task_status_and_cache(
+                db, org_id, t, prefetched, tokens_by_task.get(t["id"], set()), skip_unchanged=True,
+            )
+            if patch and _task_cache_changed(t, patch):
+                changed += 1
+    return changed
 
 
 _CONTACT_NAME_FIELDS = {

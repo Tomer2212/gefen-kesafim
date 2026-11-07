@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException
 
 import graph_client
 import meeting_activity
+import task_logic
 from academic_years import DEFAULT_ACADEMIC_YEAR
 from supabase_client import get_admin_client, reset_admin_client
 
@@ -107,11 +108,35 @@ def _find_existing_meeting(db, school_id: str, service_type: str, start_date: st
     return rows[0] if rows else None
 
 
+def _find_existing_meeting_explicit_scope(db, school_id: str, service_type: str, segments: list[dict], stage_scope: str) -> dict | None:
+    """The live check for a range minted with explicit_stage_scope_only, using the same
+    stage_scope_is_covered rule as compute_task_progress so the booking page and the task's
+    progress can't disagree: an unmarked meeting doesn't block booking here and doesn't count there.
+    Completed meetings count too, as in progress: auto-completion closes a meeting soon after it
+    happens, and a school opening its link afterwards must not be offered a duplicate."""
+    rows = []
+    for seg in segments:
+        rows.extend(
+            db.table("meetings").select("meeting_date, start_time, end_time, stage_scope")
+            .eq("school_id", school_id).eq("meeting_service_type", service_type).in_("status", ["scheduled", "completed"])
+            .gte("meeting_date", seg["start_date"]).lte("meeting_date", seg["end_date"])
+            .execute().data or []
+        )
+    if not task_logic.stage_scope_is_covered(stage_scope, [r.get("stage_scope") for r in rows]):
+        return None
+    counted = (stage_scope, "both") if stage_scope in ("tichon", "chativa") else ("tichon", "chativa", "both")
+    covering = next(r for r in rows if r.get("stage_scope") in counted)
+    return {k: covering[k] for k in ("meeting_date", "start_time", "end_time")}
+
+
 def _find_existing_meeting_any_segment(db, school_id: str, service_type: str, segments: list[dict],
-                                        stage_scope: str | None = None) -> dict | None:
+                                        stage_scope: str | None = None, explicit_scope_only: bool = False) -> dict | None:
     """OR's _find_existing_meeting across every one of a range's date segments — a school
     already has a real scheduled meeting for this range if ANY of the offered "או" windows
-    already has one."""
+    already has one. explicit_scope_only: the range's own flag, set only on ranges of tasks created
+    under the explicit-division rule; direct-coordination links and older links keep this check."""
+    if explicit_scope_only and stage_scope in ("tichon", "chativa", "both"):
+        return _find_existing_meeting_explicit_scope(db, school_id, service_type, segments, stage_scope)
     for seg in segments:
         m = _find_existing_meeting(db, school_id, service_type, seg["start_date"], seg["end_date"], stage_scope)
         if m:
@@ -247,7 +272,7 @@ def get_booking_info(token: str):
             existing = None
             existing_fyi = None
             if not is_booked:
-                found = _find_existing_meeting_any_segment(db, token_row["school_id"], r["service_type"], _range_segments(r), r.get("stage_scope"))
+                found = _find_existing_meeting_any_segment(db, token_row["school_id"], r["service_type"], _range_segments(r), r.get("stage_scope"), r.get("explicit_stage_scope_only"))
                 # "בקש לקבוע פגישה נוספת" — a pre-existing meeting must not block offering a
                 # NEW slot for this range; surfaced as a non-blocking FYI instead (the frontend
                 # still shows "בחר מועד").
@@ -302,7 +327,7 @@ def get_booking_freebusy(token: str, month: str | None = None, range_key: str | 
         if _range_is_booked(token_row, range_key):
             raise HTTPException(status_code=400, detail="הפגישה הזו כבר נקבעה")
         segments = _range_segments(range_row)
-        if not range_row.get("require_additional_meeting") and _find_existing_meeting_any_segment(db, token_row["school_id"], range_row["service_type"], segments, range_row.get("stage_scope")):
+        if not range_row.get("require_additional_meeting") and _find_existing_meeting_any_segment(db, token_row["school_id"], range_row["service_type"], segments, range_row.get("stage_scope"), range_row.get("explicit_stage_scope_only")):
             raise HTTPException(status_code=400, detail="כבר קיימת פגישה מסוג זה בטווח התאריכים הזה")
 
         sched = token_row["scheduling_window"]
@@ -499,7 +524,7 @@ def _book_range_slot(db, token_row: dict, range_key: str, body: dict) -> dict:
     # below. Also the actual safety net behind round-7's booked_ranges write becoming best-
     # effort (see the retry block at the end of this function): even if that write silently
     # failed for a prior booking, this live check against `meetings` itself still catches it.
-    if not range_row.get("require_additional_meeting") and _find_existing_meeting_any_segment(db, token_row["school_id"], range_row["service_type"], _range_segments(range_row), range_row.get("stage_scope")):
+    if not range_row.get("require_additional_meeting") and _find_existing_meeting_any_segment(db, token_row["school_id"], range_row["service_type"], _range_segments(range_row), range_row.get("stage_scope"), range_row.get("explicit_stage_scope_only")):
         raise HTTPException(status_code=400, detail="כבר קיימת פגישה מסוג זה בטווח התאריכים הזה")
 
     meeting_date = body.get("meeting_date")

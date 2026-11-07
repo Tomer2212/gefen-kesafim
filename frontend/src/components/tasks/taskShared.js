@@ -32,6 +32,18 @@ export const FIELD_LABELS = {
 
 export const NUMBER_OP_LABELS = { eq: "=", ne: "≠", gt: ">", gte: "≥", lt: "<", lte: "≤" };
 
+// A six-year school's division choice on a meeting requirement. "separate" builds two independent
+// bookable ranges (see tasks_router._build_meeting_ranges).
+export const STAGE_SCOPE_OPTIONS = [
+  { value: "tichon", label: "תיכון בלבד" },
+  { value: "chativa", label: 'חט"ב בלבד' },
+  { value: "both", label: "שתיהן בפגישה אחת" },
+  { value: "separate", label: "שתיהן - פגישות נפרדות" },
+];
+export function stageScopeLabel(value) {
+  return STAGE_SCOPE_OPTIONS.find(o => o.value === value)?.label || "";
+}
+
 export const RECIPIENT_ROLE_OPTIONS = [
   { value: "meeting_coordinator", label: "אחראי/ת לתיאום פגישות (לפי הגדרת בית הספר)" },
   { value: "principal", label: "מנהל/ת" },

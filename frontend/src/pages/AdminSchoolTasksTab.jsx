@@ -9,6 +9,8 @@ import PersonTaskCreateWizard from "../components/personTasks/PersonTaskCreateWi
 import { AcademicYearSelector } from "../components/AcademicYearSelector";
 import { DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
 
+const TASKS_REFRESH_MS = 60000;
+
 // "בתי ספר" sub-tab of ניהול -> משימות — a single table (mirrors DashboardPage.jsx's
 // conventions) with per-column sort+filter and an "עמודות להצגה" picker instead of a filter
 // bar above the table, and inline-expanding rows. "+ יצירת משימה" opens TaskTypeChooser, which
@@ -38,6 +40,25 @@ export default function AdminSchoolTasksTab() {
   }
 
   useEffect(() => { loadTasks(); }, [academicYear]);
+
+  // Progress is refreshed server-side every 5 minutes (POST /tasks/recompute-progress), so an open
+  // table picks that up by itself: no spinner, and a failed poll keeps the rows on screen.
+  useEffect(() => {
+    let stale = false;
+    function refresh() {
+      if (document.hidden) return;
+      axios.get("/tasks/", { params: { academic_year: academicYear } })
+        .then(r => { if (!stale) setTasks(r.data); })
+        .catch(() => {});
+    }
+    const timer = setInterval(refresh, TASKS_REFRESH_MS);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      stale = true;
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [academicYear]);
 
   return (
     <div dir="rtl">

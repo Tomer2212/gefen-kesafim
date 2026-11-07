@@ -1,7 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
-import ConditionGroupsEditor, { newConditionGroup, isMeetingRequirementComplete } from "./ConditionGroupsEditor";
+import ConditionGroupsEditor, { newConditionGroup, isMeetingRequirementComplete, needsStageScope } from "./ConditionGroupsEditor";
+import StageScopeCustomizeModal from "./StageScopeCustomizeModal";
+import StageScopeSummaryModal from "./StageScopeSummaryModal";
 import TemplateBodyEditor from "./TemplateBodyEditor";
 import ScheduleCriteriaModal from "./ScheduleCriteriaModal";
 import OutlookLimitModal from "./OutlookLimitModal";
@@ -12,7 +14,7 @@ import { SchoolMultiPickerModal } from "../meetings/SchoolPickerCell";
 import { AcademicYearSelector } from "../AcademicYearSelector";
 import { DEFAULT_ACADEMIC_YEAR } from "../../constants/academicYears";
 import {
-  RECIPIENT_ROLE_OPTIONS, CHANNEL_OPTIONS, describeCondition,
+  RECIPIENT_ROLE_OPTIONS, CHANNEL_OPTIONS, describeCondition, stageScopeLabel, MEETING_SERVICE_TYPE_LABELS,
 } from "./taskShared";
 
 // Built-in starting point for the common "missing meeting" task pattern — auto-suggested
@@ -229,6 +231,40 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
   // Preview + creation flow
   const [preview, setPreview] = useState(null); // {count, schools}
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [stageScopeCustomizeTarget, setStageScopeCustomizeTarget] = useState(null); // {gi, ci}
+  const [showStageScopeSummary, setShowStageScopeSummary] = useState(false);
+  const [previewFailed, setPreviewFailed] = useState(false);
+  const [previewAttempt, setPreviewAttempt] = useState(0); // bumped by the failure alert's "נסה שוב"
+  const sixYearSchools = useMemo(() => (preview?.schools || []).filter(s => s.stage === "sheshshnati"), [preview]);
+  // A scheduled task re-evaluates its audience at send time, so a six-year school can join later
+  // and needs the regular button's answer as its default, even if none matches today.
+  const asksStageScope = sixYearSchools.length > 0 || !!scheduledFor;
+
+  function meetingCardLabel(ci, cond) {
+    const typeLabel = MEETING_SERVICE_TYPE_LABELS[cond.meeting_service_type];
+    return `פגישה ${ci + 1}${typeLabel ? ` (${typeLabel})` : ""}`;
+  }
+  // Only schools still in the audience count: overrides for a school that left stay in state in
+  // case it returns, but they are not shown, summarized or sent.
+  function countStageScopeOverrides(cond) {
+    const overrides = cond.stage_scope_by_school || {};
+    return sixYearSchools.filter(s => overrides[s.school_id]).length;
+  }
+  // The meeting cards that actually ask the division question for the current audience.
+  const stageScopeCards = !asksStageScope ? [] : meetingRequirementGroups.flatMap(g =>
+    g.conditions.flatMap((cond, ci) => (needsStageScope(cond) ? [{ cond, label: meetingCardLabel(ci, cond) }] : [])),
+  );
+  // What a card sends for the division question. A card that doesn't ask it (e.g. switched to
+  // "שוטף") drops any earlier answer, so it can't split or scope the meeting. A scheduled task
+  // keeps overrides for schools outside today's audience, since it re-evaluates at send time.
+  function stageScopePayload(cond) {
+    if (!needsStageScope(cond)) return { stage_scope: null, stage_scope_by_school: null };
+    const overrides = cond.stage_scope_by_school || {};
+    const kept = scheduledFor && sixYearSchools.length > 0
+      ? overrides
+      : Object.fromEntries(sixYearSchools.filter(s => overrides[s.school_id]).map(s => [s.school_id, overrides[s.school_id]]));
+    return { stage_scope: cond.stage_scope || null, stage_scope_by_school: Object.keys(kept).length ? kept : null };
+  }
   const [showPreviewList, setShowPreviewList] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [switchingChannel, setSwitchingChannel] = useState(false);
@@ -283,7 +319,11 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
 
   function buildSuccessCriteria() {
     if (isMeetingTask) {
-      return { groups: meetingRequirementGroups };
+      return {
+        groups: meetingRequirementGroups.map(g => ({
+          ...g, conditions: g.conditions.map(c => ({ ...c, ...stageScopePayload(c) })),
+        })),
+      };
     }
     if (successMode === "custom") return { groups: successGroups };
     return null; // "none"
@@ -478,17 +518,21 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
   useEffect(() => {
     const { criteria, manual_school_ids } = audiencePayload();
     const hasAudience = (manual_school_ids && manual_school_ids.length > 0) || criteria.groups.some(g => g.conditions.length > 0);
-    if (!hasAudience) { setPreview(null); return; }
+    if (!hasAudience) { setPreview(null); setPreviewLoading(false); setPreviewFailed(false); return; }
     setPreviewLoading(true);
+    setPreviewFailed(false);
+    // The division choices and their summary are decided against this list, so a response to an
+    // earlier audience must never overwrite a newer one.
+    let stale = false;
     const timer = setTimeout(() => {
       axios.post("/tasks/preview", { criteria, manual_school_ids, academic_year: academicYear })
-        .then(r => setPreview(r.data))
-        .catch(() => setPreview(null))
-        .finally(() => setPreviewLoading(false));
+        .then(r => { if (!stale) setPreview(r.data); })
+        .catch(() => { if (!stale) { setPreview(null); setPreviewFailed(true); } })
+        .finally(() => { if (!stale) setPreviewLoading(false); });
     }, 400);
-    return () => clearTimeout(timer);
+    return () => { stale = true; clearTimeout(timer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isMeetingTask, audienceMode, academicYear, JSON.stringify(fieldGroups), JSON.stringify(manualSchoolIds), JSON.stringify(groups)]);
+  }, [isMeetingTask, audienceMode, academicYear, previewAttempt, JSON.stringify(fieldGroups), JSON.stringify(manualSchoolIds), JSON.stringify(groups)]);
 
   async function handleAttachmentUpload(e) {
     const file = e.target.files?.[0];
@@ -587,7 +631,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
         advisor_mode: c.advisor_mode || "default", advisor_ids: c.advisor_ids || [],
         duration_mode: c.duration_mode || "default", duration_minutes: c.duration_minutes,
         participant_roles: c.participant_roles || [],
-        stage_scope: c.stage_scope || null,
+        ...stageScopePayload(c),
       };
     });
   }
@@ -674,15 +718,6 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
     review: true,
   }[phase];
 
-  // Whether the task's currently-matched audience (live preview) includes at least one
-  // six-year school — the חטיבה (תיכון/חט"ב/שניהם/נפרדות) question on a "פגישה" card only
-  // means anything then; see ConditionGroupsEditor's schoolsIncludeSixYear prop. Bug fix:
-  // this question used to show (and "נפרדות" would split into two booking requests sent to
-  // the SAME principal) even for a task whose entire matched audience was non-six-year
-  // schools — _build_meeting_ranges now also guards this server-side, but hiding/not-requiring
-  // the question here avoids asking it when it can never be relevant.
-  const hasSixYearSchool = (preview?.schools || []).some(s => s.stage === "sheshshnati");
-
   const messageBadges = buildMessageBadges({ isMeetingTask, looksLikeMissingMeetingTask, recipientRole });
 
   // Every "פגישה" card must be fully filled (type/dates/participants) before leaving this
@@ -690,15 +725,30 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
   // surface a visible alert + red-bordered fields (ConditionGroupsEditor's
   // showValidationErrors) instead of the button just silently staying disabled.
   const meetingRequirementsComplete = meetingRequirementGroups.some(g => g.conditions.length > 0)
-    && meetingRequirementGroups.every(g => g.conditions.every(c => isMeetingRequirementComplete(c, hasSixYearSchool)));
+    && meetingRequirementGroups.every(g => g.conditions.every(c => isMeetingRequirementComplete(c, asksStageScope)));
+
+  // The division question depends on a fresh school list: wait while it reloads, and block if it
+  // failed to load. Otherwise the question would just disappear and six-year schools would
+  // silently get one merged meeting.
+  const meetingStepAwaitsPreview = phase === "meeting_audience" && isMeetingTask && previewLoading;
+  const meetingStepPreviewFailed = phase === "meeting_audience" && isMeetingTask && !previewLoading && previewFailed;
 
   function handleNextClick() {
-    if (phase === "meeting_audience" && isMeetingTask && !meetingRequirementsComplete) {
-      setMeetingReqAttempted(true);
-      return;
+    if (phase === "meeting_audience" && isMeetingTask) {
+      if (!meetingRequirementsComplete) {
+        setMeetingReqAttempted(true);
+        return;
+      }
+      if (stageScopeCards.some(c => countStageScopeOverrides(c.cond) > 0)) {
+        setShowStageScopeSummary(true);
+        return;
+      }
     }
     setStep(s => s + 1);
   }
+
+  const customizeCond = stageScopeCustomizeTarget
+    && meetingRequirementGroups[stageScopeCustomizeTarget.gi]?.conditions[stageScopeCustomizeTarget.ci];
 
   // Bag of everything describeCondition/ConditionGroupsEditor need to resolve raw stored
   // values (field/goal/division/control-letter) to Hebrew labels — built once per render
@@ -841,7 +891,9 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
                   allowedTypes={["meeting"]}
                   hideGroupChrome
                   forceMeetingNegateFalse
-                  schoolsIncludeSixYear={hasSixYearSchool}
+                  schoolsIncludeSixYear={asksStageScope}
+                  onCustomizeStageScope={sixYearSchools.length > 0 ? (gi, ci) => setStageScopeCustomizeTarget({ gi, ci }) : undefined}
+                  countStageScopeOverrides={countStageScopeOverrides}
                   addConditionLabel="הוסף פגישה"
                   showValidationErrors={meetingReqAttempted}
                 />
@@ -1135,6 +1187,23 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
                   ) : "—"}
                 </span>
 
+                {isMeetingTask && stageScopeCards.length > 0 && (
+                  <>
+                    <span className="font-semibold text-slate-700">בתי ספר שש-שנתיים:</span>
+                    <ul className="space-y-0.5">
+                      {stageScopeCards.map(card => {
+                        const customCount = countStageScopeOverrides(card.cond);
+                        return (
+                          <li key={card.label}>
+                            {card.label}: {stageScopeLabel(card.cond.stage_scope)}
+                            {customCount > 0 && <> · {customCount} בתי ספר בהתאמה אישית</>}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </>
+                )}
+
                 <span className="font-semibold text-slate-700">נמען:</span>
                 <span>{RECIPIENT_ROLE_OPTIONS.find(r => r.value === recipientRole)?.label}</span>
 
@@ -1151,6 +1220,12 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
           )}
         </div>
 
+        {meetingStepPreviewFailed && (
+          <div role="alert" className="flex items-center justify-between gap-3 text-xs text-red-600 bg-red-50 px-6 py-2">
+            <span>לא ניתן היה לטעון את רשימת בתי הספר, ולכן אי אפשר לדעת אילו בתי ספר שש-שנתיים נכללים במשימה.</span>
+            <button type="button" onClick={() => setPreviewAttempt(n => n + 1)} className="font-semibold underline whitespace-nowrap">נסה שוב</button>
+          </div>
+        )}
         <div className="flex justify-between gap-2 px-6 py-4 border-t border-slate-100">
           <button
             onClick={() => setStep(s => Math.max(1, s - 1))}
@@ -1162,10 +1237,10 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
           {phase !== "review" ? (
             <button
               onClick={handleNextClick}
-              disabled={!canGoNext}
+              disabled={!canGoNext || meetingStepAwaitsPreview || meetingStepPreviewFailed}
               className="px-4 py-2 rounded-xl text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60"
             >
-              הבא
+              {meetingStepAwaitsPreview ? "מעדכן רשימה..." : "הבא"}
             </button>
           ) : (
             <button
@@ -1178,6 +1253,33 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
           )}
         </div>
       </div>
+
+      {customizeCond && (
+        <StageScopeCustomizeModal
+          meetingLabel={meetingCardLabel(stageScopeCustomizeTarget.ci, customizeCond)}
+          schools={sixYearSchools}
+          defaultScope={customizeCond.stage_scope}
+          overrides={customizeCond.stage_scope_by_school}
+          onConfirm={draft => {
+            const { gi, ci } = stageScopeCustomizeTarget;
+            setMeetingRequirementGroups(prev => prev.map((g, i) => i !== gi ? g : {
+              ...g,
+              conditions: g.conditions.map((c, j) => j !== ci ? c : { ...c, stage_scope_by_school: Object.keys(draft).length ? draft : null }),
+            }));
+            setStageScopeCustomizeTarget(null);
+          }}
+          onCancel={() => setStageScopeCustomizeTarget(null)}
+        />
+      )}
+
+      {showStageScopeSummary && (
+        <StageScopeSummaryModal
+          cards={stageScopeCards.map(c => ({ label: c.label, defaultScope: c.cond.stage_scope, overrides: c.cond.stage_scope_by_school }))}
+          schools={sixYearSchools}
+          onContinue={() => { setShowStageScopeSummary(false); setStep(s => s + 1); }}
+          onEdit={() => setShowStageScopeSummary(false)}
+        />
+      )}
 
       {showContactModal && (
         <TaskContactResolutionModal

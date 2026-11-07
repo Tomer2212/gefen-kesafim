@@ -1776,7 +1776,7 @@ def list_known_reps(user: Annotated[dict, Depends(get_current_user)]):
 # Scheduled job — detects new calls with an ambiguous contact (same phone number
 # is a contact at more than one school) and notifies who needs to resolve it, and
 # attributes new calls to same-day meetings (+ the auto-completion check).
-# Cron-secured. Primary trigger: Supabase pg_cron + pg_net, every 3 min (job
+# Cron-secured. Primary trigger: Supabase pg_cron + pg_net, every 5 min (job
 # 'calls-process-new-calls'); GitHub Actions (voicenter-poll-calls.yml) is only a
 # backup — its schedule was measured lagging 3-7 hours. Safe to run concurrently
 # or twice: a per-org lease (calls_integrations.scan_lock_until) prevents overlap

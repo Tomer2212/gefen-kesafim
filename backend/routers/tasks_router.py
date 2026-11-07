@@ -577,6 +577,20 @@ def preview_task(body: PreviewIn, user: Annotated[dict, Depends(get_current_user
     matched = task_logic.find_matching_schools(
         user["org_id"], body.criteria.model_dump(), body.academic_year, manual_school_ids=body.manual_school_ids,
     )
+    # For the "התאמה אישית" modal's one-principal tag. Queried here, not added to
+    # _fetch_schools_and_meetings: compute_task_progress's split check reads this field from that
+    # select, and today's two-row display of one-principal schools relies on it being absent.
+    six_year_ids = [m["school_id"] for m in matched if m.get("stage") == "sheshshnati"]
+    if six_year_ids:
+        try:
+            db = get_admin_client()
+            rows = db.table("schools").select("id, principal_same_person").in_("id", six_year_ids).execute().data or []
+            same_person = {r["id"]: bool(r.get("principal_same_person")) for r in rows}
+            for m in matched:
+                if m["school_id"] in same_person:
+                    m["principal_same_person"] = same_person[m["school_id"]]
+        except Exception as exc:
+            logger.warning("preview_task principal_same_person enrichment failed (non-fatal): %s", exc)
     return {"count": len(matched), "schools": matched}
 
 
@@ -804,6 +818,14 @@ class MeetingRequirementIn(BaseModel):
     stage_scope: str | None = None  # round 8: 'tichon' | 'chativa' | 'both' — only meaningful
     # when "principal" is a participant_role and meeting_service_type != "current" (see
     # _principal_slots_for_school); ignored for non-six-year schools either way.
+    stage_scope_by_school: dict[str, str] | None = None  # the wizard's "התאמה אישית" — per-school
+    # exceptions to stage_scope; read through _req_stage_scope.
+
+
+def _req_stage_scope(req: MeetingRequirementIn, school: dict) -> str | None:
+    return task_logic.effective_stage_scope(
+        {"stage_scope": req.stage_scope, "stage_scope_by_school": req.stage_scope_by_school}, school,
+    )
 
 
 class MeetingsCheckIn(BaseModel):
@@ -838,11 +860,16 @@ def _coordinator_problem(school: dict, channel: str, meeting_requirements: list 
         for req in meeting_requirements:
             if req.meeting_service_type not in _MEETING_TYPE_LABELS:
                 continue
-            candidates = _coordinator_slot_candidates(school, req.meeting_service_type, req.stage_scope)
-            if not any(_slot_coordinator_ok(school, s, needs_phone) for s in candidates):
-                for s in candidates:
-                    if s not in needed_slots:
-                        needed_slots.append(s)
+            scope = _req_stage_scope(req, school)
+            # "separate" sends each division's range to its own coordinator and
+            # _group_ranges_by_coordinator needs both resolved, so both are checked here too —
+            # otherwise a school passes this check and then fails as "missing contact" at send.
+            for range_scope in (["tichon", "chativa"] if scope == "separate" else [scope]):
+                candidates = _coordinator_slot_candidates(school, req.meeting_service_type, range_scope)
+                if not any(_slot_coordinator_ok(school, s, needs_phone) for s in candidates):
+                    for s in candidates:
+                        if s not in needed_slots:
+                            needed_slots.append(s)
         if not needed_slots:
             return None
         detail = _missing_contact_detail(school)
@@ -928,7 +955,7 @@ def _check_meeting_problems(
         for req in meeting_requirements:
             for role in req.participant_roles:
                 if role in _CHATIVA_ROLE:
-                    participant_roles_needed.update(_role_slots_for_school(school, role, req.stage_scope))
+                    participant_roles_needed.update(_role_slots_for_school(school, role, _req_stage_scope(req, school)))
                 else:
                     participant_roles_needed.add(role)
         bad_roles = []
@@ -1113,6 +1140,54 @@ def export_missing_meetings(body: ExportMissingMeetingsIn, user: Annotated[dict,
     )
 
 
+_STAGE_SCOPE_VALUES = {"tichon", "chativa", "both", "separate"}
+
+
+def _prepare_meeting_conditions(success_criteria: dict | None, org_id: str) -> None:
+    """Prepares a new task's meeting conditions in place. Stamps each with
+    explicit_stage_scope_only, the coverage rule of task_logic.stage_scope_is_covered: only new
+    tasks get it, so a task created before that rule never changes its results after the fact.
+    Validates stage_scope_by_school: every value must be a known choice, and a default stage_scope
+    must exist because it's what any school without an entry receives. Keys are narrowed to this
+    org's active six-year schools, so a stored override can never refer to another org's school.
+    Schools that merely left the audience stay valid: a scheduled task re-evaluates its audience."""
+    for g in (success_criteria or {}).get("groups") or []:
+        for c in g.get("conditions") or []:
+            if c.get("type") == "meeting":
+                c["explicit_stage_scope_only"] = True
+    conditions = [
+        c for g in (success_criteria or {}).get("groups") or [] for c in g.get("conditions") or []
+        if c.get("type") == "meeting" and c.get("stage_scope_by_school")
+    ]
+    if not conditions:
+        return
+    for c in conditions:
+        if c.get("stage_scope") not in _STAGE_SCOPE_VALUES:
+            raise HTTPException(status_code=422, detail="יש לבחור אפשרות עבור בתי הספר השש-שנתיים שלא נבחרו בהתאמה האישית")
+        overrides = c["stage_scope_by_school"]
+        if not isinstance(overrides, dict) or not set(overrides.values()) <= _STAGE_SCOPE_VALUES:
+            raise HTTPException(status_code=422, detail="בחירת חטיבה לא תקינה בהתאמה האישית")
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            rows = (
+                db.table("schools").select("id")
+                .eq("org_id", org_id).eq("stage", "sheshshnati").eq("status", "active")
+                .execute().data or []
+            )
+            break
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("_prepare_meeting_conditions attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+            else:
+                logger.error("_prepare_meeting_conditions failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+    allowed = {r["id"] for r in rows}
+    for c in conditions:
+        c["stage_scope_by_school"] = {sid: scope for sid, scope in c["stage_scope_by_school"].items() if sid in allowed}
+
+
 @router.post("/")
 def create_task(body: TaskCreateIn, user: Annotated[dict, Depends(get_current_user)]):
     """Round-2 redesign: creation now immediately queues messages to whoever matches (see
@@ -1128,6 +1203,7 @@ def create_task(body: TaskCreateIn, user: Annotated[dict, Depends(get_current_us
     if not (criteria.get("groups") or manual_ids):
         raise HTTPException(status_code=422, detail="יש לבחור קריטריון סינון או לבחור בתי ספר ידנית")
     success_criteria = body.success_criteria.model_dump() if body.success_criteria else None
+    _prepare_meeting_conditions(success_criteria, user["org_id"])
 
     scheduled_for_dt = _parse_dt(body.scheduled_for)
     is_future_scheduled = bool(scheduled_for_dt and scheduled_for_dt > datetime.now(timezone.utc))
@@ -1221,8 +1297,8 @@ def list_tasks(
     columns (status, cached_total_schools/cached_actions_needed/cached_actions_completed/
     cached_progress_pct), never a live compute_task_progress loop over every org task
     (Architecture Invariant #7). Those cached columns are kept correct by task_logic.
-    recompute_task_status_and_cache, called at the mutation touchpoints in this file, exactly
-    like has_meeting_send_problems already was. Server-side filters below are all either plain
+    recompute_task_status_and_cache, called at the mutation touchpoints in this file and every
+    5 minutes for all tasks by POST /tasks/recompute-progress. Server-side filters below are all either plain
     column `.eq()`/range chains or (for `channel`, nested inside the message_config JSONB) a
     post-fetch Python filter over the single already org-scoped result set — never a per-row
     query loop."""
@@ -1416,6 +1492,12 @@ def get_task(task_id: str, user: Annotated[dict, Depends(get_current_user)]):
                 send_status["link_viewed_at"] = token.get("first_viewed_at")
                 total = len(token.get("date_ranges") or [])
                 done = len(token.get("booked_ranges") or [])
+                # The school's real progress when available — the latest token alone covers just
+                # one coordinator's ranges, so a two-coordinator school could read 1/1 of 2.
+                counted = [res for res in (row.get("condition_results") or []) if res.get("required_count")]
+                if counted:
+                    total = sum(res["required_count"] for res in counted)
+                    done = sum(min(res["actual_count"] or 0, res["required_count"]) for res in counted)
                 send_status["meeting_progress"] = {"done": done, "total": total}
             row["send_status"] = send_status
         for m in latest_by_school.values():
@@ -1651,6 +1733,9 @@ def _group_ranges_by_coordinator(school: dict, ranges_data: list[dict]) -> list[
     return list(groups.values())
 
 
+_DIVISION_LABELS = {"tichon": "תיכון", "chativa": 'חט"ב', "both": 'תיכון וחט"ב'}
+
+
 def _build_meeting_ranges(
     school: dict, meeting_conditions: list[dict],
     advisor_map: dict[str, list[str]], duration_row: dict, school_overrides: dict | None = None,
@@ -1711,7 +1796,7 @@ def _build_meeting_ranges(
             duration_minutes = override.get("duration_minutes") or duration_row.get(f"meeting_duration_{duration_col_type}") or 60
 
         roles = c.get("participant_roles") or []
-        stage_scope = c.get("stage_scope")
+        stage_scope = task_logic.effective_stage_scope(c, school)
         # Round 16 — "separate" builds TWO independent ranges (one per principal) instead of one
         # merged range with both principals as participants, mirroring StageScopeModal.jsx's
         # existing "שתי פגישות נפרדות" option for the general (non-task) scheduling flow.
@@ -1729,25 +1814,29 @@ def _build_meeting_ranges(
         is_six_year = school.get("stage") == "sheshshnati"
         if not is_six_year:
             split_scopes = [None]
-        elif stage_scope == "separate" and "principal" in roles:
+        elif stage_scope == "separate":
+            # Whatever the roles: progress requires 2 for any "separate" on a six-year school,
+            # and a single range tagged "separate" could never fulfil either division.
             split_scopes = ["tichon", "chativa"]
         else:
             split_scopes = [stage_scope]
 
+        counted_for_label = False
         for split_scope in split_scopes:
             participants = _build_school_contacts(school, roles, split_scope)
             if not participants:
                 continue
 
-            type_seen[service_type] = type_seen.get(service_type, 0) + 1
-            base_label = f"פגישת {_MEETING_TYPE_LABELS[service_type]}"
-            if len(split_scopes) > 1:
-                principal_slot = "principal" if split_scope == "tichon" else "principal_chativa"
-                label = f"{base_label} — {_principal_role_label(school, principal_slot)}"
-            elif type_counts[service_type] == 1:
-                label = base_label
-            else:
-                label = f"{base_label} ({type_seen[service_type]})"
+            if not counted_for_label:
+                type_seen[service_type] = type_seen.get(service_type, 0) + 1
+                counted_for_label = True
+            label = f"פגישת {_MEETING_TYPE_LABELS[service_type]}"
+            if type_counts[service_type] > 1:
+                label = f"{label} ({type_seen[service_type]})"
+            # A six-year school's recipient must see which division each meeting is for: most
+            # have one principal for both, so the participants alone don't tell.
+            if split_scope in _DIVISION_LABELS:
+                label = f"{label} — {_DIVISION_LABELS[split_scope]}"
             ranges_data.append({
                 "key": f"r{len(ranges_data)}-{secrets.token_urlsafe(6)}",
                 "start_date": start_date, "end_date": end_date, "segments": segments,
@@ -1774,6 +1863,10 @@ def _build_meeting_ranges(
                 # condition are indistinguishable at the DB level and booking either one
                 # incorrectly satisfies (and duplicate-blocks) the other.
                 "stage_scope": split_scope,
+                # Which live check meeting_booking_router uses for this range — see
+                # _prepare_meeting_conditions. Follows the condition, so a resend of an older
+                # task keeps that task's own rule.
+                "explicit_stage_scope_only": bool(c.get("explicit_stage_scope_only")),
             })
             for aid in advisor_ids:
                 if aid not in advisor_ids_union:
@@ -2705,6 +2798,45 @@ def _try_activate_scheduled_task(db, task: dict) -> dict:
 
     task_logic.recompute_task_status_and_cache(db, org_id, task)
     return {"activated": True, "has_problems": False}
+
+
+@router.post("/recompute-progress")
+def recompute_tasks_progress(request: Request):
+    """Keeps every task's status and cached progress current without anyone opening or sending
+    anything (primary trigger: Supabase pg_cron job 'tasks-recompute-progress', every 5 minutes;
+    .github/workflows/task-progress-recompute.yml is only a backup). Runs on a schedule rather
+    than from each write because many paths change the data a task depends on. A failure in one
+    org doesn't stop the others, and that org is retried on the next run. Sequential — no
+    ThreadPoolExecutor on the shared Supabase client."""
+    if not CRON_SECRET or request.headers.get("X-Cron-Secret") != CRON_SECRET:
+        raise HTTPException(status_code=403, detail="אין הרשאה")
+
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            tasks = db.table("org_tasks").select("*").neq("status", "scheduled").execute().data or []
+            break
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("recompute_tasks_progress attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("recompute_tasks_progress failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    tasks_by_org: dict[str, list[dict]] = {}
+    for t in tasks:
+        tasks_by_org.setdefault(t["org_id"], []).append(t)
+
+    changed = failed_orgs = 0
+    for org_id, org_tasks in tasks_by_org.items():
+        try:
+            changed += task_logic.refresh_task_progress_for_org(get_admin_client(), org_id, org_tasks)
+        except Exception as exc:
+            failed_orgs += 1
+            logger.warning("recompute_tasks_progress failed for org %s (retried next run): %s", org_id, exc)
+    return {"ok": True, "orgs": len(tasks_by_org), "tasks": len(tasks), "changed": changed, "failed_orgs": failed_orgs}
 
 
 @router.post("/process-scheduled-tasks")
