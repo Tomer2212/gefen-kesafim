@@ -27,7 +27,7 @@ HASHVA_TABS = {"hashva", "rejected", "nopdf"}
 _SHEET_NAMES = {
     "sikar":   "סקירה - גפן",
     "kvua":    "מימוש תקציב קבוע",
-    "partial": "תוכניות עם ביצוע חלקי",
+    "partial": "טרם דווח",
     "yozma":   "יוזמות וצרכים",
     "nihul":   "ניהול ותפעול",
 }

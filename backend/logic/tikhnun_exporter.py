@@ -111,7 +111,7 @@ def export_tikhnun_excel(tikhnun: dict, section: str, multiplier: str = "03", st
         ws.title = "מימוש תקציב קבוע"
     elif section == "partial":
         _write_partial(ws, tikhnun)
-        ws.title = "תוכניות עם ביצוע חלקי"
+        ws.title = "טרם דווח"
     elif section == "yozma":
         yozma_key = "yozma_04" if multiplier == "04" else "yozma_03"
         _write_yozma(ws, tikhnun, yozma_key)
@@ -508,11 +508,11 @@ def build_tikhnun_section_story(tikhnun: dict, section: str, multiplier: str = "
         story.append(tbl)
 
     elif section == "partial":
-        story.append(Paragraph(rtl("תוכניות עם ביצוע חלקי"), style_title))
+        story.append(Paragraph(rtl("טרם דווח"), style_title))
         story.append(Spacer(1, 0.4*cm))
         partial_rows = tikhnun.get("partial_rows", [])
         if not partial_rows:
-            story.append(Paragraph(rtl("אין תוכניות עם ביצוע חלקי"),
+            story.append(Paragraph(rtl("כל התוכניות דווחו במלואן"),
                                    ParagraphStyle("tkh_hdr", fontName=font_bold, fontSize=9)))
         else:
             headers = ["קוד", "שם מענה", "מס' מענה", "תכנון", "דיווח", "הפרש", "אחוז"]
@@ -753,11 +753,11 @@ def _tbl_style_compat(num_cols, num_rows, total_row=None):
         story.append(tbl)
 
     elif section == "partial":
-        story.append(Paragraph(rtl("תוכניות עם ביצוע חלקי"), style_title))
+        story.append(Paragraph(rtl("טרם דווח"), style_title))
         story.append(Spacer(1, 0.4*cm))
         partial_rows = tikhnun.get("partial_rows", [])
         if not partial_rows:
-            story.append(Paragraph(rtl("אין תוכניות עם ביצוע חלקי"), style_hdr))
+            story.append(Paragraph(rtl("כל התוכניות דווחו במלואן"), style_hdr))
         else:
             headers = ["קוד", "שם מענה", "מס' מענה", "תכנון", "דיווח", "הפרש", "אחוז"]
             col_widths = [1.5*cm, 6*cm, 2*cm, 2.2*cm, 2.2*cm, 2.2*cm, 1.8*cm]

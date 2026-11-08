@@ -129,6 +129,10 @@ def load_plan_file(fpath):
     plan_num_to_plan_stage = {}
     code_to_plan_stage = {}
     type_name_to_budget = {}
+    # (plan_num, type name) → budgets. The same plan number can be planned in two
+    # budgets under different response types (col H here = col C in the doch), so
+    # this pair tells the budget apart where the plan number alone can't.
+    plan_type_to_budgets = {}
 
     for row in plan_rows[1:]:
         budget = row[0]; plan_num = row[9]
@@ -142,6 +146,10 @@ def load_plan_file(fpath):
             plan_num_to_budgets[key].add(budget)
             if plan_stage_val and key not in plan_num_to_plan_stage:
                 plan_num_to_plan_stage[key] = plan_stage_val
+            if type_name:
+                pt_key = (key, str(type_name).strip())
+                if pt_key not in plan_type_to_budgets: plan_type_to_budgets[pt_key] = set()
+                plan_type_to_budgets[pt_key].add(budget)
 
         if code:
             if code not in code_to_budgets: code_to_budgets[code] = set()
@@ -152,11 +160,11 @@ def load_plan_file(fpath):
         if type_name and budget:
             type_name_to_budget[str(type_name).strip()] = budget
 
-    return budgets, plan_num_to_budgets, code_to_budgets, plan_num_to_plan_stage, code_to_plan_stage, detected_level, type_name_to_budget
+    return budgets, plan_num_to_budgets, code_to_budgets, plan_num_to_plan_stage, code_to_plan_stage, detected_level, type_name_to_budget, plan_type_to_budgets
 
 def try_identify_row(r, results, plan_num_to_budgets, code_to_budgets,
                      plan_num_to_plan_stage, code_to_plan_stage, type_name_to_budget,
-                     academic_year=None):
+                     academic_year=None, plan_type_to_budgets=None):
     col_code = r['orig'][1]
     col_type = r['orig'][2]
     plan_num = r['plan_num']
@@ -169,6 +177,13 @@ def try_identify_row(r, results, plan_num_to_budgets, code_to_budgets,
     if plan_num:
         bf = plan_num_to_budgets.get(plan_num, set())
         psv = plan_num_to_plan_stage.get(plan_num)
+        if len(bf) > 1 and plan_type_to_budgets:
+            # Plan number shared by several budgets: the response type narrows it to
+            # one before falling back to the sequential-context rule below, which
+            # mis-assigns rows sitting right at the boundary between budget blocks.
+            bf_type = plan_type_to_budgets.get((plan_num, str(col_type).strip()), set())
+            if len(bf_type) == 1:
+                bf = bf_type
         if len(bf) == 1:
             budget_result = list(bf)[0]
             stage_result = resolve_stage(col_code, psv, academic_year)
@@ -240,9 +255,10 @@ def identify(doch_paths, plan_fpaths, academic_year=None):
     plan_num_to_budgets = {}; code_to_budgets = {}
     plan_num_to_plan_stage = {}; code_to_plan_stage = {}
     type_name_to_budget = {}
+    plan_type_to_budgets = {}
 
     for fpath in plan_fpaths:
-        budgets, pn_map, c_map, pn_stage, c_stage, level, tn_map = load_plan_file(fpath)
+        budgets, pn_map, c_map, pn_stage, c_stage, level, tn_map, pt_map = load_plan_file(fpath)
         for b in budgets:
             if b not in all_budgets: all_budgets.append(b)
         for k, v in pn_map.items():
@@ -257,6 +273,9 @@ def identify(doch_paths, plan_fpaths, academic_year=None):
             if k not in code_to_plan_stage: code_to_plan_stage[k] = v
         for k, v in tn_map.items():
             if k not in type_name_to_budget: type_name_to_budget[k] = v
+        for k, v in pt_map.items():
+            if k not in plan_type_to_budgets: plan_type_to_budgets[k] = set()
+            plan_type_to_budgets[k] |= v
 
     possible_combos = set()
     for code, bfs in code_to_budgets.items():
@@ -370,7 +389,7 @@ def identify(doch_paths, plan_fpaths, academic_year=None):
             if not r['budget'] or not r['stage']:
                 b, s = try_identify_row(r, results, plan_num_to_budgets, code_to_budgets,
                                         plan_num_to_plan_stage, code_to_plan_stage, type_name_to_budget,
-                                        academic_year)
+                                        academic_year, plan_type_to_budgets)
                 if b:
                     r['budget'] = b; r['stage'] = s; changed = True
 

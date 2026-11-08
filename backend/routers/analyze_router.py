@@ -2102,6 +2102,53 @@ def _build_finance_ichud_budget_map(
     return ichud_to_budget, warnings, list(covered_set), invalid_reason
 
 
+# ₪ per budget — rounding differences in these sums are agorot or single shekels.
+_BALANCE_TOLERANCE = 10.0
+
+
+def _partial_integrity_warnings(
+    budgets_raw: list,
+    doch_budget_norms: set,
+    exec_sums: dict,
+    credited: dict,
+    school_code=None,
+) -> dict:
+    """Integrity checks behind "דיווח חסר", per budget → {kind: ₪}.
+
+    - double_credit: more was credited to plans than the doch holds for the budget
+      (one report counted for two plans — hides a gap).
+    - unmatched: reports of the budget that no plan was credited with (a plan may be
+      shown as missing although it was reported).
+    - misattributed: the doch's total differs from the plan file's "סכום שדווח" in
+      two or more budgets and the differences cancel out — reports were assigned to
+      the wrong budget.
+    - files_out_of_sync: the doch's total differs from "סכום שדווח" without such an
+      offset — usually a doch and a plan file downloaded at different times.
+    """
+    warnings: dict[str, dict] = {}
+    gaps: dict[str, float] = {}
+    for bud in budgets_raw:
+        norm = bud["norm_name"]
+        if norm not in doch_budget_norms:
+            continue
+        reported = sum(exec_sums.get(norm, {}).values())
+        cred = credited.get(norm, 0.0)
+        gaps[norm] = reported - bud["S"]
+        if cred - reported > 1:
+            warnings.setdefault(norm, {})["double_credit"] = round(cred - reported, 2)
+        if reported - cred > _BALANCE_TOLERANCE:
+            warnings.setdefault(norm, {})["unmatched"] = round(reported - cred, 2)
+
+    off = {n: g for n, g in gaps.items() if abs(g) > _BALANCE_TOLERANCE}
+    kind = "misattributed" if len(off) >= 2 and abs(sum(gaps.values())) <= _BALANCE_TOLERANCE else "files_out_of_sync"
+    for n, g in off.items():
+        warnings.setdefault(n, {})[kind] = round(g, 2)
+
+    for n, w in warnings.items():
+        logger.warning("partial-report integrity: school=%s budget=%s %s", school_code, n, w)
+    return warnings
+
+
 def _finalize_tikhnun_metrics(
     tikhnun_result: dict,
     results_clean: list,
@@ -2173,6 +2220,7 @@ def _finalize_tikhnun_metrics(
         tikhnun_result["overview"]["doch_analyzed"] = bool(doch_budget_norms)
 
     # Rebuild partial_rows
+    _balance_warnings: dict[str, dict] = {}
     if doch_budget_norms and results_clean and "partial_rows" in tikhnun_result:
         from collections import defaultdict as _defdict
 
@@ -2197,6 +2245,11 @@ def _finalize_tikhnun_metrics(
         # Must be per-budget to avoid cross-budget contamination when two budgets
         # share the same plan key (same report code + no plan number).
         exec_sums: dict[str, dict[str, float]] = {}
+        # Same sums split by report code: a plan planned under several codes must
+        # compare each code with what was reported under that code only — the
+        # plan-level total credited every code with all the others' reports too,
+        # hiding a shortfall in one code behind another code's reports.
+        exec_sums_by_code: dict[str, dict[tuple, float]] = {}
         for _zr in results_clean:
             _orig     = _zr["orig"]
             _a        = str(_orig[0]).strip() if _orig[0] else ""
@@ -2209,8 +2262,12 @@ def _finalize_tikhnun_metrics(
             _b    = str(_orig[1]).strip() if _orig[1] else ""
             _left = _d.split("-")[0].strip()
             _pk   = _left if _left.isdigit() else f"{_b}-{_d}"
+            _amt  = _to_f(_orig[11]) if _orig[11] is not None else 0.0
             bud_sums = exec_sums.setdefault(_bud_norm, {})
-            bud_sums[_pk] = bud_sums.get(_pk, 0.0) + (_to_f(_orig[11]) if _orig[11] is not None else 0.0)
+            bud_sums[_pk] = bud_sums.get(_pk, 0.0) + _amt
+            _ck = (_pk, _b)
+            bud_code_sums = exec_sums_by_code.setdefault(_bud_norm, {})
+            bud_code_sums[_ck] = bud_code_sums.get(_ck, 0.0) + _amt
 
         _fseen: set = set()
         _filtered_plans = []
@@ -2261,16 +2318,56 @@ def _finalize_tikhnun_metrics(
                 }
             _plan_groups[gk]["tikhnun"] += (_to_f(r[13]) if (len(r) > 13 and r[13] is not None) else _to_f(r[15])) if len(r) > 13 else (_to_f(r[15]) if len(r) > 15 else 0.0)
 
-        _new_partial = []
+        # Plan rows that are matched against the same reports are compared once,
+        # as one row: same budget + plan key + report code. Comparing each row on
+        # its own credited every one of them with all the reports (a plan without a
+        # number planned in two rows, e.g. 2,280 + 5,250, saw 7,530 reported twice).
+        _match_groups: dict = {}
         for g in _plan_groups.values():
+            mk = (g["budget_norm"], g["pkey"], g["rcode"])
+            if mk not in _match_groups:
+                _match_groups[mk] = dict(g)
+            else:
+                _match_groups[mk]["tikhnun"] += g["tikhnun"]
+
+        # Report codes planned per (budget, plan key). A plan with a single code keeps
+        # the plan-level match (a report filed under another code still counts for
+        # it, as before); only multi-code plans are matched code by code.
+        _codes_per_plan: dict = {}
+        for g in _match_groups.values():
+            _codes_per_plan.setdefault((g["budget_norm"], g["pkey"]), set()).add(g["rcode"])
+
+        # A multi-code plan's reports filed under a code it wasn't planned with still
+        # count for the plan (as they do for a single-code plan): they fill the
+        # shortfall of its planned codes, in plan order.
+        _plan_leftover: dict = {}
+        for (bn, pk), codes in _codes_per_plan.items():
+            if len(codes) > 1:
+                by_code = exec_sums_by_code.get(bn, {})
+                _plan_leftover[(bn, pk)] = exec_sums.get(bn, {}).get(pk, 0.0) - sum(
+                    by_code.get((pk, c), 0.0) for c in codes)
+
+        _new_partial = []
+        # Per budget: reported amount credited to plans, for the integrity checks below.
+        _credited: dict[str, float] = {}
+        for g in _match_groups.values():
             tikhnun_v   = g["tikhnun"]
             budget_norm = g["budget_norm"]
             pkey        = g["pkey"]
-            divuach     = exec_sums.get(budget_norm, {}).get(pkey, 0.0)
+            if len(_codes_per_plan.get((budget_norm, pkey), ())) > 1:
+                divuach = exec_sums_by_code.get(budget_norm, {}).get((pkey, g["rcode"]), 0.0)
+                _left = _plan_leftover.get((budget_norm, pkey), 0.0)
+                if _left > 0 and divuach < tikhnun_v:
+                    _take = min(_left, tikhnun_v - divuach)
+                    divuach += _take
+                    _plan_leftover[(budget_norm, pkey)] = _left - _take
+            else:
+                divuach = exec_sums.get(budget_norm, {}).get(pkey, 0.0)
             if divuach == 0.0 and g["mispnum"] == "אין":
                 _trail = _extract_trailing_plan_num(g["name"])
                 if _trail:
                     divuach = exec_sums.get(budget_norm, {}).get(_trail, divuach)
+            _credited[budget_norm] = _credited.get(budget_norm, 0.0) + divuach
             hefresh     = tikhnun_v - divuach
             if hefresh < 1:
                 continue
@@ -2281,10 +2378,20 @@ def _finalize_tikhnun_metrics(
                 "pct": pct, "budget": budget_norm,
             })
 
+        # What's left once every planned code is full is over-reporting of the plan,
+        # still credited to it — not reports that no plan was matched with.
+        for (bn, _pk), _left in _plan_leftover.items():
+            if _left > 0:
+                _credited[bn] = _credited.get(bn, 0.0) + _left
+
         _new_partial.sort(key=lambda x: (round(x["pct"], 4), -x["tikhnun"]))
         tikhnun_result["partial_rows"]        = _new_partial
         tikhnun_result["sum_hefresh_partial"] = sum(pr["hefresh"] for pr in _new_partial)
         tikhnun_result["partial_has_issues"]  = bool(_new_partial)
+
+        _balance_warnings.update(_partial_integrity_warnings(
+            budgets_raw, doch_budget_norms, exec_sums, _credited, tikhnun_result.get("school_code"),
+        ))
 
     # Build budgets list
     budgets_list = []
@@ -2305,6 +2412,7 @@ def _finalize_tikhnun_metrics(
                 "flexible_remaining": max(bud["H"] - bud["L"], 0.0),
                 "doch_analyzed":      bud.get("doch_analyzed", False),
                 "machozi_i":          bud.get("machozi_i", 0.0),
+                "balance_warning":    _balance_warnings.get(bud["norm_name"]),
             },
         })
 

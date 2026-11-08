@@ -56,6 +56,7 @@ import { ACADEMIC_YEARS, DEFAULT_ACADEMIC_YEAR } from "../constants/academicYear
 import { SLOT_LABELS, slotsForSchool } from "../components/meetings/meetingCoordinatorSlots";
 import { GEFEN_FILES_SLOT_LABELS, gefenFilesSlotsForSchool, resolveGefenFilesResponsibleForSlot } from "../components/meetings/gefenFilesResponsibleSlots";
 import { QuestionTooltip } from "../components/QuestionTooltip";
+import { PartialAmount, partialBalance } from "../components/PartialBalanceWarning";
 
 const DIVISION_LABEL = {
   tikkon: "חטיבה עליונה",
@@ -599,14 +600,14 @@ const CHECK_MOVABLE_COLS = [
   { key: "flexible_remaining", label: "גמיש" },
   { key: "sum_chayav",         label: "סכום חייב בדיווח" },
   { key: "sum_divuach",        label: "סכום שדווח" },
+  { key: "missing_report",     label: "סכום" },
+  { key: "partial_count",      label: "כמות תוכניות" },
   { key: "pct_divuach",        label: "כללי" },
   { key: "pct_tanuz",          label: "למודל תמרוץ" },
   { key: "rejected",           label: "כמות" },
   { key: "rejected_sum",       label: "סכום" },
   { key: "no_pdf",             label: "כמות" },
   { key: "no_pdf_sum",         label: "סכום" },
-  { key: "partial_count",      label: "כמות תוכניות" },
-  { key: "missing_report",     label: "סכום" },
   { key: "fn_count",           label: "כמות" },
   { key: "fn_sum",             label: "סכום" },
   { key: "gn_count",           label: "כמות" },
@@ -620,7 +621,7 @@ const COL_GROUPS = [
   { header: "אחוז דיווח",     keys: ["pct_divuach", "pct_tanuz"] },
   { header: "אסמכתאות שנדחו", keys: ["rejected", "rejected_sum"] },
   { header: "ללא PDF",         keys: ["no_pdf", "no_pdf_sum"] },
-  { header: "דיווח חסר",       keys: ["partial_count", "missing_report"] },
+  { header: "טרם דווח",        keys: ["missing_report", "partial_count"] },
   { header: "דווחו בכספים, לא שויכו בגפן", keys: ["fn_count", "fn_sum"] },
   { header: "שויכו בגפן, לא קיימות בכספים", keys: ["gn_count", "gn_sum"] },
 ];
@@ -751,7 +752,15 @@ function renderCheckLogCell(log, key, onAddFile, stageLabel) {
             reason={missingDochCheckReason(null, stageLabel)}
             onAddFile={onAddFile} anchorRight={false} />;
         }
-        return formatNum(tikhnun.sum_hefresh_partial ?? 0);
+        const missing = tikhnun.sum_hefresh_partial ?? 0;
+        // Multi-budget checks are always viewed per budget; here only a single budget's
+        // overview is comparable with the displayed totals.
+        const buds = tikhnun.budgets;
+        const balance = (!Array.isArray(buds) || buds.length === 1)
+          ? partialBalance({ sumChayav: t.sum_chayav, sumDivuach: t.sum_divuach, missing,
+                             overview: Array.isArray(buds) ? buds[0].overview : t })
+          : null;
+        return <PartialAmount text={formatNum(missing)} balance={balance} />;
       }
       return "—";
     }
@@ -938,7 +947,8 @@ function renderCheckLogCellForBudget(log, key, budgetName, onAddFile, stageLabel
       const total = tikhnun.partial_rows
         .filter(r => r.budget === budgetName)
         .reduce((s, r) => s + (r.hefresh ?? 0), 0);
-      return formatNum(total);
+      const balance = partialBalance({ sumChayav: ov.sum_chayav, sumDivuach: ov.sum_divuach, missing: total, overview: ov });
+      return <PartialAmount text={formatNum(total)} balance={balance} />;
     }
     case "rejected": {
       const tikhnun = log.summary?.tikhnun_result;

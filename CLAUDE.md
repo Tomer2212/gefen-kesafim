@@ -310,7 +310,7 @@ Both tables also hold `message_type` ('reminder' | 'upload_request' | 'upload_fo
 - **Why every 5 minutes:** each run transfers data from Supabase, about 30 KB today and about 750 KB once a task covers all 598 schools of a large org. This frequency keeps that far below the Pro plan's 250 GB egress, so raise it only after re-checking the usage page.
 - **Why a schedule, not hooks:** about 30 code paths write `meetings`, plus schools, goals and control letters. New paths need nothing added.
 - **`refresh_task_progress_for_org`:** one data fetch per org + year, narrowed to the schools its tasks cover (a full fetch took 6 s for a 598-school org), and writes only what changed. A failed token lookup skips the org instead of treating tokens as none, which would reopen closed "פגישה נוספת" tasks.
-- **The pg_cron job must be created by hand** with `cron.schedule('tasks-recompute-progress', '*/5 * * * *', ...)` at deployment (not yet created, since the endpoint isn't live before that), same `net.http_post` shape as `calls-process-new-calls`. Check `cron.job` before relying on it.
+- **The pg_cron job was created by hand** (2026-11-07, jobid 2) with `cron.schedule('tasks-recompute-progress', '*/5 * * * *', ...)`, same `net.http_post` shape as `calls-process-new-calls`. Check `cron.job` before relying on it.
 - **Runs are sequential and have no overlap guard:** about 3 s today. If a run nears 5 minutes as orgs grow, add a lease like `calls_integrations.scan_lock_until`.
 
 ### `school_update_requests` — advisors request changes, owners approve

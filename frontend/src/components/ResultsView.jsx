@@ -2,6 +2,7 @@ import { useState, useEffect, Fragment } from "react";
 import axios from "axios";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { PartialRowUpdatesModal } from "./PartialRowUpdatesModal";
+import { PartialAmount, partialBalance } from "./PartialBalanceWarning";
 
 // ---------------------------------------------------------------------------
 // Column definitions
@@ -115,7 +116,7 @@ const TAB_LABELS_MAP = {
   sikar:    "סקירה",
   rejected: "אסמכתאות שנדחו",
   nopdf:    "ללא PDF",
-  partial:  "דיווח חסר",
+  partial:  "טרם דווח",
   yozma:    "יוזמות וצרכים",
   nihul:    "ניהול ותפעול",
   kvua:     "תקציב קבוע",
@@ -1011,6 +1012,15 @@ function PartialTab({ tikhnun, activeBudgetName: propName, setActiveBudgetName: 
     : null;
   const rows = selectedBudget ? allRows.filter(r => r.budget === selectedBudget) : allRows;
   const totalHefresh = rows.reduce((s, r) => s + (r.hefresh ?? 0), 0);
+  const balanceOverview = selectedBudget
+    ? budgets.find(b => b.name === selectedBudget)?.overview
+    : (budgets?.length === 1 ? budgets[0].overview : tikhnun?.overview);
+  const balance = tikhnun?.has_doch && balanceOverview
+    ? partialBalance({
+        sumChayav: balanceOverview.sum_chayav, sumDivuach: balanceOverview.sum_divuach,
+        missing: totalHefresh, overview: balanceOverview,
+      })
+    : null;
 
   useEffect(() => {
     if (!schoolId || rows.length === 0) { setUpdatesByRowKey({}); return; }
@@ -1062,7 +1072,7 @@ function PartialTab({ tikhnun, activeBudgetName: propName, setActiveBudgetName: 
         <div className="glass-card-dark rounded-2xl overflow-hidden">
           <div className="flex items-center justify-center gap-2 py-12">
             <span className="text-sm font-700 text-amber-700" style={{ fontWeight: 700 }}>
-              לא הועלה קובץ דיווח ביצוע — לא ניתן לחשב ביצוע חלקי
+              לא הועלה קובץ דיווח ביצוע — לא ניתן לחשב את הסכום שטרם דווח
             </span>
           </div>
         </div>
@@ -1082,6 +1092,12 @@ function PartialTab({ tikhnun, activeBudgetName: propName, setActiveBudgetName: 
             </svg>
             <span className="text-sm font-700" style={{ fontWeight: 700, color: "#15803d" }}>כל התוכניות דווחו במלואן</span>
           </div>
+          {balance && (
+            <div className="flex items-center justify-center gap-1 pb-6 text-xs" dir="rtl">
+              <span className="text-slate-500">סכום שטרם דווח:</span>
+              <PartialAmount text="0 ₪" balance={balance} />
+            </div>
+          )}
         </div>
       </div>
     );
@@ -1092,12 +1108,11 @@ function PartialTab({ tikhnun, activeBudgetName: propName, setActiveBudgetName: 
       {pillsEl}
     <div className="glass-card-dark rounded-2xl overflow-hidden">
       <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-slate-100">
-        <h3 className="text-sm font-700 text-slate-700 text-right" style={{ fontWeight: 700 }}>תוכניות עם דיווח חסר</h3>
+        <h3 className="text-sm font-700 text-slate-700 text-right" style={{ fontWeight: 700 }}>תוכניות שטרם דווחו במלואן</h3>
         <div className="flex items-center gap-3">
           <span className="flex items-center gap-1 text-xs tabular-nums font-700" style={{ fontWeight: 700, color: "#1e293b" }}>
             <span className="text-slate-400" style={{ fontWeight: 400 }}>סכום שטרם דווח:</span>
-            {Math.abs(Math.round(totalHefresh)).toLocaleString("he-IL")}
-            <span style={{ color: "#64748b", fontWeight: 400 }}>₪</span>
+            <PartialAmount text={`${Math.abs(Math.round(totalHefresh)).toLocaleString("he-IL")} ₪`} balance={balance} />
           </span>
           <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-700"
             style={{ fontWeight: 700, background: "#fee2e2", color: "#dc2626" }}>
@@ -1126,7 +1141,7 @@ function PartialTab({ tikhnun, activeBudgetName: propName, setActiveBudgetName: 
               const rowGroups = (row.key && updatesByRowKey[row.key]) || [];
               const latest = latestSegmentOf(rowGroups);
               return (
-              <tr key={row.key || i} className="border-t border-slate-100" style={{ background: i % 2 === 0 ? "white" : "rgba(248,250,252,0.7)" }}>
+              <tr key={`${row.key ?? ""}|${row.rcode ?? ""}|${i}`} className="border-t border-slate-100" style={{ background: i % 2 === 0 ? "white" : "rgba(248,250,252,0.7)" }}>
                 <td className="text-right text-slate-700 text-xs"
                   style={{ ...CODE_COL_STYLE, padding: "10px 6px" }}>{row.rcode}</td>
                 <td className="px-4 py-2.5 text-right text-slate-700 text-xs">
