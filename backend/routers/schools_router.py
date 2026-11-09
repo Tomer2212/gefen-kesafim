@@ -2603,13 +2603,16 @@ def set_goal_status(
 # per division of the school's stage (six-year = beinayim + tikkon; no/other stage = one
 # 'general' section), so a school can be marked closed before any check. The stage wins
 # over a check's division for "גפן": a check-derived "גפן" combo outside the stage's
-# divisions is hidden unless it already holds a status or notes. Default sections are
-# virtual — a gefen_year_closures row is written only when a status/note is saved.
+# divisions is hidden unless it already holds a status or notes. A check showing the
+# school's main budget is פל"ג rather than גפן drops the default "גפן" section (see
+# _default_gefen_divisions). Default sections are virtual — a gefen_year_closures row is
+# written only when a status/note is saved.
 # ---------------------------------------------------------------------------
 
 _DIVISION_ORDER = {"general": -1, "yesodi": 0, "beinayim": 1, "tikkon": 2, "other": 3}
 
 GEFEN_DEFAULT_BUDGET = "גפן"
+PLG_BUDGET = 'פל"ג'  # normalize_budget_name()'s name for the budget that replaces גפן in some schools
 GENERAL_DIVISION = "general"
 _STAGE_GEFEN_DIVISIONS = {
     "yesodi": ["yesodi"], "beinayim": ["beinayim"], "tikkon": ["tikkon"],
@@ -2617,10 +2620,26 @@ _STAGE_GEFEN_DIVISIONS = {
 }
 
 
-def _default_gefen_divisions(stage: str | None) -> list[str]:
-    """Divisions that always get a "גפן" closure section — mirrored by
-    defaultGefenDivisions() in DashboardPage.jsx."""
+def _stage_gefen_divisions(stage: str | None) -> list[str]:
     return _STAGE_GEFEN_DIVISIONS.get(stage or "", [GENERAL_DIVISION])
+
+
+def _default_gefen_divisions(stage: str | None, check_combos: set) -> list[str]:
+    """Divisions that get a default "גפן" closure section — the stage's divisions, minus any
+    whose checks show פל"ג instead of גפן (in that division, or anywhere in the school when
+    no check of the year found גפן at all). Mirrored by defaultGefenDivisions() in
+    DashboardPage.jsx."""
+    budgets_by_division: dict = {}
+    for division_type, budget_name in check_combos:
+        budgets_by_division.setdefault(division_type, set()).add(budget_name)
+    all_budgets = set().union(*budgets_by_division.values()) if budgets_by_division else set()
+    school_is_plg = PLG_BUDGET in all_budgets and GEFEN_DEFAULT_BUDGET not in all_budgets
+
+    def is_plg(division_type):
+        budgets = budgets_by_division.get(division_type, set())
+        return PLG_BUDGET in budgets and GEFEN_DEFAULT_BUDGET not in budgets
+
+    return [d for d in _stage_gefen_divisions(stage) if not (school_is_plg or is_plg(d))]
 
 
 @router.get("/{school_id}/gefen-closures")
@@ -2650,7 +2669,8 @@ def list_gefen_closures(
                 db.table("schools").select("stage").eq("id", school_id).execute().data
             ) or []
             stage = school_rows[0].get("stage") if school_rows else None
-            default_divisions = _default_gefen_divisions(stage)
+            stage_divisions = _stage_gefen_divisions(stage)
+            default_divisions = _default_gefen_divisions(stage, check_combos)
 
             accounts = (
                 db.table("gefen_accounts")
@@ -2677,10 +2697,10 @@ def list_gefen_closures(
                 (r["division_type"], r["budget_name"]) for r in closure_rows
                 if r["budget_name"] == GEFEN_DEFAULT_BUDGET and (r.get("status") is not None or r.get("notes"))
             }
-            if GENERAL_DIVISION not in default_divisions:
+            if GENERAL_DIVISION not in stage_divisions:
                 check_combos = {
                     c for c in check_combos
-                    if c[1] != GEFEN_DEFAULT_BUDGET or c[0] in default_divisions or c in saved_gefen
+                    if c[1] != GEFEN_DEFAULT_BUDGET or c[0] in stage_divisions or c in saved_gefen
                 }
             combos = check_combos | {(d, GEFEN_DEFAULT_BUDGET) for d in default_divisions} | saved_gefen
 
