@@ -37,6 +37,20 @@ UNIQUE_TYPE = {
 }
 
 
+def _unique_type_for(all_budgets):
+    """UNIQUE_TYPE for this plan. A פל"ג school has פל"ג instead of גפ"ן as its
+    main budget, so the types UNIQUE_TYPE pins to 'תקציב גפ"ן' belong to the פל"ג
+    budget there — never to a גפ"ן budget the school doesn't have."""
+    def _norm(b):
+        return normalize_budget_name(str(b).replace('״', '"'))
+    if any(_norm(b) == 'גפן' for b in all_budgets):
+        return UNIQUE_TYPE
+    peleg = next((b for b in all_budgets if _norm(b) == 'פל"ג'), None)
+    if not peleg:
+        return UNIQUE_TYPE
+    return {t: (peleg if b == 'תקציב גפ"ן' else b) for t, b in UNIQUE_TYPE.items()}
+
+
 BUDGET_NAME_MAP = [
     (['חירום מחוזי', 'גפן חירום', 'חירום'], 'גפן חירום'),
     (['גפ\"ן', 'גפן'], 'גפן'),
@@ -164,7 +178,9 @@ def load_plan_file(fpath):
 
 def try_identify_row(r, results, plan_num_to_budgets, code_to_budgets,
                      plan_num_to_plan_stage, code_to_plan_stage, type_name_to_budget,
-                     academic_year=None, plan_type_to_budgets=None):
+                     academic_year=None, plan_type_to_budgets=None, unique_type=None):
+    if unique_type is None:
+        unique_type = UNIQUE_TYPE
     col_code = r['orig'][1]
     col_type = r['orig'][2]
     plan_num = r['plan_num']
@@ -210,8 +226,8 @@ def try_identify_row(r, results, plan_num_to_budgets, code_to_budgets,
                         stage_result = resolve_stage(col_code, psv, academic_year)
 
     # שלב 2 - סוג מענה
-    if budget_result is None and col_type in UNIQUE_TYPE:
-        budget_result = UNIQUE_TYPE[col_type]
+    if budget_result is None and col_type in unique_type:
+        budget_result = unique_type[col_type]
         psv = code_to_plan_stage.get(col_code)
         stage_result = resolve_stage(col_code, psv, academic_year)
 
@@ -276,6 +292,8 @@ def identify(doch_paths, plan_fpaths, academic_year=None):
         for k, v in pt_map.items():
             if k not in plan_type_to_budgets: plan_type_to_budgets[k] = set()
             plan_type_to_budgets[k] |= v
+
+    unique_type = _unique_type_for(all_budgets)
 
     possible_combos = set()
     for code, bfs in code_to_budgets.items():
@@ -389,7 +407,7 @@ def identify(doch_paths, plan_fpaths, academic_year=None):
             if not r['budget'] or not r['stage']:
                 b, s = try_identify_row(r, results, plan_num_to_budgets, code_to_budgets,
                                         plan_num_to_plan_stage, code_to_plan_stage, type_name_to_budget,
-                                        academic_year, plan_type_to_budgets)
+                                        academic_year, plan_type_to_budgets, unique_type)
                 if b:
                     r['budget'] = b; r['stage'] = s; changed = True
 

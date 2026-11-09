@@ -254,6 +254,8 @@ updated_at TIMESTAMPTZ
 ```
 Every user (owner/manager included) may edit/delete only their own notes; a NULL-author note is deletable by the owner only. The old free-text columns `school_year_admin_data.closure_parents_notes` / `closure_authority_notes` and `gefen_year_closures.notes` are a **server-maintained summary** (newest first, `dd/mm/yy HH:MM · name: content` per line) rewritten by `_sync_closure_notes_summary` — never write them directly; the dashboard/admin columns and task field-conditions read them.
 
+**"מערכת גפן" sections (`GET /schools/{id}/gefen-closures`):** check-derived (division, budget) combos from `check_metrics`, PLUS a default "גפן" section per division of the school's `stage` (`_default_gefen_divisions`: sheshshnati → beinayim + tikkon; empty/other stage → one `division_type='general'` section titled just "גפן"), so a school can be closed before any check. The stage wins for "גפן": a check-derived "גפן" combo outside the stage's divisions is hidden unless it already has a status/notes (a saved "גפן" section never disappears). Default sections are virtual — no row until a status/note is saved. `DashboardPage.jsx`'s `defaultGefenDivisions` mirrors the backend helper — keep them in sync.
+
 ### `meeting_activity` — per-meeting activity log ("תיעוד פעילות")
 ```sql
 id UUID PRIMARY KEY

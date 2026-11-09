@@ -5,7 +5,9 @@
 // 2. "מערכת גפן": one section per (division, budget) combo that has at least one check in
 //    this academic year (sourced from check_metrics via GET /{school_id}/gefen-closures),
 //    backed by gefen_year_closures (gefenClosures/saveGefenClosure, owned by SchoolPage).
-//    Purely dynamic — a school/year with no checks yet renders no second card at all.
+//    The "גפן" budget always has a default section per division of the school's stage (one
+//    untitled-division "general" section when the stage is empty/other), so it can be closed
+//    before any check — the endpoint decides the list; this tab only renders it.
 //
 // The two cards are deliberately separate elements (not one shared grid) so each card's
 // white/glass background ends exactly at its own content, and the gap between them shows
@@ -406,7 +408,7 @@ export function SchoolYearClosureTab({ yearAdminData, saveYearAdminField, gefenC
                 const titleRow = 2 + rowIdx * 4; // row 1 is the group header
                 const rows = [titleRow, titleRow + 1, titleRow + 2, titleRow + 3];
                 const key = `${combo.division_type}::${combo.budget_name}`;
-                const title = `${combo.division_label} — ${combo.budget_name}`;
+                const title = combo.division_label ? `${combo.division_label} — ${combo.budget_name}` : combo.budget_name;
                 return (
                   <AccountColumn
                     key={key}

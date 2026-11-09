@@ -53,7 +53,18 @@ const DIVISION_LABEL = {
   yesodi: "יסודי",
   other: "אחר",
   sheshshnati: "שש שנתי",
+  general: "ללא שלב",
 };
+
+// Divisions that always get a "גפן" year-closure section, even with no check — mirrors
+// _default_gefen_divisions() in backend/routers/schools_router.py.
+const GEFEN_DEFAULT_BUDGET = "גפן";
+const STAGE_GEFEN_DIVISIONS = {
+  yesodi: ["yesodi"], beinayim: ["beinayim"], tikkon: ["tikkon"], sheshshnati: ["beinayim", "tikkon"],
+};
+function defaultGefenDivisions(stage) {
+  return STAGE_GEFEN_DIVISIONS[stage] || ["general"];
+}
 
 const SCHOOL_STAGE_LABEL = {
   yesodi:      "יסודי",
@@ -596,18 +607,23 @@ function getGoalStatus(school, combo, goalKey, activeSummaryBudget) {
 // Resolves a dynamic "סגירת שנה <budget>" dashboard column's value for a school row —
 // relevant = whether this division ever ran a check for this budget this academic year
 // (check_metrics existence, same source the "סגירת שנה" tab's own "מערכת גפן" section uses
-// to discover its combos) — if not, the cell is "לא רלוונטי" regardless of gefen_year_closures.
+// to discover its combos), OR the "גפן" budget on one of the stage's default divisions, OR a
+// saved status for the combo — otherwise the cell is "לא רלוונטי". Like the card, the stage
+// wins for "גפן": a check on a division outside a known stage's divisions doesn't count.
 // status mirrors gefen_year_closures.status as-is (null/false both read as "לא סגור", same
 // as the "?? false" default on the toggle itself in SchoolYearClosureTab.jsx).
 function getGefenClosureState(school, divisionType, budgetName) {
   if (!divisionType) return { relevant: false, status: null };
-  const relevant = (school.check_metrics || []).some(
-    m => m.division_type === divisionType && m.budget_name === budgetName
-  );
-  if (!relevant) return { relevant: false, status: null };
   const entry = (school.gefen_closures || []).find(
     c => c.division_type === divisionType && c.budget_name === budgetName
   );
+  const defaults = defaultGefenDivisions(school.stage);
+  const checkHidden = budgetName === GEFEN_DEFAULT_BUDGET && !defaults.includes("general") && !defaults.includes(divisionType);
+  const relevant =
+    (!checkHidden && (school.check_metrics || []).some(m => m.division_type === divisionType && m.budget_name === budgetName))
+    || (budgetName === GEFEN_DEFAULT_BUDGET && defaults.includes(divisionType))
+    || (entry != null && entry.status != null);
+  if (!relevant) return { relevant: false, status: null };
   return { relevant: true, status: entry ? entry.status : null };
 }
 
@@ -2217,9 +2233,11 @@ export default function DashboardPage() {
   // One dashboard column per real budget_name seen across all loaded schools' check_metrics
   // (not DEFAULT_BUDGET_TYPES — real data only, per what was confirmed) — mirrors "סגירת
   // שנה" > "מערכת גפן" on the school card, just reflected here, never a new value of its own.
-  const gefenClosureColumns = useMemo(() => uniq(
-    schools.flatMap(s => (s.check_metrics || []).map(m => m.budget_name))
-  ).filter(Boolean).sort().map(budgetName => ({
+  // "גפן" is always included — every school has a default "גפן" closure section.
+  const gefenClosureColumns = useMemo(() => uniq([
+    GEFEN_DEFAULT_BUDGET,
+    ...schools.flatMap(s => (s.check_metrics || []).map(m => m.budget_name)),
+  ]).filter(Boolean).sort().map(budgetName => ({
     key: `gefen_closure_${budgetName}`,
     label: `סגירת שנה ${budgetName}`,
     budgetName,
@@ -2416,10 +2434,10 @@ export default function DashboardPage() {
   //    produce more than one row per division (pre-existing behavior, unrelated to closure
   //    columns).
   // 2. No goal filter, but a gefen-closure column ("סגירת שנה <budget>") is visible: always
-  //    exactly one row per PHYSICAL division (gefen_accounts), regardless of whether a
-  //    summary column is also visible — a closure column owns a fixed budget of its own
-  //    (not the row's), so it never needs a finer split. A division with zero checks this
-  //    year still gets a row (every one of its closure columns reads "לא רלוונטי").
+  //    exactly one row per division — the stage's default "גפן" divisions (six-year = two
+  //    rows, no stage = one "general" row) plus any gefen_accounts division — regardless of
+  //    whether a summary column is also visible — a closure column owns a fixed budget of
+  //    its own (not the row's), so it never needs a finer split.
   // 3. No goal filter, no closure column, only a summary column: narrow check_metrics combos
   //    down to the active summary budget — already one row per division (not per budget).
   const baseDisplayRows = useMemo(() => (!advancedFilterActive
@@ -2440,10 +2458,10 @@ export default function DashboardPage() {
           }
           combos = combos.filter(combo => evalGoalConditions(school, combo, goalConditions));
         } else if (hasVisibleGefenClosureCol) {
-          combos = (school.gefen_accounts && school.gefen_accounts.length
-            ? school.gefen_accounts.map(acc => ({ division_type: acc.division_type, budget_name: null }))
-            : [{ division_type: school.stage, budget_name: null }]
-          );
+          combos = uniq([
+            ...defaultGefenDivisions(school.stage),
+            ...(school.gefen_accounts || []).map(acc => acc.division_type),
+          ]).filter(Boolean).map(division_type => ({ division_type, budget_name: null }));
         } else {
           // hasVisibleSummaryCol only — narrow to the active summary budget so turning on a
           // column alone doesn't explode a school into one row per unrelated budget, only

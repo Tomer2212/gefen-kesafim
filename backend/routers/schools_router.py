@@ -2599,11 +2599,28 @@ def set_goal_status(
 # ---------------------------------------------------------------------------
 # "סגירת שנה" — Gefen-system closure per (division, budget) — see gefen_year_closures.
 # Combos are discovered dynamically from check_metrics (the same source the dashboard and
-# "בדיקות" tab already use), never hard-coded — a school/year with no checks yet has no
-# combos and the frontend hides the "מערכת גפן" section entirely.
+# "בדיקות" tab already use). On top of those, the "גפן" budget always has a default section
+# per division of the school's stage (six-year = beinayim + tikkon; no/other stage = one
+# 'general' section), so a school can be marked closed before any check. The stage wins
+# over a check's division for "גפן": a check-derived "גפן" combo outside the stage's
+# divisions is hidden unless it already holds a status or notes. Default sections are
+# virtual — a gefen_year_closures row is written only when a status/note is saved.
 # ---------------------------------------------------------------------------
 
-_DIVISION_ORDER = {"yesodi": 0, "beinayim": 1, "tikkon": 2, "other": 3}
+_DIVISION_ORDER = {"general": -1, "yesodi": 0, "beinayim": 1, "tikkon": 2, "other": 3}
+
+GEFEN_DEFAULT_BUDGET = "גפן"
+GENERAL_DIVISION = "general"
+_STAGE_GEFEN_DIVISIONS = {
+    "yesodi": ["yesodi"], "beinayim": ["beinayim"], "tikkon": ["tikkon"],
+    "sheshshnati": ["beinayim", "tikkon"],
+}
+
+
+def _default_gefen_divisions(stage: str | None) -> list[str]:
+    """Divisions that always get a "גפן" closure section — mirrored by
+    defaultGefenDivisions() in DashboardPage.jsx."""
+    return _STAGE_GEFEN_DIVISIONS.get(stage or "", [GENERAL_DIVISION])
 
 
 @router.get("/{school_id}/gefen-closures")
@@ -2625,9 +2642,15 @@ def list_gefen_closures(
                 .execute()
                 .data
             ) or []
-            combos = sorted(
-                {(r["division_type"], r["budget_name"]) for r in metric_rows if r.get("division_type") and r.get("budget_name")}
-            )
+            check_combos = {
+                (r["division_type"], r["budget_name"]) for r in metric_rows if r.get("division_type") and r.get("budget_name")
+            }
+
+            school_rows = (
+                db.table("schools").select("stage").eq("id", school_id).execute().data
+            ) or []
+            stage = school_rows[0].get("stage") if school_rows else None
+            default_divisions = _default_gefen_divisions(stage)
 
             accounts = (
                 db.table("gefen_accounts")
@@ -2648,10 +2671,28 @@ def list_gefen_closures(
             ) or []
             closure_by_combo = {(r["division_type"], r["budget_name"]): r for r in closure_rows}
 
+            # A "גפן" section that already holds a status or notes never disappears (e.g. after
+            # the school's stage changes, or a check classified it under another division).
+            saved_gefen = {
+                (r["division_type"], r["budget_name"]) for r in closure_rows
+                if r["budget_name"] == GEFEN_DEFAULT_BUDGET and (r.get("status") is not None or r.get("notes"))
+            }
+            if GENERAL_DIVISION not in default_divisions:
+                check_combos = {
+                    c for c in check_combos
+                    if c[1] != GEFEN_DEFAULT_BUDGET or c[0] in default_divisions or c in saved_gefen
+                }
+            combos = check_combos | {(d, GEFEN_DEFAULT_BUDGET) for d in default_divisions} | saved_gefen
+
+            def _label(division_type):
+                if division_type == GENERAL_DIVISION:
+                    return ""
+                return label_by_division.get(division_type, DIVISION_LABELS.get(division_type, division_type))
+
             result = [
                 {
                     "division_type": division_type,
-                    "division_label": label_by_division.get(division_type, DIVISION_LABELS.get(division_type, division_type)),
+                    "division_label": _label(division_type),
                     "budget_name": budget_name,
                     "status": closure_by_combo.get((division_type, budget_name), {}).get("status"),
                     "notes": closure_by_combo.get((division_type, budget_name), {}).get("notes"),

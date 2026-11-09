@@ -145,8 +145,20 @@ def _process_tikhnun(hakol_rows, perut_rows):
             if "מחוזי" in fval and "דיפרנציאלי" in fval:
                 machozi_I = _to_num(r[8])
 
+    # A פל"ג school's file has no גפ"ן control row: פל"ג replaces גפ"ן as the main
+    # budget, and its main row is the first פל"ג row with a total budget (H > 0).
     if ctrl is None:
-        raise ValueError("Could not find control row (תקציב גפ\"ן + תקציב כללי)")
+        for r in hakol_data:
+            aval = str(r[0]).strip().replace("״", '"').replace("“", '"').replace("”", '"') if r[0] else ""
+            if ('פל"ג' in aval or "פלג" in aval) and _to_num(r[7]) > 0:
+                ctrl = r
+                break
+
+    if ctrl is None:
+        raise ValueError(
+            "קובץ התכנון לא זוהה: לא נמצאה שורת תקציב ראשית "
+            "(תקציב גפ\"ן + תקציב כללי, או תקציב פל\"ג)"
+        )
 
     H = _to_num(ctrl[7])   # total budget
     L = _to_num(ctrl[11])  # planned
@@ -209,7 +221,14 @@ def _process_tikhnun(hakol_rows, perut_rows):
     sum_chayav = sum(_to_num(r[15]) for r in plans_with_R)
 
     # Yozma codes for this stage
-    yozma_codes = YOZMA_CODES.get(school_stage, YOZMA_CODES["תיכון"])
+    yozma_codes = YOZMA_CODES.get(school_stage)
+    if yozma_codes is None:
+        # Unrecognized stage (e.g. 'חט"ב + עליונה'): pick the set whose codes the
+        # file actually plans — only when exactly one set appears; otherwise keep
+        # the תיכון default. school_stage itself stays as is (division logic reads it).
+        planned_codes = {str(r[17]).strip() for r in unique_plans if r[17]}
+        found = [st for st, codes in YOZMA_CODES.items() if planned_codes & codes.keys()]
+        yozma_codes = YOZMA_CODES[found[0]] if len(found) == 1 else YOZMA_CODES["תיכון"]
     yozma_by_code = defaultdict(float)
     for r in unique_plans:
         rcode = str(r[17]).strip() if r[17] else ""
