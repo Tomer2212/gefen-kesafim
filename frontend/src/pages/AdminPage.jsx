@@ -5286,8 +5286,39 @@ export default function AdminPage() {
 
               {schools.some(s => s.status === "pending_deletion") && (
                 <h3 className="text-sm font-semibold text-slate-500 mb-3 flex items-center gap-2">
-                  🏫 בתי ספר פעילים ({activeAdminSchools.length})
+                  🏫 בתי ספר פעילים ({sortedAdminSchools.length !== activeAdminSchools.length
+                    ? `מוצגים ${sortedAdminSchools.length} מתוך ${activeAdminSchools.length}`
+                    : activeAdminSchools.length})
                 </h3>
+              )}
+
+              {/* Column filters are persisted per device, so always show which ones are active and
+                  how to drop them — otherwise a stray click can leave the table silently empty. */}
+              {adminColumnFilterActiveKeys.length > 0 && (
+                <div className="flex flex-wrap items-center gap-2 mb-3 px-3 py-2 rounded-xl bg-blue-50 border border-blue-100 text-sm" role="status" aria-label="סינונים פעילים בטבלה">
+                  <span className="font-medium text-blue-800">
+                    סינונים פעילים · מוצגים {sortedAdminSchools.length} מתוך {activeAdminSchools.length}:
+                  </span>
+                  {adminColumnFilterActiveKeys.map(key => {
+                    const label = ADMIN_ALL_COLUMNS.find(c => c.key === key)?.label || key;
+                    return (
+                      <span key={key} className="inline-flex items-center gap-1 pl-1 pr-2.5 py-0.5 rounded-full bg-white border border-blue-200 text-blue-800">
+                        {label}
+                        <button
+                          type="button"
+                          onClick={() => setAdminColumnFilters(prev => { const next = { ...prev }; delete next[key]; return next; })}
+                          className="w-5 h-5 rounded-full hover:bg-blue-100 leading-none"
+                          aria-label={`הסר סינון: ${label}`}
+                        >
+                          ✕
+                        </button>
+                      </span>
+                    );
+                  })}
+                  <button type="button" onClick={() => setAdminColumnFilters({})} className="text-blue-700 underline hover:text-blue-900 mr-1">
+                    נקה הכל
+                  </button>
+                </div>
               )}
 
               <div className="glass-card rounded-2xl overflow-hidden relative mb-3">
@@ -5295,12 +5326,10 @@ export default function AdminPage() {
                   <div role="status" aria-label="טוען נתוני ניהול" className="flex justify-center py-10">
                     <div aria-hidden="true" className="spinner w-8 h-8" />
                   </div>
-                ) : sortedAdminSchools.length === 0 ? (
-                  <div className="p-8 text-center">
-                    <p className="text-slate-500">לא נמצאו בתי ספר</p>
-                  </div>
                 ) : (
-                  <div ref={adminTableScrollRef} className="overflow-auto dash-scroll-x max-h-[70vh]">
+                  // The header (with its filter buttons) is rendered even when nothing matches, so a
+                  // filter can always be undone. min-h keeps room for a filter popover in that case.
+                  <div ref={adminTableScrollRef} className={`overflow-auto dash-scroll-x max-h-[70vh] ${sortedAdminSchools.length === 0 ? "min-h-[420px]" : ""}`}>
                     <table className="w-full text-sm border-collapse">
                       <thead>
                         <tr
@@ -5384,6 +5413,27 @@ export default function AdminPage() {
                         const padTop = virtualItems.length ? virtualItems[0].start : 0;
                         const padBottom = virtualItems.length ? totalSize - virtualItems[virtualItems.length - 1].end : 0;
                         const vColSpan = visibleAdminColOrder.length + 2;
+                        if (sortedAdminSchools.length === 0) {
+                          const hasFilter = adminColumnFilterActiveKeys.length > 0 || !!debouncedAdminSearch.trim();
+                          return (
+                            <tbody>
+                              <tr>
+                                <td colSpan={vColSpan} className="p-8 text-center">
+                                  <p className="text-slate-500">{hasFilter ? "לא נמצאו בתי ספר התואמים לסינון" : "לא נמצאו בתי ספר"}</p>
+                                  {adminColumnFilterActiveKeys.length > 0 && (
+                                    <button
+                                      type="button"
+                                      onClick={() => setAdminColumnFilters({})}
+                                      className="mt-3 px-4 py-1.5 rounded-full text-sm font-medium bg-blue-600 text-white hover:bg-blue-700"
+                                    >
+                                      נקה את כל הסינונים בעמודות
+                                    </button>
+                                  )}
+                                </td>
+                              </tr>
+                            </tbody>
+                          );
+                        }
                         return (
                           <>
                             {padTop > 0 && (
