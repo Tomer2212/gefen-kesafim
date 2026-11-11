@@ -160,6 +160,7 @@ export default function TaskMeetingResolutionModal({
     }
     if (school.coordinator_conflict) leaves.push(`conflict:${school.school_id}`);
     if (school.missing_service_type) leaves.push(`service_type:${school.school_id}`);
+    for (const fd of school.missing_field_days || []) leaves.push(`field_days:${school.school_id}:${fd.meeting_service_type}`);
     return leaves;
   }
   function schoolUnresolvedCount(school) {
@@ -471,6 +472,11 @@ export default function TaskMeetingResolutionModal({
       if (school.coordinator_conflict && !resolved(`conflict:${school.school_id}`)) {
         rows.push({ school_id: school.school_id, school_name: school.school_name, symbol: school.symbol, authority: school.authority, kind: "coordinator_conflict" });
       }
+      for (const fd of school.missing_field_days || []) {
+        if (!resolved(`field_days:${school.school_id}:${fd.meeting_service_type}`)) {
+          rows.push({ school_id: school.school_id, school_name: school.school_name, symbol: school.symbol, authority: school.authority, kind: "missing_field_days", detail: fd.meeting_service_type });
+        }
+      }
       if (school.missing_service_type && !resolved(`service_type:${school.school_id}`)) {
         rows.push({ school_id: school.school_id, school_name: school.school_name, symbol: school.symbol, authority: school.authority, kind: "missing_service_type" });
       }
@@ -675,6 +681,32 @@ export default function TaskMeetingResolutionModal({
                             </div>
                           );
                         })()}
+
+                        {(school.missing_field_days || []).map(fd => {
+                          cardCounter += 1;
+                          const n = cardCounter;
+                          const key = `field_days:${school.school_id}:${fd.meeting_service_type}`;
+                          if (resolved(key)) {
+                            return (
+                              <div key={key} className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 flex items-center gap-2">
+                                <span aria-hidden="true" className="text-emerald-600 text-xs font-bold">✓</span>
+                                <span className="text-xs text-emerald-800"><b>בעיה {n}:</b> נבדק שוב — יש עכשיו ימי שטח</span>
+                              </div>
+                            );
+                          }
+                          return (
+                            <div key={key} className="bg-white rounded-lg border border-amber-100 p-3 space-y-2">
+                              <p className="text-xs text-slate-700">
+                                <b>בעיה {n}:</b> הפגישה ({MEETING_SERVICE_TYPE_LABELS[fd.meeting_service_type] || fd.meeting_service_type}) פיזית ומוצעת רק בימי השטח של היועץ, אבל אין ליועץ של בית הספר יום שטח בטווח התאריכים.
+                                הוסיפו ימי שטח בדף הסבב (באזור "ימי שטח") ולחצו "בדוק שוב", או הסירו את בית הספר מהמשימה.
+                              </p>
+                              <button type="button" onClick={runCheck}
+                                className="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-amber-600 text-white hover:bg-amber-700">
+                                בדוק שוב
+                              </button>
+                            </div>
+                          );
+                        })}
 
                         {school.missing_service_type && (() => {
                           cardCounter += 1;

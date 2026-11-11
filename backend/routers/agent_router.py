@@ -731,7 +731,7 @@ def _exec_get_task_status(org_id: str, tool_input: dict) -> tuple[dict, str | No
         if not rows:
             return {"error": "משימה לא נמצאה"}, None
         task = rows[0]
-        progress = task_logic.compute_task_progress(org_id, task)
+        progress = task_logic.compute_task_progress(org_id, task, task.get("academic_year") or task_logic.DEFAULT_ACADEMIC_YEAR)
         return {"task_id": task_id, "name": task.get("name"), "status": task.get("status"), **progress}, None
 
     rows = (

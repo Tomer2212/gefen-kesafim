@@ -150,5 +150,5 @@ def test_endpoint_one_failing_org_does_not_stop_the_others(monkeypatch):
     monkeypatch.setattr(tasks_router.task_logic, "refresh_task_progress_for_org", refresh)
     resp = TestClient(app).post("/tasks/recompute-progress", headers={"X-Cron-Secret": "right"})
     assert resp.status_code == 200
-    assert resp.json() == {"ok": True, "orgs": 2, "tasks": 2, "changed": 1, "failed_orgs": 1, "links_reconciled": 0}
+    assert resp.json() == {"ok": True, "orgs": 2, "tasks": 2, "changed": 1, "failed_orgs": 1, "links_reconciled": 0, "rounds_changed": 0}
     assert seen == ["bad", "good"]

@@ -40,7 +40,7 @@ function GenericCell({ col, task }) {
 // One row of the redesigned Tasks table. Clicking the row (outside the 3-dot menu / rename
 // input) toggles inline expansion via TaskRowExpandedDetail, matching TaskMeetingResolutionModal
 // .jsx's existing expand/collapse card pattern, just hosted inside a real <table> row.
-function TaskRow({ task, visibleColumns, expanded, onToggleExpand, onChanged, onTaskRefreshed, onRequestDelete }) {
+function TaskRow({ task, visibleColumns, expanded, onToggleExpand, onChanged, onTaskRefreshed, onRequestDelete, roundName }) {
   const [renaming, setRenaming] = useState(false);
   const [nameDraft, setNameDraft] = useState(task.name || "");
   const [saving, setSaving] = useState(false);
@@ -113,6 +113,7 @@ function TaskRow({ task, visibleColumns, expanded, onToggleExpand, onChanged, on
                     {task.pinned_at && <span aria-label="נעוצה" title="נעוצה" className="text-blue-500">📌</span>}
                     {hasProblems && <span aria-label="קיימות בעיות שמונעות שליחה" title="קיימות בעיות שמונעות שליחה" className="text-red-500">⚠</span>}
                     {task.name}
+                    {roundName && <span title="סבב פגישות" className="text-[10px] bg-indigo-50 text-indigo-700 rounded-full px-1.5 py-0.5 whitespace-nowrap">סבב: {roundName}</span>}
                   </span>
                 )}
               </td>

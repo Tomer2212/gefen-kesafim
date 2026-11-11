@@ -575,6 +575,15 @@ export default function ConditionGroupsEditor({
                       </div>
                     )}
 
+                    {cond.use_field_days && (
+                      <div className="flex items-start justify-between gap-2 rounded-lg border border-violet-200 bg-violet-50/60 p-2.5 text-[12px] text-violet-900">
+                        <span>
+                          פגישה פיזית בימי שטח: כל בית ספר יוכל לקבוע רק בימי השטח של היועץ שלו שבתוך טווח התאריכים (מוגדרים בדף הסבב), ומיקום הפגישה יהיה "פיזי".
+                        </span>
+                        <button type="button" onClick={() => updateCondition(gi, ci, { use_field_days: false })} className="text-violet-700 hover:underline whitespace-nowrap">בטל</button>
+                      </div>
+                    )}
+
                     <div className="flex flex-col gap-2">
                       {(cond.date_segments || []).map((seg, segIdx) => {
                         const segments = cond.date_segments || [];

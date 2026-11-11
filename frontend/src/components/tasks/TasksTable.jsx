@@ -27,7 +27,7 @@ function defaultCompare(a, b) {
 // 13 columns: a per-column funnel (sort + type-adapted filter, ColumnFilterButton.jsx) instead
 // of a filter bar above the table, an "עמודות להצגה" visibility picker (ColumnPickerButton.jsx),
 // a per-row expand toggle (TaskRow.jsx), and a shared delete-confirm modal.
-export default function TasksTable({ tasks, onChanged, onTaskRefreshed, colVisible }) {
+export default function TasksTable({ tasks, onChanged, onTaskRefreshed, colVisible, roundNames }) {
   const [expandedId, setExpandedId] = useState(null); // single-open accordion — matches the
   // "dive into one task at a time" intent from the product spec; toggling a second row closes
   // the first rather than stacking multiple heavy per-school tables on screen at once.
@@ -157,6 +157,7 @@ export default function TasksTable({ tasks, onChanged, onTaskRefreshed, colVisib
                     onChanged={onChanged}
                     onTaskRefreshed={onTaskRefreshed}
                     onRequestDelete={setPendingDeleteId}
+                    roundName={roundNames?.[t.round_id]}
                   />
                 )}
               </VirtualRows>

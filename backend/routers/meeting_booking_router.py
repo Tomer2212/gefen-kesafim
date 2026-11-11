@@ -74,7 +74,33 @@ def _range_segments(range_row: dict) -> list[dict]:
     return range_row.get("segments") or [{"start_date": range_row["start_date"], "end_date": range_row["end_date"]}]
 
 
-def _local_meeting_busy_blocks(db, advisor_ids: list[str], start_iso: str, end_iso: str) -> list[dict]:
+def _is_remote(range_row: dict) -> bool:
+    return (range_row.get("meeting_type") or "remote") != "physical"
+
+
+def _field_day_blocks(db, advisor_ids: list[str], start_iso: str, end_iso: str) -> dict[str, list[dict]]:
+    """Advisors' field days (advisor_field_days, set from a "סבב פגישות") as all-day busy blocks:
+    an advisor out in the field is never offered for a remote meeting that day, on any link.
+    Physical ranges skip this (their dates ARE the field days). Non-fatal: on failure no day is
+    blocked, as before field days existed."""
+    if not advisor_ids:
+        return {}
+    try:
+        rows = (
+            db.table("advisor_field_days").select("advisor_id, day")
+            .in_("advisor_id", advisor_ids).gte("day", start_iso[:10]).lte("day", end_iso[:10])
+            .execute().data or []
+        )
+    except Exception as exc:
+        logger.warning("field days lookup failed (non-fatal, no day blocked): %s", exc)
+        return {}
+    out: dict[str, list[dict]] = {}
+    for r in rows:
+        out.setdefault(r["advisor_id"], []).append({"start": f"{r['day']}T00:00:00", "end": f"{r['day']}T23:59:00"})
+    return out
+
+
+def _local_meeting_busy_blocks(db, advisor_ids: list[str], start_iso: str, end_iso: str, remote: bool = True) -> list[dict]:
     """Round 9 — the local counterpart to graph_client.get_freebusy: meetings already written to
     our own `meetings` table (status="scheduled") for any of these advisors, overlapping the
     given date range. Consulted alongside Graph's freebusy so a just-booked meeting is excluded
@@ -100,6 +126,9 @@ def _local_meeting_busy_blocks(db, advisor_ids: list[str], start_iso: str, end_i
         if advisor_set.isdisjoint(m.get("advisor_ids") or []):
             continue
         blocks.append({"start": f"{m['meeting_date']}T{m['start_time']}:00", "end": f"{m['meeting_date']}T{m['end_time']}:00"})
+    if remote:
+        for field_blocks in _field_day_blocks(db, advisor_ids, start_iso, end_iso).values():
+            blocks.extend(field_blocks)
     return blocks
 
 
@@ -120,18 +149,18 @@ def _outlook_busy_by_advisor(db, org_id: str, advisor_ids: list[str], start_iso:
     return out
 
 
-def _busy_by_advisor(db, org_id: str, advisor_ids: list[str], start_iso: str, end_iso: str) -> dict[str, list[dict]] | None:
+def _busy_by_advisor(db, org_id: str, advisor_ids: list[str], start_iso: str, end_iso: str, remote: bool = True) -> dict[str, list[dict]] | None:
     """Each advisor's own busy blocks (Outlook + our scheduled meetings) — slot_policy checks
     every advisor's calendar separately. None when any advisor's calendar can't be read."""
     out = _outlook_busy_by_advisor(db, org_id, advisor_ids, start_iso, end_iso)
     if out is None:
         return None
-    for advisor_id, blocks in _local_meeting_busy_by_advisor(db, advisor_ids, start_iso, end_iso).items():
+    for advisor_id, blocks in _local_meeting_busy_by_advisor(db, advisor_ids, start_iso, end_iso, remote).items():
         out[advisor_id] = out[advisor_id] + blocks
     return out
 
 
-def _local_meeting_busy_by_advisor(db, advisor_ids: list[str], start_iso: str, end_iso: str) -> dict[str, list[dict]]:
+def _local_meeting_busy_by_advisor(db, advisor_ids: list[str], start_iso: str, end_iso: str, remote: bool = True) -> dict[str, list[dict]]:
     """_local_meeting_busy_blocks split per advisor, with one query for all of them."""
     out: dict[str, list[dict]] = {aid: [] for aid in advisor_ids}
     rows = (
@@ -145,6 +174,9 @@ def _local_meeting_busy_by_advisor(db, advisor_ids: list[str], start_iso: str, e
         for aid in m.get("advisor_ids") or []:
             if aid in out:
                 out[aid].append(block)
+    if remote:
+        for aid, blocks in _field_day_blocks(db, advisor_ids, start_iso, end_iso).items():
+            out[aid].extend(blocks)
     return out
 
 
@@ -489,7 +521,7 @@ def _policy_freebusy(db, token_row: dict, range_row: dict, segments: list[dict],
         return {"days": [], "requested_days": [] if requested else None, "ok": True}
 
     advisor_ids = range_row.get("advisor_ids") or token_row.get("advisor_ids") or [token_row["advisor_id"]]
-    busy = _busy_by_advisor(db, token_row["org_id"], advisor_ids, f"{dates[0]}T00:00:00Z", f"{dates[-1]}T23:59:59Z")
+    busy = _busy_by_advisor(db, token_row["org_id"], advisor_ids, f"{dates[0]}T00:00:00Z", f"{dates[-1]}T23:59:59Z", _is_remote(range_row))
     if busy is None:
         return {"days": [], "requested_days": [] if requested else None, "ok": False}
     pending = _pending_demand(db, token_row, range_row, advisor_ids, dates[0], dates[-1]) if min_window == slot_policy.AUTO_MIN_FREE_WINDOW else None
@@ -564,7 +596,7 @@ def get_booking_freebusy(token: str, month: str | None = None, range_key: str | 
             if advisor_busy is None:
                 return {"days": [], "ok": False}
             busy.extend(graph_client.reconcile_busy_blocks(db, advisor_busy))
-        busy.extend(_local_meeting_busy_blocks(db, advisor_ids, range_start, range_end))
+        busy.extend(_local_meeting_busy_blocks(db, advisor_ids, range_start, range_end, _is_remote(range_row)))
 
         days = []
         today = _now_il()
@@ -829,7 +861,7 @@ def _book_range_slot(db, token_row: dict, range_key: str, body: dict) -> dict:
         if not range_row.get("require_additional_meeting") and _range_existing_meeting(db, token_row, range_row):
             raise HTTPException(status_code=400, detail="כבר קיימת פגישה מסוג זה בטווח התאריכים הזה")
 
-        local_busy = _local_meeting_busy_by_advisor(db, advisor_ids, day_start, day_end)
+        local_busy = _local_meeting_busy_by_advisor(db, advisor_ids, day_start, day_end, _is_remote(range_row))
         busy_by_advisor = {aid: outlook_busy[aid] + local_busy[aid] for aid in advisor_ids}
         if uses_policy:
             # "יומן יעיל": the submitted time must be one the rule allows on the advisors'

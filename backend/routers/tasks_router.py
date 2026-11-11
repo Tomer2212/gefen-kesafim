@@ -20,6 +20,7 @@ from openpyxl import load_workbook, Workbook
 from pydantic import BaseModel
 
 import booking_requests
+import meeting_rounds
 import booking_token_logic
 import graph_client
 import school_activity
@@ -354,6 +355,26 @@ class TaskCreateIn(BaseModel):
     # {school_id: {meeting_service_type: {"advisor_ids":[...], "duration_minutes": int}}},
     # consulted by _build_meeting_ranges ahead of the school's own card defaults but
     # never written back to the school itself (see _build_meeting_ranges's docstring).
+    round_id: str | None = None  # "סבב פגישות" this task belongs to (meeting_rounds.py); its
+    # audience is always narrowed to the round's schools.
+    include_open_requests: bool = False  # round only: also send to schools that already hold a
+    # live request from another task of the round (by default they're left out).
+
+
+def _round_member_ids(db, org_id: str, round_id: str | None, include_open_requests: bool = True) -> set[str] | None:
+    """The schools a task of this round may reach (None = not in a round): the round's schools,
+    minus — unless include_open_requests — those already holding a live request from another of
+    its tasks, so any filter the task uses never sends a school a second request. 404 for a round
+    of another org, so a task can never be attached to it."""
+    if not round_id:
+        return None
+    rows = db.table("meeting_rounds").select("school_ids, excluded_school_ids").eq("id", round_id).eq("org_id", org_id).execute().data
+    if not rows:
+        raise HTTPException(status_code=404, detail="הסבב לא נמצא")
+    members = set(meeting_rounds.round_school_ids(rows[0]))
+    if not include_open_requests:
+        members -= meeting_rounds.open_request_school_ids(db, round_id)
+    return members
 
 
 class TaskPatchIn(BaseModel):
@@ -911,6 +932,35 @@ class MeetingRequirementIn(BaseModel):
     stage_scope_by_school: dict[str, str] | None = None  # the wizard's "התאמה אישית" — per-school
     # exceptions to stage_scope; read through _req_stage_scope.
     gefen_current_split: str | None = None  # "לפי סוג שירות" only — see task_logic.expand_meeting_condition
+    use_field_days: bool = False  # physical meetings offered only on the advisor's field days
+
+
+def _field_days_by_advisor(db, org_id: str, advisor_ids: list[str]) -> dict[str, list[str]]:
+    """{advisor_id: [day, ...]} — upcoming field days (advisor_field_days, set from a "סבב
+    פגישות") of these advisors."""
+    if not advisor_ids:
+        return {}
+    rows = (
+        db.table("advisor_field_days").select("advisor_id, day").eq("org_id", org_id)
+        .in_("advisor_id", list(dict.fromkeys(advisor_ids))).gte("day", date.today().isoformat())
+        .execute().data or []
+    )
+    out: dict[str, list[str]] = {}
+    for r in rows:
+        out.setdefault(r["advisor_id"], []).append(r["day"])
+    return {aid: sorted(days) for aid, days in out.items()}
+
+
+def _field_day_segments(windows: list[tuple[str, str]], advisor_ids: list[str], field_days: dict[str, list[str]]) -> list[dict]:
+    """A physical meeting's dates: the days every one of its advisors is in the field, inside
+    the requested windows — one single-day segment each."""
+    if not advisor_ids:
+        return []
+    common = set(field_days.get(advisor_ids[0]) or [])
+    for aid in advisor_ids[1:]:
+        common &= set(field_days.get(aid) or [])
+    days = sorted(d for d in common if any(lo <= d <= hi for lo, hi in windows))
+    return [{"start_date": d, "end_date": d} for d in days]
 
 
 def _same_gefen_current_advisors(school_advisors: dict) -> bool:
@@ -1005,7 +1055,8 @@ def _coordinator_problem(school: dict, channel: str, meeting_requirements: list 
 def _has_blocking_meeting_problem(entry: dict) -> bool:
     """Every problem kind except the informational opted_out one blocks sending."""
     return bool(entry["coordinator"] or entry["participants"] or entry["meeting_defaults"]
-                or entry["advisor_access"] or entry.get("coordinator_conflict") or entry.get("missing_service_type"))
+                or entry["advisor_access"] or entry.get("coordinator_conflict") or entry.get("missing_service_type")
+                or entry.get("missing_field_days"))
 
 
 def _check_meeting_problems(
@@ -1072,6 +1123,12 @@ def _check_meeting_problems(
         {sid: f.get("service_type") for sid, f in resolve_inherited_year_admin(db, school_ids, academic_year).items()}
         if has_by_service else {}
     )
+    # Physical meetings on field days: every advisor's upcoming field days, fetched once.
+    field_days = None
+    if any(r.use_field_days for r in task_requirements):
+        candidate_ids = {aid for by_type in advisor_map.values() for ids in by_type.values() for aid in ids}
+        candidate_ids |= {aid for r in task_requirements for aid in r.advisor_ids}
+        field_days = _field_days_by_advisor(db, org_id, list(candidate_ids))
 
     entries_by_school: dict[str, dict] = {}
     coordinator_emails: dict[str, str | None] = {}
@@ -1232,8 +1289,26 @@ def _check_meeting_problems(
                         "date_to": req.date_to,
                     })
 
+        # A physical meeting with no field day its advisors share in the window can't be offered.
+        missing_field_days = []
+        for req in meeting_requirements:
+            if not req.use_field_days or req.meeting_service_type not in _MEETING_TYPE_LABELS:
+                continue
+            type_override = school_overrides.get(req.meeting_service_type) or {}
+            if req.advisor_mode == "manual":
+                req_advisors = req.advisor_ids
+            else:
+                req_advisors = type_override.get("advisor_ids") or _default_advisor_ids(school_advisors, req.meeting_service_type)
+                if req.meeting_service_type == "gefen_current" and type_override.get("advisor_ids"):
+                    req_advisors = list(dict.fromkeys(_default_advisor_ids(school_advisors, req.meeting_service_type) + type_override["advisor_ids"]))
+            if not req_advisors:
+                continue  # reported as a missing advisor (meeting_defaults)
+            window = [(req.date_from or "0000-01-01", req.date_to or "9999-12-31")]
+            if not _field_day_segments(window, req_advisors, field_days or {}):
+                missing_field_days.append({"meeting_service_type": req.meeting_service_type, "advisor_ids": req_advisors})
+
         if (coordinator or participants or meeting_defaults or advisor_access or coordinator_conflict
-                or coordinator_missing_contact or missing_service_type):
+                or coordinator_missing_contact or missing_service_type or missing_field_days):
             entries_by_school[school["id"]] = {
                 "school_id": school["id"], "school_name": school["name"],
                 "symbol": school.get("symbol"), "authority": school.get("authority"),
@@ -1241,6 +1316,7 @@ def _check_meeting_problems(
                 "coordinator": coordinator, "participants": participants, "meeting_defaults": meeting_defaults,
                 "advisor_access": advisor_access, "coordinator_conflict": coordinator_conflict, "opted_out": None,
                 "missing_service_type": missing_service_type,
+                "missing_field_days": missing_field_days or None,
                 # Informational only (never blocks) — see card_only above.
                 "coordinator_missing_contact": coordinator_missing_contact,
             }
@@ -1365,6 +1441,7 @@ _MEETING_PROBLEM_KIND_LABELS = {
     "advisor": "יועץ מבצע חסר", "duration": "משך פגישה חסר",
     "coordinator_conflict": "אחראי/ת תיאום שונה לגפן ולשוטף",
     "missing_service_type": "לא הוגדר סוג שירות בכרטיס",
+    "missing_field_days": "אין ימי שטח ליועץ בטווח (פגישה פיזית)",
 }
 
 
@@ -1422,6 +1499,8 @@ def _prepare_meeting_conditions(success_criteria: dict | None, org_id: str) -> N
                     raise HTTPException(status_code=422, detail="ערך לא תקין בשאלה \"שמירה על יומן יעיל\"")
                 if c.get("start_grid_minutes") is not None and c["start_grid_minutes"] not in slot_policy.START_GRID_OPTIONS:
                     raise HTTPException(status_code=422, detail="ערך לא תקין בשאלה \"שעת התחלה של הפגישה\"")
+                if c.get("use_field_days"):
+                    c["meeting_type"] = "physical"  # field days are for in-person meetings only
                 if c.get("meeting_service_type") == task_logic.BY_SERVICE:
                     if c.get("gefen_current_split") not in task_logic.GEFEN_CURRENT_SPLIT_VALUES:
                         raise HTTPException(status_code=422, detail="יש לבחור איך לקבוע לבתי ספר גפן+שוטף עם יועצים שונים")
@@ -1478,6 +1557,8 @@ def create_task(body: TaskCreateIn, user: Annotated[dict, Depends(get_current_us
     success_criteria = body.success_criteria.model_dump() if body.success_criteria else None
     _prepare_meeting_conditions(success_criteria, user["org_id"])
 
+    round_members = _round_member_ids(get_admin_client(), user["org_id"], body.round_id, body.include_open_requests)
+
     scheduled_for_dt = _parse_dt(body.scheduled_for)
     is_future_scheduled = bool(scheduled_for_dt and scheduled_for_dt > datetime.now(timezone.utc))
     if is_future_scheduled:
@@ -1486,7 +1567,8 @@ def create_task(body: TaskCreateIn, user: Annotated[dict, Depends(get_current_us
     else:
         matched = task_logic.find_matching_schools(user["org_id"], criteria, body.academic_year, manual_school_ids=manual_ids)
         excluded = set(body.excluded_school_ids or [])
-        matched_school_ids = [m["school_id"] for m in matched if m["school_id"] not in excluded]
+        matched_school_ids = [m["school_id"] for m in matched if m["school_id"] not in excluded
+                              and (round_members is None or m["school_id"] in round_members)]
         status = "active"
 
     channel = body.message_config.channel
@@ -1523,6 +1605,8 @@ def create_task(body: TaskCreateIn, user: Annotated[dict, Depends(get_current_us
                     "track_success": body.track_success,
                     "is_meeting_task": body.is_meeting_task,
                     "meeting_overrides": body.meeting_overrides,
+                    "round_id": body.round_id,
+                    "round_include_open_requests": bool(body.round_id and body.include_open_requests),
                 })
                 .execute()
             )
@@ -1542,7 +1626,7 @@ def create_task(body: TaskCreateIn, user: Annotated[dict, Depends(get_current_us
             # Never send a "please do the thing" reminder to a school that already satisfies
             # success on day one (e.g. a manually-picked school that happens to already have
             # the meeting) — see plan decision #2.
-            progress = task_logic.compute_task_progress(user["org_id"], task)
+            progress = task_logic.compute_task_progress(user["org_id"], task, task.get("academic_year") or DEFAULT_ACADEMIC_YEAR)
             send_targets = [r["school_id"] for r in progress["schools"] if not r["done"]]
             _mark_already_done_schools(db, task["id"], matched_school_ids, send_targets)
         else:
@@ -1698,7 +1782,7 @@ def get_task(task_id: str, user: Annotated[dict, Depends(get_current_user)]):
             else:
                 logger.error("get_task failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
-    progress = task_logic.compute_task_progress(user["org_id"], task)
+    progress = task_logic.compute_task_progress(user["org_id"], task, task.get("academic_year") or DEFAULT_ACADEMIC_YEAR)
 
     # Round-2 redesign: success_criteria is now an independent tree from criteria (targeting).
     # The frontend needs to know the ACTUAL conditions condition_results reflects (whichever
@@ -2042,6 +2126,7 @@ _DIVISION_LABELS = {"tichon": "תיכון", "chativa": 'חט"ב', "both": 'תי�
 def _build_meeting_ranges(
     school: dict, meeting_conditions: list[dict],
     advisor_map: dict[str, list[str]], duration_row: dict, school_overrides: dict | None = None,
+    field_days: dict[str, list[str]] | None = None,
 ) -> list[dict] | None:
     """Structured, per-meeting-requirement booking link for 'קביעת פגישות' tasks (round 5) —
     mirrors schools_router.send_direct_coordination_request's ranges_data construction
@@ -2096,6 +2181,12 @@ def _build_meeting_ranges(
                 advisor_ids = list(dict.fromkeys(_default_advisor_ids(advisor_map, service_type) + override["advisor_ids"]))
         if not advisor_ids:
             continue
+        if c.get("use_field_days"):
+            # A physical meeting is offered only on its advisors' field days (in the same windows).
+            segments = _field_day_segments([(s["start_date"], s["end_date"]) for s in segments], advisor_ids, field_days or {})
+            if not segments:
+                continue
+            start_date, end_date = segments[0]["start_date"], segments[-1]["end_date"]
         if c.get("duration_mode") == "manual":
             duration_minutes = c.get("duration_minutes") or 60
         else:
@@ -2368,6 +2459,12 @@ def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[st
         # "takuma" reuses the school's גפן advisor list — see identical comment above.
         for school_id, by_type in advisor_map.items():
             by_type["takuma"] = by_type.get("gefen", [])
+    field_days = None
+    if needs_booking_link and any(c.get("use_field_days") for c in meeting_conditions):
+        candidate_ids = {aid for by_type in advisor_map.values() for ids in by_type.values() for aid in ids}
+        candidate_ids |= {aid for c in meeting_conditions for aid in (c.get("advisor_ids") or [])}
+        candidate_ids |= {aid for o in meeting_overrides.values() for t in (o or {}).values() for aid in ((t or {}).get("advisor_ids") or [])}
+        field_days = _field_days_by_advisor(db, task["org_id"], list(candidate_ids))
 
     try:
         notes_map = _fetch_school_notes_map(db, task["id"], school_ids)
@@ -2407,7 +2504,7 @@ def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[st
             ranges_data = school_conditions and _build_meeting_ranges(
                 school, school_conditions,
                 advisor_map.get(school["id"], {}), duration_map.get(school["id"], {}),
-                meeting_overrides.get(school["id"]),
+                meeting_overrides.get(school["id"]), field_days,
             )
             ranges_data = ranges_data or None
             if ranges_data is None:
@@ -2588,9 +2685,12 @@ def send_task_bulk(task_id: str, body: SendIn, user: Annotated[dict, Depends(get
     scheduled_at = _parse_dt(body.scheduled_at)
 
     if body.only_school_ids:
-        target_ids = body.only_school_ids
+        # Only the task's own schools — _queue_messages_for_schools reads any school id it gets,
+        # so an unchecked list could send this org's message to another org's school.
+        members = set(task.get("matched_school_ids") or [])
+        target_ids = [sid for sid in dict.fromkeys(body.only_school_ids) if sid in members]
     else:
-        progress = task_logic.compute_task_progress(user["org_id"], task)
+        progress = task_logic.compute_task_progress(user["org_id"], task, task.get("academic_year") or DEFAULT_ACADEMIC_YEAR)
         target_ids = [r["school_id"] for r in progress["schools"] if not r["done"]]
 
     if not target_ids:
@@ -2632,6 +2732,8 @@ def send_task_single(task_id: str, school_id: str, user: Annotated[dict, Depends
     _require_manager(user)
     db = get_admin_client()
     task = _get_task_or_404(db, task_id, user["org_id"])
+    if school_id not in set(task.get("matched_school_ids") or []):
+        raise HTTPException(status_code=404, detail="בית הספר אינו חלק מהמשימה")
 
     # A manual per-row send respects an active broadcast-reminder exclusion (does NOT consume a
     # 'once' — consumption is tied to an actual broadcast send). The manager must clear the
@@ -3111,7 +3213,8 @@ def _try_activate_scheduled_task(db, task: dict) -> dict:
         org_id, task.get("criteria") or {}, task.get("academic_year") or DEFAULT_ACADEMIC_YEAR,
         manual_school_ids=task.get("manual_school_ids"),
     )
-    matched_school_ids = [m["school_id"] for m in matched]
+    round_members = _round_member_ids(db, org_id, task.get("round_id"), bool(task.get("round_include_open_requests")))
+    matched_school_ids = [m["school_id"] for m in matched if round_members is None or m["school_id"] in round_members]
     db.table("org_tasks").update({
         "matched_school_ids": matched_school_ids,
         "status": "active",
@@ -3121,7 +3224,7 @@ def _try_activate_scheduled_task(db, task: dict) -> dict:
 
     if matched_school_ids:
         if task.get("track_success", True):
-            progress = task_logic.compute_task_progress(org_id, task)
+            progress = task_logic.compute_task_progress(org_id, task, task.get("academic_year") or DEFAULT_ACADEMIC_YEAR)
             send_targets = [r["school_id"] for r in progress["schools"] if not r["done"]]
             _mark_already_done_schools(db, task["id"], matched_school_ids, send_targets)
         else:
@@ -3191,8 +3294,14 @@ def recompute_tasks_progress(request: Request):
         except Exception as exc:
             failed_orgs += 1
             logger.warning("recompute_tasks_progress failed for org %s (retried next run): %s", org_id, exc)
+    # "סבבי פגישות" list numbers (meeting_rounds.py) — non-fatal per round.
+    rounds_changed = 0
+    try:
+        rounds_changed = meeting_rounds.refresh_round_caches(get_admin_client())
+    except Exception as exc:
+        logger.warning("recompute_tasks_progress: round cache refresh failed (non-fatal): %s", exc)
     return {"ok": True, "orgs": len(tasks_by_org), "tasks": len(tasks), "changed": changed, "failed_orgs": failed_orgs,
-            "links_reconciled": reopened_links}
+            "links_reconciled": reopened_links, "rounds_changed": rounds_changed}
 
 
 @router.post("/process-scheduled-tasks")

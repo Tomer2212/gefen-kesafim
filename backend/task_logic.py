@@ -402,8 +402,20 @@ def _fetch_schools_and_meetings(
                     advisor_ids_by_school[service_type].setdefault(r["school_id"], []).append(r["advisor_id"])
 
             try:
-                stats_rows = db.rpc("get_meetings_stats", {"school_ids": school_ids, "p_academic_year": academic_year}).execute().data or []
-                stats_by_school = {r["school_id"]: r for r in stats_rows}
+                # One row per (school, service_type) — summed per school, and paged like
+                # schools_router.list_schools (RPCs aren't covered by the 1,000-row auto-paging).
+                stats_rows: list = []
+                while True:
+                    page = (
+                        db.rpc("get_meetings_stats", {"school_ids": school_ids, "p_academic_year": academic_year})
+                        .order("school_id").order("service_type")
+                        .range(len(stats_rows), len(stats_rows) + 999)
+                        .execute().data or []
+                    )
+                    stats_rows.extend(page)
+                    if len(page) < 1000:
+                        break
+                stats_by_school = sum_meeting_stats(stats_rows)
             except Exception as exc:
                 _log.warning("get_meetings_stats RPC failed (non-fatal, meetings_completed/hours will be 0): %s", exc)
                 stats_by_school = {}
@@ -482,6 +494,17 @@ def _date_in_cond_window(md: str, cond: dict) -> bool:
     if date_to and md > date_to:
         return False
     return True
+
+
+def sum_meeting_stats(stats_rows: list[dict]) -> dict[str, dict]:
+    """get_meetings_stats returns one row per (school, service_type); a school's totals are
+    the sum over all of its rows."""
+    out: dict[str, dict] = {}
+    for r in stats_rows:
+        entry = out.setdefault(r["school_id"], {"completed": 0, "total_minutes": 0})
+        entry["completed"] += r.get("completed") or 0
+        entry["total_minutes"] += r.get("total_minutes") or 0
+    return out
 
 
 def _matching_meetings(cond: dict, school_meetings: list[dict], task_token_ids: set[str] | None = None) -> list[dict]:

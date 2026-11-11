@@ -1550,3 +1550,135 @@ def test_rerun_interrupted_cross_org_rejected(org_b_client):
 def test_rerun_interrupted_same_org_passes_org_check(org_a_client):
     resp = org_a_client.post(f"/analyze/rerun/{ORG_A_RUN_ID}")
     assert resp.status_code == 409, resp.text
+
+
+# ===========================================================================
+# "סבבי פגישות" (/rounds) — a round of another org is never readable, changeable or deletable,
+# and a task can't be attached to it. Rounds are created directly in the sandbox org (org B);
+# the attacker is org A (read-only org: every attack call is rejected before any write).
+# ===========================================================================
+
+def _make_round(admin_db, org_id=ORG_B_ID):
+    return admin_db.table("meeting_rounds").insert({
+        "org_id": org_id, "academic_year": "תשפ\"ז", "name": "בדיקת אבטחה", "start_date": "2099-12-01",
+        "end_date": "2099-12-31", "school_ids": [ORG_B_SCHOOL_ID],
+        "requirement": {"meeting_service_type": "gefen", "count_per_school": 1},
+    }).execute().data[0]
+
+
+@pytest.fixture
+def org_b_round(admin_db):
+    rnd = _make_round(admin_db)
+    yield rnd
+    admin_db.table("meeting_rounds").delete().eq("id", rnd["id"]).execute()
+
+
+def test_round_read_cross_org_rejected(org_a_client, org_b_round):
+    assert org_a_client.get(f"/rounds/{org_b_round['id']}").status_code == 404
+    listed = org_a_client.get("/rounds/", params={"academic_year": "תשפ\"ז"})
+    assert listed.status_code == 200 and org_b_round["id"] not in {r["id"] for r in listed.json()}
+
+
+def test_round_write_cross_org_rejected(org_a_client, org_b_round, admin_db):
+    rid = org_b_round["id"]
+    assert org_a_client.patch(f"/rounds/{rid}", json={"name": "נפרץ"}).status_code == 404
+    assert org_a_client.post(f"/rounds/{rid}/audience-apply", json={"remove_ids": [ORG_B_SCHOOL_ID]}).status_code == 404
+    assert org_a_client.post(f"/rounds/{rid}/audience-preview").status_code == 404
+    assert org_a_client.delete(f"/rounds/{rid}").status_code == 404
+    row = admin_db.table("meeting_rounds").select("name, school_ids").eq("id", rid).execute().data[0]
+    assert row["name"] == "בדיקת אבטחה" and row["school_ids"] == [ORG_B_SCHOOL_ID]
+
+
+def test_round_same_org_works(org_b_client, org_b_round):
+    rid = org_b_round["id"]
+    resp = org_b_client.get(f"/rounds/{rid}")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["round"]["id"] == rid
+    assert org_b_client.patch(f"/rounds/{rid}", json={"name": "סבב בדיקה"}).json()["name"] == "סבב בדיקה"
+
+
+def test_round_apply_never_adds_another_orgs_school(org_b_client, org_b_round, admin_db):
+    resp = org_b_client.post(f"/rounds/{org_b_round['id']}/audience-apply", json={"add_ids": [ORG_A_SCHOOL_ID]})
+    assert resp.status_code == 200, resp.text
+    assert ORG_A_SCHOOL_ID not in resp.json()["school_ids"]
+
+
+def test_task_cannot_join_another_orgs_round(org_b_client, admin_db):
+    foreign = _make_round(admin_db, org_id=str(uuid.uuid4()))  # a round of some other org
+    try:
+        resp = org_b_client.post("/tasks/", json={
+            "name": "בדיקת אבטחה", "criteria": {"groups": []}, "manual_school_ids": [ORG_B_SCHOOL_ID],
+            "message_config": {"recipient_role": "principal", "channel": "email_resend", "body_template": "x"},
+            "round_id": foreign["id"],
+        })
+        assert resp.status_code == 404, resp.text
+        assert admin_db.table("org_tasks").select("id").eq("round_id", foreign["id"]).execute().data == []
+    finally:
+        admin_db.table("meeting_rounds").delete().eq("id", foreign["id"]).execute()
+
+
+# ===========================================================================
+# Task sends reach only the task's own schools. _queue_messages_for_schools reads any school id
+# it is given, so an unchecked id (another org's school included) used to get this task's message.
+# Proven with a sandbox school outside the task, so a regression can only ever email the sandbox.
+# ===========================================================================
+
+def _org_b_task_and_outsider(admin_db):
+    tasks = admin_db.table("org_tasks").select("id, matched_school_ids").eq("org_id", ORG_B_ID).limit(50).execute().data or []
+    schools = [s["id"] for s in admin_db.table("schools").select("id").eq("org_id", ORG_B_ID).execute().data or []]
+    for t in tasks:
+        outside = [sid for sid in schools if sid not in set(t.get("matched_school_ids") or [])]
+        if outside:
+            return t, outside[0]
+    pytest.skip("no sandbox task with a school outside it")
+
+
+def _messages(admin_db, task_id, school_id):
+    return admin_db.table("org_task_messages").select("id").eq("task_id", task_id).eq("school_id", school_id).execute().data or []
+
+
+def test_bulk_send_ignores_schools_outside_the_task(org_b_client, admin_db):
+    task, outsider = _org_b_task_and_outsider(admin_db)
+    before = len(_messages(admin_db, task["id"], outsider))
+    resp = org_b_client.post(f"/tasks/{task['id']}/send", json={"only_school_ids": [outsider]})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["queued"] == 0
+    assert len(_messages(admin_db, task["id"], outsider)) == before
+
+
+def test_single_send_rejects_a_school_outside_the_task(org_b_client, admin_db):
+    task, outsider = _org_b_task_and_outsider(admin_db)
+    before = len(_messages(admin_db, task["id"], outsider))
+    assert org_b_client.post(f"/tasks/{task['id']}/schools/{outsider}/send").status_code == 404
+    assert len(_messages(admin_db, task["id"], outsider)) == before
+
+
+# ימי שטח (/rounds/{id}/field-days): never read or changed through another org's round, never
+# set for another org's advisor, and a day id of another org is never deleted.
+
+def test_field_days_cross_org_rejected(org_a_client, org_b_round, admin_db):
+    rid = org_b_round["id"]
+    assert org_a_client.get(f"/rounds/{rid}/field-days").status_code == 404
+    assert org_a_client.post(f"/rounds/{rid}/field-days", json={"advisor_id": ORG_A_MANAGER_ID, "days": ["2099-12-10"]}).status_code == 404
+    assert admin_db.table("advisor_field_days").select("id").eq("round_id", rid).execute().data == []
+
+
+def test_field_days_never_for_another_orgs_advisor(org_b_client, org_b_round, admin_db):
+    resp = org_b_client.post(f"/rounds/{org_b_round['id']}/field-days", json={"advisor_id": ORG_A_MANAGER_ID, "days": ["2099-12-10"]})
+    assert resp.status_code == 404, resp.text
+    assert admin_db.table("advisor_field_days").select("id").eq("advisor_id", ORG_A_MANAGER_ID).eq("day", "2099-12-10").execute().data == []
+
+
+def test_field_days_same_org_works_and_foreign_ids_are_not_deleted(org_b_client, org_b_round, admin_db):
+    rid = org_b_round["id"]
+    try:
+        resp = org_b_client.post(f"/rounds/{rid}/field-days", json={"advisor_id": ORG_B_MANAGER_ID, "days": ["2099-12-10"]})
+        assert resp.status_code == 200, resp.text
+        assert org_b_client.get(f"/rounds/{rid}/field-days").status_code == 200
+        foreign = admin_db.table("advisor_field_days").insert({
+            "org_id": str(uuid.uuid4()), "advisor_id": ORG_B_OWNER_ID, "day": "2099-12-11",
+        }).execute().data[0]
+        assert org_b_client.delete(f"/rounds/{rid}/field-days/{foreign['id']}").status_code == 200
+        assert admin_db.table("advisor_field_days").select("id").eq("id", foreign["id"]).execute().data  # still there
+    finally:
+        admin_db.table("advisor_field_days").delete().in_("day", ["2099-12-10", "2099-12-11"]).in_("advisor_id", [ORG_B_MANAGER_ID, ORG_B_OWNER_ID]).execute()

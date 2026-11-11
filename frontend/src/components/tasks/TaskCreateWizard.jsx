@@ -139,7 +139,34 @@ function SchoolPreviewList({ schools }) {
 // motivating examples — a plain "send to whoever already has a meeting" broadcast where
 // success is just the send itself, vs. a filtered audience whose success condition is
 // unrelated to the filter). useFocusTrap + role="dialog" per CLAUDE.md accessibility checklist.
-export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, onClose, onCreated }) {
+// roundContext (a task created from a "סבב פגישות" dashboard, components/rounds/RoundDashboard):
+// {round, schoolIds, physical, requireAdditional} — the audience is those schools, and the meeting
+// card starts from the round's requirement and dates. The backend narrows the audience to the
+// round's schools whatever is sent (tasks_router.create_task).
+function roundMeetingGroup(roundContext) {
+  const group = newConditionGroup(["meeting"]);
+  const base = group.conditions[0];
+  const { round, physical, requireAdditional } = roundContext;
+  const req = round.requirement || {};
+  return {
+    ...group,
+    conditions: [{
+      ...base,
+      meeting_service_type: req.meeting_service_type || "",
+      gefen_current_split: req.gefen_current_split || null,
+      stage_scope: req.stage_scope || null,
+      meeting_type: physical ? "physical" : "remote",
+      // Physical meetings of a round are offered on each advisor's field days (RoundFieldDays).
+      use_field_days: !!physical,
+      require_additional_meeting: requireAdditional ? true : null,
+      // The round's own dates, so a meeting held earlier in the round still counts for the task;
+      // the booking page never offers a day that's already gone.
+      date_segments: [{ ...base.date_segments[0], date_from: round.start_date, date_to: round.end_date }],
+    }],
+  };
+}
+
+export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, onClose, onCreated, roundContext = null }) {
   const [academicYear, setAcademicYear] = useState(initialAcademicYear || DEFAULT_ACADEMIC_YEAR);
   const { ref, handleKeyDown } = useFocusTrap(onClose);
   const PHASES = isMeetingTask
@@ -148,7 +175,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
   const [step, setStep] = useState(1);
   const phase = PHASES[step - 1];
 
-  const [name, setName] = useState("");
+  const [name, setName] = useState(roundContext ? `${roundContext.round.name}${roundContext.physical ? " — פיזי" : ""}` : "");
   const nameSet = name.trim().length > 0;
   const [scheduledFor, setScheduledFor] = useState(""); // datetime-local string, empty = evaluate now
   const [showScheduleModal, setShowScheduleModal] = useState(false);
@@ -161,17 +188,17 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
   // SCHOOL_DEFAULT_CONDITIONS) since the vast majority of meeting-scheduling tasks target
   // active clients and specify a service type; client_status is mandatory (non-removable),
   // service_type is just a convenience default the manager can still change/remove.
-  const [audienceMode, setAudienceMode] = useState("filter"); // "filter" | "manual"
+  const [audienceMode, setAudienceMode] = useState(roundContext?.schoolIds?.length ? "manual" : "filter"); // "filter" | "manual"
   const [fieldGroups, setFieldGroups] = useState([
     { conditions: SCHOOL_DEFAULT_CONDITIONS.map(c => ({ ...c })) },
   ]);
-  const [manualSchoolIds, setManualSchoolIds] = useState([]);
+  const [manualSchoolIds, setManualSchoolIds] = useState(roundContext?.schoolIds || []);
   const [showSchoolPicker, setShowSchoolPicker] = useState(false);
   // A meeting task can require SEVERAL distinct meetings, each with its own conditions (e.g.
   // "needs a גפן meeting AND a שוטף meeting") — same {groups:[{conditions:[...]}]} shape
   // ConditionGroupsEditor already expects, constrained to a single implied AND group
   // (hideGroupChrome) since all listed meetings are mandatory, not alternatives.
-  const [meetingRequirementGroups, setMeetingRequirementGroups] = useState([newConditionGroup(["meeting"])]);
+  const [meetingRequirementGroups, setMeetingRequirementGroups] = useState(() => [roundContext ? roundMeetingGroup(roundContext) : newConditionGroup(["meeting"])]);
   // Set once the manager tries to leave this step with an incomplete "פגישה" card — reveals
   // the inline alert + red-bordered fields in ConditionGroupsEditor.
   const [meetingReqAttempted, setMeetingReqAttempted] = useState(false);
@@ -270,6 +297,50 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
     return { stage_scope: cond.stage_scope || null, stage_scope_by_school: Object.keys(kept).length ? kept : null };
   }
   const [showPreviewList, setShowPreviewList] = useState(true);
+  // A task in a "סבב פגישות": whatever the filter, only the round's schools that still need a
+  // request get one — those already booked are left out, and so are those holding a live request
+  // from another task of the round unless "שלח גם להם" (the server enforces the same rule).
+  const [roundState, setRoundState] = useState(null); // {bySchool: {id: row}, taskNames} | {failed: true}
+  const [includeOpenRequests, setIncludeOpenRequests] = useState(!!roundContext?.includeOpenRequests);
+  useEffect(() => {
+    if (!roundContext) return;
+    axios.get(`/rounds/${roundContext.round.id}`)
+      .then(r => setRoundState({
+        bySchool: Object.fromEntries((r.data.schools || []).map(x => [x.school_id, x])),
+        taskNames: Object.fromEntries((r.data.tasks || []).map(t => [t.id, t.name])),
+      }))
+      .catch(() => setRoundState({ failed: true }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // Whether this task's meetings are in person — a school the round marks physical shouldn't get
+  // a remote request through a broad filter, and the other way round (skipped by default).
+  const taskIsPhysical = meetingRequirementGroups.some(g => g.conditions.some(c => c.use_field_days || c.meeting_type === "physical"));
+  const [skipLocationMismatch, setSkipLocationMismatch] = useState(true);
+  const roundSplit = useMemo(() => {
+    if (!roundContext || !roundState?.bySchool || !preview) return null;
+    const physical = new Set(roundContext.round.physical_school_ids || []);
+    const out = { outside: [], booked: [], open: [], mismatch: [], send: [] };
+    for (const s of preview.schools || []) {
+      const row = roundState.bySchool[s.school_id];
+      if (!row) out.outside.push(s);
+      else if (["done", "booked"].includes(row.status)) out.booked.push(row);
+      // Same rule as the server (meeting_rounds.open_request_school_ids): any live request.
+      else if (row.request?.open) out.open.push(row);
+      else if (physical.size && physical.has(row.school_id) !== taskIsPhysical) out.mismatch.push(row);
+      else out.send.push(row);
+    }
+    return out;
+  }, [roundContext, roundState, preview, taskIsPhysical]);
+  const roundSendIds = roundSplit
+    ? [...roundSplit.send, ...(includeOpenRequests ? roundSplit.open : []), ...(skipLocationMismatch ? [] : roundSplit.mismatch)].map(x => x.school_id)
+    : [];
+  const roundSkipIds = roundSplit
+    ? [...roundSplit.booked, ...(includeOpenRequests ? [] : roundSplit.open), ...(skipLocationMismatch ? roundSplit.mismatch : [])].map(x => x.school_id)
+    : [];
+  // The pre-send check covers exactly the schools that will get a request.
+  function checkAudiencePayload() {
+    return roundContext && roundSplit ? { criteria: { groups: [] }, manual_school_ids: roundSendIds } : audiencePayload();
+  }
   const [submitting, setSubmitting] = useState(false);
   const [switchingChannel, setSwitchingChannel] = useState(false);
   const [checkingContacts, setCheckingContacts] = useState(false);
@@ -579,8 +650,10 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
         success_criteria: buildSuccessCriteria(),
         track_success: trackSuccess,
         is_meeting_task: isMeetingTask,
-        excluded_school_ids: excludedIds || excludedSchoolIds,
+        excluded_school_ids: [...(excludedIds || excludedSchoolIds || []), ...roundSkipIds],
         meeting_overrides: overrides || meetingOverrides,
+        round_id: roundContext?.round.id || null,
+        include_open_requests: !!(roundContext && includeOpenRequests),
         message_config: {
           recipient_role: recipientRole,
           channel: effectiveChannel,
@@ -637,6 +710,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
         participant_roles: c.participant_roles || [],
         ...stageScopePayload(c),
         gefen_current_split: c.meeting_service_type === BY_SERVICE ? c.gefen_current_split || null : null,
+        use_field_days: !!c.use_field_days,
       };
     });
   }
@@ -659,7 +733,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
     }
     setCheckingMeetings(true);
     try {
-      const { criteria, manual_school_ids } = audiencePayload();
+      const { criteria, manual_school_ids } = checkAudiencePayload();
       const res = await axios.post("/tasks/meetings/check", {
         criteria, manual_school_ids, meeting_requirements: requirements, channel, academic_year: academicYear,
       });
@@ -801,6 +875,13 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
                 />
               </div>
 
+              {roundContext && (
+                <p role="note" className="text-sm bg-indigo-50 text-indigo-900 rounded-lg px-3 py-2 mt-4">
+                  משימה בסבב <b>{roundContext.round.name}</b>: {roundContext.schoolIds.length ? `נבחרו ${roundContext.schoolIds.length} בתי ספר מהסבב. ` : ""}
+                  אפשר לסנן כרגיל — המערכת תשלח רק לבתי ספר של הסבב שעוד צריכים בקשה, ותדלג על מי שכבר קבע או כבר קיבל בקשה במשימה אחרת של הסבב. סוג הפגישה והתאריכים מולאו לפי הסבב.
+                </p>
+              )}
+
               <div className="pt-8">
                 <p className="text-[1.2rem] font-semibold text-black mb-2">אילו בתי ספר ייכללו במשימה? (נא לסנן)</p>
                 <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -875,6 +956,46 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
                   <SchoolPreviewList schools={preview.schools} />
                 )}
               </div>
+
+              {roundContext && preview && (
+                <div className="text-sm border border-indigo-200 bg-indigo-50/60 rounded-lg px-3 py-2.5 flex flex-col gap-1.5">
+                  {!roundSplit ? (
+                    <span>{roundState?.failed ? "לא ניתן היה לבדוק מול הסבב — השרת ישמיט בכל מקרה בתי ספר שכבר קיבלו בקשה." : "בודק מול הסבב..."}</span>
+                  ) : (
+                    <>
+                      <span><b>{roundSendIds.length}</b> בתי ספר יקבלו בקשה במשימה הזו.</span>
+                      {roundSplit.booked.length > 0 && <span className="text-slate-600">{roundSplit.booked.length} כבר קבעו את הפגישה בסבב — לא יקבלו בקשה.</span>}
+                      {roundSplit.outside.length > 0 && <span className="text-slate-600">{roundSplit.outside.length} לא שייכים לסבב (או הוחרגו ממנו) — לא ייכללו.</span>}
+                      {roundSplit.open.length > 0 && (
+                        <span className="flex flex-col gap-1">
+                          <span className="text-slate-600">
+                            {roundSplit.open.length} כבר קיבלו בקשה פתוחה במשימה אחרת של הסבב
+                            {` (${[...new Set(roundSplit.open.map(x => roundState.taskNames[x.request?.task_id]).filter(Boolean))].join(", ")})`}
+                            {includeOpenRequests ? " — יקבלו בקשה נוספת." : " — לא יקבלו שוב."}
+                          </span>
+                          <label className="flex items-center gap-1.5 text-xs cursor-pointer w-fit">
+                            <input type="checkbox" checked={includeOpenRequests} onChange={e => setIncludeOpenRequests(e.target.checked)} className="accent-blue-600" />
+                            שלח גם להם (למשל אם התעלמו מהבקשה הקודמת)
+                          </label>
+                        </span>
+                      )}
+                      {roundSplit.mismatch.length > 0 && (
+                        <span className="flex flex-col gap-1">
+                          <span className="text-slate-600">
+                            {roundSplit.mismatch.length} מסומנים בסבב כ{taskIsPhysical ? "מרחוק" : "פיזיים"}, והמשימה הזו {taskIsPhysical ? "פיזית" : "מרחוק"}
+                            {skipLocationMismatch ? " — לא ייכללו (צרו להם משימה נפרדת מהסבב)." : " — ייכללו בכל זאת."}
+                          </span>
+                          <label className="flex items-center gap-1.5 text-xs cursor-pointer w-fit">
+                            <input type="checkbox" checked={!skipLocationMismatch} onChange={e => setSkipLocationMismatch(!e.target.checked)} className="accent-blue-600" />
+                            כלול גם אותם במשימה הזו
+                          </label>
+                        </span>
+                      )}
+                      {roundSendIds.length === 0 && <span role="alert" className="text-red-600">אין בסינון הזה בית ספר שצריך בקשה.</span>}
+                    </>
+                  )}
+                </div>
+              )}
 
               <div className="pt-1">
                 <button type="button" onClick={() => setShowScheduleModal(true)}
@@ -1314,8 +1435,8 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
 
       {showMeetingResolutionModal && (
         <TaskMeetingResolutionModal
-          criteria={audiencePayload().criteria}
-          manualSchoolIds={audiencePayload().manual_school_ids}
+          criteria={checkAudiencePayload().criteria}
+          manualSchoolIds={checkAudiencePayload().manual_school_ids}
           meetingRequirements={meetingRequirementsPayload().filter(r => r.meeting_service_type && r.participant_roles.length)}
           channel={channel}
           orgUsers={orgUsers}
