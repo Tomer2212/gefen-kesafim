@@ -9,6 +9,9 @@ import { SLOT_LABELS } from "../meetings/meetingCoordinatorSlots";
 const SURFACE_HEADERS = { headers: { "X-Client-Surface": "task_resolution" } };
 const COORDINATOR_TYPE_LABELS = { gefen: "גפן", current: "שוטף" };
 const DIVISION_LABELS = { tichon: "תיכון", chativa: 'חט"ב', both: 'תיכון וחט"ב' };
+// The school card's "סוג שירות" choices — for a "לפי סוג שירות בכרטיס" meeting at a school whose
+// card has none for the task's year.
+const SERVICE_TYPE_CHOICES = ["gefen", "current", "gefen_current", "district", "takuma"];
 
 // The school-card fields a meeting type's missing default must be saved into: the backend says
 // which ones (gefen_current → the missing ones of גפן/שוטף, takuma → גפן); older responses
@@ -156,6 +159,7 @@ export default function TaskMeetingResolutionModal({
       leaves.push(`access:${school.school_id}:${aa.meeting_service_type}:${aa.advisor_id}`);
     }
     if (school.coordinator_conflict) leaves.push(`conflict:${school.school_id}`);
+    if (school.missing_service_type) leaves.push(`service_type:${school.school_id}`);
     return leaves;
   }
   function schoolUnresolvedCount(school) {
@@ -389,6 +393,26 @@ export default function TaskMeetingResolutionModal({
     }
   }
 
+  // --- "לפי סוג שירות בכרטיס" at a school whose card has no service type for the task's year ---
+  // Saved to the card (logged in its "תיעוד פעולות"), then the check re-runs: the chosen type
+  // may surface problems of its own, e.g. no advisor of that type on the card yet.
+  async function handleSaveServiceType(school) {
+    const key = `service_type:${school.school_id}`;
+    const value = draftValue(key, "");
+    if (!value) return;
+    setSavingKey(key);
+    setSaveError(null);
+    try {
+      await axios.put(`/schools/${school.school_id}/year-admin-data`, { service_type: value }, { params: { academic_year: academicYear }, ...SURFACE_HEADERS });
+      markResolved(key);
+      runCheck();
+    } catch {
+      setSaveError(`שמירת סוג השירות עבור ${school.school_name} נכשלה — נסה שוב.`);
+    } finally {
+      setSavingKey(null);
+    }
+  }
+
   // --- Combined "גפן+שוטף" meeting whose גפן and שוטף coordinators are different people ---
   async function chooseCoordinator(schoolIds, coordinatorType) {
     setSaveError(null);
@@ -446,6 +470,9 @@ export default function TaskMeetingResolutionModal({
       }
       if (school.coordinator_conflict && !resolved(`conflict:${school.school_id}`)) {
         rows.push({ school_id: school.school_id, school_name: school.school_name, symbol: school.symbol, authority: school.authority, kind: "coordinator_conflict" });
+      }
+      if (school.missing_service_type && !resolved(`service_type:${school.school_id}`)) {
+        rows.push({ school_id: school.school_id, school_name: school.school_name, symbol: school.symbol, authority: school.authority, kind: "missing_service_type" });
       }
     }
     const res = await axios.post("/tasks/meetings/export-missing", { rows }, { responseType: "blob" });
@@ -643,6 +670,40 @@ export default function TaskMeetingResolutionModal({
                                 <button type="button" onClick={() => handleSaveCoordinator(school)} disabled={saving || !isDraftComplete(draft)}
                                   className="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">
                                   {saving ? "שומר..." : "שמור"}
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })()}
+
+                        {school.missing_service_type && (() => {
+                          cardCounter += 1;
+                          const n = cardCounter;
+                          const key = `service_type:${school.school_id}`;
+                          const saving = savingKey === key;
+                          if (resolved(key)) {
+                            return (
+                              <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 flex items-center gap-2">
+                                <span aria-hidden="true" className="text-emerald-600 text-xs font-bold">✓</span>
+                                <span className="text-xs text-emerald-800"><b>בעיה {n}:</b> נשמר בכרטיס סוג שירות: {MEETING_SERVICE_TYPE_LABELS[draftValue(key, "")]}</span>
+                              </div>
+                            );
+                          }
+                          return (
+                            <div className="bg-white rounded-lg border border-amber-100 p-3 space-y-2">
+                              <p className="text-xs text-slate-700">
+                                <b>בעיה {n}:</b> הפגישה נקבעת לפי סוג השירות בכרטיס בית הספר, אבל בכרטיס לא הוגדר סוג שירות לשנת {academicYear}. בחרו סוג שירות — הוא יישמר בכרטיס בית הספר.
+                              </p>
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <label className="sr-only" htmlFor={`${key}-select`}>סוג שירות</label>
+                                <select id={`${key}-select`} value={draftValue(key, "")} onChange={e => setDraftValue(key, e.target.value)}
+                                  className="text-xs border border-amber-300 rounded-lg px-2 py-1.5">
+                                  <option value="">בחר סוג שירות</option>
+                                  {SERVICE_TYPE_CHOICES.map(t => <option key={t} value={t}>{MEETING_SERVICE_TYPE_LABELS[t]}</option>)}
+                                </select>
+                                <button type="button" onClick={() => handleSaveServiceType(school)} disabled={saving || !draftValue(key, "")}
+                                  className="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">
+                                  {saving ? "שומר..." : "שמור בכרטיס"}
                                 </button>
                               </div>
                             </div>

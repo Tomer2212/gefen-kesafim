@@ -910,6 +910,35 @@ class MeetingRequirementIn(BaseModel):
     # _principal_slots_for_school); ignored for non-six-year schools either way.
     stage_scope_by_school: dict[str, str] | None = None  # the wizard's "התאמה אישית" — per-school
     # exceptions to stage_scope; read through _req_stage_scope.
+    gefen_current_split: str | None = None  # "לפי סוג שירות" only — see task_logic.expand_meeting_condition
+
+
+def _same_gefen_current_advisors(school_advisors: dict) -> bool:
+    """Same rule as task_logic's advisor_gefen_current_same: both lists non-empty and equal."""
+    gefen, current = set(school_advisors.get("gefen") or []), set(school_advisors.get("current") or [])
+    return bool(gefen) and gefen == current
+
+
+def _school_meeting_conditions(conditions: list[dict], school_advisors: dict, card_service_type: str | None) -> list[dict] | None:
+    """A task's meeting conditions as asked of ONE school: each "לפי סוג שירות בכרטיס" condition
+    becomes that school's plain meeting(s) (task_logic.expand_meeting_condition), so everything
+    after this runs on plain types only. None when one can't be resolved (no service type in the
+    card for the task's year) — the school can't be sent anything sensible."""
+    same = _same_gefen_current_advisors(school_advisors)
+    out: list[dict] = []
+    for c in conditions:
+        expanded = task_logic.expand_meeting_condition(c, card_service_type, same)
+        if not expanded:
+            return None
+        out.extend(expanded)
+    return out
+
+
+def _school_meeting_requirements(
+    meeting_requirements: list["MeetingRequirementIn"], school_advisors: dict, card_service_type: str | None,
+) -> list["MeetingRequirementIn"] | None:
+    expanded = _school_meeting_conditions([r.model_dump() for r in meeting_requirements], school_advisors, card_service_type)
+    return None if expanded is None else [MeetingRequirementIn(**c) for c in expanded]
 
 
 def _req_stage_scope(req: MeetingRequirementIn, school: dict) -> str | None:
@@ -976,7 +1005,7 @@ def _coordinator_problem(school: dict, channel: str, meeting_requirements: list 
 def _has_blocking_meeting_problem(entry: dict) -> bool:
     """Every problem kind except the informational opted_out one blocks sending."""
     return bool(entry["coordinator"] or entry["participants"] or entry["meeting_defaults"]
-                or entry["advisor_access"] or entry.get("coordinator_conflict"))
+                or entry["advisor_access"] or entry.get("coordinator_conflict") or entry.get("missing_service_type"))
 
 
 def _check_meeting_problems(
@@ -1035,6 +1064,14 @@ def _check_meeting_problems(
     )
     duration_by_school = {r["school_id"]: r for r in duration_rows}
     needs_phone = channel == "whatsapp_twilio"
+    # "לפי סוג שירות בכרטיס" — each school's requirements are its own plain meetings, from its
+    # service type for this year (carried forward from an earlier year, as everywhere else).
+    task_requirements = meeting_requirements
+    has_by_service = any(r.meeting_service_type == task_logic.BY_SERVICE for r in task_requirements)
+    service_type_by_school = (
+        {sid: f.get("service_type") for sid, f in resolve_inherited_year_admin(db, school_ids, academic_year).items()}
+        if has_by_service else {}
+    )
 
     entries_by_school: dict[str, dict] = {}
     coordinator_emails: dict[str, str | None] = {}
@@ -1043,7 +1080,21 @@ def _check_meeting_problems(
         if not school:
             continue
 
-        coordinator = _coordinator_problem(school, channel, meeting_requirements)
+        school_advisors = advisor_map.get(school["id"], {})
+        meeting_requirements = task_requirements
+        missing_service_type = None
+        if has_by_service:
+            meeting_requirements = _school_meeting_requirements(
+                task_requirements, school_advisors, service_type_by_school.get(school["id"]),
+            )
+            if meeting_requirements is None:
+                # Nothing can be asked of this school until its card says what service it gets;
+                # the other requirements are still checked so one fix-up round covers everything.
+                missing_service_type = {"academic_year": academic_year}
+                meeting_requirements = [r for r in task_requirements if r.meeting_service_type != task_logic.BY_SERVICE]
+
+        # With nothing resolvable yet there are no ranges whose coordinator could be checked.
+        coordinator = _coordinator_problem(school, channel, meeting_requirements) if meeting_requirements or not missing_service_type else None
         coordinator_emails[school["id"]] = _resolve_recipient_with_cascade(
             school, "meeting_coordinator", True, channel,
         )["recipient"].get("email")
@@ -1113,7 +1164,6 @@ def _check_meeting_problems(
         coordinator_missing_contact = list(card_only.values()) or None
 
         duration_row = duration_by_school.get(school["id"], {})
-        school_advisors = advisor_map.get(school["id"], {})
         school_overrides = (meeting_overrides or {}).get(school["id"]) or {}
         type_needs: dict[str, dict] = {}
         for req in meeting_requirements:
@@ -1183,13 +1233,14 @@ def _check_meeting_problems(
                     })
 
         if (coordinator or participants or meeting_defaults or advisor_access or coordinator_conflict
-                or coordinator_missing_contact):
+                or coordinator_missing_contact or missing_service_type):
             entries_by_school[school["id"]] = {
                 "school_id": school["id"], "school_name": school["name"],
                 "symbol": school.get("symbol"), "authority": school.get("authority"),
                 "stage": school.get("stage"), "meeting_coordinators": school.get("meeting_coordinators") or {},
                 "coordinator": coordinator, "participants": participants, "meeting_defaults": meeting_defaults,
                 "advisor_access": advisor_access, "coordinator_conflict": coordinator_conflict, "opted_out": None,
+                "missing_service_type": missing_service_type,
                 # Informational only (never blocks) — see card_only above.
                 "coordinator_missing_contact": coordinator_missing_contact,
             }
@@ -1313,6 +1364,7 @@ _MEETING_PROBLEM_KIND_LABELS = {
     "coordinator": "אחראי/ת תיאום פגישות חסר/ה", "participant": "איש קשר חסר",
     "advisor": "יועץ מבצע חסר", "duration": "משך פגישה חסר",
     "coordinator_conflict": "אחראי/ת תיאום שונה לגפן ולשוטף",
+    "missing_service_type": "לא הוגדר סוג שירות בכרטיס",
 }
 
 
@@ -1370,6 +1422,12 @@ def _prepare_meeting_conditions(success_criteria: dict | None, org_id: str) -> N
                     raise HTTPException(status_code=422, detail="ערך לא תקין בשאלה \"שמירה על יומן יעיל\"")
                 if c.get("start_grid_minutes") is not None and c["start_grid_minutes"] not in slot_policy.START_GRID_OPTIONS:
                     raise HTTPException(status_code=422, detail="ערך לא תקין בשאלה \"שעת התחלה של הפגישה\"")
+                if c.get("meeting_service_type") == task_logic.BY_SERVICE:
+                    if c.get("gefen_current_split") not in task_logic.GEFEN_CURRENT_SPLIT_VALUES:
+                        raise HTTPException(status_code=422, detail="יש לבחור איך לקבוע לבתי ספר גפן+שוטף עם יועצים שונים")
+                    # Each school's advisor and length come from its own card, per meeting type.
+                    c["advisor_mode"], c["advisor_ids"] = "default", []
+                    c["duration_mode"], c["duration_minutes"] = "default", None
     conditions = [
         c for g in (success_criteria or {}).get("groups") or [] for c in g.get("conditions") or []
         if c.get("type") == "meeting" and c.get("stage_scope_by_school")
@@ -2289,10 +2347,10 @@ def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[st
         .select("school_id, client_status, meeting_duration_gefen, meeting_duration_current, meeting_duration_district")
         .eq("academic_year", academic_year).in_("school_id", school_ids).execute().data or []
     )
-    client_status_map = {
-        sid: fields.get("client_status")
-        for sid, fields in resolve_inherited_year_admin(db, school_ids, academic_year).items()
-    }
+    inherited_year_admin = resolve_inherited_year_admin(db, school_ids, academic_year)
+    client_status_map = {sid: fields.get("client_status") for sid, fields in inherited_year_admin.items()}
+    # "לפי סוג שירות בכרטיס" meeting conditions resolve per school from this.
+    service_type_map = {sid: fields.get("service_type") for sid, fields in inherited_year_admin.items()}
     duration_map = {r["school_id"]: r for r in year_rows}
 
     # Only fetched when actually needed — a structured meeting-scheduling task's booking link
@@ -2343,11 +2401,15 @@ def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[st
 
         ranges_data = None
         if needs_booking_link and meeting_conditions:
-            ranges_data = _build_meeting_ranges(
-                school, meeting_conditions,
+            school_conditions = _school_meeting_conditions(
+                meeting_conditions, advisor_map.get(school["id"], {}), service_type_map.get(school["id"]),
+            )
+            ranges_data = school_conditions and _build_meeting_ranges(
+                school, school_conditions,
                 advisor_map.get(school["id"], {}), duration_map.get(school["id"], {}),
                 meeting_overrides.get(school["id"]),
             )
+            ranges_data = ranges_data or None
             if ranges_data is None:
                 # Defensive hardening (round 6) — POST /tasks/meetings/check + the resolution
                 # modal's blocking gate should make this unreachable in practice, but a school

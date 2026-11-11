@@ -64,12 +64,22 @@ const EMPTY_MEETING_CONDITION = {
   // requirement's meeting is actually scheduled. Only meaningful when meeting_service_type
   // != "current"; null there. Mirrors DirectCoordinationRangeIn.requested_upload_years.
   requested_upload_years: [DEFAULT_ACADEMIC_YEAR],
+  // "לפי סוג שירות בכרטיס" only — required there: "separate" | "combined".
+  gefen_current_split: null,
 };
 // "גפן+שוטף" — one combined meeting: the school card's גפן and שוטף advisors together, for the
 // sum of both card lengths (resolved per school on the backend, _build_meeting_ranges).
 const MEETING_TYPE_PILLS = [
   { value: "gefen", label: "גפן" }, { value: "current", label: "שוטף" }, { value: "gefen_current", label: "גפן+שוטף" },
   { value: "district", label: "מחוז" }, { value: "takuma", label: "תקומה" },
+  // Resolved per school from its card's service type (backend task_logic.expand_meeting_condition).
+  { value: "by_service", label: "לפי סוג שירות בכרטיס בית ספר" },
+];
+export const BY_SERVICE = "by_service";
+// "לפי סוג שירות" — what a גפן+שוטף school whose גפן and שוטף advisors differ is asked for.
+export const GEFEN_CURRENT_SPLIT_OPTIONS = [
+  { value: "separate", label: "פגישות נפרדות", hint: "פגישת גפן עם יועץ הגפן ופגישת שוטף עם יועץ השוטף, כל אחת במשך שלה" },
+  { value: "combined", label: "פגישה אחת עם כלל היועצים", hint: "פגישת גפן+שוטף אחת עם שני היועצים, במשך המצטבר של שתיהן" },
 ];
 const PARTICIPANT_ROLE_OPTIONS = [
   { value: "principal", label: "מנהל/ת" }, { value: "secretary", label: "מנהלנ/ית" }, { value: "finance_contact", label: "אחראי/ת כספים" },
@@ -99,7 +109,7 @@ export function formatDuration(minutes) {
 
 // (DirectStyleDateInput now lives in its own file — see ./DirectStyleDateInput.jsx — reused by
 // PersonTaskCreateWizard.jsx's "תאריך יעד" field.)
-const MEETING_SERVICE_TYPE_LABELS = { gefen: "גפן", current: "שוטף", gefen_current: "גפן+שוטף", district: "מחוז", takuma: "תקומה" };
+const MEETING_SERVICE_TYPE_LABELS = { gefen: "גפן", current: "שוטף", gefen_current: "גפן+שוטף", district: "מחוז", takuma: "תקומה", by_service: "לפי סוג הפגישה" };
 export function isMeetingDateSegmentsComplete(cond) {
   const segments = cond.date_segments || [];
   return segments.length > 0 && segments.every(s => s.date_from && s.date_to && s.date_from <= s.date_to);
@@ -113,6 +123,7 @@ export function isMeetingDateSegmentsComplete(cond) {
 export function isMeetingRequirementComplete(cond, hasSixYearSchool = true) {
   return !!(
     cond.meeting_service_type && isMeetingDateSegmentsComplete(cond) && (cond.participant_roles || []).length > 0 &&
+    (cond.meeting_service_type !== BY_SERVICE || cond.gefen_current_split) &&
     (!needsStageScope(cond) || !hasSixYearSchool || cond.stage_scope) &&
     cond.allow_time_range_search !== null && cond.allow_time_range_search !== undefined &&
     isEfficientCalendarComplete(cond.min_free_window_minutes, cond.start_grid_minutes) &&
@@ -516,7 +527,9 @@ export default function ConditionGroupsEditor({
                         {MEETING_TYPE_PILLS.map(opt => (
                           <button key={opt.value} type="button"
                             aria-pressed={cond.meeting_service_type === opt.value}
-                            onClick={() => updateCondition(gi, ci, { meeting_service_type: opt.value })}
+                            onClick={() => updateCondition(gi, ci, opt.value === BY_SERVICE
+                              ? { meeting_service_type: opt.value, advisor_mode: "default", advisor_ids: [], duration_mode: "default", duration_minutes: null }
+                              : { meeting_service_type: opt.value })}
                             className={`text-sm px-4 py-1.5 rounded-lg border transition-colors ${
                               cond.meeting_service_type === opt.value
                                 ? "bg-blue-600 border-blue-600 text-white font-semibold"
@@ -527,6 +540,40 @@ export default function ConditionGroupsEditor({
                         ))}
                       </div>
                     </fieldset>
+
+                    {cond.meeting_service_type === BY_SERVICE && (
+                      <div className="flex flex-col gap-2 rounded-lg border border-blue-200 bg-blue-50/60 p-3">
+                        <p className="text-[12px] text-slate-700">
+                          כל בית ספר יתבקש לקבוע את הפגישה של סוג השירות שלו בכרטיס בית הספר (לשנת המשימה):
+                          גפן ← פגישת גפן, שוטף ← פגישת שוטף, מחוז ← פגישת מחוז, תקומה ← פגישת תקומה (עם יועץ הגפן),
+                          גפן+שוטף עם אותו יועץ ← פגישת גפן+שוטף אחת. היועץ ומשך הפגישה נלקחים מהכרטיס.
+                        </p>
+                        <fieldset className="flex flex-col gap-1.5">
+                          <legend className="text-xs font-medium text-black">
+                            בית ספר עם סוג שירות גפן+שוטף, שיש לו יועץ גפן ויועץ שוטף שונים — איך לקבוע? <span className="text-red-600">(שדה חובה)</span>
+                          </legend>
+                          <div className={`flex flex-wrap gap-2 ${showValidationErrors && !cond.gefen_current_split ? "border border-red-400 rounded-lg p-1.5 -m-1.5" : ""}`}>
+                            {GEFEN_CURRENT_SPLIT_OPTIONS.map(opt => (
+                              <button key={opt.value} type="button"
+                                aria-pressed={cond.gefen_current_split === opt.value}
+                                onClick={() => updateCondition(gi, ci, { gefen_current_split: opt.value })}
+                                className={`text-sm px-4 py-1.5 rounded-lg border transition-colors ${
+                                  cond.gefen_current_split === opt.value
+                                    ? "bg-blue-600 border-blue-600 text-white font-semibold"
+                                    : "border-black text-black bg-white hover:bg-slate-50"
+                                }`}>
+                                {opt.label}
+                              </button>
+                            ))}
+                          </div>
+                          {cond.gefen_current_split && (
+                            <p className="text-[11px] text-slate-600">
+                              {GEFEN_CURRENT_SPLIT_OPTIONS.find(o => o.value === cond.gefen_current_split)?.hint}
+                            </p>
+                          )}
+                        </fieldset>
+                      </div>
+                    )}
 
                     <div className="flex flex-col gap-2">
                       {(cond.date_segments || []).map((seg, segIdx) => {
@@ -599,6 +646,7 @@ export default function ConditionGroupsEditor({
                       <div className="flex flex-col gap-1 relative group">
                         <label htmlFor={`mtg-advisor-${gi}-${ci}`} className="text-xs font-medium text-black">יועץ מבצע</label>
                         <select id={`mtg-advisor-${gi}-${ci}`}
+                          disabled={cond.meeting_service_type === BY_SERVICE}
                           value={cond.advisor_mode === "manual" ? (cond.advisor_ids?.[0] || "") : "__default__"}
                           onChange={e => {
                             const v = e.target.value;
@@ -607,19 +655,23 @@ export default function ConditionGroupsEditor({
                           }}
                           className="text-sm border border-black rounded-lg px-2.5 py-1.5 w-full">
                           <option value="__default__">
-                            {cond.meeting_service_type ? `יועץ מלווה [${MEETING_SERVICE_TYPE_LABELS[cond.meeting_service_type]}]` : "יועץ מלווה"}
+                            {cond.meeting_service_type === BY_SERVICE ? "יועץ מלווה לפי הכרטיס"
+                              : cond.meeting_service_type ? `יועץ מלווה [${MEETING_SERVICE_TYPE_LABELS[cond.meeting_service_type]}]` : "יועץ מלווה"}
                           </option>
                           {(orgUsers || []).map(u => <option key={u.id} value={u.id}>{u.full_name || u.email}</option>)}
                         </select>
                         <div className="pointer-events-none absolute -top-7 right-0 opacity-0 group-hover:opacity-100 transition-opacity bg-amber-400 text-amber-950 text-[11px] font-medium px-2 py-1 rounded-md shadow-lg whitespace-nowrap z-10">
                           {cond.meeting_service_type === "gefen_current"
                             ? "יועצי הגפן והשוטף מהכרטיס — פגישה אחת עם כולם, במועד שכולם פנויים"
-                            : "בהתאם להגדרה בכרטיס בית הספר"}
+                            : cond.meeting_service_type === BY_SERVICE
+                              ? "היועץ המלווה של סוג הפגישה של כל בית ספר, מהכרטיס שלו"
+                              : "בהתאם להגדרה בכרטיס בית הספר"}
                         </div>
                       </div>
                       <div className="flex flex-col gap-1 relative group">
                         <label htmlFor={`mtg-duration-${gi}-${ci}`} className="text-xs font-medium text-black">משך הפגישה</label>
                         <select id={`mtg-duration-${gi}-${ci}`}
+                          disabled={cond.meeting_service_type === BY_SERVICE}
                           value={cond.duration_mode === "manual" ? String(cond.duration_minutes || 60) : "__default__"}
                           onChange={e => {
                             const v = e.target.value;
@@ -628,7 +680,8 @@ export default function ConditionGroupsEditor({
                           }}
                           className="text-sm border border-black rounded-lg px-2.5 py-1.5 w-full">
                           <option value="__default__">
-                            {cond.meeting_service_type === "gefen_current"
+                            {cond.meeting_service_type === BY_SERVICE ? "זמן פגישה לפי הכרטיס"
+                              : cond.meeting_service_type === "gefen_current"
                               ? "זמן פגישה [גפן + שוטף]"
                               : cond.meeting_service_type ? `זמן פגישה [${MEETING_SERVICE_TYPE_LABELS[cond.meeting_service_type]}]` : "זמן פגישה"}
                           </option>
@@ -637,7 +690,9 @@ export default function ConditionGroupsEditor({
                         <div className="pointer-events-none absolute -top-7 right-0 opacity-0 group-hover:opacity-100 transition-opacity bg-amber-400 text-amber-950 text-[11px] font-medium px-2 py-1 rounded-md shadow-lg whitespace-nowrap z-10">
                           {cond.meeting_service_type === "gefen_current"
                             ? "חיבור זמן הפגישה של גפן ושל שוטף מכרטיס בית הספר (למשל שעה + שעה וחצי = 2:30 שעות)"
-                            : "בהתאם להקצאה בכרטיס בית הספר"}
+                            : cond.meeting_service_type === BY_SERVICE
+                              ? "זמן הפגישה של סוג הפגישה של כל בית ספר, מהכרטיס שלו (בפגישת גפן+שוטף — שניהם יחד)"
+                              : "בהתאם להקצאה בכרטיס בית הספר"}
                         </div>
                       </div>
                       <div className="flex flex-col gap-1">
@@ -705,7 +760,7 @@ export default function ConditionGroupsEditor({
 
                     <fieldset className="flex flex-col gap-1.5">
                       <legend className="text-xs font-medium text-black">
-                        במידה ולבית הספר כבר קיימת פגישת {cond.meeting_service_type ? MEETING_SERVICE_TYPE_LABELS[cond.meeting_service_type] : "זו"} בטווח התאריכים שהוגדר, האם לבקש לקבוע פגישה נוספת? <span className="text-red-600">(שדה חובה)</span>
+                        במידה ולבית הספר כבר קיימת פגישת {cond.meeting_service_type && cond.meeting_service_type !== BY_SERVICE ? MEETING_SERVICE_TYPE_LABELS[cond.meeting_service_type] : "זו"} בטווח התאריכים שהוגדר, האם לבקש לקבוע פגישה נוספת? <span className="text-red-600">(שדה חובה)</span>
                       </legend>
                       <div className={`flex gap-2 ${showValidationErrors && (cond.require_additional_meeting === null || cond.require_additional_meeting === undefined) ? "border border-red-400 rounded-lg p-1.5 -m-1.5" : ""}`}>
                         {[{ value: true, label: "כן" }, { value: false, label: "לא" }].map(opt => (
@@ -727,6 +782,7 @@ export default function ConditionGroupsEditor({
                       <fieldset className="flex flex-col gap-1.5">
                         <legend className="text-xs font-medium text-black">
                           קבצים של אילו שנות לימוד תתבקש המנהלנית להעלות
+                          {cond.meeting_service_type === BY_SERVICE && <span className="text-slate-500 font-normal"> (לא חל על פגישות שוטף)</span>}
                         </legend>
                         <div className="flex gap-3">
                           {ACADEMIC_YEARS.map(year => (
@@ -754,6 +810,7 @@ export default function ConditionGroupsEditor({
                         <legend className="text-xs font-medium text-black">עבור בתי ספר שש שנתיים בלבד</legend>
                         <p className="text-[11px] text-slate-400">
                           לאילו מהחטיבות תרצו לקבוע פגישה?
+                          {cond.meeting_service_type === BY_SERVICE && " (לא חל על פגישות שוטף, שהן לכל בית הספר)"}
                         </p>
                         <div className={`flex flex-wrap gap-2 ${showValidationErrors && !cond.stage_scope ? "border border-red-400 rounded-lg p-1.5 -m-1.5" : ""}`}>
                           {STAGE_SCOPE_OPTIONS.map(opt => (

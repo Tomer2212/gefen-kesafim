@@ -9,7 +9,7 @@ import OutlookLimitModal from "./OutlookLimitModal";
 import TaskMeetingResolutionModal from "./TaskMeetingResolutionModal";
 import ConditionGroupsEditor, { newConditionGroup } from "./ConditionGroupsEditor";
 import ColumnPickerButton, { loadColVisible } from "./ColumnPickerButton";
-import { describeCondition, describeConditionColumn, firstDisplayGroupConditions, formatDateDMY, stageScopeLabel } from "./taskShared";
+import { describeCondition, describeConditionColumn, firstDisplayGroupConditions, formatDateDMY, resolvedTypesLabel, stageScopeLabel } from "./taskShared";
 
 // The per-school table's middle band — every column between the fixed "בית ספר" (always first)
 // and the fixed "הערות" onward. Toggle visibility + drag-reorder among themselves, same idea as
@@ -132,6 +132,9 @@ function renderConditionCell(res) {
       ) : (
         <span aria-hidden="true" className="text-red-500 font-bold">✕</span>
       )}
+      {resolvedTypesLabel(res) && (
+        <span className="block text-[10px] text-slate-500 whitespace-nowrap">{resolvedTypesLabel(res)}</span>
+      )}
       {res.requested_scope && (
         <span className="block text-[10px] text-slate-500 whitespace-nowrap">{stageScopeLabel(res.requested_scope)}</span>
       )}
@@ -141,7 +144,8 @@ function renderConditionCell(res) {
 
 // Excel counterpart of the caption in renderConditionCell.
 function withRequestedScope(text, res) {
-  return res.requested_scope ? `${text} (${stageScopeLabel(res.requested_scope)})` : text;
+  const caption = [resolvedTypesLabel(res), res.requested_scope && stageScopeLabel(res.requested_scope)].filter(Boolean).join(", ");
+  return caption ? `${text} (${caption})` : text;
 }
 
 // Extracted out of TaskPanel.jsx (round: Tasks-table redesign) so the exact same per-school

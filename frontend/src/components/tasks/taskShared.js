@@ -4,6 +4,18 @@
 // Matches meetings-area MEETING_SERVICE_TYPE_OPTIONS (the "סוג" column) — NOT the
 // unrelated meeting_type (physical/remote) field.
 export const MEETING_SERVICE_TYPE_LABELS = { gefen: "גפן", current: "שוטף", gefen_current: "גפן+שוטף", district: "מחוז", takuma: "תקומה" };
+// "לפי סוג שירות בכרטיס" (ConditionGroupsEditor's BY_SERVICE): resolved per school, so its
+// results cell names what this school was actually asked for (condition_results.resolved_types).
+export function resolvedTypesLabel(res) {
+  if (!res?.resolved_types) return null;
+  if (!res.resolved_types.length) return "אין סוג שירות בכרטיס";
+  return res.resolved_types.map(t => MEETING_SERVICE_TYPE_LABELS[t] || t).join(" · ");
+}
+function meetingTitle(cond) {
+  if (cond.meeting_service_type === "by_service") return "פגישה לפי סוג שירות";
+  const typeLabel = cond.meeting_service_type ? MEETING_SERVICE_TYPE_LABELS[cond.meeting_service_type] || cond.meeting_service_type : "כלשהי";
+  return `פגישת ${typeLabel}`;
+}
 
 // Mirrors backend/task_logic.py's FIELD_LABELS — kept in sync by hand.
 export const FIELD_LABELS = {
@@ -105,9 +117,7 @@ export function describeCondition(cond, meta) {
   if (!cond) return "";
   const fieldOptions = meta?.fieldOptions || [];
   if (cond.type === "meeting") {
-    const typeLabel = cond.meeting_service_type ? MEETING_SERVICE_TYPE_LABELS[cond.meeting_service_type] || cond.meeting_service_type : "כלשהי";
-    const prefix = cond.negate ? "אין פגישת" : "יש פגישת";
-    return `${prefix} ${typeLabel} (${meetingDateRange(cond)})`;
+    return `${cond.negate ? "אין" : "יש"} ${meetingTitle(cond)} (${meetingDateRange(cond)})`;
   }
   if (cond.type === "goal") {
     const goalOptions = meta?.goalOptions || [];
@@ -166,8 +176,7 @@ export function describeCondition(cond, meta) {
 export function describeConditionColumn(cond, meta) {
   if (!cond) return { title: "", range: null };
   if (cond.type === "meeting") {
-    const typeLabel = cond.meeting_service_type ? MEETING_SERVICE_TYPE_LABELS[cond.meeting_service_type] || cond.meeting_service_type : "כלשהי";
-    return { title: `פגישת ${typeLabel}`, range: meetingDateRange(cond) };
+    return { title: meetingTitle(cond), range: meetingDateRange(cond) };
   }
   return { title: describeCondition(cond, meta), range: null };
 }

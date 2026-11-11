@@ -31,6 +31,15 @@ const DURATION_OPTIONS = Array.from({ length: (300 - 30) / 15 + 1 }, (_, i) => 3
 const MAX_DURATION = DURATION_OPTIONS[DURATION_OPTIONS.length - 1];
 const COORDINATOR_TYPE_LABELS = { gefen: "גפן", current: "שוטף" };
 
+// "לפי סוג שירות בכרטיס בית ספר" — fills a range from the card's service type for the year
+// (the school is known here, so the range shows exactly what will be sent; tasks resolve the same
+// rule per school on the backend, task_logic.expand_meeting_condition).
+const CARD_DURATION_FIELDS = {
+  gefen: ["meeting_duration_gefen"], takuma: ["meeting_duration_gefen"], current: ["meeting_duration_current"],
+  district: ["meeting_duration_district"], gefen_current: ["meeting_duration_gefen", "meeting_duration_current"],
+};
+const SERVICE_TYPE_LABELS = { gefen: "גפן", current: "שוטף", gefen_current: "גפן+שוטף", district: "מחוז", takuma: "תקומה" };
+
 function formatDuration(minutes) {
   if (minutes < 60) return `${minutes} דק'`;
   const hours = minutes / 60;
@@ -195,6 +204,53 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
       !yearAdminData?.meeting_duration_gefen && "גפן",
       !yearAdminData?.meeting_duration_current && "שוטף",
     ].filter(Boolean);
+  }
+
+  // A type's length from the card, rounded up to the 15-minute steps (null while any part is empty).
+  function cardDuration(serviceType) {
+    const values = (CARD_DURATION_FIELDS[serviceType] || []).map(f => yearAdminData?.[f]);
+    if (!values.length || values.some(v => !v)) return null;
+    const total = values.reduce((a, b) => a + b, 0);
+    return Math.min(Math.max(Math.ceil(total / 15) * 15, DURATION_OPTIONS[0]), MAX_DURATION);
+  }
+  function rangeForType(r, serviceType) {
+    const duration = cardDuration(serviceType);
+    return {
+      ...r, serviceType, coordinatorType: "", advisorMode: "default", advisorId: "", byServiceChoice: "applied",
+      cardDurationMissing: !duration,
+      ...(serviceType === "current" ? { stageScope: "" } : {}),
+      ...(duration ? { duration } : {}),
+    };
+  }
+  // The card's גפן and שוטף advisors are the same people (one combined meeting, no question).
+  function sameGefenCurrentAdvisors() {
+    const g = typedAdvisorIdsForServiceType("gefen", school), c = typedAdvisorIdsForServiceType("current", school);
+    return g.length > 0 && g.length === c.length && g.every(id => c.includes(id));
+  }
+  function applyCardServiceType(r) {
+    const cardType = yearAdminData?.service_type;
+    if (!SERVICE_TYPE_LABELS[cardType]) {
+      updateRange(r.localId, { byServiceChoice: "missing" });
+      return;
+    }
+    if (cardType === "gefen_current" && !sameGefenCurrentAdvisors()) {
+      updateRange(r.localId, { byServiceChoice: "ask" });
+      return;
+    }
+    setRanges(prev => prev.map(x => x.localId === r.localId ? rangeForType(x, cardType) : x));
+  }
+  // The answer for a גפן+שוטף school whose גפן and שוטף advisors differ.
+  function resolveGefenCurrentSplit(r, split) {
+    if (split === "combined") {
+      setRanges(prev => prev.map(x => x.localId === r.localId ? rangeForType(x, "gefen_current") : x));
+      return;
+    }
+    rangeIdCounter += 1;
+    const currentRange = {
+      ...rangeForType(r, "current"), localId: rangeIdCounter,
+      dateSegments: r.dateSegments.map(seg => ({ ...newDateSegment(), start: seg.start, end: seg.end })),
+    };
+    setRanges(prev => prev.flatMap(x => x.localId === r.localId ? [rangeForType(x, "gefen"), currentRange] : [x]));
   }
 
   function allResolvedAdvisorIds() {
@@ -431,6 +487,7 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
                           onClick={() => updateRange(r.localId, {
                             serviceType: opt.value,
                             coordinatorType: "",
+                            byServiceChoice: null,
                             ...(opt.value === "gefen_current" && gefenCurrentDefaultDuration() ? { duration: gefenCurrentDefaultDuration() } : {}),
                           })}
                           className={`text-sm px-4 py-1.5 rounded-lg border transition-colors ${
@@ -441,7 +498,50 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
                           {opt.label}
                         </button>
                       ))}
+                      <button type="button"
+                        aria-pressed={r.byServiceChoice === "ask" || r.byServiceChoice === "missing"}
+                        disabled={!yearAdminData}
+                        onClick={() => applyCardServiceType(r)}
+                        className={`text-sm px-4 py-1.5 rounded-lg border transition-colors disabled:opacity-50 ${
+                          r.byServiceChoice === "ask" || r.byServiceChoice === "missing"
+                            ? "bg-blue-600 border-blue-600 text-white font-semibold"
+                            : "border-black text-slate-600 hover:bg-slate-50"
+                        }`}>
+                        לפי סוג שירות בכרטיס בית ספר
+                      </button>
                     </div>
+                    {r.byServiceChoice === "applied" && (
+                      <p className="text-[11px] text-slate-500">
+                        {r.cardDurationMissing
+                          ? `נבחר לפי סוג השירות בכרטיס בית הספר (${SERVICE_TYPE_LABELS[r.serviceType]}), עם היועץ המלווה מהכרטיס. בכרטיס חסר "זמן לפגישה" לסוג זה — בחרו משך ידנית.`
+                          : "נבחר לפי סוג השירות בכרטיס בית הספר — גם היועץ ומשך הפגישה נלקחו מהכרטיס (אפשר לשנות)."}
+                      </p>
+                    )}
+                    {r.byServiceChoice === "missing" && (
+                      <p role="alert" className="text-[11px] text-red-600">
+                        בכרטיס בית הספר לא הוגדר סוג שירות לשנת {DEFAULT_ACADEMIC_YEAR}. הגדירו אותו בכרטיס בית הספר (פרטי ליווי), או בחרו סוג פגישה כאן.
+                      </p>
+                    )}
+                    {r.byServiceChoice === "ask" && (
+                      <div className="flex flex-col gap-1.5 rounded-lg border border-blue-200 bg-blue-50/60 p-2.5">
+                        <p className="text-xs text-slate-700">
+                          סוג השירות בכרטיס הוא גפן+שוטף, ויועץ הגפן ויועץ השוטף שונים — איך לקבוע?
+                        </p>
+                        <div className="flex flex-wrap gap-2">
+                          <button type="button" onClick={() => resolveGefenCurrentSplit(r, "separate")}
+                            className="text-sm px-4 py-1.5 rounded-lg border border-black bg-white text-slate-700 hover:bg-slate-50">
+                            פגישות נפרדות
+                          </button>
+                          <button type="button" onClick={() => resolveGefenCurrentSplit(r, "combined")}
+                            className="text-sm px-4 py-1.5 rounded-lg border border-black bg-white text-slate-700 hover:bg-slate-50">
+                            פגישה אחת עם כלל היועצים
+                          </button>
+                        </div>
+                        <p className="text-[11px] text-slate-500">
+                          נפרדות: פגישת גפן עם יועץ הגפן ופגישת שוטף עם יועץ השוטף, כל אחת במשך שלה. אחת: פגישת גפן+שוטף עם שני היועצים, במשך המצטבר.
+                        </p>
+                      </div>
+                    )}
                   </fieldset>
 
                   {r.serviceType && r.serviceType !== "current" && (

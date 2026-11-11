@@ -562,6 +562,45 @@ def effective_stage_scope(cond: dict, school: dict | None) -> str | None:
     return overrides.get((school or {}).get("id")) or cond.get("stage_scope")
 
 
+# "לפי סוג שירות בכרטיס בית ספר" — a meeting-task condition type that is never stored on a
+# meeting or a booking range: each school's condition is expanded into plain conditions by
+# expand_meeting_condition, from the school's own service type for the task's year.
+BY_SERVICE = "by_service"
+# What a "גפן+שוטף" school whose גפן and שוטף advisors differ gets: two meetings, or one with all.
+GEFEN_CURRENT_SPLIT_VALUES = ("separate", "combined")
+
+
+def expand_meeting_condition(cond: dict, card_service_type: str | None, gefen_current_same: bool) -> list[dict]:
+    """The plain meeting conditions this school is asked for. A condition that isn't
+    BY_SERVICE comes back unchanged; a BY_SERVICE one becomes the meeting of the school's card
+    service type (גפן+שוטף: one combined meeting when both advisor lists are the same, otherwise
+    per the condition's gefen_current_split). No service type → [] (nothing can be asked).
+    Everything downstream (ranges, pre-check, progress) runs on the result, so it never sees
+    BY_SERVICE. A שוטף meeting has no division choice, as in the wizard."""
+    if cond.get("meeting_service_type") != BY_SERVICE:
+        return [cond]
+    if card_service_type not in MEETING_SERVICE_TYPE_OPTIONS:
+        return []
+    if card_service_type == "gefen_current" and not gefen_current_same and cond.get("gefen_current_split") == "separate":
+        types = ["gefen", "current"]
+    else:
+        types = [card_service_type]
+    out = []
+    for t in types:
+        c = {**cond, "meeting_service_type": t}
+        if t == "current":
+            c["stage_scope"] = None
+            c["stage_scope_by_school"] = None
+        out.append(c)
+    return out
+
+
+def _expand_for_school(cond: dict, school: dict, year_row: dict | None) -> list[dict]:
+    return expand_meeting_condition(
+        cond, (year_row or {}).get("service_type"), bool(school.get("advisor_gefen_current_same")),
+    )
+
+
 def stage_scope_is_covered(requested_scope: str, meeting_scopes) -> bool:
     """Whether a school's meetings (given by their stage_scope values) satisfy a requested
     division choice. The single rule shared by task progress and the public booking page, so
@@ -870,6 +909,11 @@ def _resolve_condition(
     task (success_criteria vs. auto-inverted criteria vs. track_success=False), not per
     condition. See compute_task_progress."""
     ctype = cond.get("type")
+    if ctype == "meeting" and cond.get("meeting_service_type") == BY_SERVICE:
+        expanded = _expand_for_school(cond, school, year_row)
+        return bool(expanded) and all(
+            _resolve_condition(c, school, school_meetings, year_row, goal_rows, cl_rows, task_token_ids) for c in expanded
+        )
     if ctype == "meeting":
         # Round 17 — now required-count-aware (was a plain >=1 existence check). Defaults to
         # requiring exactly 1 match for every condition that doesn't set required_count or
@@ -962,6 +1006,62 @@ def find_matching_schools(
                 "symbol": s.get("symbol"), "authority": s.get("authority"), "stage": s.get("stage"),
             })
     return matched
+
+
+def _meeting_condition_result(
+    cond: dict, school: dict, school_meetings: list[dict], year_row: dict | None, task_token_ids: set[str] | None,
+) -> dict:
+    """One results-table cell for a meeting condition. A "לפי סוג שירות" condition stays one
+    column: its plain meetings for this school are summed (resolved_types says which they were),
+    so the table has the same columns for every school."""
+    expanded = _expand_for_school(cond, school, year_row)
+    is_six_year = school.get("stage") == "sheshshnati"
+    if not expanded:
+        return {"ok": False, "meeting_exists": False, "actual_count": 0, "required_count": 1,
+                "requested_scope": None, "resolved_types": []}
+    ok = all(_resolve_condition(c, school, school_meetings, year_row, None, None, task_token_ids) for c in expanded)
+    result = {
+        "ok": ok,
+        "meeting_exists": all(_meeting_exists_for_school(c, school_meetings, school, task_token_ids) for c in expanded),
+        # Round 17: required-count-aware — always >=1 for a meeting condition now (was raw match
+        # count / manager-set-or-None), so a "separate" split condition shows 0-2 distinct-slot
+        # progress instead of a raw row count that could misleadingly read "1/1" after only one
+        # of two principals was booked.
+        "actual_count": sum(min(_fulfilled_count_for_meeting_condition(c, school_meetings, task_token_ids, school),
+                                _required_count_for_condition(c, school)) if len(expanded) > 1
+                            else _fulfilled_count_for_meeting_condition(c, school_meetings, task_token_ids, school)
+                            for c in expanded),
+        "required_count": sum(_required_count_for_condition(c, school) for c in expanded),
+        # What was asked of THIS school — differs per school under "התאמה אישית".
+        "requested_scope": next((effective_stage_scope(c, school) for c in expanded
+                                 if effective_stage_scope(c, school)), None) if is_six_year else None,
+    }
+    if cond.get("meeting_service_type") == BY_SERVICE:
+        result["resolved_types"] = [c["meeting_service_type"] for c in expanded]
+    return result
+
+
+def _by_service_stage_row(
+    cond: dict, school: dict, school_meetings: list[dict], year_row: dict | None,
+    task_token_ids: set[str] | None, row_stage: str,
+) -> dict:
+    """A "לפי סוג שירות" cell in one division row of a six-year school: each of the school's
+    plain meetings counts in the rows of its own division (a שוטף meeting, with no division, in
+    both) — the same per-stage rules as a plain condition below."""
+    parts = []
+    for c in _expand_for_school(cond, school, year_row):
+        scope = effective_stage_scope(c, school)
+        if scope == "separate":
+            parts.append(any(m.get("stage_scope") in (row_stage, "both")
+                             for m in _matching_meetings(c, school_meetings, task_token_ids)))
+        elif scope in ("tichon", "chativa"):
+            if scope == row_stage:
+                parts.append(_resolve_condition(c, school, school_meetings, year_row, None, None, task_token_ids))
+        else:
+            parts.append(_resolve_condition(c, school, school_meetings, year_row, None, None, task_token_ids))
+    if not parts:
+        return {"ok": None, "merged": False, "not_applicable": True}
+    return {"ok": all(parts), "merged": False, "not_applicable": False}
 
 
 def compute_task_progress(
@@ -1060,16 +1160,7 @@ def compute_task_progress(
         conds = display_group.get("conditions") or []
         condition_results = [
             (
-                {
-                    "ok": _resolve_condition(c, school, school_meetings, year_row, goal_rows, cl_rows, task_token_ids), "meeting_exists": _meeting_exists_for_school(c, school_meetings, school, task_token_ids),
-                    # Round 17: required-count-aware — always >=1 for a meeting condition now
-                    # (was raw match count / manager-set-or-None), so a "separate" split
-                    # condition shows 0-2 distinct-slot progress instead of a raw row count that
-                    # could misleadingly read "1/1" after only one of two principals was booked.
-                    "actual_count": _fulfilled_count_for_meeting_condition(c, school_meetings, task_token_ids, school), "required_count": _required_count_for_condition(c, school),
-                    # What was asked of THIS school — differs per school under "התאמה אישית".
-                    "requested_scope": effective_stage_scope(c, school) if school.get("stage") == "sheshshnati" else None,
-                }
+                _meeting_condition_result(c, school, school_meetings, year_row, task_token_ids)
                 if c.get("type") == "meeting"
                 else {"ok": _resolve_condition(c, school, school_meetings, year_row, goal_rows, cl_rows, task_token_ids), "meeting_exists": None, "actual_count": None, "required_count": None}
             )
@@ -1109,7 +1200,9 @@ def compute_task_progress(
                 row_results = []
                 for c, base_res in zip(conds, condition_results):
                     cond_stage_scope = effective_stage_scope(c, school)
-                    if c.get("type") == "meeting" and cond_stage_scope in ("tichon", "chativa", "separate"):
+                    if c.get("type") == "meeting" and c.get("meeting_service_type") == BY_SERVICE:
+                        row_results.append(_by_service_stage_row(c, school, school_meetings, year_row, task_token_ids, row_stage))
+                    elif c.get("type") == "meeting" and cond_stage_scope in ("tichon", "chativa", "separate"):
                         if cond_stage_scope == "separate":
                             matches = _matching_meetings(c, school_meetings, task_token_ids)
                             ok = any(m.get("stage_scope") in (row_stage, "both") for m in matches)

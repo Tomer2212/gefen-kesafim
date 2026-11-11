@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
-import ConditionGroupsEditor, { newConditionGroup, isMeetingRequirementComplete, needsStageScope } from "./ConditionGroupsEditor";
+import ConditionGroupsEditor, { newConditionGroup, isMeetingRequirementComplete, needsStageScope, BY_SERVICE, GEFEN_CURRENT_SPLIT_OPTIONS } from "./ConditionGroupsEditor";
 import StageScopeCustomizeModal from "./StageScopeCustomizeModal";
 import StageScopeSummaryModal from "./StageScopeSummaryModal";
 import TemplateBodyEditor from "./TemplateBodyEditor";
@@ -241,7 +241,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
   const asksStageScope = sixYearSchools.length > 0 || !!scheduledFor;
 
   function meetingCardLabel(ci, cond) {
-    const typeLabel = MEETING_SERVICE_TYPE_LABELS[cond.meeting_service_type];
+    const typeLabel = cond.meeting_service_type === BY_SERVICE ? "לפי סוג שירות" : MEETING_SERVICE_TYPE_LABELS[cond.meeting_service_type];
     return `פגישה ${ci + 1}${typeLabel ? ` (${typeLabel})` : ""}`;
   }
   // Only schools still in the audience count: overrides for a school that left stay in state in
@@ -253,6 +253,10 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
   // The meeting cards that actually ask the division question for the current audience.
   const stageScopeCards = !asksStageScope ? [] : meetingRequirementGroups.flatMap(g =>
     g.conditions.flatMap((cond, ci) => (needsStageScope(cond) ? [{ cond, label: meetingCardLabel(ci, cond) }] : [])),
+  );
+  // "לפי סוג שירות" cards, for the summary's answer to the גפן+שוטף question.
+  const byServiceCards = meetingRequirementGroups.flatMap(g =>
+    g.conditions.flatMap((cond, ci) => (cond.meeting_service_type === BY_SERVICE ? [{ cond, label: meetingCardLabel(ci, cond) }] : [])),
   );
   // What a card sends for the division question. A card that doesn't ask it (e.g. switched to
   // "שוטף") drops any earlier answer, so it can't split or scope the meeting. A scheduled task
@@ -632,6 +636,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
         duration_mode: c.duration_mode || "default", duration_minutes: c.duration_minutes,
         participant_roles: c.participant_roles || [],
         ...stageScopePayload(c),
+        gefen_current_split: c.meeting_service_type === BY_SERVICE ? c.gefen_current_split || null : null,
       };
     });
   }
@@ -1200,6 +1205,19 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
                           </li>
                         );
                       })}
+                    </ul>
+                  </>
+                )}
+
+                {isMeetingTask && byServiceCards.length > 0 && (
+                  <>
+                    <span className="font-semibold text-slate-700">גפן+שוטף עם יועצים שונים:</span>
+                    <ul className="space-y-0.5">
+                      {byServiceCards.map(card => (
+                        <li key={card.label}>
+                          {card.label}: {GEFEN_CURRENT_SPLIT_OPTIONS.find(o => o.value === card.cond.gefen_current_split)?.label || "—"}
+                        </li>
+                      ))}
                     </ul>
                   </>
                 )}
