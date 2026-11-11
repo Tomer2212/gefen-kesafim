@@ -4316,9 +4316,18 @@ export default function AdminPage() {
       passesAdminColumnFilters(s, yearAdminData[s.id] || {}, adminColumnFilters, getAdminSortValue),
     );
   }, [filteredAdminSchools, adminColumnFilters, yearAdminData, getAdminSortValue]);
+  // Must match passesAdminColumnFilters' "does this spec filter anything" rules exactly — the
+  // active-filters bar and the empty-table "clear" button rely on it to never hide a live filter.
   const adminColumnFilterActiveKeys = useMemo(
     () => Object.entries(adminColumnFilters)
-      .filter(([, spec]) => spec && (spec.value || (spec.values && spec.values.length > 0)))
+      .filter(([key, spec]) => {
+        if (!spec) return false;
+        const type = getAdminColumnFilterType(key);
+        if (type === "text") return !!String(spec.value ?? "").trim();
+        if (type === "number") return spec.value !== "" && spec.value !== null && spec.value !== undefined;
+        if (type === "select") return Array.isArray(spec.values) && spec.values.length > 0;
+        return false;
+      })
       .map(([key]) => key),
     [adminColumnFilters],
   );
@@ -4342,16 +4351,17 @@ export default function AdminPage() {
     });
   }, [columnFilteredAdminSchools, sortValueBySchoolId, adminSortKey, adminSortDir]);
   // Dynamic filter options for the 3 advisor-name columns — deduplicated {id, name} pairs
-  // collected from every school's already-loaded advisors_gefen/current/district list.
-  // Stays lazy: only invoked from the header JSX while a filter popover is open.
+  // collected from the active schools' already-loaded advisors_gefen/current/district lists
+  // (the table shows active schools only — an advisor found only on trashed schools would be
+  // an option that empties the table). Stays lazy: only invoked while a filter popover is open.
   const adminAdvisorFilterOptions = useCallback((key) => {
     const field = key === "advisor_gefen" ? "advisors_gefen" : key === "advisor_current" ? "advisors_current" : "advisors_district";
     const map = new Map();
-    for (const s of schools) {
+    for (const s of activeAdminSchools) {
       for (const a of (s[field] || [])) map.set(a.id, a.full_name || a.email);
     }
     return [...map.entries()].map(([value, label]) => ({ value, label })).sort((a, b) => a.label.localeCompare(b.label, "he"));
-  }, [schools]);
+  }, [activeAdminSchools]);
   const visibleAdminColOrder = useMemo(
     () => adminColOrder.filter(k => adminColVisible[k] && ADMIN_ALL_COLUMNS.some(c => c.key === k)),
     [adminColOrder, adminColVisible],
@@ -5295,7 +5305,7 @@ export default function AdminPage() {
               {/* Column filters are persisted per device, so always show which ones are active and
                   how to drop them — otherwise a stray click can leave the table silently empty. */}
               {adminColumnFilterActiveKeys.length > 0 && (
-                <div className="flex flex-wrap items-center gap-2 mb-3 px-3 py-2 rounded-xl bg-blue-50 border border-blue-100 text-sm" role="status" aria-label="סינונים פעילים בטבלה">
+                <div className="flex flex-wrap items-center gap-2 mb-3 px-3 py-2 rounded-xl bg-blue-50 border border-blue-100 text-sm" role="group" aria-label="סינונים פעילים בטבלה">
                   <span className="font-medium text-blue-800">
                     סינונים פעילים · מוצגים {sortedAdminSchools.length} מתוך {activeAdminSchools.length}:
                   </span>

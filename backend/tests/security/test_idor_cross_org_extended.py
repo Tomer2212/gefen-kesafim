@@ -1422,3 +1422,50 @@ def test_task_preview_six_year_enrichment_stays_in_org(org_b_client, admin_db):
     schools = resp.json()["schools"]
     assert [s["school_id"] for s in schools] == [own_id]
     assert isinstance(schools[0]["principal_same_person"], bool)
+
+
+# ---------------------------------------------------------------------------
+# Combined "גפן+שוטף" meeting — PATCH /tasks/{task_id}/meeting-overrides/{school_id} saves which
+# coordinator gets the link. Both the task and the school must be the caller's own org's.
+# Org A is never written to: the cross-org calls are rejected before any write.
+# ---------------------------------------------------------------------------
+
+
+def _any_task_id(admin_db, org_id):
+    rows = admin_db.table("org_tasks").select("id").eq("org_id", org_id).limit(1).execute().data
+    if not rows:
+        pytest.skip(f"no org_tasks row in org {org_id}")
+    return rows[0]["id"]
+
+
+_OVERRIDE_BODY = {"meeting_service_type": "gefen_current", "coordinator_type": "gefen"}
+
+
+def test_meeting_override_cross_org_task_rejected(org_b_client, admin_db):
+    foreign_task = _any_task_id(admin_db, ORG_A_ID)
+    before = admin_db.table("org_tasks").select("meeting_overrides").eq("id", foreign_task).execute().data[0]
+    resp = org_b_client.patch(f"/tasks/{foreign_task}/meeting-overrides/{ORG_B_SCHOOL_ID}", json=_OVERRIDE_BODY)
+    assert resp.status_code in (403, 404), resp.text
+    after = admin_db.table("org_tasks").select("meeting_overrides").eq("id", foreign_task).execute().data[0]
+    assert after == before
+
+
+def test_meeting_override_cross_org_school_rejected(org_b_client, admin_db):
+    own_task = _any_task_id(admin_db, ORG_B_ID)
+    before = admin_db.table("org_tasks").select("meeting_overrides").eq("id", own_task).execute().data[0]
+    resp = org_b_client.patch(f"/tasks/{own_task}/meeting-overrides/{ORG_A_SCHOOL_ID}", json=_OVERRIDE_BODY)
+    assert resp.status_code in (403, 404), resp.text
+    after = admin_db.table("org_tasks").select("meeting_overrides").eq("id", own_task).execute().data[0]
+    assert after == before
+
+
+def test_meeting_override_same_org_works(org_b_client, admin_db):
+    own_task = _any_task_id(admin_db, ORG_B_ID)
+    original = admin_db.table("org_tasks").select("meeting_overrides").eq("id", own_task).execute().data[0]["meeting_overrides"]
+    try:
+        resp = org_b_client.patch(f"/tasks/{own_task}/meeting-overrides/{ORG_B_SCHOOL_ID}", json=_OVERRIDE_BODY)
+        assert resp.status_code == 200, resp.text
+        saved = admin_db.table("org_tasks").select("meeting_overrides").eq("id", own_task).execute().data[0]["meeting_overrides"]
+        assert saved[ORG_B_SCHOOL_ID]["gefen_current"]["coordinator_type"] == "gefen"
+    finally:
+        admin_db.table("org_tasks").update({"meeting_overrides": original}).eq("id", own_task).execute()

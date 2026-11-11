@@ -28,7 +28,7 @@ const FIELD_CATEGORIES = [
     // גפן advisor list everywhere else in the app, so filtering by "יועץ מלווה [גפן]" already
     // finds schools where that person is the תקומה advisor too.
     title: "יועץ מלווה",
-    fields: ["advisor_gefen", "advisor_current", "advisor_district"],
+    fields: ["advisor_gefen", "advisor_current", "advisor_district", "advisor_gefen_current_same"],
   },
   {
     title: "פיננסי",

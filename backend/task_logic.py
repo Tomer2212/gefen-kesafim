@@ -67,6 +67,7 @@ SCHOOL_FIELDS = {
     # meetings-stats RPC (see there), but from _eval_field_condition's point of view they're
     # indistinguishable from any other school-level field once attached.
     "advisor_gefen": "select", "advisor_current": "select", "advisor_district": "select",
+    "advisor_gefen_current_same": "bool",
     "meetings_completed": "number", "meetings_hours": "number",
 }
 # JSONB/array-shaped school fields (restrict_access_to, extra_contacts, *_day_off) are
@@ -191,6 +192,7 @@ FIELD_LABELS = {
     "school_phone": "טלפון בית ספר", "address": "כתובת", "notes": "הערות",
     "meeting_coordinator": "אחראי/ת לתיאום פגישות",
     "advisor_gefen": "יועץ מלווה [גפן]", "advisor_current": "יועץ מלווה [שוטף]", "advisor_district": "יועץ מלווה [מחוז]",
+    "advisor_gefen_current_same": "יועץ גפן ויועץ שוטף זהים",
     "meetings_completed": 'סה"כ פגישות שבוצעו', "meetings_hours": 'סה"כ שעות שבוצעו',
     "service_type": "סוג שירות", "client_status": "סטטוס לקוח", "requested_price": "מחיר מבוקש",
     "order_method": "אמצעי הזמנה", "order_method_other_text": "אמצעי הזמנה - טקסט חופשי (אחר)",
@@ -265,6 +267,7 @@ def field_options(org_id: str | None = None) -> dict:
         "meeting_coordinator": _labeled(MEETING_COORDINATOR_OPTIONS, MEETING_COORDINATOR_LABELS),
         "district": _labeled(DISTRICT_OPTIONS, {}),
         "advisor_gefen": advisor_options, "advisor_current": advisor_options, "advisor_district": advisor_options,
+        "advisor_gefen_current_same": _labeled(["yes", "no"], BOOL_LABELS),
     }
     fields = []
     for key, ftype in SCHOOL_FIELDS.items():
@@ -393,6 +396,10 @@ def _fetch_schools_and_meetings(
             for s in schools:
                 for service_type in _ADVISOR_TABLES:
                     s[f"advisor_{service_type}"] = advisor_ids_by_school[service_type].get(s["id"], [])
+                # "יועץ גפן ויועץ שוטף זהים" — the same non-empty set of advisors on both lists,
+                # i.e. a school where one combined "גפן+שוטף" meeting needs just one advisor.
+                gefen_set, current_set = set(s["advisor_gefen"]), set(s["advisor_current"])
+                s["advisor_gefen_current_same"] = bool(gefen_set) and gefen_set == current_set
                 stats = stats_by_school.get(s["id"])
                 s["meetings_completed"] = stats["completed"] if stats else 0
                 s["meetings_hours"] = round((stats["total_minutes"] or 0) / 60, 1) if stats else 0
@@ -611,6 +618,11 @@ def _compare(ftype: str | None, op: str, actual, target) -> bool:
     _eval_control_letter_condition can reuse it against a control_letters row instead of a
     school/year_admin row, with identical eq/ne/gt/gte/lt/lte/contains/list-membership rules."""
     if ftype == "bool":
+        # The UI's yes/no chips send a list (e.g. ["yes"]); a list must not be coerced as one
+        # value, which made "כן" match only the schools where the field is "לא".
+        if isinstance(target, (list, tuple)):
+            is_member = _coerce_bool(actual) in {_coerce_bool(t) for t in target}
+            return not is_member if op == "ne" else is_member
         return _coerce_bool(actual) == _coerce_bool(target)
     if ftype == "number":
         try:

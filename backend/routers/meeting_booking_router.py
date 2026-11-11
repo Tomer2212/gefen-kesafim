@@ -2,17 +2,37 @@ import logging
 import re
 import time
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException
 
+import booking_lock
 import graph_client
 import meeting_activity
+import slot_policy
 import task_logic
 from academic_years import DEFAULT_ACADEMIC_YEAR
 from supabase_client import get_admin_client, reset_admin_client
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+_IL_TZ = ZoneInfo("Asia/Jerusalem")
+
+
+def _now_il() -> datetime:
+    return datetime.now(_IL_TZ)
+
+
+def _upcoming_dates(dates: list[str]) -> list[str]:
+    """A link lives for weeks, so its date range may already have started: past days are never
+    offered (today is, from the current time on — see _not_started_yet)."""
+    today = _now_il().date().isoformat()
+    return [d for d in dates if d >= today]
+
+
+def _not_started_yet(meeting_date: str, start_time: str) -> bool:
+    now = _now_il()
+    return (meeting_date, start_time) > (now.date().isoformat(), now.strftime("%H:%M"))
 
 
 def _get_valid_token(db, token: str) -> dict:
@@ -80,6 +100,77 @@ def _local_meeting_busy_blocks(db, advisor_ids: list[str], start_iso: str, end_i
             continue
         blocks.append({"start": f"{m['meeting_date']}T{m['start_time']}:00", "end": f"{m['meeting_date']}T{m['end_time']}:00"})
     return blocks
+
+
+def _uses_slot_policy(range_row: dict) -> bool:
+    """Ranges created with the "יומן יעיל" questions (min_free_window_minutes set, 0 included)
+    go through slot_policy; older links keep the original earliest-slot behavior untouched."""
+    return range_row.get("min_free_window_minutes") is not None
+
+
+def _outlook_busy_by_advisor(db, org_id: str, advisor_ids: list[str], start_iso: str, end_iso: str) -> dict[str, list[dict]] | None:
+    """Each advisor's own Outlook busy blocks. None when any advisor's calendar can't be read."""
+    out: dict[str, list[dict]] = {}
+    for advisor_id in advisor_ids:
+        advisor_busy = graph_client.get_freebusy(db, org_id, advisor_id, start_iso, end_iso)
+        if advisor_busy is None:
+            return None
+        out[advisor_id] = graph_client.reconcile_busy_blocks(db, advisor_busy)
+    return out
+
+
+def _busy_by_advisor(db, org_id: str, advisor_ids: list[str], start_iso: str, end_iso: str) -> dict[str, list[dict]] | None:
+    """Each advisor's own busy blocks (Outlook + our scheduled meetings) — slot_policy checks
+    every advisor's calendar separately. None when any advisor's calendar can't be read."""
+    out = _outlook_busy_by_advisor(db, org_id, advisor_ids, start_iso, end_iso)
+    if out is None:
+        return None
+    for advisor_id, blocks in _local_meeting_busy_by_advisor(db, advisor_ids, start_iso, end_iso).items():
+        out[advisor_id] = out[advisor_id] + blocks
+    return out
+
+
+def _local_meeting_busy_by_advisor(db, advisor_ids: list[str], start_iso: str, end_iso: str) -> dict[str, list[dict]]:
+    """_local_meeting_busy_blocks split per advisor, with one query for all of them."""
+    out: dict[str, list[dict]] = {aid: [] for aid in advisor_ids}
+    rows = (
+        db.table("meetings").select("meeting_date, start_time, end_time, advisor_ids")
+        .eq("status", "scheduled")
+        .gte("meeting_date", start_iso[:10]).lte("meeting_date", end_iso[:10])
+        .execute().data or []
+    )
+    for m in rows:
+        block = {"start": f"{m['meeting_date']}T{m['start_time']}:00", "end": f"{m['meeting_date']}T{m['end_time']}:00"}
+        for aid in m.get("advisor_ids") or []:
+            if aid in out:
+                out[aid].append(block)
+    return out
+
+
+def _with_elapsed_time(day_iso: str, busy_today: dict[str, list[tuple[int, int]]], start_grid: int) -> dict[str, list[tuple[int, int]]]:
+    """On today's date the time already gone (rounded up to the start-time grid, so "now" never
+    becomes an odd start like 10:21) counts as busy: the rule treats it like the start of the
+    working day instead of offering, or counting gaps in, the past."""
+    now = _now_il()
+    if day_iso != now.date().isoformat():
+        return busy_today
+    elapsed = (0, -(-(now.hour * 60 + now.minute + 1) // start_grid) * start_grid)
+    return {aid: [elapsed, *intervals] for aid, intervals in busy_today.items()}
+
+
+def _policy_args(token_row: dict, range_row: dict) -> tuple[int, int, int, int, int]:
+    sched = token_row["scheduling_window"]
+    return (
+        sched["start_hour"] * 60, sched["end_hour"] * 60, range_row["duration_minutes"],
+        int(range_row.get("min_free_window_minutes") or 0), int(range_row.get("start_grid_minutes") or 30),
+    )
+
+
+def _policy_dates(token_row: dict, range_row: dict) -> set[str]:
+    """The dates the range may be booked on (its segments x the working days). Blocked dates are
+    checked separately by the booking endpoint (_find_blocking_rule)."""
+    days_of_week = token_row["scheduling_window"]["days_of_week"]
+    return {d for seg in _range_segments(range_row) for d in _range_dates_in_window(seg["start_date"], seg["end_date"], days_of_week)}
 
 
 def _find_existing_meeting(db, school_id: str, service_type: str, start_date: str, end_date: str,
@@ -316,6 +407,51 @@ def _parse_hhmm_to_minutes(text: str | None) -> int | None:
     return hour * 60 + minute
 
 
+def _policy_freebusy(db, token_row: dict, range_row: dict, segments: list[dict],
+                     time_from: str | None, time_to: str | None) -> dict:
+    """"יומן יעיל" ranges: "days" = each day's regular offer (earliest time the rule allows);
+    "requested_days" = the times for the school's "אפשרויות נוספות" hours, each marked near=True
+    when it's only the closest allowed time to them. requested_days is null when no hours were
+    sent (or the range doesn't allow them) — the client then shows only the regular offer.
+    The rule always looks at the whole working day, never only at the requested hours."""
+    work_start, work_end, duration, min_window, start_grid = _policy_args(token_row, range_row)
+    requested = None
+    # Never trust the client: the hours are honored only when the org allowed this range to use
+    # them, and only inside the org's own working day.
+    if range_row.get("allow_time_range_search"):
+        requested_from, requested_to = _parse_hhmm_to_minutes(time_from), _parse_hhmm_to_minutes(time_to)
+        if requested_from is not None and requested_to is not None:
+            requested = (max(work_start, requested_from), min(work_end, requested_to))
+            if requested[0] >= requested[1]:
+                return {"days": [], "requested_days": [], "ok": True}
+
+    days_of_week = token_row["scheduling_window"]["days_of_week"]
+    dates = _upcoming_dates(sorted({d for seg in segments for d in _range_dates_in_window(seg["start_date"], seg["end_date"], days_of_week)}))
+    dates = _filter_blocked_dates(db, token_row["org_id"], token_row["school_id"], dates)
+    if not dates:
+        return {"days": [], "requested_days": [] if requested else None, "ok": True}
+
+    advisor_ids = range_row.get("advisor_ids") or token_row.get("advisor_ids") or [token_row["advisor_id"]]
+    busy = _busy_by_advisor(db, token_row["org_id"], advisor_ids, f"{dates[0]}T00:00:00Z", f"{dates[-1]}T23:59:59Z")
+    if busy is None:
+        return {"days": [], "requested_days": [] if requested else None, "ok": False}
+
+    days, requested_days = [], []
+    for d in dates:
+        busy_today = _with_elapsed_time(d, {aid: slot_policy.day_intervals(d, blocks) for aid, blocks in busy.items()}, start_grid)
+        offer = slot_policy.offer_for_day(busy_today, work_start, work_end, duration, min_window, start_grid, requested)
+        if offer["regular"]:
+            days.append({"date": d, "slots": [
+                {"start_time": slot_policy.hhmm(s), "end_time": slot_policy.hhmm(e)} for s, e in offer["regular"]
+            ]})
+        if offer["requested"]:
+            requested_days.append({"date": d, "slots": [
+                {"start_time": slot_policy.hhmm(o["slot"][0]), "end_time": slot_policy.hhmm(o["slot"][1]), "near": o["near"]}
+                for o in offer["requested"]
+            ]})
+    return {"days": days, "requested_days": requested_days if requested else None, "ok": True}
+
+
 @router.get("/public/meeting-booking/{token}/freebusy")
 def get_booking_freebusy(token: str, month: str | None = None, range_key: str | None = None,
                           time_from: str | None = None, time_to: str | None = None):
@@ -329,6 +465,9 @@ def get_booking_freebusy(token: str, month: str | None = None, range_key: str | 
         segments = _range_segments(range_row)
         if not range_row.get("require_additional_meeting") and _find_existing_meeting_any_segment(db, token_row["school_id"], range_row["service_type"], segments, range_row.get("stage_scope"), range_row.get("explicit_stage_scope_only")):
             raise HTTPException(status_code=400, detail="כבר קיימת פגישה מסוג זה בטווח התאריכים הזה")
+
+        if _uses_slot_policy(range_row):
+            return _policy_freebusy(db, token_row, range_row, segments, time_from, time_to)
 
         sched = token_row["scheduling_window"]
         start_minute, end_minute = sched["start_hour"] * 60, sched["end_hour"] * 60
@@ -349,7 +488,7 @@ def get_booking_freebusy(token: str, month: str | None = None, range_key: str | 
         window = {"days_of_week": sched["days_of_week"], "start_minute": start_minute, "end_minute": end_minute, "duration_minutes": range_row["duration_minutes"]}
         # Union of dates across every OR'd segment (deduped + sorted) — a date is offerable if
         # it falls in ANY of the range's date segments.
-        dates = sorted({d for seg in segments for d in _range_dates_in_window(seg["start_date"], seg["end_date"], window["days_of_week"])})
+        dates = _upcoming_dates(sorted({d for seg in segments for d in _range_dates_in_window(seg["start_date"], seg["end_date"], window["days_of_week"])}))
         dates = _filter_blocked_dates(db, token_row["org_id"], token_row["school_id"], dates)
         if not dates:
             return {"days": [], "ok": True}
@@ -369,8 +508,14 @@ def get_booking_freebusy(token: str, month: str | None = None, range_key: str | 
         busy.extend(_local_meeting_busy_blocks(db, advisor_ids, range_start, range_end))
 
         days = []
+        today = _now_il()
         for d in dates:
-            slots = _slots_for_day(d, window, busy)
+            day_window = window
+            if d == today.date().isoformat():
+                # Today: start from the next half hour, never offering a time already gone.
+                next_half_hour = -(-(today.hour * 60 + today.minute + 1) // 30) * 30
+                day_window = {**window, "start_minute": max(window["start_minute"], next_half_hour)}
+            slots = _slots_for_day(d, day_window, busy)
             if slots:
                 days.append({"date": d, "slots": slots})
         return {"days": days, "ok": True}
@@ -380,7 +525,7 @@ def get_booking_freebusy(token: str, month: str | None = None, range_key: str | 
 
     sched = token_row["scheduling_window"]
     window = {**sched, "start_minute": sched["start_hour"] * 60, "end_minute": sched["end_hour"] * 60}
-    dates = _month_dates_in_window(month, window["days_of_week"])
+    dates = _upcoming_dates(_month_dates_in_window(month, window["days_of_week"]))
     dates = _filter_blocked_dates(db, token_row["org_id"], token_row["school_id"], dates)
     if not dates:
         return {"days": [], "ok": True}
@@ -426,18 +571,19 @@ def book_meeting_slot(token: str, body: dict):
     end_time = body.get("end_time")
     if not all([month, meeting_date, start_time, end_time]):
         raise HTTPException(status_code=400, detail="נתונים חסרים")
+    if not _not_started_yet(str(meeting_date), str(start_time)):
+        raise HTTPException(status_code=409, detail="המועד הזה כבר עבר. נא לבחור מועד אחר.")
     if month not in _open_months(token_row):
         raise HTTPException(status_code=400, detail="חודש זה כבר אינו פתוח לשריון")
 
     # Re-check the slot is genuinely free server-side — never trust the client's earlier read.
     day_start = f"{meeting_date}T00:00:00Z"
     day_end = f"{meeting_date}T23:59:59Z"
-    busy = graph_client.get_freebusy(db, token_row["org_id"], token_row["advisor_id"], day_start, day_end)
-    if busy is None:
+    # Outlook is read here; our own meetings are re-read inside the booking lock below.
+    outlook_busy = graph_client.get_freebusy(db, token_row["org_id"], token_row["advisor_id"], day_start, day_end)
+    if outlook_busy is None:
         raise HTTPException(status_code=503, detail="לא ניתן לאמת זמינות כרגע, נסה שוב")
-    busy = graph_client.reconcile_busy_blocks(db, list(busy)) + _local_meeting_busy_blocks(db, [token_row["advisor_id"]], day_start, day_end)
-    if any(_time_overlaps(start_time, end_time, b["start"][11:16], b["end"][11:16]) for b in busy):
-        raise HTTPException(status_code=409, detail="אופס.. הזמן הזה כבר נתפס. נא לבחור מועד אחר.")
+    outlook_busy = graph_client.reconcile_busy_blocks(db, list(outlook_busy))
 
     from routers.schools_router import BLOCKED_DATE_SCOPE_FIELDS, _find_blocking_rule
     school_res = db.table("schools").select(
@@ -472,12 +618,41 @@ def book_meeting_slot(token: str, body: dict):
         "meeting_type": "remote",
         "booking_token_id": token_row["id"],
     }
-    try:
-        res = db.table("meetings").insert(meeting_data).execute()
-        meeting = res.data[0]
-    except Exception as exc:
-        logger.error("book_meeting_slot insert failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=503, detail="שגיאה זמנית בשמירת הפגישה, נסה שוב")
+    # Same two layers as _book_range_slot — see booking_lock.py.
+    advisor_ids = [token_row["advisor_id"]]
+    lock_keys = [booking_lock.advisor_day_key(token_row["advisor_id"], meeting_date), booking_lock.range_key(token_row["id"], f"month:{month}")]
+    with booking_lock.booking_locks(lock_keys):
+        db = get_admin_client()
+        fresh_token = db.table("meeting_booking_tokens").select("booked_months").eq("id", token_row["id"]).execute().data or [{}]
+        booked_months = fresh_token[0].get("booked_months") or []
+        if month in booked_months:
+            raise HTTPException(status_code=400, detail="חודש זה כבר אינו פתוח לשריון")
+        busy = outlook_busy + _local_meeting_busy_blocks(db, advisor_ids, day_start, day_end)
+        if any(_time_overlaps(start_time, end_time, b["start"][11:16], b["end"][11:16]) for b in busy):
+            raise HTTPException(status_code=409, detail=booking_lock.TAKEN_DETAIL)
+        try:
+            res = db.table("meetings").insert(meeting_data).execute()
+            meeting = res.data[0]
+        except Exception as exc:
+            logger.error("book_meeting_slot insert failed: %s", exc, exc_info=True)
+            raise HTTPException(status_code=503, detail="שגיאה זמנית בשמירת הפגישה, נסה שוב")
+        if not booking_lock.keep_or_discard_booking(db, meeting, advisor_ids):
+            raise HTTPException(status_code=409, detail=booking_lock.TAKEN_DETAIL)
+
+        # Same reasoning as _book_range_slot's booked_ranges update — written while still locked.
+        booked_months = list(set(booked_months + [month]))
+        for attempt in range(2):
+            try:
+                db2 = get_admin_client()
+                db2.table("meeting_booking_tokens").update({"booked_months": booked_months}).eq("id", token_row["id"]).execute()
+                break
+            except Exception as exc:
+                if attempt == 0:
+                    logger.warning("failed to update booked_months for token %s (attempt 1, retrying): %s", token_row["id"], exc)
+                    reset_admin_client()
+                    time.sleep(0.1)
+                else:
+                    logger.error("failed to update booked_months for token %s after 2 attempts: %s", token_row["id"], exc, exc_info=True)
     _log_booking_activity(db, token_row, meeting)
 
     calendar_synced = False
@@ -492,22 +667,6 @@ def book_meeting_slot(token: str, body: dict):
                     calendar_synced = any(v.get("status") == "synced" for v in sync_map.values())
     except Exception as exc:
         logger.warning("calendar sync failed for booked meeting %s (non-fatal): %s", meeting.get("id"), exc)
-
-    # Same reasoning as _book_range_slot's booked_ranges update — critical bookkeeping, not
-    # secondary enrichment, so it gets the standard retry instead of a single silent attempt.
-    booked_months = list(set((token_row.get("booked_months") or []) + [month]))
-    for attempt in range(2):
-        try:
-            db2 = get_admin_client()
-            db2.table("meeting_booking_tokens").update({"booked_months": booked_months}).eq("id", token_row["id"]).execute()
-            break
-        except Exception as exc:
-            if attempt == 0:
-                logger.warning("failed to update booked_months for token %s (attempt 1, retrying): %s", token_row["id"], exc)
-                reset_admin_client()
-                time.sleep(0.1)
-            else:
-                logger.error("failed to update booked_months for token %s after 2 attempts: %s", token_row["id"], exc, exc_info=True)
 
     return {"ok": True, "calendar_synced": calendar_synced, "open_months": [m for m in _open_months(token_row) if m != month]}
 
@@ -532,21 +691,29 @@ def _book_range_slot(db, token_row: dict, range_key: str, body: dict) -> dict:
     end_time = body.get("end_time")
     if not all([meeting_date, start_time, end_time]):
         raise HTTPException(status_code=400, detail="נתונים חסרים")
+    if not _not_started_yet(str(meeting_date), str(start_time)):
+        raise HTTPException(status_code=409, detail="המועד הזה כבר עבר. נא לבחור מועד אחר.")
 
     # Round-7: per-range advisor_ids takes priority over the token-level union — see
     # get_booking_freebusy's identical fallback comment.
     advisor_ids = range_row.get("advisor_ids") or token_row.get("advisor_ids") or [token_row["advisor_id"]]
     day_start = f"{meeting_date}T00:00:00Z"
     day_end = f"{meeting_date}T23:59:59Z"
-    busy: list[dict] = []
-    for advisor_id in advisor_ids:
-        advisor_busy = graph_client.get_freebusy(db, token_row["org_id"], advisor_id, day_start, day_end)
-        if advisor_busy is None:
-            raise HTTPException(status_code=503, detail="לא ניתן לאמת זמינות כרגע, נסה שוב")
-        busy.extend(graph_client.reconcile_busy_blocks(db, advisor_busy))
-    busy.extend(_local_meeting_busy_blocks(db, advisor_ids, day_start, day_end))
-    if any(_time_overlaps(start_time, end_time, b["start"][11:16], b["end"][11:16]) for b in busy):
-        raise HTTPException(status_code=409, detail="אופס.. הזמן הזה כבר נתפס. נא לבחור מועד אחר.")
+    uses_policy = _uses_slot_policy(range_row)
+    start_min, end_min = _parse_hhmm_to_minutes(start_time), _parse_hhmm_to_minutes(end_time)
+    # Whatever kind of link: only a date of the request, the request's own length, inside the
+    # org's working hours — the endpoint is public, so the page's own offer is never assumed.
+    work_start, work_end = token_row["scheduling_window"]["start_hour"] * 60, token_row["scheduling_window"]["end_hour"] * 60
+    if (
+        start_min is None or end_min is None or meeting_date not in _policy_dates(token_row, range_row)
+        or end_min - start_min != range_row["duration_minutes"] or start_min < work_start or end_min > work_end
+    ):
+        raise HTTPException(status_code=409, detail="המועד הזה כבר לא זמין. נא לבחור מועד אחר.")
+    # Outlook is read before the lock (slow, and unaffected by concurrent bookings, whose rows
+    # are re-read from `meetings` inside it).
+    outlook_busy = _outlook_busy_by_advisor(db, token_row["org_id"], advisor_ids, day_start, day_end)
+    if outlook_busy is None:
+        raise HTTPException(status_code=503, detail="לא ניתן לאמת זמינות כרגע, נסה שוב")
 
     from routers.schools_router import BLOCKED_DATE_SCOPE_FIELDS, _find_blocking_rule
     school_res = db.table("schools").select("id, name, " + ",".join(BLOCKED_DATE_SCOPE_FIELDS)).eq("id", token_row["school_id"]).execute()
@@ -581,12 +748,61 @@ def _book_range_slot(db, token_row: dict, range_key: str, body: dict) -> dict:
         "requested_upload_years": range_row.get("requested_upload_years"),
         "booking_token_id": token_row["id"],
     }
-    try:
-        res = db.table("meetings").insert(meeting_data).execute()
-        meeting = res.data[0]
-    except Exception as exc:
-        logger.error("_book_range_slot insert failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=503, detail="שגיאה זמנית בשמירת הפגישה, נסה שוב")
+
+    # No two bookings of the same advisor+day (or of the same request) run this section at once,
+    # on any worker — see booking_lock.py. Everything that another booking could have changed
+    # since this request started is re-read inside it.
+    lock_keys = [booking_lock.advisor_day_key(aid, meeting_date) for aid in advisor_ids]
+    lock_keys.append(booking_lock.range_key(token_row["id"], range_key))
+    with booking_lock.booking_locks(lock_keys):
+        db = get_admin_client()
+        fresh_token = db.table("meeting_booking_tokens").select("booked_ranges").eq("id", token_row["id"]).execute().data or [{}]
+        booked_ranges = fresh_token[0].get("booked_ranges") or []
+        if range_key in booked_ranges:
+            raise HTTPException(status_code=400, detail="הפגישה הזו כבר נקבעה")
+        if not range_row.get("require_additional_meeting") and _find_existing_meeting_any_segment(db, token_row["school_id"], range_row["service_type"], _range_segments(range_row), range_row.get("stage_scope"), range_row.get("explicit_stage_scope_only")):
+            raise HTTPException(status_code=400, detail="כבר קיימת פגישה מסוג זה בטווח התאריכים הזה")
+
+        local_busy = _local_meeting_busy_by_advisor(db, advisor_ids, day_start, day_end)
+        busy_by_advisor = {aid: outlook_busy[aid] + local_busy[aid] for aid in advisor_ids}
+        if uses_policy:
+            # "יומן יעיל": the submitted time must be one the rule allows on the advisors'
+            # calendars right now — never taken on trust from the public page.
+            if not slot_policy.is_allowed(
+                _with_elapsed_time(meeting_date, {aid: slot_policy.day_intervals(meeting_date, blocks) for aid, blocks in busy_by_advisor.items()},
+                                   _policy_args(token_row, range_row)[4]),
+                *_policy_args(token_row, range_row), start_min, end_min,
+            ):
+                raise HTTPException(status_code=409, detail="המועד הזה כבר לא זמין. נא לבחור מועד אחר.")
+        elif any(_time_overlaps(start_time, end_time, b["start"][11:16], b["end"][11:16])
+                 for blocks in busy_by_advisor.values() for b in blocks):
+            raise HTTPException(status_code=409, detail=booking_lock.TAKEN_DETAIL)
+
+        try:
+            res = db.table("meetings").insert(meeting_data).execute()
+            meeting = res.data[0]
+        except Exception as exc:
+            logger.error("_book_range_slot insert failed: %s", exc, exc_info=True)
+            raise HTTPException(status_code=503, detail="שגיאה זמנית בשמירת הפגישה, נסה שוב")
+        if not booking_lock.keep_or_discard_booking(db, meeting, advisor_ids):
+            raise HTTPException(status_code=409, detail=booking_lock.TAKEN_DETAIL)
+
+        # Written while still locked, so the same request's next click sees it. The live checks
+        # above remain the real safety net if this write fails.
+        booked_ranges = list(set(booked_ranges + [range_key]))
+        for attempt in range(2):
+            try:
+                db2 = get_admin_client()
+                db2.table("meeting_booking_tokens").update({"booked_ranges": booked_ranges}).eq("id", token_row["id"]).execute()
+                break
+            except Exception as exc:
+                if attempt == 0:
+                    logger.warning("failed to update booked_ranges for token %s (attempt 1, retrying): %s", token_row["id"], exc)
+                    reset_admin_client()
+                    time.sleep(0.1)
+                else:
+                    logger.error("failed to update booked_ranges for token %s after 2 attempts: %s", token_row["id"], exc, exc_info=True)
+
     _log_booking_activity(db, token_row, meeting)
 
     calendar_synced = False
@@ -601,26 +817,5 @@ def _book_range_slot(db, token_row: dict, range_key: str, body: dict) -> dict:
                     calendar_synced = any(v.get("status") == "synced" for v in sync_map.values())
     except Exception as exc:
         logger.warning("calendar sync failed for range-booked meeting %s (non-fatal): %s", meeting.get("id"), exc)
-
-    # Critical bookkeeping (not "secondary enrichment" — this is the only thing that prevents
-    # a second visitor from double-booking the same range), so it gets the standard 2-attempt
-    # retry pattern instead of a single silent try/except. Still never raises here — the
-    # meeting itself already exists and synced successfully by this point, so the response to
-    # the school stays {"ok": True}; a persistent failure is logged loudly (error, not warning)
-    # for manual follow-up, and _find_existing_meeting above is the real safety net against a
-    # double-booking slipping through because of it.
-    booked_ranges = list(set((token_row.get("booked_ranges") or []) + [range_key]))
-    for attempt in range(2):
-        try:
-            db2 = get_admin_client()
-            db2.table("meeting_booking_tokens").update({"booked_ranges": booked_ranges}).eq("id", token_row["id"]).execute()
-            break
-        except Exception as exc:
-            if attempt == 0:
-                logger.warning("failed to update booked_ranges for token %s (attempt 1, retrying): %s", token_row["id"], exc)
-                reset_admin_client()
-                time.sleep(0.1)
-            else:
-                logger.error("failed to update booked_ranges for token %s after 2 attempts: %s", token_row["id"], exc, exc_info=True)
 
     return {"ok": True, "calendar_synced": calendar_synced}

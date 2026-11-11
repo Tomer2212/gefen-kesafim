@@ -61,6 +61,7 @@ from meeting_labels import (
 from meeting_upload_logic import build_upload_checklist, get_or_create_upload_token, recipient_division_scope
 import meeting_activity
 import school_activity
+import slot_policy
 from supabase_client import get_admin_client, reset_admin_client
 
 logger = logging.getLogger(__name__)
@@ -510,8 +511,14 @@ class DirectCoordinationSegmentIn(BaseModel):
 class DirectCoordinationRangeIn(BaseModel):
     date_segments: list[DirectCoordinationSegmentIn]  # 1-10 OR'd date ranges the school may pick a slot from
     meeting_service_type: str  # "gefen" | "current" | "gefen_current" | "district" | "takuma"
-    duration_minutes: int      # 30..180, step 15
+    duration_minutes: int      # 30..300, step 15
     advisor_ids: list[str] = []  # this specific meeting's performing advisor(s) — see send_direct_coordination_request
+    coordinator_type: str | None = None  # gefen_current only: "gefen" | "current" — who gets the link when the two coordinators differ
+    # "יומן יעיל" (slot_policy) — the shortest free window to keep in the advisors' calendars
+    # (0 = no limit) and the start-time grid (30/60). Required by DirectCoordinationModal; None
+    # keeps the link on the original earliest-slot behavior.
+    min_free_window_minutes: int | None = None
+    start_grid_minutes: int | None = None
     participants: list[DirectCoordinationParticipantIn]
     stage_scope: str | None = None  # six-year schools only, gefen/current ranges only: "tichon" | "chativa"
     meeting_type: str = "remote"  # "remote" | "physical" — where the meeting will take place
@@ -4991,6 +4998,8 @@ def _build_reminder_email_html(recipient_name: str, when_lamed: str, when_bet: s
     # "gefen" keeps the exact original wording (no visible change for existing recipients).
     if meeting_service_type == "current":
         body_line = f'רצינו להזכיר לך על הפגישה השוטפת על התוכנה הכספית שמתוכננת {when_lamed}, בתאריך <b>{date_fmt}</b>{time_clause}{advisor_clause}{location_clause}.'
+    elif meeting_service_type == "gefen_current":
+        body_line = f'רצינו להזכיר לך על הפגישה שמתוכננת {when_lamed}, בתאריך <b>{date_fmt}</b>{time_clause}{advisor_clause}{location_clause} על תקציב הגפ"ן ועל התוכנה הכספית.'
     elif meeting_service_type == "district":
         body_line = f'רצינו להזכיר לך על הפגישה שמתוכננת {when_lamed}, בתאריך <b>{date_fmt}</b>{time_clause}{advisor_clause}{location_clause} בנושא המחוז.'
     elif meeting_service_type == "takuma":
@@ -10395,7 +10404,8 @@ def remap_import_values(body: RemapImportValuesIn, user: Annotated[dict, Depends
 _DIRECT_COORDINATION_SERVICE_TYPES = {
     "gefen": "גפן", "current": "שוטף", "gefen_current": "גפן+שוטף", "district": "מחוז", "takuma": "תקומה",
 }
-_DIRECT_COORDINATION_DURATIONS = set(range(30, 181, 15))
+# Up to 5 hours: a combined "גפן+שוטף" meeting defaults to the sum of both lengths.
+_DIRECT_COORDINATION_DURATIONS = set(range(30, 301, 15))
 
 
 @router.post("/{school_id}/meetings/direct-coordination")
@@ -10443,6 +10453,10 @@ def send_direct_coordination_request(
             raise HTTPException(status_code=400, detail="יש לבחור סוג פגישה (גפן/שוטף/גפן+שוטף/מחוז/תקומה) לכל טווח")
         if r.duration_minutes not in _DIRECT_COORDINATION_DURATIONS:
             raise HTTPException(status_code=400, detail="משך פגישה לא תקין")
+        if r.min_free_window_minutes is not None and r.min_free_window_minutes not in slot_policy.MIN_FREE_WINDOW_OPTIONS:
+            raise HTTPException(status_code=400, detail='ערך לא תקין בשאלה "שמירה על יומן יעיל"')
+        if r.start_grid_minutes is not None and r.start_grid_minutes not in slot_policy.START_GRID_OPTIONS:
+            raise HTTPException(status_code=400, detail='ערך לא תקין בשאלה "שעת התחלה של הפגישה"')
         if not r.participants:
             raise HTTPException(status_code=400, detail="יש לבחור לפחות משתתף אחד לכל טווח/פגישה")
         if not r.advisor_ids:
@@ -10451,9 +10465,9 @@ def send_direct_coordination_request(
         # Each range is one concrete meeting request, so it resolves to exactly ONE coordination
         # slot: takuma merges into gefen, district never splits by division, gefen/current split
         # into tichon/beinayim for six-year schools per stage_scope. gefen_current (a combined
-        # meeting, only ever sent by a frontend that already verified the two coordinators match —
-        # see DirectCoordinationModal's isGefenCurrentEligible) canonically resolves to the
-        # "current" slot; we still re-verify both coordinators match here server-side.
+        # meeting) goes to the "current" slot when both coordinators are the same person (or only
+        # the שוטף one is set), to the "gefen" slot when only that one is set, and to the one the
+        # manager picked (coordinator_type) when they are two different people.
         base = "gefen" if r.meeting_service_type == "takuma" else "current" if r.meeting_service_type == "gefen_current" else r.meeting_service_type
         slot = _resolve_slot(base, r.stage_scope)
         if slot is None:
@@ -10465,15 +10479,18 @@ def send_direct_coordination_request(
             gefen_slot = _resolve_slot("gefen", r.stage_scope)
             gefen_coord = _resolve_meeting_coordinator_for_slot(school, gefen_slot)
             current_coord = _resolve_meeting_coordinator_for_slot(school, slot)
-            if (
-                not gefen_coord or not gefen_coord.get("email")
-                or not current_coord or not current_coord.get("email")
-                or gefen_coord["email"] != current_coord["email"]
-            ):
-                raise HTTPException(
-                    status_code=400,
-                    detail="פגישה מסוג גפן+שוטף דורשת אותו/ה אחראי/ת תיאום לגפן ולשוטף",
-                )
+            gefen_ok = bool(gefen_coord and gefen_coord.get("email"))
+            current_ok = bool(current_coord and current_coord.get("email"))
+            if gefen_ok and current_ok and gefen_coord["email"].strip().lower() != current_coord["email"].strip().lower():
+                if r.coordinator_type not in ("gefen", "current"):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="לגפן ולשוטף מוגדרים אחראי/ת תיאום שונים — יש לבחור למי לשלוח את בקשת התיאום",
+                    )
+                if r.coordinator_type == "gefen":
+                    slot = gefen_slot
+            elif gefen_ok and not current_ok:
+                slot = gefen_slot
         range_slots.append(slot)
         type_counts[r.meeting_service_type] = type_counts.get(r.meeting_service_type, 0) + 1
         for aid in r.advisor_ids:
@@ -10528,6 +10545,8 @@ def send_direct_coordination_request(
             "participants": [p.model_dump() for p in r.participants],
             "meeting_type": r.meeting_type,
             "allow_time_range_search": r.allow_time_range_search,
+            "min_free_window_minutes": r.min_free_window_minutes,
+            "start_grid_minutes": r.start_grid_minutes,
             "requested_upload_years": r.requested_upload_years,
         })
 

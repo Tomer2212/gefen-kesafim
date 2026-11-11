@@ -61,9 +61,9 @@ export function resolveMeetingCoordinatorForSlot(school, slot) {
 // Mirrors schools_router.py's per-range slot resolution in send_direct_coordination_request:
 // one concrete meeting (one range) resolves to exactly one slot. Returns null when a six-year
 // school's gefen/current/takuma range hasn't had its division (stageScope) chosen yet.
-// gefen_current (a combined meeting, only offered when the גפן and שוטף coordinators already
-// match — see DirectCoordinationModal's eligibility check) canonically resolves to the "current"
-// slot, matching the backend's choice in send_direct_coordination_request.
+// gefen_current (a combined meeting) canonically resolves to the "current" slot, matching the
+// backend's default in send_direct_coordination_request; DirectCoordinationModal's
+// rangeCoordinatorSlot switches it to the גפן slot when the manager picks that coordinator.
 export function slotForMeetingServiceType(school, meetingServiceType, stageScope) {
   if (!meetingServiceType) return null;
   const base = meetingServiceType === "takuma" ? "gefen" : meetingServiceType === "gefen_current" ? "current" : meetingServiceType;

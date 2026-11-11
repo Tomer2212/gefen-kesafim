@@ -3,6 +3,7 @@ import axios from "axios";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
 import { buildSchoolContacts } from "./schoolContacts";
 import { resolveMeetingCoordinatorForSlot, slotForMeetingServiceType } from "./meetingCoordinatorSlots";
+import EfficientCalendarFields from "./EfficientCalendarFields";
 import { DirectCoordinationResolutionModal } from "./DirectCoordinationResolutionModal";
 import AdvisorAccessGrantModal from "./AdvisorAccessGrantModal";
 import DirectStyleDateInput from "../tasks/DirectStyleDateInput";
@@ -17,16 +18,18 @@ const SERVICE_TYPE_OPTIONS = [
   { value: "takuma", label: "תקומה" },
 ];
 
-// "גפן+שוטף" — a single combined meeting, only offered (see isGefenCurrentEligible below) when
-// the school's גפן and שוטף advisors AND coordination contacts already match, so bundling them
-// into one meeting/one coordinator email is actually correct rather than silently merging two
-// distinct people's schedules.
+// "גפן+שוטף" — a single combined meeting with the school's גפן and שוטף advisors together (all of
+// them must be free), offered when the school has both (see isGefenCurrentOffered below). When
+// the two divisions have different coordination contacts, the manager picks who gets the link.
 const GEFEN_CURRENT_OPTION = { value: "gefen_current", label: "גפן+שוטף" };
 const ALL_SERVICE_TYPE_OPTIONS = [
   SERVICE_TYPE_OPTIONS[0], SERVICE_TYPE_OPTIONS[1], GEFEN_CURRENT_OPTION, SERVICE_TYPE_OPTIONS[2], SERVICE_TYPE_OPTIONS[3],
 ];
 
-const DURATION_OPTIONS = Array.from({ length: (180 - 30) / 15 + 1 }, (_, i) => 30 + i * 15);
+// Up to 5 hours — a combined "גפן+שוטף" meeting defaults to the sum of two lengths.
+const DURATION_OPTIONS = Array.from({ length: (300 - 30) / 15 + 1 }, (_, i) => 30 + i * 15);
+const MAX_DURATION = DURATION_OPTIONS[DURATION_OPTIONS.length - 1];
+const COORDINATOR_TYPE_LABELS = { gefen: "גפן", current: "שוטף" };
 
 function formatDuration(minutes) {
   if (minutes < 60) return `${minutes} דק'`;
@@ -57,24 +60,26 @@ function newRange() {
     participantKeys: [],
     advisorMode: "default",
     advisorId: "",
+    coordinatorType: "", // gefen_current only, when the גפן and שוטף coordinators differ
     meetingType: "remote",
     allowTimeRangeSearch: null, // required yes/no — no default, must be explicitly answered
+    minFreeWindow: null, // "יומן יעיל" — required, no default (see EfficientCalendarFields)
+    startGrid: null,
     requestedUploadYears: [DEFAULT_ACADEMIC_YEAR], // which academic year(s) the secretary will be asked for files
   };
 }
 
 // Same mapping as MeetingRow.jsx's typedAdvisorsForServiceType — "takuma" reuses the school's
-// גפן advisor list (no typed advisor table of its own). gefen_current is only ever offered when
-// the two lists already match (see isGefenCurrentEligible), so either one is the same set.
+// גפן advisor list (no typed advisor table of its own); gefen_current is both lists together.
 function typedAdvisorIdsForServiceType(serviceType, school) {
   let list;
   if (serviceType === "gefen") list = school?.advisors_gefen;
   else if (serviceType === "current") list = school?.advisors_current;
   else if (serviceType === "district") list = school?.advisors_district;
   else if (serviceType === "takuma") list = school?.advisors_gefen;
-  else if (serviceType === "gefen_current") list = school?.advisors_gefen;
+  else if (serviceType === "gefen_current") list = [...(school?.advisors_gefen || []), ...(school?.advisors_current || [])];
   else list = [];
-  return (list || []).map(a => a.id);
+  return [...new Set((list || []).map(a => a.id))];
 }
 
 function resolveRangeAdvisorIds(r, school) {
@@ -82,25 +87,38 @@ function resolveRangeAdvisorIds(r, school) {
   return typedAdvisorIdsForServiceType(r.serviceType, school);
 }
 
-// Whether "גפן+שוטף" may be offered as a single combined meeting for this school: both the
-// typed advisor lists and the resolved coordination contact must match between גפן and שוטף for
-// every stage scope the school actually has (both תיכון/חט"ב for a six-year school, otherwise
-// the single school-wide slot) — checked scope-independently since the button is shown before
-// the user picks a stage.
-function isGefenCurrentEligible(school) {
-  if (!school) return false;
-  const gefenIds = typedAdvisorIdsForServiceType("gefen", school);
-  const currentIds = typedAdvisorIdsForServiceType("current", school);
-  if (gefenIds.length === 0) return false;
-  const sameAdvisors = gefenIds.length === currentIds.length && gefenIds.every(id => currentIds.includes(id));
-  if (!sameAdvisors) return false;
+// "גפן+שוטף" is offered whenever the school has both a גפן and a שוטף advisor — the same or
+// different people (one meeting with all of them, at a time they're all free).
+function isGefenCurrentOffered(school) {
+  return typedAdvisorIdsForServiceType("gefen", school).length > 0
+    && typedAdvisorIdsForServiceType("current", school).length > 0;
+}
 
-  const stageScopes = school.stage === "sheshshnati" ? ["tichon", "chativa"] : [null];
-  return stageScopes.every(scope => {
-    const gefenCoord = resolveMeetingCoordinatorForSlot(school, slotForMeetingServiceType(school, "gefen", scope));
-    const currentCoord = resolveMeetingCoordinatorForSlot(school, slotForMeetingServiceType(school, "current", scope));
-    return !!gefenCoord?.email && !!currentCoord?.email && gefenCoord.email === currentCoord.email;
-  });
+// The גפן and שוטף coordination contacts for one combined-meeting range (by its division).
+function gefenCurrentCoordinators(school, stageScope) {
+  const gefenSlot = slotForMeetingServiceType(school, "gefen", stageScope);
+  const currentSlot = slotForMeetingServiceType(school, "current", stageScope);
+  return {
+    gefenSlot, currentSlot,
+    gefen: gefenSlot ? resolveMeetingCoordinatorForSlot(school, gefenSlot) : null,
+    current: currentSlot ? resolveMeetingCoordinatorForSlot(school, currentSlot) : null,
+  };
+}
+
+function coordinatorsDiffer(coords) {
+  return !!(coords.gefen?.email && coords.current?.email
+    && coords.gefen.email.trim().toLowerCase() !== coords.current.email.trim().toLowerCase());
+}
+
+// The coordination slot a range's link goes to — mirrors send_direct_coordination_request: a
+// combined meeting uses the שוטף slot unless the manager picked גפן, or only גפן has a contact.
+function rangeCoordinatorSlot(school, r) {
+  if (r.serviceType !== "gefen_current") return slotForMeetingServiceType(school, r.serviceType, r.stageScope);
+  const coords = gefenCurrentCoordinators(school, r.stageScope);
+  if (!coords.currentSlot) return null;
+  if (coordinatorsDiffer(coords)) return r.coordinatorType === "gefen" ? coords.gefenSlot : coords.currentSlot;
+  if (coords.gefen?.email && !coords.current?.email) return coords.gefenSlot;
+  return coords.currentSlot;
 }
 
 export function DirectCoordinationModal({ school: initialSchool, advisors, onClose, onSent }) {
@@ -115,7 +133,7 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
   const [yearAdminData, setYearAdminData] = useState(null);
 
   const contacts = buildSchoolContacts(school);
-  const gefenCurrentEligible = isGefenCurrentEligible(school);
+  const gefenCurrentOffered = isGefenCurrentOffered(school);
 
   // Only needed to compute the "גפן+שוטף" default duration (sum of the school's own per-type
   // meeting durations) — school_year_admin_data isn't included on the school object the modal
@@ -128,10 +146,21 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
     return () => { cancelled = true; };
   }, [school.id]);
 
+  // The school card's גפן length + שוטף length, or null while either one is empty (the
+  // manager then picks a length; a guessed default would book the wrong slot size). The card
+  // takes any hours:minutes value, so the sum is rounded UP to the 15-minute steps that the
+  // select and the server (_DIRECT_COORDINATION_DURATIONS) accept — e.g. 45 + 50 → 1:45.
   function gefenCurrentDefaultDuration() {
-    const g = yearAdminData?.meeting_duration_gefen ?? 60;
-    const c = yearAdminData?.meeting_duration_current ?? 60;
-    return g + c;
+    const g = yearAdminData?.meeting_duration_gefen;
+    const c = yearAdminData?.meeting_duration_current;
+    if (!g || !c) return null;
+    return Math.min(Math.max(Math.ceil((g + c) / 15) * 15, DURATION_OPTIONS[0]), MAX_DURATION);
+  }
+  function gefenCurrentMissingDurations() {
+    return [
+      !yearAdminData?.meeting_duration_gefen && "גפן",
+      !yearAdminData?.meeting_duration_current && "שוטף",
+    ].filter(Boolean);
   }
 
   function allResolvedAdvisorIds() {
@@ -184,8 +213,13 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
       }
       if (r.participantKeys.length === 0) return "יש לבחור לפחות משתתף אחד לכל פגישה";
       if (r.allowTimeRangeSearch === null) return 'יש לענות על השאלה "האם לאפשר לבית הספר אפשרויות נוספות לשעת הפגישה?" (שדה חובה) לכל פגישה';
+      if (r.minFreeWindow === null) return 'יש לבחור "שמירה על יומן יעיל" (שדה חובה) לכל פגישה';
+      if (r.startGrid === null) return 'יש לבחור "שעת התחלה של הפגישה" (שדה חובה) לכל פגישה';
       if (slotForMeetingServiceType(school, r.serviceType, r.stageScope) === null) {
         return 'יש לבחור חטיבה (תיכון/חט"ב) לכל פגישה מסוג גפן/שוטף/תקומה בבית ספר שש-שנתי';
+      }
+      if (r.serviceType === "gefen_current" && !r.coordinatorType && coordinatorsDiffer(gefenCurrentCoordinators(school, r.stageScope))) {
+        return "יש לבחור למי לשלוח את בקשת התיאום לפגישת גפן+שוטף (לגפן ולשוטף מוגדרים אחראי/ות תיאום שונים)";
       }
     }
     return "";
@@ -196,7 +230,7 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
   function neededCoordinatorSlots() {
     const slots = new Set();
     for (const r of ranges) {
-      const slot = slotForMeetingServiceType(school, r.serviceType, r.stageScope);
+      const slot = rangeCoordinatorSlot(school, r);
       if (slot) slots.add(slot);
     }
     return [...slots];
@@ -260,6 +294,7 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
           meeting_service_type: r.serviceType,
           duration_minutes: r.duration,
           advisor_ids: resolveRangeAdvisorIds(r, school),
+          coordinator_type: r.serviceType === "gefen_current" && r.coordinatorType ? r.coordinatorType : null,
           participants: r.participantKeys.map(key => {
             const c = contacts.find(c => c.key === key);
             return { key: c.key, name: c.name, email: c.email || null };
@@ -267,6 +302,8 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
           stage_scope: r.stageScope || null,
           meeting_type: r.meetingType || "remote",
           allow_time_range_search: r.allowTimeRangeSearch,
+          min_free_window_minutes: r.minFreeWindow,
+          start_grid_minutes: r.startGrid,
           requested_upload_years: r.serviceType !== "current" ? (r.requestedUploadYears || [DEFAULT_ACADEMIC_YEAR]) : null,
         })),
       };
@@ -342,13 +379,14 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
 
                   <fieldset className="flex flex-col gap-1.5">
                     <legend className="text-xs font-medium text-slate-500">סוג פגישה</legend>
-                    <div className="flex gap-2">
-                      {ALL_SERVICE_TYPE_OPTIONS.filter(opt => opt.value !== "gefen_current" || gefenCurrentEligible).map(opt => (
+                    <div className="flex flex-wrap gap-2">
+                      {ALL_SERVICE_TYPE_OPTIONS.filter(opt => opt.value !== "gefen_current" || gefenCurrentOffered).map(opt => (
                         <button key={opt.value} type="button"
                           aria-pressed={r.serviceType === opt.value}
                           onClick={() => updateRange(r.localId, {
                             serviceType: opt.value,
-                            ...(opt.value === "gefen_current" ? { duration: gefenCurrentDefaultDuration() } : {}),
+                            coordinatorType: "",
+                            ...(opt.value === "gefen_current" && gefenCurrentDefaultDuration() ? { duration: gefenCurrentDefaultDuration() } : {}),
                           })}
                           className={`text-sm px-4 py-1.5 rounded-lg border transition-colors ${
                             r.serviceType === opt.value
@@ -464,6 +502,32 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
                     )}
                   </div>
 
+                  {r.serviceType === "gefen_current" && (() => {
+                    const coords = gefenCurrentCoordinators(school, r.stageScope);
+                    if (!coordinatorsDiffer(coords)) return null;
+                    return (
+                      <fieldset className="flex flex-col gap-1.5">
+                        <legend className="text-xs font-medium text-slate-500">
+                          לגפן ולשוטף מוגדרים אחראי/ות תיאום שונים — למי לשלוח את בקשת התיאום? <span className="text-red-600">(שדה חובה)</span>
+                        </legend>
+                        <div className={`flex flex-wrap gap-2 ${error && !r.coordinatorType ? "border border-red-400 rounded-lg p-1.5 -m-1.5" : ""}`}>
+                          {["gefen", "current"].map(type => (
+                            <button key={type} type="button"
+                              aria-pressed={r.coordinatorType === type}
+                              onClick={() => updateRange(r.localId, { coordinatorType: type })}
+                              className={`text-sm px-4 py-1.5 rounded-lg border transition-colors ${
+                                r.coordinatorType === type
+                                  ? "bg-blue-600 border-blue-600 text-white font-semibold"
+                                  : "border-black text-slate-600 hover:bg-slate-50"
+                              }`}>
+                              {coords[type].name} ({COORDINATOR_TYPE_LABELS[type]})
+                            </button>
+                          ))}
+                        </div>
+                      </fieldset>
+                    );
+                  })()}
+
                   <div className="grid grid-cols-3 gap-3">
                     <div className="flex flex-col gap-1">
                       <label htmlFor={`dc-advisor-${r.localId}`} className="text-xs font-medium text-slate-500">יועץ מבצע</label>
@@ -488,6 +552,16 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
                         className="text-sm border border-black rounded-lg px-2.5 py-1.5 w-full">
                         {DURATION_OPTIONS.map(d => <option key={d} value={d}>{formatDuration(d)}</option>)}
                       </select>
+                      {r.serviceType === "gefen_current" && gefenCurrentMissingDurations().length > 0 && (
+                        <p className="text-[11px] text-amber-600">
+                          חסר "זמן לפגישה" [{gefenCurrentMissingDurations().join(" ו")}] בכרטיס בית הספר — יש לבחור משך ידנית.
+                        </p>
+                      )}
+                      {r.serviceType === "gefen_current" && (yearAdminData?.meeting_duration_gefen || 0) + (yearAdminData?.meeting_duration_current || 0) > MAX_DURATION && (
+                        <p className="text-[11px] text-amber-600">
+                          סכום הזמנים בכרטיס עולה על {formatDuration(MAX_DURATION)} — נבחר המשך המרבי.
+                        </p>
+                      )}
                     </div>
                     <div className="flex flex-col gap-1">
                       <label htmlFor={`dc-location-${r.localId}`} className="text-xs font-medium text-slate-500">מיקום הפגישה</label>
@@ -536,6 +610,15 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
                       ))}
                     </div>
                   </fieldset>
+
+                  <EfficientCalendarFields
+                    idPrefix={`dc-${r.localId}`}
+                    minFreeWindow={r.minFreeWindow}
+                    startGrid={r.startGrid}
+                    onMinFreeWindowChange={v => updateRange(r.localId, { minFreeWindow: v })}
+                    onStartGridChange={v => updateRange(r.localId, { startGrid: v })}
+                    showErrors={!!error}
+                  />
                 </div>
               ))}
             </div>

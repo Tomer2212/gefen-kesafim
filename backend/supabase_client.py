@@ -61,6 +61,7 @@ _AUTO_PAGE_HARD_CAP = 200_000      # runaway guard: never pull more than this in
 # tests/test_row_cap_pagination.py fails if a table is added/changed without updating this.
 TABLE_PRIMARY_KEYS = {
     "advisor_schools": ("advisor_id", "school_id"),
+    "booking_slot_locks": ("lock_key",),
     "calendar_sync_locks": ("meeting_id",),
     "calls_scan_processed": ("org_id", "call_id"),
     "chatbot_usage_daily": ("user_id", "usage_date"),

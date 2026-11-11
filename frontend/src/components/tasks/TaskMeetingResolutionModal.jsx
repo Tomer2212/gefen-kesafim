@@ -7,6 +7,16 @@ import { SLOT_LABELS } from "../meetings/meetingCoordinatorSlots";
 
 // Tags school-data writes for the school card's "תיעוד פעולות" log (backend school_activity.py).
 const SURFACE_HEADERS = { headers: { "X-Client-Surface": "task_resolution" } };
+const COORDINATOR_TYPE_LABELS = { gefen: "גפן", current: "שוטף" };
+const DIVISION_LABELS = { tichon: "תיכון", chativa: 'חט"ב', both: 'תיכון וחט"ב' };
+
+// The school-card fields a meeting type's missing default must be saved into: the backend says
+// which ones (gefen_current → the missing ones of גפן/שוטף, takuma → גפן); older responses
+// without the list fall back to the type itself.
+function cardTypesFor(md, field) {
+  const types = md[field];
+  return types && types.length ? types : [md.meeting_service_type];
+}
 
 // Fallback labels only — round 8: the backend sends a per-school school.participants.role_labels
 // map (aware of stage/principal_same_person, e.g. "מנהל/ת חט\"ע" vs "מנהל/ת חט\"ב"), which is
@@ -143,6 +153,7 @@ export default function TaskMeetingResolutionModal({
     for (const aa of school.advisor_access || []) {
       leaves.push(`access:${school.school_id}:${aa.meeting_service_type}:${aa.advisor_id}`);
     }
+    if (school.coordinator_conflict) leaves.push(`conflict:${school.school_id}`);
     return leaves;
   }
   function schoolUnresolvedCount(school) {
@@ -153,6 +164,9 @@ export default function TaskMeetingResolutionModal({
   const activeSchools = schools.filter(s => !removedSchoolIds.has(s.school_id));
   const remainingSchools = activeSchools.filter(s => schoolUnresolvedCount(s) > 0);
   const allClear = !checking && result && remainingSchools.length === 0;
+  const unresolvedConflictIds = activeSchools
+    .filter(s => s.coordinator_conflict && !resolved(`conflict:${s.school_id}`))
+    .map(s => s.school_id);
 
   // Existing-task mode: once every visible problem is marked resolved, immediately attempt
   // the real send instead of making the manager click a button — the scheduled time has
@@ -285,8 +299,11 @@ export default function TaskMeetingResolutionModal({
     if (!advisorId) return;
     setSavingKey(key);
     setSaveError(null);
+    const md = (school.meeting_defaults || []).find(m => m.meeting_service_type === type) || { meeting_service_type: type };
     try {
-      await axios.post(`/schools/${school.school_id}/advisors/${type}`, { advisor_id: advisorId }, SURFACE_HEADERS);
+      for (const cardType of cardTypesFor(md, "missing_advisor_types")) {
+        await axios.post(`/schools/${school.school_id}/advisors/${cardType}`, { advisor_id: advisorId }, SURFACE_HEADERS);
+      }
       markResolved(key);
     } catch {
       setSaveError(`שמירת היועץ עבור ${school.school_name} נכשלה — נסה שוב.`);
@@ -304,15 +321,28 @@ export default function TaskMeetingResolutionModal({
     }));
     markResolved(key);
   }
-  async function handleSaveDurationToCard(school, type) {
+  // cardType = the card field to fill (e.g. "current" for a gefen_current meeting missing only
+  // the שוטף length). A combined meeting has one row per missing field, so its problem counts as
+  // resolved once all of them are saved (or once a total length is set for this task only).
+  async function handleSaveDurationToCard(school, type, cardType) {
+    const md = (school.meeting_defaults || []).find(m => m.meeting_service_type === type) || { meeting_service_type: type };
+    const cardTypes = cardTypesFor(md, "missing_duration_types");
+    const target = cardType || cardTypes[0];
     const key = `duration:${school.school_id}:${type}`;
-    const minutes = draftValue(key, "");
+    const rowKey = cardType ? `${key}:${cardType}` : key;
+    const minutes = draftValue(rowKey, "");
     if (!minutes) return;
-    setSavingKey(key);
+    setSavingKey(rowKey);
     setSaveError(null);
     try {
-      await axios.put(`/schools/${school.school_id}/year-admin-data`, { [`meeting_duration_${type}`]: Number(minutes) }, { params: { academic_year: academicYear }, ...SURFACE_HEADERS });
-      markResolved(key);
+      await axios.put(`/schools/${school.school_id}/year-admin-data`, { [`meeting_duration_${target}`]: Number(minutes) }, { params: { academic_year: academicYear }, ...SURFACE_HEADERS });
+      if (cardType) {
+        markResolved(rowKey);
+        const others = cardTypes.filter(t => t !== cardType);
+        if (others.every(t => resolved(`${key}:${t}`))) markResolved(key);
+      } else {
+        markResolved(key);
+      }
     } catch {
       setSaveError(`שמירת משך הפגישה עבור ${school.school_name} נכשלה — נסה שוב.`);
     } finally {
@@ -357,6 +387,40 @@ export default function TaskMeetingResolutionModal({
     }
   }
 
+  // --- Combined "גפן+שוטף" meeting whose גפן and שוטף coordinators are different people ---
+  async function chooseCoordinator(schoolIds, coordinatorType) {
+    setSaveError(null);
+    if (taskId) {
+      setSavingKey(`conflict:${schoolIds.join(",")}`);
+      try {
+        for (const schoolId of schoolIds) {
+          await axios.patch(`/tasks/${taskId}/meeting-overrides/${schoolId}`, {
+            meeting_service_type: "gefen_current", coordinator_type: coordinatorType,
+          });
+        }
+      } catch {
+        setSaveError("שמירת הבחירה נכשלה — נסה שוב.");
+        setSavingKey(null);
+        return;
+      }
+      setSavingKey(null);
+    } else {
+      setMeetingOverrides(prev => {
+        const next = { ...prev };
+        for (const schoolId of schoolIds) {
+          next[schoolId] = { ...next[schoolId], gefen_current: { ...next[schoolId]?.gefen_current, coordinator_type: coordinatorType } };
+        }
+        return next;
+      });
+    }
+    for (const schoolId of schoolIds) setDraftValue(`conflict:${schoolId}`, coordinatorType);
+    setResolvedKeys(prev => {
+      const next = new Set(prev);
+      for (const schoolId of schoolIds) next.add(`conflict:${schoolId}`);
+      return next;
+    });
+  }
+
   async function handleExport() {
     const rows = [];
     for (const school of remainingSchools) {
@@ -377,6 +441,9 @@ export default function TaskMeetingResolutionModal({
         if (md.missing_duration && !resolved(`duration:${school.school_id}:${md.meeting_service_type}`)) {
           rows.push({ school_id: school.school_id, school_name: school.school_name, symbol: school.symbol, authority: school.authority, kind: "duration", detail: md.meeting_service_type });
         }
+      }
+      if (school.coordinator_conflict && !resolved(`conflict:${school.school_id}`)) {
+        rows.push({ school_id: school.school_id, school_name: school.school_name, symbol: school.symbol, authority: school.authority, kind: "coordinator_conflict" });
       }
     }
     const res = await axios.post("/tasks/meetings/export-missing", { rows }, { responseType: "blob" });
@@ -418,6 +485,20 @@ export default function TaskMeetingResolutionModal({
                   <>לבתי הספר הבאים חסרות הגדרות להשלמת המשימה: <b className="text-slate-800">{remainingSchools.length}</b> נותרו לטיפול.</>
                 )}
               </p>
+
+              {unresolvedConflictIds.length > 1 && (
+                <div className="flex items-center gap-1.5 flex-wrap bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
+                  <span className="text-xs text-slate-700">
+                    ל-<b>{unresolvedConflictIds.length}</b> בתי ספר יש אחראי/ת תיאום שונה לגפן ולשוטף. לכולם:
+                  </span>
+                  {["gefen", "current"].map(type => (
+                    <button key={type} type="button" disabled={!!savingKey} onClick={() => chooseCoordinator(unresolvedConflictIds, type)}
+                      className="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-white border border-amber-300 text-amber-800 hover:bg-amber-100 disabled:opacity-50">
+                      שלח לאחראי/ת התיאום של {COORDINATOR_TYPE_LABELS[type]}
+                    </button>
+                  ))}
+                </div>
+              )}
 
               {schools.map(school => {
                 const isRemoved = removedSchoolIds.has(school.school_id);
@@ -566,6 +647,11 @@ export default function TaskMeetingResolutionModal({
                           const durationKey = `duration:${school.school_id}:${md.meeting_service_type}`;
                           const advisorDone = md.missing_advisor && resolved(advisorKey);
                           const durationDone = md.missing_duration && resolved(durationKey);
+                          // A combined meeting names which side is missing ("יועץ מלווה [שוטף]").
+                          const isCombined = md.meeting_service_type === "gefen_current";
+                          const advisorLabel = isCombined
+                            ? cardTypesFor(md, "missing_advisor_types").map(t => MEETING_SERVICE_TYPE_LABELS[t]).join(" + ")
+                            : typeLabel;
                           return (
                             <div key={md.meeting_service_type} className="bg-white rounded-lg border border-amber-100 p-3 space-y-2">
                               <p className="text-xs text-slate-700">
@@ -574,11 +660,11 @@ export default function TaskMeetingResolutionModal({
                               {md.missing_advisor && (advisorDone ? (
                                 <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1.5">
                                   <span aria-hidden="true" className="text-emerald-600 text-xs font-bold">✓</span>
-                                  <span className="text-xs text-emerald-800">יועץ מלווה [{typeLabel}] — טופל</span>
+                                  <span className="text-xs text-emerald-800">יועץ מלווה [{advisorLabel}] — טופל</span>
                                 </div>
                               ) : (
                                 <div className="flex items-center gap-1.5 flex-wrap">
-                                  <span className="text-xs font-medium text-slate-600 w-24">יועץ מלווה [{typeLabel}]</span>
+                                  <span className="text-xs font-medium text-slate-600 w-24">יועץ מלווה [{advisorLabel}]</span>
                                   <select
                                     value={draftValue(advisorKey, "")}
                                     onChange={e => setDraftValue(advisorKey, e.target.value)}
@@ -603,6 +689,55 @@ export default function TaskMeetingResolutionModal({
                                 <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1.5">
                                   <span aria-hidden="true" className="text-emerald-600 text-xs font-bold">✓</span>
                                   <span className="text-xs text-emerald-800">זמן פגישה [{typeLabel}] — טופל</span>
+                                </div>
+                              ) : isCombined ? (
+                                <div className="space-y-1.5">
+                                  {cardTypesFor(md, "missing_duration_types").map(cardType => {
+                                    const rowKey = `${durationKey}:${cardType}`;
+                                    const cardLabel = MEETING_SERVICE_TYPE_LABELS[cardType];
+                                    if (resolved(rowKey)) {
+                                      return (
+                                        <div key={cardType} className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1.5">
+                                          <span aria-hidden="true" className="text-emerald-600 text-xs font-bold">✓</span>
+                                          <span className="text-xs text-emerald-800">זמן פגישה [{cardLabel}] נשמר בכרטיס</span>
+                                        </div>
+                                      );
+                                    }
+                                    return (
+                                      <div key={cardType} className="flex items-center gap-1.5 flex-wrap">
+                                        <label htmlFor={`${rowKey}-select`} className="text-xs font-medium text-slate-600 w-24">זמן פגישה [{cardLabel}]</label>
+                                        <select id={`${rowKey}-select`}
+                                          value={draftValue(rowKey, "")}
+                                          onChange={e => setDraftValue(rowKey, e.target.value)}
+                                          className="text-xs border border-amber-300 rounded-lg px-2 py-1.5 bg-white"
+                                        >
+                                          <option value="" disabled>בחר משך...</option>
+                                          {DURATION_OPTIONS.map(m => <option key={m} value={m}>{formatDuration(m)}</option>)}
+                                        </select>
+                                        <button type="button" onClick={() => handleSaveDurationToCard(school, md.meeting_service_type, cardType)} disabled={savingKey === rowKey || !draftValue(rowKey, "")}
+                                          className="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">
+                                          {savingKey === rowKey ? "שומר..." : "שמור בכרטיס בית הספר"}
+                                        </button>
+                                      </div>
+                                    );
+                                  })}
+                                  {!taskId && (
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                      <label htmlFor={`${durationKey}-total`} className="text-xs font-medium text-slate-600 w-24">או: משך כולל לפגישה זו</label>
+                                      <select id={`${durationKey}-total`}
+                                        value={draftValue(durationKey, "")}
+                                        onChange={e => setDraftValue(durationKey, e.target.value)}
+                                        className="text-xs border border-amber-300 rounded-lg px-2 py-1.5 bg-white"
+                                      >
+                                        <option value="" disabled>בחר משך...</option>
+                                        {DURATION_OPTIONS.map(m => <option key={m} value={m}>{formatDuration(m)}</option>)}
+                                      </select>
+                                      <button type="button" onClick={() => handleOverrideDuration(school, md.meeting_service_type)} disabled={!draftValue(durationKey, "")}
+                                        className="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-white border border-amber-300 text-amber-800 hover:bg-amber-100 disabled:opacity-50">
+                                        קבע משך לפגישה זו בלבד
+                                      </button>
+                                    </div>
+                                  )}
                                 </div>
                               ) : (
                                 <div className="flex items-center gap-1.5 flex-wrap">
@@ -667,6 +802,43 @@ export default function TaskMeetingResolutionModal({
                             </div>
                           );
                         })}
+
+                        {school.coordinator_conflict && (() => {
+                          cardCounter += 1;
+                          const n = cardCounter;
+                          const key = `conflict:${school.school_id}`;
+                          const chosen = draftValue(key, "");
+                          const saving = savingKey === key;
+                          if (resolved(key)) {
+                            return (
+                              <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 flex items-center gap-2">
+                                <span aria-hidden="true" className="text-emerald-600 text-xs font-bold">✓</span>
+                                <span className="text-xs text-emerald-800"><b>בעיה {n}:</b> בקשת התיאום לפגישת גפן+שוטף תישלח לאחראי/ת התיאום של {COORDINATOR_TYPE_LABELS[chosen] || ""}</span>
+                              </div>
+                            );
+                          }
+                          return (
+                            <div className="bg-white rounded-lg border border-amber-100 p-3 space-y-2">
+                              <p className="text-xs text-slate-700">
+                                <b>בעיה {n}:</b> לפגישת גפן+שוטף נשלחת בקשת תיאום אחת, אבל לגפן ולשוטף מוגדרים בבית הספר אחראי/ות תיאום שונים. למי לשלוח?
+                              </p>
+                              {school.coordinator_conflict.scopes.map((sc, i) => (
+                                <p key={i} className="text-xs text-slate-600">
+                                  {sc.stage_scope && DIVISION_LABELS[sc.stage_scope] && <b>{DIVISION_LABELS[sc.stage_scope]}: </b>}
+                                  גפן — {sc.gefen.name} (<bdi>{sc.gefen.email}</bdi>) · שוטף — {sc.current.name} (<bdi>{sc.current.email}</bdi>)
+                                </p>
+                              ))}
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                {["gefen", "current"].map(type => (
+                                  <button key={type} type="button" disabled={saving} onClick={() => chooseCoordinator([school.school_id], type)}
+                                    className="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">
+                                    שלח לאחראי/ת התיאום של {COORDINATOR_TYPE_LABELS[type]} ({school.coordinator_conflict.scopes[0][type].name})
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          );
+                        })()}
                       </div>
                     )}
                   </div>

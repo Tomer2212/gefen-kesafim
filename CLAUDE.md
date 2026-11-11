@@ -315,6 +315,20 @@ Both tables also hold `message_type` ('reminder' | 'upload_request' | 'upload_fo
 - **The pg_cron job was created by hand** (2026-11-07, jobid 2) with `cron.schedule('tasks-recompute-progress', '*/5 * * * *', ...)`, same `net.http_post` shape as `calls-process-new-calls`. Check `cron.job` before relying on it.
 - **Runs are sequential and have no overlap guard:** about 3 s today. If a run nears 5 minutes as orgs grow, add a lease like `calls_integrations.scan_lock_until`.
 
+### Public booking links — no overlapping bookings, even at the same instant (`backend/booking_lock.py`)
+`_book_range_slot` and `book_meeting_slot` used to be check-then-insert with no lock and `meetings` has no DB constraint, so two schools confirming the same advisor's time on different workers could both succeed (reproduced in `tests/test_booking_concurrency.py` with the protection off). Two layers now:
+- **`booking_locks(keys)`** — table `booking_slot_locks` (`lock_key` PK; service_role only, deny-all RLS; same mechanism as `graph_client.calendar_sync_lock`), keys `adv:{advisor_id}:{date}` per advisor + `range:{token_id}:{range_key}` (double clicks), taken in sorted order, stale after 30 s, 503 after 15 s of waiting. Outlook is read **before** the lock; inside it everything another booking may have changed is re-read (token's `booked_ranges`/`booked_months`, `meetings` of the day, existing-meeting check, slot_policy) and then insert + `booked_*` update. Activity log + Outlook sync run after release.
+- **`keep_or_discard_booking`** right after the insert: an overlapping scheduled meeting of the same advisor created earlier (`created_at`, then `id`) wins and the new row is deleted (409). Holds even if a lock was stolen.
+- Any new public (school-side) booking path MUST use both. Staff-created meetings are deliberately not locked (an advisor may double-book on purpose), but an earlier staff meeting always beats a link booking.
+
+### "יומן יעיל" — which times a public booking link offers (`backend/slot_policy.py`)
+A range created with the two required questions (`min_free_window_minutes` X, 0 = no limit; `start_grid_minutes` 30/60) goes through `slot_policy`; a range without `min_free_window_minutes` keeps the original earliest-slot code path (`meeting_booking_router._uses_slot_policy`), so links already sent never change.
+- **Rule:** per advisor and day (working-day edges count as events), a free gap of G minutes is worth ⌊G/X⌋ windows; only the times of minimal cost that day are allowed — first fewest windows lost, then fewest minutes of "locked" gaps shorter than X. Each advisor's calendar is checked separately (`_busy_by_advisor`), never their union.
+- **Every range booking (any link) is checked to be on a date of the range, of the range's exact length and inside the working hours** before the lock; slot_policy ranges are additionally checked against the rule.
+- **The same function decides what is shown and what is accepted:** `_book_range_slot` re-runs `slot_policy.is_allowed` on the live calendars (plus duration and date), since the endpoint is public. Any new booking path for such ranges must do the same.
+- `requested_days` (the school's "אפשרויות נוספות" hours) is added next to the regular `days`, never replacing them.
+- **Past days/hours are never offered or accepted** (all booking paths, old links included): `_upcoming_dates` drops past days, and on today's date the elapsed time (rounded up to the start grid) counts as busy (`_with_elapsed_time`); the booking endpoints reject a start time already gone.
+
 ### `school_update_requests` — advisors request changes, owners approve
 ```sql
 id UUID PRIMARY KEY

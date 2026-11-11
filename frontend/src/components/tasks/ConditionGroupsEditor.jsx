@@ -6,6 +6,7 @@ import FieldPickerButton from "./FieldPickerButton";
 import { formatDateDMY, STAGE_SCOPE_OPTIONS } from "./taskShared";
 import { MEETING_STATUS_OPTIONS, MEETING_TYPE_OPTIONS } from "../meetings/constants";
 import { ACADEMIC_YEARS, DEFAULT_ACADEMIC_YEAR } from "../../constants/academicYears";
+import EfficientCalendarFields, { isEfficientCalendarComplete } from "../meetings/EfficientCalendarFields";
 
 // Only scheduled/completed meetings are ever fetched for condition-matching at all (see
 // backend/task_logic.py's _fetch_schools_and_meetings, which pre-filters at the query level for
@@ -50,6 +51,10 @@ const EMPTY_MEETING_CONDITION = {
   // public booking page ("אפשרויות נוספות"). null (unanswered) until explicitly set; see
   // isMeetingRequirementComplete below.
   allow_time_range_search: null,
+  // "יומן יעיל" (backend/slot_policy.py) — required, no default: the shortest free window to
+  // keep in the advisor's calendar (0 = no limit) and the start-time grid (30/60 minutes).
+  min_free_window_minutes: null,
+  start_grid_minutes: null,
   // Required yes/no — whether a school that already has a matching scheduled meeting should
   // still be asked to book an ADDITIONAL one through this requirement, instead of the
   // requirement being auto-satisfied by the pre-existing meeting. null (unanswered) until
@@ -60,7 +65,12 @@ const EMPTY_MEETING_CONDITION = {
   // != "current"; null there. Mirrors DirectCoordinationRangeIn.requested_upload_years.
   requested_upload_years: [DEFAULT_ACADEMIC_YEAR],
 };
-const MEETING_TYPE_PILLS = [{ value: "gefen", label: "גפן" }, { value: "current", label: "שוטף" }, { value: "district", label: "מחוז" }, { value: "takuma", label: "תקומה" }];
+// "גפן+שוטף" — one combined meeting: the school card's גפן and שוטף advisors together, for the
+// sum of both card lengths (resolved per school on the backend, _build_meeting_ranges).
+const MEETING_TYPE_PILLS = [
+  { value: "gefen", label: "גפן" }, { value: "current", label: "שוטף" }, { value: "gefen_current", label: "גפן+שוטף" },
+  { value: "district", label: "מחוז" }, { value: "takuma", label: "תקומה" },
+];
 const PARTICIPANT_ROLE_OPTIONS = [
   { value: "principal", label: "מנהל/ת" }, { value: "secretary", label: "מנהלנ/ית" }, { value: "finance_contact", label: "אחראי/ת כספים" },
 ];
@@ -72,7 +82,8 @@ export function needsStageScope(cond) {
   return cond.meeting_service_type && cond.meeting_service_type !== "current"
     && (cond.participant_roles || []).some(r => ["principal", "secretary", "finance_contact"].includes(r));
 }
-export const DURATION_OPTIONS = Array.from({ length: (180 - 30) / 15 + 1 }, (_, i) => 30 + i * 15);
+// Up to 5 hours — a combined "גפן+שוטף" meeting is the sum of two lengths.
+export const DURATION_OPTIONS = Array.from({ length: (300 - 30) / 15 + 1 }, (_, i) => 30 + i * 15);
 export function formatDuration(minutes) {
   if (minutes < 60) return `${minutes} דק'`;
   const hours = minutes / 60;
@@ -97,6 +108,7 @@ export function isMeetingRequirementComplete(cond, hasSixYearSchool = true) {
     cond.meeting_service_type && isMeetingDateSegmentsComplete(cond) && (cond.participant_roles || []).length > 0 &&
     (!needsStageScope(cond) || !hasSixYearSchool || cond.stage_scope) &&
     cond.allow_time_range_search !== null && cond.allow_time_range_search !== undefined &&
+    isEfficientCalendarComplete(cond.min_free_window_minutes, cond.start_grid_minutes) &&
     cond.require_additional_meeting !== null && cond.require_additional_meeting !== undefined
   );
 }
@@ -493,7 +505,7 @@ export default function ConditionGroupsEditor({
                     )}
                     <fieldset className="flex flex-col gap-1.5">
                       <legend className="text-xs font-medium text-black">סוג פגישה</legend>
-                      <div className={`flex gap-2 ${showValidationErrors && !cond.meeting_service_type ? "border border-red-400 rounded-lg p-1.5 -m-1.5" : ""}`}>
+                      <div className={`flex flex-wrap gap-2 ${showValidationErrors && !cond.meeting_service_type ? "border border-red-400 rounded-lg p-1.5 -m-1.5" : ""}`}>
                         {MEETING_TYPE_PILLS.map(opt => (
                           <button key={opt.value} type="button"
                             aria-pressed={cond.meeting_service_type === opt.value}
@@ -593,7 +605,9 @@ export default function ConditionGroupsEditor({
                           {(orgUsers || []).map(u => <option key={u.id} value={u.id}>{u.full_name || u.email}</option>)}
                         </select>
                         <div className="pointer-events-none absolute -top-7 right-0 opacity-0 group-hover:opacity-100 transition-opacity bg-amber-400 text-amber-950 text-[11px] font-medium px-2 py-1 rounded-md shadow-lg whitespace-nowrap z-10">
-                          בהתאם להגדרה בכרטיס בית הספר
+                          {cond.meeting_service_type === "gefen_current"
+                            ? "יועצי הגפן והשוטף מהכרטיס — פגישה אחת עם כולם, במועד שכולם פנויים"
+                            : "בהתאם להגדרה בכרטיס בית הספר"}
                         </div>
                       </div>
                       <div className="flex flex-col gap-1 relative group">
@@ -607,12 +621,16 @@ export default function ConditionGroupsEditor({
                           }}
                           className="text-sm border border-black rounded-lg px-2.5 py-1.5 w-full">
                           <option value="__default__">
-                            {cond.meeting_service_type ? `זמן פגישה [${MEETING_SERVICE_TYPE_LABELS[cond.meeting_service_type]}]` : "זמן פגישה"}
+                            {cond.meeting_service_type === "gefen_current"
+                              ? "זמן פגישה [גפן + שוטף]"
+                              : cond.meeting_service_type ? `זמן פגישה [${MEETING_SERVICE_TYPE_LABELS[cond.meeting_service_type]}]` : "זמן פגישה"}
                           </option>
                           {DURATION_OPTIONS.map(d => <option key={d} value={d}>{formatDuration(d)}</option>)}
                         </select>
                         <div className="pointer-events-none absolute -top-7 right-0 opacity-0 group-hover:opacity-100 transition-opacity bg-amber-400 text-amber-950 text-[11px] font-medium px-2 py-1 rounded-md shadow-lg whitespace-nowrap z-10">
-                          בהתאם להקצאה בכרטיס בית הספר
+                          {cond.meeting_service_type === "gefen_current"
+                            ? "חיבור זמן הפגישה של גפן ושל שוטף מכרטיס בית הספר (למשל שעה + שעה וחצי = 2:30 שעות)"
+                            : "בהתאם להקצאה בכרטיס בית הספר"}
                         </div>
                       </div>
                       <div className="flex flex-col gap-1">
@@ -663,6 +681,15 @@ export default function ConditionGroupsEditor({
                         ))}
                       </div>
                     </fieldset>
+
+                    <EfficientCalendarFields
+                      idPrefix={`mtg-${gi}-${ci}`}
+                      minFreeWindow={cond.min_free_window_minutes}
+                      startGrid={cond.start_grid_minutes}
+                      onMinFreeWindowChange={v => updateCondition(gi, ci, { min_free_window_minutes: v })}
+                      onStartGridChange={v => updateCondition(gi, ci, { start_grid_minutes: v })}
+                      showErrors={showValidationErrors}
+                    />
 
                     <fieldset className="flex flex-col gap-1.5">
                       <legend className="text-xs font-medium text-black">

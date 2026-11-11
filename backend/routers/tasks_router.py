@@ -22,6 +22,7 @@ from pydantic import BaseModel
 import booking_token_logic
 import graph_client
 import school_activity
+import slot_policy
 import task_logic
 import whatsapp_twilio
 from routers import schools_router as _schools_router
@@ -51,8 +52,45 @@ _PARTICIPANT_ROLE_LABELS = {
     "secretary": "מנהלנ/ית", "secretary_chativa": 'מנהלנ/ית חט"ב',
     "finance_contact": "אחראי/ת כספים", "finance_contact_chativa": 'אחראי/ת כספים חט"ב',
 }
-_MEETING_TYPE_LABELS = {"gefen": "גפן", "current": "שוטף", "district": "מחוז", "takuma": "תקומה"}
+_MEETING_TYPE_LABELS = {"gefen": "גפן", "current": "שוטף", "gefen_current": "גפן+שוטף", "district": "מחוז", "takuma": "תקומה"}
 _TYPED_ADVISOR_TABLES = {"gefen": "school_advisors_gefen", "current": "school_advisors_current", "district": "school_advisors_district"}
+
+
+def _card_types_for_meeting(service_type: str) -> list[str]:
+    """Which of the school card's per-type advisor lists / "זמן לפגישה" fields a meeting type
+    draws its defaults from: takuma reuses גפן, and the combined "גפן+שוטף" meeting uses both."""
+    if service_type == "gefen_current":
+        return ["gefen", "current"]
+    if service_type == "takuma":
+        return ["gefen"]
+    return [service_type]
+
+
+def _default_advisor_ids(by_type: dict, service_type: str) -> list[str]:
+    """The school card's advisors for a meeting type. "גפן+שוטף" gets both lists (deduped), so
+    one meeting is booked with all of them, at a time when every one of them is free."""
+    out: list[str] = []
+    for t in _card_types_for_meeting(service_type):
+        for aid in by_type.get(t) or []:
+            if aid not in out:
+                out.append(aid)
+    return out
+
+
+def _missing_default_advisor_types(by_type: dict, service_type: str) -> list[str]:
+    return [t for t in _card_types_for_meeting(service_type) if not by_type.get(t)]
+
+
+def _missing_default_duration_types(duration_row: dict, service_type: str) -> list[str]:
+    return [t for t in _card_types_for_meeting(service_type) if not duration_row.get(f"meeting_duration_{t}")]
+
+
+def _default_duration_minutes(duration_row: dict, service_type: str) -> int | None:
+    """The school card's meeting length for a meeting type; "גפן+שוטף" is the sum of the גפן
+    and שוטף lengths. None when any of the needed fields is empty."""
+    if _missing_default_duration_types(duration_row, service_type):
+        return None
+    return sum(duration_row[f"meeting_duration_{t}"] for t in _card_types_for_meeting(service_type))
 
 
 _SAME_PERSON_FIELD = {
@@ -883,9 +921,16 @@ def _coordinator_problem(school: dict, channel: str, meeting_requirements: list 
     return detail
 
 
+def _has_blocking_meeting_problem(entry: dict) -> bool:
+    """Every problem kind except the informational opted_out one blocks sending."""
+    return bool(entry["coordinator"] or entry["participants"] or entry["meeting_defaults"]
+                or entry["advisor_access"] or entry.get("coordinator_conflict"))
+
+
 def _check_meeting_problems(
     org_id: str, criteria: dict, manual_school_ids: list[str] | None,
     meeting_requirements: list[MeetingRequirementIn], channel: str, academic_year: str,
+    meeting_overrides: dict | None = None,
 ) -> dict:
     """Round-6 unified pre-creation check (TaskMeetingResolutionModal) for 'קביעת פגישות'
     tasks — replaces both the old split-out advisor/participant-name-only version of this
@@ -902,6 +947,9 @@ def _check_meeting_problems(
       fell back to 60 minutes at send time instead). One entry per meeting_service_type that
       has either gap, not two separate entries.
     - advisor_access: a manually-chosen advisor who no longer has access to the school's card.
+    - coordinator_conflict: a combined "גפן+שוטף" meeting whose גפן and שוטף coordinators are
+      different people, with no choice yet in meeting_overrides (the existing task's saved
+      overrides; the wizard keeps its choices client-side until creation).
 
     Extracted out of the /meetings/check endpoint handler so it can be reused both for the
     pre-creation wizard check AND for re-validating an already-created task right before a
@@ -981,21 +1029,57 @@ def _check_meeting_problems(
             }
 
         duration_row = duration_by_school.get(school["id"], {})
+        school_advisors = advisor_map.get(school["id"], {})
+        school_overrides = (meeting_overrides or {}).get(school["id"]) or {}
         type_needs: dict[str, dict] = {}
         for req in meeting_requirements:
             service_type = req.meeting_service_type
             if service_type not in _MEETING_TYPE_LABELS:
                 continue
-            entry = type_needs.setdefault(service_type, {"missing_advisor": False, "missing_duration": False})
-            if req.advisor_mode != "manual" and not advisor_map.get(school["id"], {}).get(service_type):
-                entry["missing_advisor"] = True
-            duration_col_type = "gefen" if service_type == "takuma" else service_type
-            if req.duration_mode != "manual" and not duration_row.get(f"meeting_duration_{duration_col_type}"):
-                entry["missing_duration"] = True
+            entry = type_needs.setdefault(service_type, {
+                "missing_advisor": False, "missing_duration": False,
+                "missing_advisor_types": [], "missing_duration_types": [],
+            })
+            # A saved "קבע אחר לפגישה זו בלבד" value fills the gap, exactly as in
+            # _build_meeting_ranges — otherwise a scheduled task that used one would be held back.
+            type_override = school_overrides.get(service_type) or {}
+            if req.advisor_mode != "manual" and not type_override.get("advisor_ids"):
+                missing_types = _missing_default_advisor_types(school_advisors, service_type)
+                if missing_types:
+                    entry["missing_advisor"] = True
+                    entry["missing_advisor_types"] = missing_types
+            if req.duration_mode != "manual" and not type_override.get("duration_minutes"):
+                missing_types = _missing_default_duration_types(duration_row, service_type)
+                if missing_types:
+                    entry["missing_duration"] = True
+                    entry["missing_duration_types"] = missing_types
         meeting_defaults = [
             {"meeting_service_type": t, **flags}
             for t, flags in type_needs.items() if flags["missing_advisor"] or flags["missing_duration"]
         ]
+
+        chosen_coordinator = (
+            ((meeting_overrides or {}).get(school["id"]) or {}).get("gefen_current") or {}
+        ).get("coordinator_type")
+        coordinator_conflict = None
+        if not chosen_coordinator:
+            conflict_scopes = []
+            for req in meeting_requirements:
+                if req.meeting_service_type != "gefen_current":
+                    continue
+                scope = _req_stage_scope(req, school)
+                is_six_year = school.get("stage") == "sheshshnati"
+                range_scopes = [None] if not is_six_year else (["tichon", "chativa"] if scope == "separate" else [scope])
+                for range_scope in range_scopes:
+                    gefen_c, current_c = _gefen_current_coordinators(school, range_scope)
+                    if gefen_c and current_c and not _same_coordinator(gefen_c, current_c):
+                        conflict_scopes.append({
+                            "stage_scope": range_scope,
+                            "gefen": {k: gefen_c.get(k) for k in ("name", "email", "phone", "role_label")},
+                            "current": {k: current_c.get(k) for k in ("name", "email", "phone", "role_label")},
+                        })
+            if conflict_scopes:
+                coordinator_conflict = {"scopes": conflict_scopes}
 
         # Advisor-access check — the "the manually picked advisor can't actually reach this
         # school's card" case from the temp-access-grant feature. Only relevant for manual-mode
@@ -1014,13 +1098,13 @@ def _check_meeting_problems(
                         "date_to": req.date_to,
                     })
 
-        if coordinator or participants or meeting_defaults or advisor_access:
+        if coordinator or participants or meeting_defaults or advisor_access or coordinator_conflict:
             entries_by_school[school["id"]] = {
                 "school_id": school["id"], "school_name": school["name"],
                 "symbol": school.get("symbol"), "authority": school.get("authority"),
                 "stage": school.get("stage"), "meeting_coordinators": school.get("meeting_coordinators") or {},
                 "coordinator": coordinator, "participants": participants, "meeting_defaults": meeting_defaults,
-                "advisor_access": advisor_access, "opted_out": None,
+                "advisor_access": advisor_access, "coordinator_conflict": coordinator_conflict, "opted_out": None,
             }
 
     # Purely informational (never a blocking leaf) — an opted-out coordinator is added even to
@@ -1040,12 +1124,12 @@ def _check_meeting_problems(
             "school_id": school_id, "school_name": school["name"],
             "symbol": school.get("symbol"), "authority": school.get("authority"),
             "coordinator": None, "participants": None, "meeting_defaults": [],
-            "advisor_access": [], "opted_out": None,
+            "advisor_access": [], "coordinator_conflict": None, "opted_out": None,
         })
         entry["opted_out"] = {"email": email}
 
     results = list(entries_by_school.values())
-    blocking_count = sum(1 for r in results if r["coordinator"] or r["participants"] or r["meeting_defaults"] or r["advisor_access"])
+    blocking_count = sum(1 for r in results if _has_blocking_meeting_problem(r))
     return {"schools": results, "total_schools": len(matched), "ok_schools": len(matched) - blocking_count}
 
 
@@ -1085,7 +1169,44 @@ def check_task_meeting_problems(task_id: str, user: Annotated[dict, Depends(get_
     return _check_meeting_problems(
         user["org_id"], task.get("criteria") or {}, task.get("manual_school_ids"),
         meeting_requirements, channel, task.get("academic_year") or DEFAULT_ACADEMIC_YEAR,
+        task.get("meeting_overrides"),
     )
+
+
+class MeetingOverrideIn(BaseModel):
+    meeting_service_type: str
+    coordinator_type: str  # "gefen" | "current"
+
+
+@router.patch("/{task_id}/meeting-overrides/{school_id}")
+def set_task_meeting_override(
+    task_id: str, school_id: str, body: MeetingOverrideIn, user: Annotated[dict, Depends(get_current_user)],
+):
+    """Saves the manager's choice of who receives a combined "גפן+שוטף" meeting's link when the
+    school's גפן and שוטף coordinators differ, on an already-created task (the 'בעיות' screen of a
+    scheduled task that was held back). The wizard sends the same choice in meeting_overrides at
+    creation instead."""
+    _require_manager(user)
+    if body.meeting_service_type != "gefen_current" or body.coordinator_type not in ("gefen", "current"):
+        raise HTTPException(status_code=400, detail="בחירה לא תקינה")
+    db = get_admin_client()
+    task_rows = (
+        db.table("org_tasks").select("id, meeting_overrides")
+        .eq("id", task_id).eq("org_id", user["org_id"]).execute().data
+    )
+    if not task_rows:
+        raise HTTPException(status_code=404, detail="משימה לא נמצאה")
+    school_rows = db.table("schools").select("id").eq("id", school_id).eq("org_id", user["org_id"]).execute().data
+    if not school_rows:
+        raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
+    overrides = dict(task_rows[0].get("meeting_overrides") or {})
+    school_overrides = dict(overrides.get(school_id) or {})
+    type_override = dict(school_overrides.get(body.meeting_service_type) or {})
+    type_override["coordinator_type"] = body.coordinator_type
+    school_overrides[body.meeting_service_type] = type_override
+    overrides[school_id] = school_overrides
+    db.table("org_tasks").update({"meeting_overrides": overrides}).eq("id", task_id).execute()
+    return {"ok": True}
 
 
 class MeetingProblemRowIn(BaseModel):
@@ -1104,6 +1225,7 @@ class ExportMissingMeetingsIn(BaseModel):
 _MEETING_PROBLEM_KIND_LABELS = {
     "coordinator": "אחראי/ת תיאום פגישות חסר/ה", "participant": "איש קשר חסר",
     "advisor": "יועץ מבצע חסר", "duration": "משך פגישה חסר",
+    "coordinator_conflict": "אחראי/ת תיאום שונה לגפן ולשוטף",
 }
 
 
@@ -1155,6 +1277,12 @@ def _prepare_meeting_conditions(success_criteria: dict | None, org_id: str) -> N
         for c in g.get("conditions") or []:
             if c.get("type") == "meeting":
                 c["explicit_stage_scope_only"] = True
+                # "יומן יעיל" — required in the wizard; a creator that doesn't send them (older
+                # clients, the agent) gets the original earliest-slot behavior.
+                if c.get("min_free_window_minutes") is not None and c["min_free_window_minutes"] not in slot_policy.MIN_FREE_WINDOW_OPTIONS:
+                    raise HTTPException(status_code=422, detail="ערך לא תקין בשאלה \"שמירה על יומן יעיל\"")
+                if c.get("start_grid_minutes") is not None and c["start_grid_minutes"] not in slot_policy.START_GRID_OPTIONS:
+                    raise HTTPException(status_code=422, detail="ערך לא תקין בשאלה \"שעת התחלה של הפגישה\"")
     conditions = [
         c for g in (success_criteria or {}).get("groups") or [] for c in g.get("conditions") or []
         if c.get("type") == "meeting" and c.get("stage_scope_by_school")
@@ -1698,7 +1826,11 @@ def _coordinator_slot_candidates(school: dict, service_type: str, stage_scope: s
     schools_router.py's per-range slot resolution in send_direct_coordination_request. A range
     whose stage_scope spans both divisions ("both"/unset — a single merged meeting) has no one
     well-defined slot; try the תיכון coordinator first, then חט"ב, since one merged meeting can
-    only go to a single recipient either way."""
+    only go to a single recipient either way. A combined "גפן+שוטף" meeting may go to either
+    division's coordinator (see _resolve_range_coordinator for which one)."""
+    if service_type == "gefen_current":
+        return (_coordinator_slot_candidates(school, "gefen", stage_scope)
+                + _coordinator_slot_candidates(school, "current", stage_scope))
     base = "gefen" if service_type == "takuma" else service_type
     if base == "district" or school.get("stage") != "sheshshnati":
         return [base]
@@ -1709,7 +1841,33 @@ def _coordinator_slot_candidates(school: dict, service_type: str, stage_scope: s
     return [f"{base}_tichon", f"{base}_beinayim"]
 
 
+def _first_slot_coordinator(school: dict, service_type: str, stage_scope: str | None) -> dict | None:
+    for slot in _coordinator_slot_candidates(school, service_type, stage_scope):
+        c = _schools_router._resolve_meeting_coordinator_for_slot(school, slot)
+        if c and c.get("email"):
+            return c
+    return None
+
+
+def _same_coordinator(a: dict, b: dict) -> bool:
+    return (a.get("email") or "").strip().lower() == (b.get("email") or "").strip().lower()
+
+
+def _gefen_current_coordinators(school: dict, stage_scope: str | None) -> tuple[dict | None, dict | None]:
+    """(גפן coordinator, שוטף coordinator) for one combined-meeting range."""
+    return (_first_slot_coordinator(school, "gefen", stage_scope),
+            _first_slot_coordinator(school, "current", stage_scope))
+
+
 def _resolve_range_coordinator(school: dict, r: dict) -> dict | None:
+    if r["service_type"] == "gefen_current":
+        # One combined meeting = one recipient. When the גפן and שוטף coordinators are different
+        # people, the manager picks one in TaskMeetingResolutionModal (stored on the range as
+        # coordinator_type); without that choice the school is never sent to a guessed person.
+        gefen_c, current_c = _gefen_current_coordinators(school, r.get("stage_scope"))
+        if gefen_c and current_c and not _same_coordinator(gefen_c, current_c):
+            return {"gefen": gefen_c, "current": current_c}.get(r.get("coordinator_type"))
+        return gefen_c or current_c
     for slot in _coordinator_slot_candidates(school, r["service_type"], r.get("stage_scope")):
         c = _schools_router._resolve_meeting_coordinator_for_slot(school, slot)
         if c and c.get("email"):
@@ -1786,14 +1944,23 @@ def _build_meeting_ranges(
         if c.get("advisor_mode") == "manual":
             advisor_ids = c.get("advisor_ids")
         else:
-            advisor_ids = override.get("advisor_ids") or advisor_map.get(service_type, [])
+            advisor_ids = override.get("advisor_ids") or _default_advisor_ids(advisor_map, service_type)
+            if service_type == "gefen_current" and override.get("advisor_ids"):
+                # A combined meeting's override only fills the side missing from the card
+                # (TaskMeetingResolutionModal), so it joins the card's advisors, not replaces them.
+                advisor_ids = list(dict.fromkeys(_default_advisor_ids(advisor_map, service_type) + override["advisor_ids"]))
         if not advisor_ids:
             continue
         if c.get("duration_mode") == "manual":
             duration_minutes = c.get("duration_minutes") or 60
         else:
-            duration_col_type = "gefen" if service_type == "takuma" else service_type
-            duration_minutes = override.get("duration_minutes") or duration_row.get(f"meeting_duration_{duration_col_type}") or 60
+            duration_minutes = override.get("duration_minutes") or _default_duration_minutes(duration_row, service_type)
+            if not duration_minutes:
+                # A combined meeting with a guessed length would be booked wrong, so it gets no
+                # range at all (the pre-check reports the missing field before it gets here).
+                if service_type == "gefen_current":
+                    continue
+                duration_minutes = 60
 
         roles = c.get("participant_roles") or []
         stage_scope = task_logic.effective_stage_scope(c, school)
@@ -1837,7 +2004,7 @@ def _build_meeting_ranges(
             # have one principal for both, so the participants alone don't tell.
             if split_scope in _DIVISION_LABELS:
                 label = f"{label} — {_DIVISION_LABELS[split_scope]}"
-            ranges_data.append({
+            range_row = {
                 "key": f"r{len(ranges_data)}-{secrets.token_urlsafe(6)}",
                 "start_date": start_date, "end_date": end_date, "segments": segments,
                 "service_type": service_type, "duration_minutes": duration_minutes,
@@ -1847,6 +2014,10 @@ def _build_meeting_ranges(
                 # blocks saving until this is explicitly answered, so bool(...) here is a defensive
                 # fallback for a legacy/malformed condition, not a real UX path.
                 "allow_time_range_search": bool(c.get("allow_time_range_search")),
+                # "יומן יעיל" (slot_policy) — None keeps the link on the original earliest-slot
+                # behavior (meeting_booking_router._uses_slot_policy).
+                "min_free_window_minutes": c.get("min_free_window_minutes"),
+                "start_grid_minutes": c.get("start_grid_minutes"),
                 # "בקש לקבוע פגישה נוספת" — when true, meeting_booking_router.py must not treat
                 # a pre-existing meeting as already satisfying this range (the school still gets
                 # offered "בחר מועד"), and task_logic.compute_task_progress must not count a
@@ -1867,7 +2038,12 @@ def _build_meeting_ranges(
                 # _prepare_meeting_conditions. Follows the condition, so a resend of an older
                 # task keeps that task's own rule.
                 "explicit_stage_scope_only": bool(c.get("explicit_stage_scope_only")),
-            })
+            }
+            if service_type == "gefen_current" and override.get("coordinator_type"):
+                # Which coordinator gets a combined meeting when גפן and שוטף have different
+                # ones — see _resolve_range_coordinator.
+                range_row["coordinator_type"] = override["coordinator_type"]
+            ranges_data.append(range_row)
             for aid in advisor_ids:
                 if aid not in advisor_ids_union:
                     advisor_ids_union.append(aid)
@@ -2747,12 +2923,12 @@ def _try_activate_scheduled_task(db, task: dict) -> dict:
         academic_year = task.get("academic_year") or DEFAULT_ACADEMIC_YEAR
         check = _check_meeting_problems(
             org_id, task.get("criteria") or {}, task.get("manual_school_ids"),
-            meeting_requirements, channel, academic_year,
+            meeting_requirements, channel, academic_year, task.get("meeting_overrides"),
         )
         # opted_out-only entries are informational (see _check_meeting_problems) and must never
         # hold back activation on their own — only real coordinator/participants/meeting_defaults/
         # advisor_access problems do.
-        if any(s["coordinator"] or s["participants"] or s["meeting_defaults"] or s["advisor_access"] for s in check["schools"]):
+        if any(_has_blocking_meeting_problem(s) for s in check["schools"]):
             return _hold_back_scheduled_task(db, task, meeting_wording=True)
         elif task.get("has_meeting_send_problems"):
             db.table("org_tasks").update({"has_meeting_send_problems": False}).eq("id", task["id"]).execute()

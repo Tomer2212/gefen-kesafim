@@ -180,7 +180,7 @@ def build_booking_request_email_html(recipient_name: str, school_name: str, advi
 </html>"""
 
 
-_SERVICE_TYPE_LABEL_HE = {"gefen": "גפן", "current": "שוטף"}
+_SERVICE_TYPE_LABEL_HE = {"gefen": "גפן", "current": "שוטף", "gefen_current": "גפן+שוטף", "district": "מחוז", "takuma": "תקומה"}
 _MEETING_TYPE_LABEL_HE = {"remote": "מרחוק", "physical": "פיזי"}
 
 

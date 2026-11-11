@@ -159,6 +159,11 @@ function RangeSlotPickerModal({ token, range, onClose, onBooked }) {
   const [timeTo, setTimeTo] = useState("");
   const [timeRangeError, setTimeRangeError] = useState("");
   const [activeTimeRange, setActiveTimeRange] = useState(null); // { from, to } once a re-search was applied
+  // "יומן יעיל" links (backend/slot_policy.py): the regular offer stays on screen and a
+  // re-search adds its own list (requestedDays) instead of replacing it. Older links keep the
+  // original behavior, where a re-search replaces `days`.
+  const usesSlotPolicy = range.min_free_window_minutes !== null && range.min_free_window_minutes !== undefined;
+  const [requestedDays, setRequestedDays] = useState(null); // null = no re-search applied
 
   function loadDays(timeRange) {
     setLoading(true);
@@ -167,6 +172,7 @@ function RangeSlotPickerModal({ token, range, onClose, onBooked }) {
     return axios.get(`/public/meeting-booking/${token}/freebusy`, { params })
       .then(res => {
         setDays(res.data.days || []);
+        setRequestedDays(res.data.requested_days ?? null);
         if (!res.data.ok) setError("לא ניתן היה לבדוק זמינות ביומן כרגע, נסו שוב מאוחר יותר.");
       })
       .catch(() => setError("אירעה שגיאה בטעינת המשבצות הפנויות."))
@@ -251,6 +257,9 @@ function RangeSlotPickerModal({ token, range, onClose, onBooked }) {
           <p className="text-sm text-slate-500 text-center py-4">לא נמצאו משבצות פנויות בטווח זה.</p>
         )}
 
+        {!loading && usesSlotPolicy && requestedDays && days.length > 0 && (
+          <p className="text-xs font-semibold text-slate-500">המועדים המוצעים:</p>
+        )}
         {!loading && days.map(d => (
           <div key={d.date} className="border-t border-slate-100 pt-2 first:border-t-0 first:pt-0">
             <p className="text-sm font-semibold text-slate-700 mb-1.5">
@@ -268,10 +277,44 @@ function RangeSlotPickerModal({ token, range, onClose, onBooked }) {
           </div>
         ))}
 
+        {!loading && usesSlotPolicy && requestedDays && activeTimeRange && (
+          <div className="border-t-2 border-slate-200 pt-3 mt-1 flex flex-col gap-2">
+            <p className="text-xs font-semibold text-slate-500">
+              לפי השעות שביקשתם (<bdi>{activeTimeRange.from}–{activeTimeRange.to}</bdi>):
+            </p>
+            {requestedDays.length === 0 ? (
+              <p role="status" className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                לא נמצא מועד בטווח הזה — נסו טווח שעות רחב יותר, בחרו אחד מהמועדים המוצעים, או צרו קשר.
+              </p>
+            ) : requestedDays.map(d => (
+              <div key={d.date}>
+                <p className="text-sm font-semibold text-slate-700 mb-1.5">
+                  {HEBREW_WEEKDAYS[new Date(d.date + "T00:00:00").getDay()]}, {formatDateDDMMYYYY(d.date)}
+                </p>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {d.slots.map(slot => (
+                    <span key={slot.start_time} className="flex items-center gap-1.5">
+                      <SlotButton disabled={booking}
+                        selected={selected?.date === d.date && selected?.slot.start_time === slot.start_time}
+                        onClick={() => setSelected({ date: d.date, slot })}>
+                        {slot.start_time}
+                      </SlotButton>
+                      {slot.near && <span className="text-[11px] text-amber-700">הכי קרוב לבקשה שלכם</span>}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
         {range.allow_time_range_search && moreOptionsOpen && (
           <div className="border-t border-slate-100 pt-3 mt-1 flex flex-col gap-2">
             <p className="text-xs text-slate-500">
               יכולים להיפגש רק בטווח שעות מסוים? הגדירו אותו כאן וחפשו שוב.
+            </p>
+            <p className="text-xs font-semibold text-blue-800 bg-blue-50 border border-blue-200 rounded-lg px-2.5 py-1.5">
+              ככל שתבחרו טווח שעות רחב יותר, כך גדל הסיכוי למצוא מועד מתאים.
             </p>
             <div className="flex items-end gap-2">
               <div className="flex flex-col gap-1">
