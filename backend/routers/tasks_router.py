@@ -19,6 +19,7 @@ from fastapi.responses import Response
 from openpyxl import load_workbook, Workbook
 from pydantic import BaseModel
 
+import booking_requests
 import booking_token_logic
 import graph_client
 import school_activity
@@ -150,7 +151,54 @@ def _principal_role_label(school: dict, slot: str) -> str:
     return _PARTICIPANT_ROLE_LABELS.get(slot, slot)
 
 
-def _build_school_contacts(school: dict, roles: list[str], stage_scope: str | None = None) -> list[dict]:
+# Participant role "מתאם פגישות [סוג]" — whoever the school card names as the meeting
+# coordinator of the meeting's type, resolved per school (and per range division).
+MEETING_COORDINATOR_PARTICIPANT = "meeting_coordinator"
+
+
+def _coordinator_participant_key(ref: str) -> str:
+    """A coordinator ref ('secretary', 'extra:3') as a meeting-participant key — participants
+    spell extra contacts 'extra_<i>' (schoolContacts.js, _build_meeting_subject)."""
+    return f"extra_{ref.split(':', 1)[1]}" if ref.startswith("extra:") else ref
+
+
+def _coordinator_participants(school: dict, service_type: str | None, stage_scope: str | None) -> list[dict]:
+    """Every coordinator a meeting range invites: one division's coordinator for a single-
+    division range, both divisions' for a merged six-year range ("both"/unset), and both the
+    גפן and שוטף coordinators for a combined meeting. A slot with no coordinator is skipped —
+    the link itself can't be sent without one (_coordinator_problem)."""
+    if not service_type:
+        return []
+    out = []
+    for slot in _coordinator_slot_candidates(school, service_type, stage_scope):
+        c = _schools_router._resolve_meeting_coordinator_for_slot(school, slot)
+        if not c:
+            continue
+        out.append({
+            "key": _coordinator_participant_key(c["role"]), "name": c["name"],
+            "email": c.get("email") or None, "phone": c.get("phone") or None, "role_label": c.get("role_label"),
+        })
+    return _dedupe_contacts(out)
+
+
+def _dedupe_contacts(contacts: list[dict]) -> list[dict]:
+    """Keeps the first entry per key and per (case-insensitive) email, so one person picked
+    both by role and as the coordinator is invited — and reminded — once."""
+    seen_keys, seen_emails, out = set(), set(), []
+    for c in contacts:
+        email = (c.get("email") or "").strip().lower()
+        if c.get("key") in seen_keys or (email and email in seen_emails):
+            continue
+        seen_keys.add(c.get("key"))
+        if email:
+            seen_emails.add(email)
+        out.append(c)
+    return out
+
+
+def _build_school_contacts(
+    school: dict, roles: list[str], stage_scope: str | None = None, service_type: str | None = None,
+) -> list[dict]:
     """Round-5 meeting-requirement participants — role-level selection resolved to that
     school's actual named contact, reusing _ROLE_CONTACT_FIELDS (same 3 roles
     RECIPIENT_ROLE_OPTIONS/taskShared.js already use for message recipients). Mirrors
@@ -165,6 +213,8 @@ def _build_school_contacts(school: dict, roles: list[str], stage_scope: str | No
     *_same_person flag — any other role is unaffected."""
     contacts = []
     for role in roles:
+        if role == MEETING_COORDINATOR_PARTICIPANT:
+            continue
         slots = _role_slots_for_school(school, role, stage_scope) if role in _CHATIVA_ROLE else [role]
         for slot in slots:
             fields = _ROLE_CONTACT_FIELDS.get(slot)
@@ -174,7 +224,9 @@ def _build_school_contacts(school: dict, roles: list[str], stage_scope: str | No
             name = school.get(name_field)
             if name:
                 contacts.append({"key": slot, "name": name, "email": school.get(email_field) or None})
-    return contacts
+    if MEETING_COORDINATOR_PARTICIPANT in roles:
+        contacts += _coordinator_participants(school, service_type, stage_scope)
+    return _dedupe_contacts(contacts)
 
 
 def _require_manager(user: dict):
@@ -1015,11 +1067,42 @@ def _check_meeting_problems(
             channel_field_ok = bool(school.get(phone_f)) if needs_phone else bool(school.get(email_f))
             if not (school.get(name_f) and channel_field_ok):
                 bad_roles.append(role)
+
+        # "מתאם פגישות [סוג]" participants. The coordinator who receives the link is already
+        # checked above (coordinator problem); this catches the OTHER coordinators a range also
+        # invites (the second division of a merged six-year meeting, the other side of גפן+שוטף).
+        # Skipped while the coordinator problem is open: its fix fills the same slots.
+        role_label_overrides: dict[str, str] = {}
+        # Extra-contact coordinators can only be fixed in the card, so they are a non-blocking
+        # notice (like opted_out) — a blocking one would hold a scheduled task back for good.
+        card_only: dict[str, dict] = {}
+        if not coordinator:
+            for req in meeting_requirements:
+                if MEETING_COORDINATOR_PARTICIPANT not in req.participant_roles or req.meeting_service_type not in _MEETING_TYPE_LABELS:
+                    continue
+                scope = _req_stage_scope(req, school)
+                type_label = _MEETING_TYPE_LABELS[req.meeting_service_type]
+                for range_scope in (["tichon", "chativa"] if scope == "separate" else [scope]):
+                    for c in _coordinator_participants(school, req.meeting_service_type, range_scope):
+                        if c.get("phone") if needs_phone else c.get("email"):
+                            continue
+                        key = c["key"]
+                        base_label = _principal_role_label(school, key) if key in _ROLE_CONTACT_FIELDS else c.get("role_label")
+                        label = f"מתאם פגישות [{type_label}] — {base_label}"
+                        if key not in _ROLE_CONTACT_FIELDS:
+                            card_only.setdefault(key, {"label": label, "name": c.get("name")})
+                            continue
+                        role_label_overrides.setdefault(key, label)
+                        if key not in bad_roles:
+                            bad_roles.append(key)
+
         participants = None
         if bad_roles:
             participants = {
                 "roles": bad_roles,
-                "role_labels": {role: _principal_role_label(school, role) for role in bad_roles},
+                "role_labels": {
+                    role: role_label_overrides.get(role) or _principal_role_label(school, role) for role in bad_roles
+                },
                 "contacts": {
                     role: {"name": school.get(_ROLE_CONTACT_FIELDS[role][0]),
                            "email": school.get(_ROLE_CONTACT_FIELDS[role][1]),
@@ -1027,6 +1110,7 @@ def _check_meeting_problems(
                     for role in bad_roles
                 },
             }
+        coordinator_missing_contact = list(card_only.values()) or None
 
         duration_row = duration_by_school.get(school["id"], {})
         school_advisors = advisor_map.get(school["id"], {})
@@ -1098,13 +1182,16 @@ def _check_meeting_problems(
                         "date_to": req.date_to,
                     })
 
-        if coordinator or participants or meeting_defaults or advisor_access or coordinator_conflict:
+        if (coordinator or participants or meeting_defaults or advisor_access or coordinator_conflict
+                or coordinator_missing_contact):
             entries_by_school[school["id"]] = {
                 "school_id": school["id"], "school_name": school["name"],
                 "symbol": school.get("symbol"), "authority": school.get("authority"),
                 "stage": school.get("stage"), "meeting_coordinators": school.get("meeting_coordinators") or {},
                 "coordinator": coordinator, "participants": participants, "meeting_defaults": meeting_defaults,
                 "advisor_access": advisor_access, "coordinator_conflict": coordinator_conflict, "opted_out": None,
+                # Informational only (never blocks) — see card_only above.
+                "coordinator_missing_contact": coordinator_missing_contact,
             }
 
     # Purely informational (never a blocking leaf) — an opted-out coordinator is added even to
@@ -1990,7 +2077,7 @@ def _build_meeting_ranges(
 
         counted_for_label = False
         for split_scope in split_scopes:
-            participants = _build_school_contacts(school, roles, split_scope)
+            participants = _build_school_contacts(school, roles, split_scope, service_type)
             if not participants:
                 continue
 
@@ -2703,6 +2790,14 @@ def process_message_queue(request: Request):
 
     db = get_admin_client()
     BATCH_SIZE = 20
+    # A row stays "sending" only if the run handling it was killed (e.g. a deploy restarting
+    # the backend) — almost always before its message went out, so it goes back to the queue.
+    try:
+        stuck_before = (datetime.now(timezone.utc) - timedelta(minutes=_schools_router.QUEUE_SENDING_STALE_MINUTES)).isoformat()
+        db.table("org_task_messages").update({"status": "pending"}) \
+            .eq("status", "sending").lt("claimed_at", stuck_before).execute()
+    except Exception as exc:
+        logger.warning("process_message_queue: stuck-row recovery failed (non-fatal): %s", exc)
     rows = (
         db.table("org_task_messages")
         .select("*")
@@ -2719,6 +2814,10 @@ def process_message_queue(request: Request):
     last_outlook_send_at = None  # monotonic clock — paces real email_outlook sends only (see
     # OUTLOOK_SEND_MIN_INTERVAL_SECONDS); other channels in the same batch are unaffected.
     for row in rows:
+        # Claim the row first (pending → sending, atomically), so two overlapping runs can
+        # never both send it.
+        if not _schools_router.claim_queue_row(db, "org_task_messages", row["id"], {"claimed_at": datetime.now(timezone.utc).isoformat()}):
+            continue
         try:
             task = db.table("org_tasks").select("org_id, created_by, academic_year").eq("id", row["task_id"]).execute().data
             org_id = task[0]["org_id"] if task else None
@@ -3005,6 +3104,24 @@ def recompute_tasks_progress(request: Request):
     for t in tasks:
         tasks_by_org.setdefault(t["org_id"], []).append(t)
 
+    # Reopen requests whose meeting was cancelled/postponed/deleted (and close ones a meeting
+    # fills) on every live booking link — any org with live links, tasks or not. Before progress,
+    # non-fatal per org. See booking_requests.reconcile_booked_ranges.
+    reopened_links = 0
+    try:
+        link_orgs = {
+            r["org_id"] for r in get_admin_client().table("meeting_booking_tokens").select("org_id")
+            .gt("expires_at", datetime.now(timezone.utc).isoformat()).execute().data or []
+        }
+    except Exception as exc:
+        logger.warning("recompute_tasks_progress: live-link orgs lookup failed (non-fatal): %s", exc)
+        link_orgs = set()
+    for org_id in link_orgs:
+        try:
+            reopened_links += booking_requests.reconcile_booked_ranges(get_admin_client(), org_id)
+        except Exception as exc:
+            logger.warning("reconcile_booked_ranges failed for org %s (retried next run): %s", org_id, exc)
+
     changed = failed_orgs = 0
     for org_id, org_tasks in tasks_by_org.items():
         try:
@@ -3012,7 +3129,8 @@ def recompute_tasks_progress(request: Request):
         except Exception as exc:
             failed_orgs += 1
             logger.warning("recompute_tasks_progress failed for org %s (retried next run): %s", org_id, exc)
-    return {"ok": True, "orgs": len(tasks_by_org), "tasks": len(tasks), "changed": changed, "failed_orgs": failed_orgs}
+    return {"ok": True, "orgs": len(tasks_by_org), "tasks": len(tasks), "changed": changed, "failed_orgs": failed_orgs,
+            "links_reconciled": reopened_links}
 
 
 @router.post("/process-scheduled-tasks")

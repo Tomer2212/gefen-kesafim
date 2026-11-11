@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import os
 from datetime import datetime, timedelta, timezone
@@ -40,7 +39,7 @@ _log = logging.getLogger(__name__)
 app = FastAPI(title="Gefen Reconciliation API")
 
 
-async def _cleanup_old_storage_files() -> None:
+def _cleanup_old_storage_files() -> None:
     """Delete Supabase Storage files for check_logs older than 24 months."""
     try:
         from supabase_client import get_admin_client
@@ -73,7 +72,7 @@ async def _cleanup_old_storage_files() -> None:
         _log.warning("Storage cleanup failed: %s", exc)
 
 
-async def _cleanup_old_run_states() -> None:
+def _cleanup_old_run_states() -> None:
     """Delete run_states rows (and their Excel files in Storage) older than 120 days."""
     try:
         from supabase_client import get_admin_client
@@ -109,8 +108,6 @@ def _warmup():
         _get_public_key()
     except Exception as exc:
         _log.warning("JWKS warmup failed: %s — will retry on first request", exc)
-    asyncio.create_task(_cleanup_old_storage_files())
-    asyncio.create_task(_cleanup_old_run_states())
 
 _allowed = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173")
 _origins = [o.strip() for o in _allowed.split(",") if o.strip()]
@@ -189,4 +186,17 @@ app.include_router(training_videos_router, prefix="/training-videos")
 
 @app.get("/health")
 def health():
+    return {"status": "ok"}
+
+
+@app.post("/maintenance/daily-cleanup")
+def daily_cleanup(request: Request):
+    """Cron (.github/workflows/daily-cleanup.yml). These used to run on startup — in all 8
+    workers at once on every deploy, blocking each worker's event loop while live traffic was
+    switching over to it. Nothing about them needs to happen at deploy time."""
+    secret = os.getenv("CRON_SECRET", "")
+    if not secret or request.headers.get("X-Cron-Secret") != secret:
+        return JSONResponse(status_code=401, content={"detail": "unauthorized"})
+    _cleanup_old_storage_files()
+    _cleanup_old_run_states()
     return {"status": "ok"}

@@ -376,6 +376,21 @@ def _fetch_schools_and_meetings(
                 .execute()
                 .data or []
             )
+            # "מחליפה או נוספת?" answers (booking_requests.py) — read by _matching_meetings when a
+            # task's progress is computed. Non-fatal: without them progress is exactly as before.
+            try:
+                resolution_rows = (
+                    db.table("meeting_request_resolutions")
+                    .select("meeting_id, token_id, service_type, stage_scope, decision")
+                    .eq("org_id", org_id).execute().data or []
+                )
+                resolutions_by_meeting: dict[str, list[dict]] = {}
+                for r in resolution_rows:
+                    resolutions_by_meeting.setdefault(r["meeting_id"], []).append(r)
+                for m in meetings:
+                    m["request_resolutions"] = resolutions_by_meeting.get(m["id"], [])
+            except Exception as exc:
+                _log.warning("meeting_request_resolutions lookup failed (non-fatal): %s", exc)
 
             # advisor_gefen/current/district — attached directly onto each school dict as a
             # list of advisor_ids, so _eval_field_condition's existing "actual is a list ->
@@ -490,9 +505,22 @@ def _matching_meetings(cond: dict, school_meetings: list[dict], task_token_ids: 
             continue
         if not _date_in_cond_window(md, cond):
             continue
-        if meeting_service_type and m.get("meeting_service_type") != meeting_service_type:
-            continue
         if status and m.get("status") != status:
+            continue
+        # The staff's "מחליפה או נוספת?" answer about one of THIS task's requests of this type
+        # overrides the automatic matching (only in a task's own progress, task_token_ids set):
+        # "replaces" counts the meeting even if its type differs or the request asks for an
+        # additional meeting, and in the request's division; "additional" never counts it.
+        if task_token_ids is not None and meeting_service_type:
+            answers = [r for r in m.get("request_resolutions") or []
+                       if r.get("token_id") in task_token_ids and r.get("service_type") == meeting_service_type]
+            replacing = next((r for r in answers if r.get("decision") == "replaces"), None)
+            if replacing:
+                out.append({**m, "stage_scope": replacing.get("stage_scope") or m.get("stage_scope")})
+                continue
+            if answers:
+                continue
+        if meeting_service_type and m.get("meeting_service_type") != meeting_service_type:
             continue
         if meeting_type and m.get("meeting_type") != meeting_type:
             continue
@@ -597,11 +625,23 @@ def _fulfilled_count_for_meeting_condition(
     return len(matches)
 
 
-def _meeting_exists_for_school(cond: dict, school_meetings: list[dict], school: dict | None) -> bool:
+def _meeting_exists_for_school(cond: dict, school_meetings: list[dict], school: dict | None,
+                               task_token_ids: set[str] | None = None) -> bool:
     """The results table's "יש/אין" for one school. On a six-year school with a division choice
     this follows the same coverage rule as progress, so the cell can't read "יש" next to a
     requirement that a meeting of the other division doesn't actually satisfy. Like
-    _meeting_exists, it doesn't apply the "require_additional_meeting" token filter."""
+    _meeting_exists, it doesn't apply the "require_additional_meeting" token filter — but it
+    does follow the staff's "מחליפה או נוספת?" answers about this task's requests, as progress
+    does: a meeting marked "additional" is not shown as the meeting, one marked "replaces" is."""
+    service_type = cond.get("meeting_service_type")
+    if task_token_ids and service_type:
+        def answers(m):
+            return {r.get("decision") for r in m.get("request_resolutions") or []
+                    if r.get("token_id") in task_token_ids and r.get("service_type") == service_type}
+        if any("replaces" in answers(m) and m.get("meeting_date") and _date_in_cond_window(m["meeting_date"], cond)
+               for m in school_meetings):
+            return True
+        school_meetings = [m for m in school_meetings if not answers(m)]
     if cond.get("explicit_stage_scope_only") and (school or {}).get("stage") == "sheshshnati" and effective_stage_scope(cond, school):
         return _fulfilled_count_for_meeting_condition(cond, school_meetings, None, school) > 0
     return _meeting_exists(cond, school_meetings)
@@ -1021,7 +1061,7 @@ def compute_task_progress(
         condition_results = [
             (
                 {
-                    "ok": _resolve_condition(c, school, school_meetings, year_row, goal_rows, cl_rows, task_token_ids), "meeting_exists": _meeting_exists_for_school(c, school_meetings, school),
+                    "ok": _resolve_condition(c, school, school_meetings, year_row, goal_rows, cl_rows, task_token_ids), "meeting_exists": _meeting_exists_for_school(c, school_meetings, school, task_token_ids),
                     # Round 17: required-count-aware — always >=1 for a meeting condition now
                     # (was raw match count / manager-set-or-None), so a "separate" split
                     # condition shows 0-2 distinct-slot progress instead of a raw row count that

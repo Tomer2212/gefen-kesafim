@@ -17,6 +17,8 @@ import CallNoteWindows from "./components/calls/CallNoteWindow";
 import { GuideProvider } from "./context/GuideContext";
 import GuideWindow from "./components/GuideWindow";
 import ChatWidget from "./components/ChatWidget";
+import NewVersionBanner from "./components/NewVersionBanner";
+import RouteErrorScreen from "./components/RouteErrorScreen";
 import axios from "axios";
 import { supabase } from "./lib/supabase";
 import { registerDeviceSession } from "./lib/deviceSession";
@@ -89,6 +91,7 @@ function AppLayout() {
       <CallNoteWindows />
       <GuideWindow />
       {CHAT_WIDGET_ENABLED && <ChatWidget />}
+      <NewVersionBanner />
     </>
   );
 }
@@ -96,6 +99,7 @@ function AppLayout() {
 const router = createBrowserRouter([
   {
     element: <AppLayout />,
+    errorElement: <RouteErrorScreen />,
     children: [
       { path: "/login", element: <LoginPage /> },
       { path: "/register", element: <RegisterPage /> },

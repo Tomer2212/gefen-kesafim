@@ -15,6 +15,7 @@ import { MeetingActualDetail } from "./MeetingActualDetail";
 import { MeetingMessagesBadge } from "./MeetingMessagesPopover";
 import BlockedDateConfirmModal from "./BlockedDateConfirmModal";
 import RequestedUploadYearsModal from "./RequestedUploadYearsModal";
+import BookingRequestResolutionModal from "./BookingRequestResolutionModal";
 import { getAcademicYearForDate, isAcademicYearSeam, DEFAULT_ACADEMIC_YEAR } from "../../constants/academicYears";
 import { MEETING_STATUS_OPTIONS, MEETING_SERVICE_TYPE_OPTIONS, STATUS_MAP, getStatusDisplay, formatMeetingDate } from "./constants";
 
@@ -301,6 +302,7 @@ function MeetingRowImpl({
   const navigate = useNavigate();
   const PERMISSION_DENIED_MSG = "אין לך הרשאה לערוך פגישה זו — הפגישה משויכת ליועץ אחר";
   const ROW_LOCKED_MSG = "פגישה נעולה לעריכה — משויכת ליועץ אחר. ניתן להצטרף כיועץ מבצע נוסף.";
+  const SAVE_FAILED_MSG = "השמירה האחרונה נכשלה — השינוי עדיין מוצג בשורה ויישלח שוב ביציאה מהשורה";
   const isAdvisorRole = currentUserRole === "advisor";
   const meetingAdvisorIds = (meeting.advisor_ids && meeting.advisor_ids.length ? meeting.advisor_ids
     : meeting.advisor_id ? [meeting.advisor_id] : []);
@@ -331,6 +333,15 @@ function MeetingRowImpl({
   const actionsMenuRef = useRef(null);
   // Track what was last sent so blur doesn't double-save after an immediate save
   const lastSentRef = useRef(blurSavedSnapshot(meeting));
+  const [saveFailed, setSaveFailed] = useState(false);
+  // Mirrors saveFailed for the sync effects below: after a failed save the parent reloads the
+  // list, and `meeting` jumps back from its optimistic copy (== draft) to the server values —
+  // which those effects would otherwise read as "row is clean" and copy over the unsaved edit.
+  const saveFailedRef = useRef(false);
+  function markSaveFailed(failed) {
+    saveFailedRef.current = failed;
+    setSaveFailed(failed);
+  }
   // Serializes saveDraft calls for this row so their PUT requests always reach the backend
   // in the order they were triggered. Without this, two saves fired close together (e.g. the
   // "סוג" change followed almost immediately by the advisor-reassign modal's choice) can
@@ -362,7 +373,7 @@ function MeetingRowImpl({
   useEffect(() => {
     const prev = prevMeetingRef.current;
     const wasClean = draft.start_time === prev.start_time && draft.end_time === prev.end_time && draft.meeting_date === prev.meeting_date;
-    if (wasClean) {
+    if (wasClean && !saveFailedRef.current) {
       setDraft(d => ({ ...d, start_time: meeting.start_time, end_time: meeting.end_time, meeting_date: meeting.meeting_date }));
       const { start_time, end_time, meeting_date } = blurSavedSnapshot(meeting);
       lastSentRef.current = { ...lastSentRef.current, start_time, end_time, meeting_date };
@@ -376,7 +387,7 @@ function MeetingRowImpl({
   const prevStatusRef = useRef(meeting.status);
   useEffect(() => {
     const prevStatus = prevStatusRef.current;
-    setDraft(d => (d.status === prevStatus ? { ...d, status: meeting.status } : d));
+    if (!saveFailedRef.current) setDraft(d => (d.status === prevStatus ? { ...d, status: meeting.status } : d));
     prevStatusRef.current = meeting.status;
   }, [meeting.status]);
 
@@ -571,7 +582,9 @@ function MeetingRowImpl({
         newEvent: { startHM: draftToSave.start_time, endHM: draftToSave.end_time, subject },
       });
     }
-    lastSentRef.current = blurSavedSnapshot(draftToSave);
+    const prevSent = lastSentRef.current;
+    const sent = blurSavedSnapshot(draftToSave);
+    lastSentRef.current = sent;
     // Invalidate the freebusy cache only *after* onSave's PUT round-trip (and the
     // Outlook sync it triggers server-side) actually completes — not before. Clearing
     // it earlier leaves a window where a freebusy fetch can slip in before the backend
@@ -582,8 +595,13 @@ function MeetingRowImpl({
     const { status: _unchangedStatus, ...withoutStatus } = draftToSave;
     try {
       await onSave(draftToSave.status === meeting.status ? withoutStatus : draftToSave);
+      markSaveFailed(false);
     } catch (err) {
+      // Not saved: forget that it was sent, so the row stays dirty and the next blur re-sends
+      // it (unless a newer save has already replaced it).
+      if (lastSentRef.current === sent) lastSentRef.current = prevSent;
       if (err?.response?.status === 403) onPermissionDenied?.(err.response.data?.detail || PERMISSION_DENIED_MSG);
+      else markSaveFailed(true);
       throw err;
     }
     (draftToSave.advisor_ids || []).forEach(invalidateFreebusyCache);
@@ -601,10 +619,27 @@ function MeetingRowImpl({
       start_time: normalizeTimeValue(draft.start_time),
       end_time: normalizeTimeValue(draft.end_time),
     };
-    if (JSON.stringify(lastSentRef.current) !== JSON.stringify(blurSavedSnapshot(normalized))) {
+    // After a failed save, re-send even when only a non-blur field (e.g. status) is unsaved.
+    if (saveFailedRef.current || JSON.stringify(lastSentRef.current) !== JSON.stringify(blurSavedSnapshot(normalized))) {
       setDraft(normalized);
       saveDraft(normalized);
     }
+  }
+
+  // "מחליפה או נוספת?" — a create/PUT response carries open_booking_requests when the school
+  // still has an open booking request covering this meeting's date (list loads never do, so this
+  // only follows this user's own save). Copied into local state so a poll that replaces the row
+  // can't close the question; "אחליט אחר כך" isn't asked again for those requests this session.
+  const [bookingRequests, setBookingRequests] = useState(null);
+  const dismissedRequestsRef = useRef(new Set());
+  useEffect(() => {
+    const fresh = (meeting.open_booking_requests || [])
+      .filter(r => !dismissedRequestsRef.current.has(`${r.token_id}:${r.range_key}`));
+    if (fresh.length) setBookingRequests(fresh);
+  }, [meeting.open_booking_requests]);
+  function closeBookingRequests() {
+    for (const r of bookingRequests || []) dismissedRequestsRef.current.add(`${r.token_id}:${r.range_key}`);
+    setBookingRequests(null);
   }
 
   const status = getStatusDisplay(draft.status);
@@ -614,6 +649,12 @@ function MeetingRowImpl({
   return (
     <>
       {showNoParticipantsModal && <NoParticipantsModal onClose={() => setShowNoParticipantsModal(false)} />}
+      {bookingRequests && (
+        <BookingRequestResolutionModal
+          schoolId={meeting.school_id} meetingId={meeting.id} schoolName={meeting.school_name}
+          requests={bookingRequests} clientSurface={clientSurface} onClose={closeBookingRequests}
+        />
+      )}
       {pendingYearsPrompt && (
         <RequestedUploadYearsModal
           defaultYear={getAcademicYearForDate(pendingYearsPrompt) || DEFAULT_ACADEMIC_YEAR}
@@ -676,6 +717,12 @@ function MeetingRowImpl({
         <td className="py-2.5 px-1 text-center">
           {rowLocked && (
             <span aria-label="פגישה נעולה — לא ניתן לערוך, ניתן להצטרף כיועץ מבצע נוסף" className="ml-1 text-slate-400" title={ROW_LOCKED_MSG}>🔒</span>
+          )}
+          {saveFailed && (
+            <span role="alert" className="ml-1 text-amber-600" title={SAVE_FAILED_MSG}>
+              <span aria-hidden="true">⚠</span>
+              <span className="sr-only">{SAVE_FAILED_MSG}</span>
+            </span>
           )}
           <button type="button" onClick={() => onToggleExpand?.(meeting.id)} aria-expanded={!!expanded}
             aria-label={expanded ? "כווץ שורה" : "הרחב שורה — פירוט פעילות בפועל"}

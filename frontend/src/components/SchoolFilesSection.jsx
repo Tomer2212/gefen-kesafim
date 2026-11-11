@@ -34,6 +34,7 @@ export function FilesThread({ files, currentUser, onUpload, onEditDescription, o
     try {
       await onEditDescription(fileId, description);
     } catch {
+      setEditDraft({ fileId, text }); // keep the edit open with what was typed
       setError("עריכת התיאור נכשלה — אין הרשאה או שגיאה זמנית");
     } finally {
       setSaving(false);

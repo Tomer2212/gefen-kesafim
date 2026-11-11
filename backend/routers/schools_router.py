@@ -59,6 +59,7 @@ from meeting_labels import (
     resolve_participant_role_token,
 )
 from meeting_upload_logic import build_upload_checklist, get_or_create_upload_token, recipient_division_scope
+import booking_requests
 import meeting_activity
 import school_activity
 import slot_policy
@@ -501,6 +502,7 @@ class DirectCoordinationParticipantIn(BaseModel):
     key: str
     name: str
     email: str | None = None
+    role_label: str | None = None  # set for a "מתאם פגישות" participant (e.g. an extra contact's role)
 
 
 class DirectCoordinationSegmentIn(BaseModel):
@@ -857,6 +859,21 @@ def _gefen_files_slots_for_meeting(school: dict, normalized_stage_scope: str | N
     if normalized_stage_scope == "chativa":
         return ["beinayim"]
     return ["tichon", "beinayim"]  # "both" or unrecognized/missing — best-effort union, never skip
+
+
+def _dedupe_participants_by_email(participants: list[dict]) -> list[dict]:
+    """Keeps the first participant per (case-insensitive) email, so a person listed twice —
+    e.g. picked by role and again as "מתאם פגישות", or two roles sharing one address — gets
+    one reminder / one Outlook invite. Participants without an email are kept as they are."""
+    seen, out = set(), []
+    for p in participants or []:
+        email = (p.get("email") or "").strip().lower()
+        if email and email in seen:
+            continue
+        if email:
+            seen.add(email)
+        out.append(p)
+    return out
 
 
 def _participant_role_label(participant: dict, school: dict) -> str | None:
@@ -5230,7 +5247,9 @@ def send_due_reminders(request: Request, school_id: str | None = None):
     sent, failed, skipped_meetings = 0, 0, 0
     for m in meetings:
         try:
-            participants = [p for p in (m.get("participants") or []) if (p.get("email") or "").strip()]
+            participants = _dedupe_participants_by_email(
+                [p for p in (m.get("participants") or []) if (p.get("email") or "").strip()]
+            )
             school = schools_map.get(m["school_id"], {})
 
             # Round 16 — a שוטף meeting needs no files, so its secretary/finance reminder uses
@@ -5429,6 +5448,19 @@ def send_due_reminders(request: Request, school_id: str | None = None):
     return {"ok": True, "sent": sent, "failed": failed, "skipped_meetings": skipped_meetings, "total_due": len(meetings)}
 
 
+QUEUE_SENDING_STALE_MINUTES = 10
+
+
+def claim_queue_row(db, table: str, row_id: str, extra: dict | None = None) -> bool:
+    """Atomically moves one queue row from "pending" to "sending". False means another run
+    already took it. Shared by the email/message queues (see also process_message_queue)."""
+    claimed = (
+        db.table(table).update({"status": "sending", **(extra or {})})
+        .eq("id", row_id).eq("status", "pending").execute().data
+    )
+    return bool(claimed)
+
+
 @router.post("/meetings/process-booking-email-queue")
 def process_booking_email_queue(request: Request):
     """Cron-triggered (same GitHub Actions convention as send-due-reminders). Drains a small
@@ -5443,6 +5475,14 @@ def process_booking_email_queue(request: Request):
 
     db = get_admin_client()
     BATCH_SIZE = 20
+    # A row stays "sending" only if the run handling it was killed (e.g. a deploy restarting
+    # the backend) — almost always before its email went out, so it goes back to the queue.
+    try:
+        stuck_before = (datetime.now(timezone.utc) - timedelta(minutes=QUEUE_SENDING_STALE_MINUTES)).isoformat()
+        db.table("meeting_booking_email_queue").update({"status": "pending"}) \
+            .eq("status", "sending").lt("attempted_at", stuck_before).execute()
+    except Exception as exc:
+        logger.warning("process_booking_email_queue: stuck-row recovery failed (non-fatal): %s", exc)
     rows = (
         db.table("meeting_booking_email_queue")
         .select("*")
@@ -5455,6 +5495,10 @@ def process_booking_email_queue(request: Request):
 
     sent, failed = 0, 0
     for row in rows:
+        # Claim the row first (pending → sending, atomically), so two overlapping runs — a cron
+        # tick while the previous one is still going — can never both send it.
+        if not claim_queue_row(db, "meeting_booking_email_queue", row["id"], {"attempted_at": datetime.now(timezone.utc).isoformat()}):
+            continue
         try:
             school = db.table("schools").select(
                 "id, name, secretary_name, secretary_email, finance_contact_name, finance_contact_email"
@@ -5529,7 +5573,7 @@ def process_booking_email_queue(request: Request):
                 db.table("meeting_booking_email_queue")
                 .select("id")
                 .eq("draft_id", draft_id)
-                .eq("status", "pending")
+                .in_("status", ["pending", "sending"])
                 .execute()
                 .data or []
             )
@@ -7154,7 +7198,15 @@ def cancel_user_future_meetings(user_id: str, user: Annotated[dict, Depends(get_
             db.table("calendar_event_index").delete().eq("meeting_id", m["id"]).execute()
         except Exception as exc:
             logger.warning("calendar_event_index cleanup failed for meeting %s (non-fatal): %s", m["id"], exc)
+        # A booking request this meeting filled reopens once it's gone (see delete_meeting).
+        try:
+            filled_requests = booking_requests.requests_filled_by_meeting(db, m["id"])
+        except Exception as exc:
+            logger.warning("filled-requests lookup failed for meeting %s (non-fatal): %s", m["id"], exc)
+            filled_requests = []
         db.table("meetings").delete().eq("id", m["id"]).execute()
+        if filled_requests:
+            booking_requests.reopen_for_deleted_meeting(db, user["org_id"], filled_requests)
         meeting_activity.log_meeting_activity(
             db, meeting_id=m["id"], school_id=m.get("school_id"), org_id=user["org_id"],
             actor_id=user["id"], actor_type="user", source="user_transfer", action="deleted", before=m,
@@ -9236,6 +9288,9 @@ def create_meeting(school_id: str, body: MeetingIn, user: Annotated[dict, Depend
         actor_id=user["id"], actor_type="user", source=meeting_activity.client_surface(x_client_surface),
         action="created", after=meeting,
     )
+    # "מחליפה או נוספת?" — open booking requests of the school this meeting's date falls in
+    # (MeetingRow asks about each one; see booking_requests.py).
+    meeting["open_booking_requests"] = booking_requests.open_requests_for_meeting(db, user["org_id"], meeting)
     return meeting
 
 
@@ -10542,7 +10597,10 @@ def send_direct_coordination_request(
             "duration_minutes": r.duration_minutes,
             "label": label,
             "advisor_ids": r.advisor_ids,
-            "participants": [p.model_dump() for p in r.participants],
+            # A person picked both by name and as "מתאם פגישות" is invited once.
+            "participants": _dedupe_participants_by_email([
+                {k: v for k, v in p.model_dump().items() if k != "role_label" or v} for p in r.participants
+            ]),
             "meeting_type": r.meeting_type,
             "allow_time_range_search": r.allow_time_range_search,
             "min_free_window_minutes": r.min_free_window_minutes,
@@ -10708,6 +10766,7 @@ def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annot
     except Exception as exc:
         logger.warning("calendar sync failed for updated meeting %s (non-fatal): %s", meeting_id, exc)
 
+    meeting["open_booking_requests"] = booking_requests.open_requests_for_meeting(db, user["org_id"], meeting)
     return meeting
 
 
@@ -10749,6 +10808,42 @@ def _apply_meeting_patch(db, org_id: str, school_id: str, meeting_id: str, patch
     except Exception as exc:
         logger.warning("calendar sync failed for patched meeting %s (non-fatal): %s", meeting_id, exc)
 
+    return {"ok": True}
+
+
+class BookingRequestResolutionIn(BaseModel):
+    token_id: str
+    range_key: str
+    decision: str  # "replaces" | "additional"
+
+
+@router.post("/{school_id}/meetings/{meeting_id}/booking-request-resolutions")
+def resolve_booking_request(school_id: str, meeting_id: str, body: BookingRequestResolutionIn,
+                            user: Annotated[dict, Depends(get_current_user)],
+                            x_client_surface: Annotated[str | None, Header()] = None):
+    """The staff's answer to "this meeting replaces the school's open booking request, or is it
+    an additional one?" (MeetingRow's BookingRequestResolutionModal). "replaces" closes the
+    request (no more booking through that link, done for the task, no longer reserved in the
+    advisor's calendar); "additional" keeps it open and the meeting never counts for it.
+    The meeting, the school and the link must all belong to the caller's org."""
+    if body.decision not in booking_requests.DECISIONS:
+        raise HTTPException(status_code=400, detail="בחירה לא תקינה")
+    db = get_admin_client()
+    _require_school_access_for_meeting_activity(db, user, school_id)
+    meetings = db.table("meetings").select("id, school_id, booking_token_id").eq("id", meeting_id).eq("school_id", school_id).execute().data
+    if not meetings:
+        raise HTTPException(status_code=404, detail="פגישה לא נמצאה")
+    tokens = (
+        db.table("meeting_booking_tokens").select("id, task_id, date_ranges")
+        .eq("id", body.token_id).eq("org_id", user["org_id"]).eq("school_id", school_id).execute().data
+    )
+    range_row = next((r for r in ((tokens or [{}])[0].get("date_ranges") or []) if r.get("key") == body.range_key), None)
+    if not tokens or not range_row:
+        raise HTTPException(status_code=404, detail="הבקשה לא נמצאה")
+    booking_requests.record_resolution(
+        db, org_id=user["org_id"], user_id=user["id"], meeting=meetings[0], token=tokens[0], range_row=range_row,
+        decision=body.decision, source=meeting_activity.client_surface(x_client_surface),
+    )
     return {"ok": True}
 
 
@@ -10907,7 +11002,16 @@ def delete_meeting(school_id: str, meeting_id: str, user: Annotated[dict, Depend
     except Exception as exc:
         logger.warning("calendar_event_index cleanup failed for deleted meeting %s (non-fatal): %s", meeting_id, exc)
     activity_before = meeting_activity.fetch_tracked(db, meeting_id)
+    # Booking requests this meeting fills reopen once it's gone (booking_requests.py) — read now,
+    # since the row and its "replaces" answers disappear with the delete.
+    try:
+        filled_requests = booking_requests.requests_filled_by_meeting(db, meeting_id)
+    except Exception as exc:
+        logger.warning("delete_meeting: filled-requests lookup failed for %s (non-fatal): %s", meeting_id, exc)
+        filled_requests = []
     db.table("meetings").delete().eq("id", meeting_id).eq("school_id", school_id).execute()
+    if filled_requests:
+        booking_requests.reopen_for_deleted_meeting(db, user["org_id"], filled_requests)
     meeting_activity.log_meeting_activity(
         db, meeting_id=meeting_id, school_id=school_id, org_id=user["org_id"],
         actor_id=user["id"], actor_type="user", source=None, action="deleted", before=activity_before,

@@ -6,7 +6,10 @@ import EfficientCalendarGuideWindow from "./EfficientCalendarGuideWindow";
 // times the school's link may offer, so short meetings never leave an advisor's day full of
 // gaps too short for anything else. Values mirror slot_policy.MIN_FREE_WINDOW_OPTIONS /
 // START_GRID_OPTIONS; null = not answered yet (the callers block "next" until both are set).
+// -1 = "אוטומטי" (slot_policy.AUTO_MIN_FREE_WINDOW): per advisor and day, room for the longest
+// meeting still waiting to be booked with that advisor, across every active task's link.
 export const MIN_FREE_WINDOW_OPTIONS = [
+  { value: -1, label: "אוטומטי — לפי הפגישות שעוד מחכות להיקבע (מומלץ)" },
   { value: 0, label: "ללא הגבלה (השעה הפנויה המוקדמת ביותר)" },
   { value: 30, label: "30 דק'" },
   { value: 60, label: "שעה" },
@@ -47,7 +50,11 @@ export default function EfficientCalendarFields({ idPrefix, minFreeWindow, start
           {MIN_FREE_WINDOW_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
         <p id={`${idPrefix}-min-window-hint`} className="text-[11px] text-slate-500">
-          לבתי הספר יוצעו רק שעות שצמודות לפגישה אחרת, או שמשאירות לפניהן ואחריהן לפחות את הזמן הזה — כך תמיד יישאר מקום לפגישה באורך שבחרתם.
+          {minFreeWindow === -1
+            ? "בכל יום המערכת תשמור ביומן של כל יועץ מקום לפגישה הארוכה ביותר שעוד מחכה להיקבע אצלו (מכל המשימות), ותפסיק לשמור ברגע שהיא נקבעת."
+            : minFreeWindow === 0
+              ? "בתי הספר יקבלו פשוט את השעה הפנויה המוקדמת ביותר, בלי התחשבות במקום שנשאר ביומן."
+              : "לבתי הספר יוצעו רק שעות שצמודות לפגישה אחרת, או שמשאירות לפניהן ואחריהן לפחות את הזמן הזה — כך תמיד יישאר מקום לפגישה באורך שבחרתם."}
         </p>
       </div>
       <fieldset className="flex flex-col gap-1.5">

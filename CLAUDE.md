@@ -264,7 +264,7 @@ school_id UUID, org_id UUID
 actor_id UUID        -- NULL for school (public booking link) / system / Outlook
 actor_type TEXT      -- 'user' | 'school' | 'system' | 'outlook'
 source TEXT          -- school_card | personal | admin | status_popup | import | import_remap | booking_link | task_booking_link | outlook | auto_complete | calls_sync | user_transfer | NULL
-action TEXT          -- created | updated | deleted | moved_year | reassigned_school | advisor_joined | note_added/edited/deleted | offline_added/edited/deleted | summary_uploaded
+action TEXT          -- created | updated | deleted | moved_year | reassigned_school | advisor_joined | note_added/edited/deleted | offline_added/edited/deleted | summary_uploaded | request_resolved | request_reopened
 changes JSONB        -- {field: {from, to}} — only tracked fields that really changed
 snapshot JSONB       -- tracked fields after the action
 meta JSONB           -- note content, offline entry, task_id, Outlook calendar owners, …
@@ -320,6 +320,12 @@ Both tables also hold `message_type` ('reminder' | 'upload_request' | 'upload_fo
 - **`booking_locks(keys)`** — table `booking_slot_locks` (`lock_key` PK; service_role only, deny-all RLS; same mechanism as `graph_client.calendar_sync_lock`), keys `adv:{advisor_id}:{date}` per advisor + `range:{token_id}:{range_key}` (double clicks), taken in sorted order, stale after 30 s, 503 after 15 s of waiting. Outlook is read **before** the lock; inside it everything another booking may have changed is re-read (token's `booked_ranges`/`booked_months`, `meetings` of the day, existing-meeting check, slot_policy) and then insert + `booked_*` update. Activity log + Outlook sync run after release.
 - **`keep_or_discard_booking`** right after the insert: an overlapping scheduled meeting of the same advisor created earlier (`created_at`, then `id`) wins and the new row is deleted (409). Holds even if a lock was stolen.
 - Any new public (school-side) booking path MUST use both. Staff-created meetings are deliberately not locked (an advisor may double-book on purpose), but an earlier staff meeting always beats a link booking.
+
+### Booking requests and the meetings that fill them (`backend/booking_requests.py`)
+A "request" = one range of a live booking link (a task's or a direct-coordination one).
+- **`meeting_request_resolutions`** (service_role only, deny-all RLS; `UNIQUE(meeting_id, token_id, range_key)`, cascades with the meeting): the staff's answer to "מחליפה או נוספת?". `create_meeting`/`update_meeting` return `open_booking_requests` (open requests of the school whose dates include a staff-made, dated, live meeting, not yet answered for it); `MeetingRow` opens `BookingRequestResolutionModal` on every surface → `POST /schools/{sid}/meetings/{mid}/booking-request-resolutions`, logged as `request_resolved`. "replaces" closes the request (`booked_ranges`) and counts the meeting for that task's condition of the request's type (any meeting type, also under "בקש לקבוע פגישה נוספת", in the request's division — `task_logic._matching_meetings` via `request_resolutions` attached in `_fetch_schools_and_meetings`); "additional" keeps it open and the meeting never counts for it (nor blocks the link — `_range_existing_meeting`). No answer = the automatic rule exactly as before.
+- **`meetings.booking_range_key`**: which request a link booking filled. **`reconcile_booked_ranges`** runs in the `tasks-recompute-progress` cron (every 5 min, every org with live links): a request whose KNOWN filler (link booking / "replaces") is no longer scheduled/completed reopens while its dates aren't over (`request_reopened` logged); a request with no known filler (links booked before this existed) is never reopened by guess. Deleting a meeting reopens its requests in `delete_meeting` (`requests_filled_by_meeting` before the delete → `reopen_for_deleted_meeting`), as does changing an answer from "replaces" to "additional".
+- **"אוטומטי" in יומן יעיל** (`min_free_window_minutes = -1`): per advisor and day, X = the longest still-open request of that advisor covering the day (SQL `pending_booking_demand`, EXECUTE service_role only; active tasks + direct coordination; filled requests dropped via `requests_already_filled`; the school's own request excluded), else the meeting's own length.
 
 ### "יומן יעיל" — which times a public booking link offers (`backend/slot_policy.py`)
 A range created with the two required questions (`min_free_window_minutes` X, 0 = no limit; `start_grid_minutes` 30/60) goes through `slot_policy`; a range without `min_free_window_minutes` keeps the original earliest-slot code path (`meeting_booking_router._uses_slot_policy`), so links already sent never change.
@@ -752,11 +758,31 @@ This file is the single source of truth for what will be deployed next.
 ### Pre-Deployment Flow (MUST follow every time)
 1. Read `dev-log.md`
 2. **Check whether this deployment needs the cross-org security test suite — see "Cross-Org Security Test Suite (MANDATORY)" below. If yes, run it now and report the result before continuing.**
+2a. **Classify the deployment as "safe during work hours" or "evening only"** (see "Deploying During Work Hours" below) and tell the user which, with the reason.
 3. Present pending changes to user as Hebrew bullet-point summary
 4. Ask: **"האם להעלות את כל העדכונים הללו לאתר?"**
 5. **Wait for explicit approval**
 6. Only after approval: run Deployment Steps
 7. After successful push to `main`: clear `dev-log.md` (leave only `# Dev Log`)
+
+### Deploying During Work Hours
+A deploy swaps the backend instance and the frontend build while advisors are working. What keeps that invisible — don't remove any of it:
+- **Backend shutdown:** `render.yaml` has `healthCheckPath: /health` (traffic moves only to a ready instance) and `maxShutdownDelaySeconds: 120` with gunicorn `--graceful-timeout 110` (in-flight requests and running checks get time to finish). Keep the graceful timeout below the shutdown delay. Nothing slow may run on startup (8 workers × every deploy) — the old startup cleanups now run from `POST /maintenance/daily-cleanup` (`.github/workflows/daily-cleanup.yml`).
+- **Interrupted checks:** `/analyze/upload` and `/add-file` store the source files in Storage *before* starting `_process`, and record `_rerun` (preserved by `_update_run`, like `_school_ctx`). Every `_update_run` stamps `run_states.updated_at`; a run still `processing`/`saving` after 10 minutes is settled by `_interrupt_if_stale` (`done` if it has `saved_log_id`, else `interrupted`) — on the next poll, or by `POST /analyze/sweep-interrupted-runs` (pg_cron `analyze-sweep-interrupted-runs`, every 10 min), which also retries a background meeting check once and then notifies the advisor. `POST /analyze/rerun/{run_id}` re-runs an interrupted run ("הרץ שוב" in `SchoolPage.jsx`).
+- **Frontend:** `main.jsx` retries (1s/2s/4s) reads on any 502/503/504/no response, and PUT/PATCH/DELETE only when the request never reached the app (no response, or a non-JSON gateway page) — our own JSON 503 on a write means the handler ran part-way, so re-sending could repeat side effects. A POST is retried only with `config.retryable = true`. `vite.config.js` writes `dist/version.json`; `NewVersionBanner` only *offers* a reload — **never auto-reload** (the floating windows survive navigation and may hold unsaved text). Run polling (`pollRun` in `SchoolPage.jsx`) survives ~2 minutes of failed polls. Measured on 661 real checks: p99 28 s, max 110 s — hence the 10-minute stale threshold and the 110 s graceful timeout.
+- **No input lost on a failed save:** composers restore the typed text when a save fails. `MeetingRow.performSave` forgets a failed send so the next blur re-sends it, and `saveFailedRef` stops the date/time/status sync effects from copying the parent's post-failure reload over the unsaved edit. Any new save-on-blur field must do the same — never clear the text before the save succeeds.
+- **Queues:** `meeting_booking_email_queue` and `org_task_messages` rows are claimed `pending → sending` (`schools_router.claim_queue_row`) before sending; a row left `sending` for 10 minutes goes back to `pending`. Any new queue must claim the same way.
+
+**Evening only** (or split into two deploys) when a change:
+- drops or renames a column, table or API field that the currently-deployed code or open browser tabs still use (**expand/contract:** add the new thing → deploy → remove the old thing in a later deploy, at least a day after);
+- makes a new request field *required* (a tab loaded before the deploy won't send it — make it optional with the old behavior as default, like `status_changed`);
+- changes the meaning of an existing stored value.
+Everything else (UI, fixes, new optional fields/endpoints, additive migrations run **before** the push) is safe during work hours. Before pushing, optionally check that no check is running right now: `SELECT count(*) FROM run_states WHERE status IN ('processing','saving') AND updated_at > now() - interval '3 minutes';`
+
+**pg_cron job for the sweep** (create once, after the deploy that added the endpoint; check `cron.job` first):
+```sql
+select cron.schedule('analyze-sweep-interrupted-runs', '*/10 * * * *', $$select net.http_post(url := 'https://gefen-kesafim-api.onrender.com/analyze/sweep-interrupted-runs', headers := jsonb_build_object('Content-Type','application/json','X-Cron-Secret', (select decrypted_secret from vault.decrypted_secrets where name='cron_secret')), body := '{}'::jsonb, timeout_milliseconds := 120000);$$);
+```
 
 ### Render Setup
 - Platform: Render.com — watches `main` branch (auto-deploy on push)

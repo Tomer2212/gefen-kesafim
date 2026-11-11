@@ -1469,3 +1469,84 @@ def test_meeting_override_same_org_works(org_b_client, admin_db):
         assert saved[ORG_B_SCHOOL_ID]["gefen_current"]["coordinator_type"] == "gefen"
     finally:
         admin_db.table("org_tasks").update({"meeting_overrides": original}).eq("id", own_task).execute()
+
+
+# ---------------------------------------------------------------------------
+# "מחליפה או נוספת?" — POST /schools/{school_id}/meetings/{meeting_id}/booking-request-resolutions.
+# The meeting, the school and the booking link must all be the caller's own org's. Org A is never
+# written to; the same-org test uses a temporary org-B meeting and restores the link.
+# ---------------------------------------------------------------------------
+
+
+def _org_link(admin_db, org_id):
+    rows = (
+        admin_db.table("meeting_booking_tokens").select("id, school_id, date_ranges, booked_ranges")
+        .eq("org_id", org_id).execute().data or []
+    )
+    rows = [r for r in rows if r.get("date_ranges")]
+    if not rows:
+        pytest.skip(f"no range booking link in org {org_id}")
+    return rows[0]
+
+
+def _resolutions_for(admin_db, meeting_id):
+    return admin_db.table("meeting_request_resolutions").select("id").eq("meeting_id", meeting_id).execute().data or []
+
+
+def test_request_resolution_cross_org_meeting_rejected(org_b_client, admin_db):
+    link = _org_link(admin_db, ORG_B_ID)
+    resp = org_b_client.post(
+        f"/schools/{ORG_A_MEETING_SCHOOL_ID}/meetings/{ORG_A_MEETING_ID}/booking-request-resolutions",
+        json={"token_id": link["id"], "range_key": link["date_ranges"][0]["key"], "decision": "replaces"},
+    )
+    assert resp.status_code in (403, 404), resp.text
+    assert _resolutions_for(admin_db, ORG_A_MEETING_ID) == []
+
+
+def test_request_resolution_cross_org_link_rejected(org_b_client, admin_db):
+    foreign_link = _org_link(admin_db, ORG_A_ID)
+    own_link = _org_link(admin_db, ORG_B_ID)
+    meeting = admin_db.table("meetings").insert({
+        "school_id": own_link["school_id"], "status": "scheduled", "meeting_date": "2099-12-10", "participants": [],
+    }).execute().data[0]
+    try:
+        resp = org_b_client.post(
+            f"/schools/{own_link['school_id']}/meetings/{meeting['id']}/booking-request-resolutions",
+            json={"token_id": foreign_link["id"], "range_key": foreign_link["date_ranges"][0]["key"], "decision": "replaces"},
+        )
+        assert resp.status_code in (403, 404), resp.text
+        assert _resolutions_for(admin_db, meeting["id"]) == []
+    finally:
+        admin_db.table("meetings").delete().eq("id", meeting["id"]).execute()
+
+
+def test_request_resolution_same_org_works(org_b_client, admin_db):
+    link = _org_link(admin_db, ORG_B_ID)
+    original_booked = link.get("booked_ranges")
+    meeting = admin_db.table("meetings").insert({
+        "school_id": link["school_id"], "status": "scheduled", "meeting_date": "2099-12-10", "participants": [],
+    }).execute().data[0]
+    try:
+        resp = org_b_client.post(
+            f"/schools/{link['school_id']}/meetings/{meeting['id']}/booking-request-resolutions",
+            json={"token_id": link["id"], "range_key": link["date_ranges"][0]["key"], "decision": "additional"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert len(_resolutions_for(admin_db, meeting["id"])) == 1
+    finally:
+        admin_db.table("meeting_activity").delete().eq("meeting_id", meeting["id"]).execute()
+        admin_db.table("meetings").delete().eq("id", meeting["id"]).execute()  # cascades the resolution
+        admin_db.table("meeting_booking_tokens").update({"booked_ranges": original_booked}).eq("id", link["id"]).execute()
+
+
+# POST /analyze/rerun — re-runs an interrupted check. ORG_A_RUN_ID is a completed ("done") run,
+# so the same-org call stops at the 409 "not interrupted" guard and writes nothing to org A.
+def test_rerun_interrupted_cross_org_rejected(org_b_client):
+    resp = org_b_client.post(f"/analyze/rerun/{ORG_A_RUN_ID}")
+    assert resp.status_code == 404, resp.text
+    assert resp.json().get("detail") == "בית ספר לא נמצא", resp.json()
+
+
+def test_rerun_interrupted_same_org_passes_org_check(org_a_client):
+    resp = org_a_client.post(f"/analyze/rerun/{ORG_A_RUN_ID}")
+    assert resp.status_code == 409, resp.text

@@ -337,7 +337,7 @@ def test_task_link_counts_completed_meetings_like_progress_does():
 def test_range_without_the_flag_keeps_the_original_check(monkeypatch):
     calls = []
 
-    def original(db, school_id, service_type, start, end, scope):
+    def original(db, school_id, service_type, start, end, scope, excluded_ids=frozenset()):
         calls.append(scope)
         return {"meeting_date": "2026-12-10"}
 

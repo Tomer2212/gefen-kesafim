@@ -26,7 +26,9 @@ const PARTICIPANT_ROLE_FIELDS = {
   principal: { name: "principal_name", phone: "principal_phone", email: "principal_email" },
   principal_chativa: { name: "principal_chativa_name", phone: "principal_chativa_phone", email: "principal_chativa_email" },
   secretary: { name: "secretary_name", phone: "secretary_phone", email: "secretary_email" },
+  secretary_chativa: { name: "secretary_chativa_name", phone: "secretary_chativa_phone", email: "secretary_chativa_email" },
   finance_contact: { name: "finance_contact_name", phone: "finance_contact_phone", email: "finance_contact_email" },
+  finance_contact_chativa: { name: "finance_contact_chativa_name", phone: "finance_contact_chativa_phone", email: "finance_contact_chativa_email" },
 };
 const COORDINATOR_ROLE_OPTIONS = [
   { value: "principal", label: "מנהל/ת" },
@@ -427,7 +429,7 @@ export default function TaskMeetingResolutionModal({
       if (school.participants) {
         for (const role of school.participants.roles) {
           if (!resolved(`participant:${school.school_id}:${role}`)) {
-            rows.push({ school_id: school.school_id, school_name: school.school_name, symbol: school.symbol, authority: school.authority, kind: "participant", detail: role });
+            rows.push({ school_id: school.school_id, school_name: school.school_name, symbol: school.symbol, authority: school.authority, kind: "participant", detail: roleLabel(school, role) });
           }
         }
       }
@@ -545,6 +547,15 @@ export default function TaskMeetingResolutionModal({
                             <p className="text-xs text-slate-600">
                               <b>לתשומת לב:</b> בית ספר זה ביקש הסרה מרשימת התפוצה ({school.opted_out.email}) ולא יקבל את ההודעה, עד ששדה "סטטוס לקוח" שלו יהפוך ל"פעיל". זו הערה בלבד ואינה חוסמת את יצירת המשימה.
                             </p>
+                          </div>
+                        )}
+                        {school.coordinator_missing_contact && (
+                          <div className="bg-slate-50 rounded-lg border border-slate-200 p-3 space-y-1">
+                            {school.coordinator_missing_contact.map(c => (
+                              <p key={c.label} className="text-xs text-slate-600">
+                                <b>לתשומת לב:</b> ל{c.label} ({c.name}) אין {needsPhone ? "טלפון" : "מייל"}. הוא/היא יוזמן/תוזמן לפגישה אך לא יקבל/תקבל תזכורת. ניתן להשלים בכרטיס בית הספר, תחת "אנשי קשר נוספים". זו הערה בלבד ואינה חוסמת את יצירת המשימה.
+                              </p>
+                            ))}
                           </div>
                         )}
                         {school.participants && (() => {

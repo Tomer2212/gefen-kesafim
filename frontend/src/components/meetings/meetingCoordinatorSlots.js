@@ -53,6 +53,14 @@ export function resolveCoordinatorRef(school, ref) {
   return null;
 }
 
+// A coordinator ref as a meeting-participant key — participants (buildSchoolContacts) spell the
+// finance role "finance" and extra contacts "extra_<i>", unlike the coordinator refs.
+export function coordinatorRefToParticipantKey(ref) {
+  if (ref === "finance_contact") return "finance";
+  if (ref?.startsWith("extra:")) return `extra_${ref.split(":")[1]}`;
+  return ref;
+}
+
 export function resolveMeetingCoordinatorForSlot(school, slot) {
   const ref = school?.meeting_coordinators?.[slot];
   return resolveCoordinatorRef(school, ref);

@@ -429,11 +429,15 @@ def _event_payload(meeting: dict, subject: str | None, show_as: str | None = Non
         # used for soft-cancel (status cancelled/postponed) so the event survives as a record.
         payload["attendees"] = []
     else:
-        attendees = [
-            {"emailAddress": {"address": p["email"].strip(), "name": p.get("name") or p["email"]}, "type": "required"}
-            for p in (meeting.get("participants") or [])
-            if (p.get("email") or "").strip()
-        ]
+        # One invite per address, even when a person is listed twice (e.g. picked by role and
+        # again as "מתאם פגישות", or two roles sharing one email).
+        attendees, seen_emails = [], set()
+        for p in meeting.get("participants") or []:
+            email = (p.get("email") or "").strip()
+            if not email or email.lower() in seen_emails:
+                continue
+            seen_emails.add(email.lower())
+            attendees.append({"emailAddress": {"address": email, "name": p.get("name") or email}, "type": "required"})
         if attendees:
             payload["attendees"] = attendees
     return payload

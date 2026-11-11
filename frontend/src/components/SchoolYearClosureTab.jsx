@@ -128,16 +128,19 @@ function ClosureNotesList({ notesId, notesLabel, notes, currentUser, onCreate, o
     if (draft === null) setDraft({ text: "", openedAt: new Date().toISOString() });
   }
 
-  function commitDraft() {
-    const content = (draft?.text || "").trim();
+  // The composer closes at once, but a failed save brings the typed text back instead of losing it.
+  async function commitDraft() {
+    const pending = draft;
+    const content = (pending?.text || "").trim();
     setDraft(null);
-    if (content) onCreate(content);
+    if (content && !(await onCreate(content))) setDraft(pending);
   }
 
-  function commitEdit(note) {
-    const content = (editDraft?.text || "").trim();
+  async function commitEdit(note) {
+    const pending = editDraft;
+    const content = (pending?.text || "").trim();
     setEditDraft(null);
-    if (content && content !== note.content) onEdit(note.id, content);
+    if (content && content !== note.content && !(await onEdit(note.id, content))) setEditDraft(pending);
   }
 
   return (
@@ -310,8 +313,10 @@ export function SchoolYearClosureTab({ yearAdminData, saveYearAdminField, gefenC
             academic_year: academicYear, scope, division_type: divisionType ?? null, budget_name: budgetName ?? null, content,
           });
           setNotes(prev => [{ ...data, author_name: data.author_name || currentUser?.full_name }, ...prev]);
+          return true;
         } catch {
-          setNotesError("שמירת ההערה נכשלה — נסה שוב");
+          setNotesError("שמירת ההערה נכשלה — הטקסט נשמר בתיבה, נסה שוב");
+          return false;
         }
       },
       onEdit: async (noteId, content) => {
@@ -319,8 +324,10 @@ export function SchoolYearClosureTab({ yearAdminData, saveYearAdminField, gefenC
         try {
           await axios.patch(`/schools/${schoolId}/year-closure-notes/${noteId}`, { content });
           setNotes(prev => prev.map(n => n.id === noteId ? { ...n, content } : n));
+          return true;
         } catch {
           setNotesError("עריכת ההערה נכשלה — אין הרשאה או שגיאה זמנית");
+          return false;
         }
       },
       onDelete: async noteId => {

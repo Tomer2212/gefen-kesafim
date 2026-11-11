@@ -73,14 +73,21 @@ const MEETING_TYPE_PILLS = [
 ];
 const PARTICIPANT_ROLE_OPTIONS = [
   { value: "principal", label: "מנהל/ת" }, { value: "secretary", label: "מנהלנ/ית" }, { value: "finance_contact", label: "אחראי/ת כספים" },
+  // Resolved per school to the card's meeting coordinator of this meeting type (and division) —
+  // tasks_router._coordinator_participants. Its label names the type, like "יועץ מלווה [גפן]".
+  { value: "meeting_coordinator", label: "מתאם פגישות", tooltip: "מי שמוגדר כמתאם הפגישות של סוג פגישה זה בכרטיס בית הספר" },
 ];
+function participantRoleLabel(opt, serviceType) {
+  if (opt.value !== "meeting_coordinator" || !serviceType) return opt.label;
+  return `${opt.label} [${MEETING_SERVICE_TYPE_LABELS[serviceType]}]`;
+}
 // Generalized (meeting-coordinator redesign): secretary/finance_contact now split by division
 // on a six-year school too (each via its own *_same_person flag), same as principal already
 // did — so the חטיבה pills must show whenever ANY splittable role is selected, not principal
 // only, or a manager could never express "only the תיכון secretary" for that participant.
 export function needsStageScope(cond) {
   return cond.meeting_service_type && cond.meeting_service_type !== "current"
-    && (cond.participant_roles || []).some(r => ["principal", "secretary", "finance_contact"].includes(r));
+    && (cond.participant_roles || []).some(r => ["principal", "secretary", "finance_contact", "meeting_coordinator"].includes(r));
 }
 // Up to 5 hours — a combined "גפן+שוטף" meeting is the sum of two lengths.
 export const DURATION_OPTIONS = Array.from({ length: (300 - 30) / 15 + 1 }, (_, i) => 30 + i * 15);
@@ -649,13 +656,18 @@ export default function ConditionGroupsEditor({
                         {PARTICIPANT_ROLE_OPTIONS.map(opt => {
                           const checked = (cond.participant_roles || []).includes(opt.value);
                           return (
-                            <label key={opt.value} className="flex items-center gap-1.5 text-sm border border-black rounded-lg px-2.5 py-1.5 cursor-pointer hover:bg-slate-50">
+                            <label key={opt.value} className="relative group flex items-center gap-1.5 text-sm border border-black rounded-lg px-2.5 py-1.5 cursor-pointer hover:bg-slate-50">
                               <input type="checkbox" checked={checked}
                                 onChange={() => updateCondition(gi, ci, {
                                   participant_roles: checked ? (cond.participant_roles || []).filter(r => r !== opt.value) : [...(cond.participant_roles || []), opt.value],
                                 })}
                                 className="w-3.5 h-3.5 rounded accent-blue-600" />
-                              <span>{opt.label}</span>
+                              <span>{participantRoleLabel(opt, cond.meeting_service_type)}</span>
+                              {opt.tooltip && (
+                                <span className="pointer-events-none absolute -top-7 right-0 opacity-0 group-hover:opacity-100 transition-opacity bg-amber-400 text-amber-950 text-[11px] font-medium px-2 py-1 rounded-md shadow-lg whitespace-nowrap z-10">
+                                  {opt.tooltip}
+                                </span>
+                              )}
                             </label>
                           );
                         })}

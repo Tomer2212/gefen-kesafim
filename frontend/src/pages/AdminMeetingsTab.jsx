@@ -390,7 +390,8 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
       setMeetings(prev => prev.map(m => m.id === draft.id ? saved : m));
     } catch (err) {
       console.error("Update meeting failed:", err);
-      loadAllMeetings(filters);
+      loadAllMeetings(filters, academicYear, { silent: true });
+      throw err; // let the row (MeetingRow.performSave) keep its draft and surface the failure
     }
   }
 

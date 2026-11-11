@@ -4,7 +4,14 @@ services:
     env: python
     rootDir: backend
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn main:app -w 8 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT --timeout 45 --graceful-timeout 20
+    # Render routes traffic to a new deploy only once this answers, so users never hit a
+    # worker that is still starting up.
+    healthCheckPath: /health
+    # On a deploy the old instance gets SIGTERM and up to this long before SIGKILL — enough
+    # for a running check (_process, in a BackgroundTask) to finish. gunicorn's
+    # --graceful-timeout below must stay a little under it.
+    maxShutdownDelaySeconds: 120
+    startCommand: gunicorn main:app -w 8 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT --timeout 45 --graceful-timeout 110
     envVars:
       - key: ALLOWED_ORIGINS
         sync: false

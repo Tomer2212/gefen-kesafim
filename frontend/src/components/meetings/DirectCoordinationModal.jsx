@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import axios from "axios";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
 import { buildSchoolContacts } from "./schoolContacts";
-import { resolveMeetingCoordinatorForSlot, slotForMeetingServiceType } from "./meetingCoordinatorSlots";
+import { COORDINATOR_ROLE_FIELDS, coordinatorRefToParticipantKey, resolveMeetingCoordinatorForSlot, slotForMeetingServiceType } from "./meetingCoordinatorSlots";
 import EfficientCalendarFields from "./EfficientCalendarFields";
 import { DirectCoordinationResolutionModal } from "./DirectCoordinationResolutionModal";
 import AdvisorAccessGrantModal from "./AdvisorAccessGrantModal";
@@ -121,6 +121,40 @@ function rangeCoordinatorSlot(school, r) {
   return coords.currentSlot;
 }
 
+// "מתאם פגישות [סוג]" participant — a pseudo key in participantKeys, expanded on send.
+const COORDINATOR_PARTICIPANT_KEY = "__coordinator__";
+
+// The coordination slots a range's "מתאם פגישות" participant invites: its division's slot, and
+// for a combined גפן+שוטף meeting both the גפן and the שוטף one (both coordinators are invited).
+function coordinatorParticipantSlots(school, r) {
+  if (!r.serviceType) return [];
+  if (r.serviceType === "gefen_current") {
+    const coords = gefenCurrentCoordinators(school, r.stageScope);
+    return [coords.gefenSlot, coords.currentSlot].filter(Boolean);
+  }
+  const slot = slotForMeetingServiceType(school, r.serviceType, r.stageScope);
+  return slot ? [slot] : [];
+}
+
+// Concrete participants for the "מתאם פגישות" pick, one per person (same key or email = once).
+function coordinatorParticipants(school, r) {
+  return dedupeParticipants(coordinatorParticipantSlots(school, r)
+    .map(slot => resolveMeetingCoordinatorForSlot(school, slot))
+    .filter(Boolean)
+    .map(c => ({ key: coordinatorRefToParticipantKey(c.role), name: c.name, email: c.email || null, role_label: c.roleLabel })));
+}
+
+function dedupeParticipants(list) {
+  const keys = new Set(), emails = new Set();
+  return list.filter(p => {
+    const email = (p.email || "").trim().toLowerCase();
+    if (keys.has(p.key) || (email && emails.has(email))) return false;
+    keys.add(p.key);
+    if (email) emails.add(email);
+    return true;
+  });
+}
+
 export function DirectCoordinationModal({ school: initialSchool, advisors, onClose, onSent }) {
   const { ref, handleKeyDown } = useFocusTrap(onClose);
   const [school, setSchool] = useState(initialSchool);
@@ -232,13 +266,23 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
     for (const r of ranges) {
       const slot = rangeCoordinatorSlot(school, r);
       if (slot) slots.add(slot);
+      // A coordinator invited as a participant must have an email too. A slot with no
+      // coordinator at all is just skipped (nobody to invite), like on the backend. An extra
+      // contact can't be completed in the resolution modal (saving there would replace the
+      // coordinator with a fixed role), so its missing email is only shown on the pill.
+      if (r.participantKeys.includes(COORDINATOR_PARTICIPANT_KEY)) {
+        for (const s of coordinatorParticipantSlots(school, r)) {
+          const c = resolveMeetingCoordinatorForSlot(school, s);
+          if (c && !c.email && COORDINATOR_ROLE_FIELDS[c.role]) slots.add(s);
+        }
+      }
     }
     return [...slots];
   }
 
   function participantRoleKeysNeeded() {
     const keys = new Set();
-    for (const r of ranges) for (const k of r.participantKeys) keys.add(k);
+    for (const r of ranges) for (const k of r.participantKeys) if (k !== COORDINATOR_PARTICIPANT_KEY) keys.add(k);
     return [...keys];
   }
 
@@ -295,10 +339,11 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
           duration_minutes: r.duration,
           advisor_ids: resolveRangeAdvisorIds(r, school),
           coordinator_type: r.serviceType === "gefen_current" && r.coordinatorType ? r.coordinatorType : null,
-          participants: r.participantKeys.map(key => {
+          participants: dedupeParticipants(r.participantKeys.flatMap(key => {
+            if (key === COORDINATOR_PARTICIPANT_KEY) return coordinatorParticipants(school, r);
             const c = contacts.find(c => c.key === key);
-            return { key: c.key, name: c.name, email: c.email || null };
-          }),
+            return c ? [{ key: c.key, name: c.name, email: c.email || null }] : [];
+          })),
           stage_scope: r.stageScope || null,
           meeting_type: r.meetingType || "remote",
           allow_time_range_search: r.allowTimeRangeSearch,
@@ -579,6 +624,23 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
                       <p className="text-xs text-slate-400">לא הוגדרו אנשי קשר לבית הספר</p>
                     ) : (
                       <div className="flex flex-wrap gap-2">
+                        {r.serviceType && (() => {
+                          const typeLabel = ALL_SERVICE_TYPE_OPTIONS.find(o => o.value === r.serviceType)?.label;
+                          const resolved = coordinatorParticipants(school, r);
+                          return (
+                            <label className="flex items-center gap-1.5 text-sm border border-black rounded-lg px-2.5 py-1.5 cursor-pointer hover:bg-slate-50">
+                              <input type="checkbox" checked={r.participantKeys.includes(COORDINATOR_PARTICIPANT_KEY)}
+                                onChange={() => toggleParticipant(r.localId, COORDINATOR_PARTICIPANT_KEY)}
+                                className="w-3.5 h-3.5 rounded accent-blue-600" />
+                              <span>
+                                מתאם פגישות [{typeLabel}]
+                                {resolved.length > 0
+                                  ? ` — ${resolved.map(p => `${p.name} (${p.role_label}${p.email ? "" : ", אין מייל, לא יקבל תזכורת"})`).join(", ")}`
+                                  : coordinatorParticipantSlots(school, r).length > 0 && <span className="text-slate-400"> — לא הוגדר בכרטיס</span>}
+                              </span>
+                            </label>
+                          );
+                        })()}
                         {contacts.map(c => (
                           <label key={c.key} className="flex items-center gap-1.5 text-sm border border-black rounded-lg px-2.5 py-1.5 cursor-pointer hover:bg-slate-50">
                             <input type="checkbox" checked={r.participantKeys.includes(c.key)}

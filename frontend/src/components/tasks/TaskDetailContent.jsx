@@ -217,6 +217,7 @@ export default function TaskDetailContent({ taskId, onTaskChange }) {
   // once from GET /schools/ (same source DashboardPage uses), lazily on first popover open.
   const [quickTextValues, setQuickTextValues] = useState(null); // {authority: [...], city: [...]} | null
   const [openNoteIds, setOpenNoteIds] = useState(() => new Set()); // school_ids whose note box is expanded
+  const [noteSaveFailedId, setNoteSaveFailedId] = useState(null); // school_id whose last note save failed
 
   function loadTask() {
     setLoading(true);
@@ -369,9 +370,15 @@ export default function TaskDetailContent({ taskId, onTaskChange }) {
     }
   }
 
+  // On failure the text stays in the (uncontrolled) textarea and leaving it again retries.
   async function saveNote(schoolId, note) {
-    await axios.put(`/tasks/${taskId}/schools/${schoolId}/note`, { note });
-    loadTask();
+    try {
+      await axios.put(`/tasks/${taskId}/schools/${schoolId}/note`, { note });
+      setNoteSaveFailedId(null);
+      loadTask();
+    } catch {
+      setNoteSaveFailedId(schoolId);
+    }
   }
 
   async function saveBroadcastSkip(schoolId, mode, until = null) {
@@ -967,6 +974,9 @@ export default function TaskDetailContent({ taskId, onTaskChange }) {
                             placeholder="הערה..."
                             className="w-56 text-xs border border-transparent hover:border-slate-200 focus:border-blue-400 rounded-lg px-2 py-1 outline-none bg-transparent focus:bg-white resize-y align-top"
                           />
+                          {noteSaveFailedId === r.school_id && (
+                            <span role="alert" className="block text-[11px] text-red-600">שמירת ההערה נכשלה — צא מהתיבה שוב כדי לנסות</span>
+                          )}
                         </>
                       ) : (
                         <button

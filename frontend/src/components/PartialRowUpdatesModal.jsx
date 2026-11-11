@@ -86,7 +86,8 @@ export function PartialRowUpdatesModal({
       };
       pushChange([{ group_id: data.group_id, segments: [segment] }, ...groups]);
     } catch {
-      setError("שמירת העדכון נכשלה — נסה שוב");
+      setNewRecordText(content); // keep what was typed — the composer reopens with it
+      setError("שמירת העדכון נכשלה — הטקסט נשמר בתיבה, נסה שוב");
     } finally {
       setSaving(false);
     }
@@ -104,6 +105,7 @@ export function PartialRowUpdatesModal({
         segments: g.segments.map(s => s.id === segmentId ? { ...s, content } : s),
       }));
     } catch {
+      setEditDraft({ segmentId, groupId, text }); // keep the edit open with what was typed
       setError("עריכת העדכון נכשלה — אין הרשאה או שגיאה זמנית");
     } finally {
       setSaving(false);

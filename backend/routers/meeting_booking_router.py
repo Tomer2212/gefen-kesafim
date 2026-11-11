@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, HTTPException
 
 import booking_lock
+import booking_requests
 import graph_client
 import meeting_activity
 import slot_policy
@@ -166,6 +167,33 @@ def _policy_args(token_row: dict, range_row: dict) -> tuple[int, int, int, int, 
     )
 
 
+def _pending_demand(db, token_row: dict, range_row: dict, advisor_ids: list[str], date_from: str, date_to: str) -> list[dict]:
+    """"אוטומטי" (slot_policy.AUTO_MIN_FREE_WINDOW): every booking request still waiting for these
+    advisors in these dates — any active task's or direct-coordination link, the school's own
+    request excluded. Non-fatal: on failure the window falls back to the meeting's own length."""
+    try:
+        db = get_admin_client()
+        rows = db.rpc("pending_booking_demand", {
+            "p_org_id": token_row["org_id"], "p_advisor_ids": advisor_ids, "p_from": date_from, "p_to": date_to,
+        }).execute().data or []
+        rows = [r for r in rows if not (str(r["token_id"]) == str(token_row["id"]) and r["range_key"] == range_row["key"])]
+        filled = booking_requests.requests_already_filled(db, rows)
+    except Exception as exc:
+        logger.warning("pending booking demand lookup failed (non-fatal, own length used): %s", exc)
+        return []
+    return [
+        {"advisor_ids": r.get("advisor_ids") or [], "start_date": r["range_row"].get("start_date"),
+         "end_date": r["range_row"].get("end_date"), "duration_minutes": r["range_row"].get("duration_minutes")}
+        for r in rows if (str(r["token_id"]), r["range_key"]) not in filled
+    ]
+
+
+def _day_window(min_window: int, pending: list[dict] | None, day_iso: str, advisor_ids: list[str], duration: int) -> int | dict[str, int]:
+    if min_window == slot_policy.AUTO_MIN_FREE_WINDOW:
+        return slot_policy.auto_window_by_advisor(pending or [], day_iso, advisor_ids, duration)
+    return min_window
+
+
 def _policy_dates(token_row: dict, range_row: dict) -> set[str]:
     """The dates the range may be booked on (its segments x the working days). Blocked dates are
     checked separately by the booking endpoint (_find_blocking_rule)."""
@@ -174,7 +202,7 @@ def _policy_dates(token_row: dict, range_row: dict) -> set[str]:
 
 
 def _find_existing_meeting(db, school_id: str, service_type: str, start_date: str, end_date: str,
-                            stage_scope: str | None = None) -> dict | None:
+                            stage_scope: str | None = None, excluded_ids: frozenset = frozenset()) -> dict | None:
     """Round-7 live check — a school may already have a genuine scheduled meeting of this
     service_type overlapping the requested range (booked another way entirely, e.g. by phone,
     or via a different token) even though THIS token's own booked_ranges never recorded one.
@@ -187,19 +215,21 @@ def _find_existing_meeting(db, school_id: str, service_type: str, start_date: st
     principal (or a "both"/unset legacy meeting, which covers either) — without this, a
     "separate" split condition's two ranges (same school/type/date-window, different principal)
     were indistinguishable, so booking either one falsely "existing_meeting"-blocked the other.
-    stage_scope=None (the normal, non-split case) keeps the exact original behavior."""
+    stage_scope=None (the normal, non-split case) keeps the exact original behavior.
+    excluded_ids: meetings the staff marked as "additional" to this request (_range_existing_meeting)."""
     query = (
-        db.table("meetings").select("meeting_date, start_time, end_time")
+        db.table("meetings").select("id, meeting_date, start_time, end_time")
         .eq("school_id", school_id).eq("meeting_service_type", service_type).eq("status", "scheduled")
         .gte("meeting_date", start_date).lte("meeting_date", end_date)
     )
     if stage_scope in ("tichon", "chativa"):
         query = query.or_(f"stage_scope.eq.{stage_scope},stage_scope.eq.both,stage_scope.is.null")
-    rows = query.limit(1).execute().data or []
-    return rows[0] if rows else None
+    rows = [r for r in (query.limit(len(excluded_ids) + 1).execute().data or []) if r.get("id") not in excluded_ids]
+    return {k: rows[0].get(k) for k in ("meeting_date", "start_time", "end_time")} if rows else None
 
 
-def _find_existing_meeting_explicit_scope(db, school_id: str, service_type: str, segments: list[dict], stage_scope: str) -> dict | None:
+def _find_existing_meeting_explicit_scope(db, school_id: str, service_type: str, segments: list[dict], stage_scope: str,
+                                          excluded_ids: frozenset = frozenset()) -> dict | None:
     """The live check for a range minted with explicit_stage_scope_only, using the same
     stage_scope_is_covered rule as compute_task_progress so the booking page and the task's
     progress can't disagree: an unmarked meeting doesn't block booking here and doesn't count there.
@@ -208,11 +238,12 @@ def _find_existing_meeting_explicit_scope(db, school_id: str, service_type: str,
     rows = []
     for seg in segments:
         rows.extend(
-            db.table("meetings").select("meeting_date, start_time, end_time, stage_scope")
+            db.table("meetings").select("id, meeting_date, start_time, end_time, stage_scope")
             .eq("school_id", school_id).eq("meeting_service_type", service_type).in_("status", ["scheduled", "completed"])
             .gte("meeting_date", seg["start_date"]).lte("meeting_date", seg["end_date"])
             .execute().data or []
         )
+    rows = [r for r in rows if r.get("id") not in excluded_ids]
     if not task_logic.stage_scope_is_covered(stage_scope, [r.get("stage_scope") for r in rows]):
         return None
     counted = (stage_scope, "both") if stage_scope in ("tichon", "chativa") else ("tichon", "chativa", "both")
@@ -221,18 +252,44 @@ def _find_existing_meeting_explicit_scope(db, school_id: str, service_type: str,
 
 
 def _find_existing_meeting_any_segment(db, school_id: str, service_type: str, segments: list[dict],
-                                        stage_scope: str | None = None, explicit_scope_only: bool = False) -> dict | None:
+                                        stage_scope: str | None = None, explicit_scope_only: bool = False,
+                                        excluded_ids: frozenset = frozenset()) -> dict | None:
     """OR's _find_existing_meeting across every one of a range's date segments — a school
     already has a real scheduled meeting for this range if ANY of the offered "או" windows
     already has one. explicit_scope_only: the range's own flag, set only on ranges of tasks created
     under the explicit-division rule; direct-coordination links and older links keep this check."""
     if explicit_scope_only and stage_scope in ("tichon", "chativa", "both"):
-        return _find_existing_meeting_explicit_scope(db, school_id, service_type, segments, stage_scope)
+        return _find_existing_meeting_explicit_scope(db, school_id, service_type, segments, stage_scope, excluded_ids)
     for seg in segments:
-        m = _find_existing_meeting(db, school_id, service_type, seg["start_date"], seg["end_date"], stage_scope)
+        m = _find_existing_meeting(db, school_id, service_type, seg["start_date"], seg["end_date"], stage_scope, excluded_ids)
         if m:
             return m
     return None
+
+
+def _additional_meeting_ids(db, token_id: str, range_key: str) -> frozenset:
+    """Meetings the staff marked as "additional" to this request ("מחליפה או נוספת?") — they
+    never count as already filling it. Non-fatal: a failed lookup keeps the old behavior."""
+    try:
+        rows = (
+            db.table("meeting_request_resolutions").select("meeting_id")
+            .eq("token_id", token_id).eq("range_key", range_key).eq("decision", "additional")
+            .execute().data or []
+        )
+        return frozenset(r["meeting_id"] for r in rows)
+    except Exception as exc:
+        logger.warning("additional-meeting lookup failed for %s/%s (non-fatal): %s", token_id, range_key, exc)
+        return frozenset()
+
+
+def _range_existing_meeting(db, token_row: dict, range_row: dict) -> dict | None:
+    """The school's existing meeting that already fills this request, if any (same rule as task
+    progress). Meetings marked "additional" to the request don't count."""
+    return _find_existing_meeting_any_segment(
+        db, token_row["school_id"], range_row["service_type"], _range_segments(range_row),
+        range_row.get("stage_scope"), range_row.get("explicit_stage_scope_only"),
+        excluded_ids=_additional_meeting_ids(db, token_row["id"], range_row["key"]),
+    )
 
 
 def _time_overlaps(s1: str, e1: str, s2: str, e2: str) -> bool:
@@ -363,7 +420,7 @@ def get_booking_info(token: str):
             existing = None
             existing_fyi = None
             if not is_booked:
-                found = _find_existing_meeting_any_segment(db, token_row["school_id"], r["service_type"], _range_segments(r), r.get("stage_scope"), r.get("explicit_stage_scope_only"))
+                found = _range_existing_meeting(db, token_row, r)
                 # "בקש לקבוע פגישה נוספת" — a pre-existing meeting must not block offering a
                 # NEW slot for this range; surfaced as a non-blocking FYI instead (the frontend
                 # still shows "בחר מועד").
@@ -435,11 +492,13 @@ def _policy_freebusy(db, token_row: dict, range_row: dict, segments: list[dict],
     busy = _busy_by_advisor(db, token_row["org_id"], advisor_ids, f"{dates[0]}T00:00:00Z", f"{dates[-1]}T23:59:59Z")
     if busy is None:
         return {"days": [], "requested_days": [] if requested else None, "ok": False}
+    pending = _pending_demand(db, token_row, range_row, advisor_ids, dates[0], dates[-1]) if min_window == slot_policy.AUTO_MIN_FREE_WINDOW else None
 
     days, requested_days = [], []
     for d in dates:
         busy_today = _with_elapsed_time(d, {aid: slot_policy.day_intervals(d, blocks) for aid, blocks in busy.items()}, start_grid)
-        offer = slot_policy.offer_for_day(busy_today, work_start, work_end, duration, min_window, start_grid, requested)
+        offer = slot_policy.offer_for_day(busy_today, work_start, work_end, duration,
+                                          _day_window(min_window, pending, d, advisor_ids, duration), start_grid, requested)
         if offer["regular"]:
             days.append({"date": d, "slots": [
                 {"start_time": slot_policy.hhmm(s), "end_time": slot_policy.hhmm(e)} for s, e in offer["regular"]
@@ -463,7 +522,7 @@ def get_booking_freebusy(token: str, month: str | None = None, range_key: str | 
         if _range_is_booked(token_row, range_key):
             raise HTTPException(status_code=400, detail="הפגישה הזו כבר נקבעה")
         segments = _range_segments(range_row)
-        if not range_row.get("require_additional_meeting") and _find_existing_meeting_any_segment(db, token_row["school_id"], range_row["service_type"], segments, range_row.get("stage_scope"), range_row.get("explicit_stage_scope_only")):
+        if not range_row.get("require_additional_meeting") and _range_existing_meeting(db, token_row, range_row):
             raise HTTPException(status_code=400, detail="כבר קיימת פגישה מסוג זה בטווח התאריכים הזה")
 
         if _uses_slot_policy(range_row):
@@ -683,7 +742,7 @@ def _book_range_slot(db, token_row: dict, range_key: str, body: dict) -> dict:
     # below. Also the actual safety net behind round-7's booked_ranges write becoming best-
     # effort (see the retry block at the end of this function): even if that write silently
     # failed for a prior booking, this live check against `meetings` itself still catches it.
-    if not range_row.get("require_additional_meeting") and _find_existing_meeting_any_segment(db, token_row["school_id"], range_row["service_type"], _range_segments(range_row), range_row.get("stage_scope"), range_row.get("explicit_stage_scope_only")):
+    if not range_row.get("require_additional_meeting") and _range_existing_meeting(db, token_row, range_row):
         raise HTTPException(status_code=400, detail="כבר קיימת פגישה מסוג זה בטווח התאריכים הזה")
 
     meeting_date = body.get("meeting_date")
@@ -714,6 +773,10 @@ def _book_range_slot(db, token_row: dict, range_key: str, body: dict) -> dict:
     outlook_busy = _outlook_busy_by_advisor(db, token_row["org_id"], advisor_ids, day_start, day_end)
     if outlook_busy is None:
         raise HTTPException(status_code=503, detail="לא ניתן לאמת זמינות כרגע, נסה שוב")
+    if uses_policy:
+        work_start_p, work_end_p, duration_p, min_window_p, start_grid_p = _policy_args(token_row, range_row)
+        pending = _pending_demand(db, token_row, range_row, advisor_ids, meeting_date, meeting_date) if min_window_p == slot_policy.AUTO_MIN_FREE_WINDOW else None
+        day_window = _day_window(min_window_p, pending, meeting_date, advisor_ids, duration_p)
 
     from routers.schools_router import BLOCKED_DATE_SCOPE_FIELDS, _find_blocking_rule
     school_res = db.table("schools").select("id, name, " + ",".join(BLOCKED_DATE_SCOPE_FIELDS)).eq("id", token_row["school_id"]).execute()
@@ -747,6 +810,9 @@ def _book_range_slot(db, token_row: dict, range_key: str, body: dict) -> dict:
         # date by academic_years.resolve_requested_upload_years.
         "requested_upload_years": range_row.get("requested_upload_years"),
         "booking_token_id": token_row["id"],
+        # Which request of the link this meeting fills — booking_requests.reconcile_booked_ranges
+        # reopens exactly that request if the meeting is later cancelled/postponed/deleted.
+        "booking_range_key": range_key,
     }
 
     # No two bookings of the same advisor+day (or of the same request) run this section at once,
@@ -760,7 +826,7 @@ def _book_range_slot(db, token_row: dict, range_key: str, body: dict) -> dict:
         booked_ranges = fresh_token[0].get("booked_ranges") or []
         if range_key in booked_ranges:
             raise HTTPException(status_code=400, detail="הפגישה הזו כבר נקבעה")
-        if not range_row.get("require_additional_meeting") and _find_existing_meeting_any_segment(db, token_row["school_id"], range_row["service_type"], _range_segments(range_row), range_row.get("stage_scope"), range_row.get("explicit_stage_scope_only")):
+        if not range_row.get("require_additional_meeting") and _range_existing_meeting(db, token_row, range_row):
             raise HTTPException(status_code=400, detail="כבר קיימת פגישה מסוג זה בטווח התאריכים הזה")
 
         local_busy = _local_meeting_busy_by_advisor(db, advisor_ids, day_start, day_end)
@@ -770,8 +836,8 @@ def _book_range_slot(db, token_row: dict, range_key: str, body: dict) -> dict:
             # calendars right now — never taken on trust from the public page.
             if not slot_policy.is_allowed(
                 _with_elapsed_time(meeting_date, {aid: slot_policy.day_intervals(meeting_date, blocks) for aid, blocks in busy_by_advisor.items()},
-                                   _policy_args(token_row, range_row)[4]),
-                *_policy_args(token_row, range_row), start_min, end_min,
+                                   start_grid_p),
+                work_start_p, work_end_p, duration_p, day_window, start_grid_p, start_min, end_min,
             ):
                 raise HTTPException(status_code=409, detail="המועד הזה כבר לא זמין. נא לבחור מועד אחר.")
         elif any(_time_overlaps(start_time, end_time, b["start"][11:16], b["end"][11:16])

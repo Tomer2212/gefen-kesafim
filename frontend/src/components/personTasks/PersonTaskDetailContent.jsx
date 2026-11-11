@@ -66,6 +66,7 @@ export default function PersonTaskDetailContent({ taskId, onTaskChange, onlyCurr
   const [fieldMeta, setFieldMeta] = useState(null);
   const [uploadingTargetId, setUploadingTargetId] = useState(null);
   const [openNoteIds, setOpenNoteIds] = useState(() => new Set());
+  const [noteSaveFailedId, setNoteSaveFailedId] = useState(null); // target id whose last note save failed
   // Free-text / advanced / column-filter / sort state for the schools table (schools-mode,
   // multi-school views only — see showSchoolFilters below).
   const [subFilter, setSubFilter] = useState(EMPTY_SUB_FILTER);
@@ -131,9 +132,15 @@ export default function PersonTaskDetailContent({ taskId, onTaskChange, onlyCurr
     }
   }
 
+  // On failure the text stays in the (uncontrolled) textarea and leaving it again retries.
   async function saveNote(targetId, note) {
-    await axios.put(`/person-tasks/${taskId}/targets/${targetId}/note`, { note });
-    loadTask();
+    try {
+      await axios.put(`/person-tasks/${taskId}/targets/${targetId}/note`, { note });
+      setNoteSaveFailedId(null);
+      loadTask();
+    } catch {
+      setNoteSaveFailedId(targetId);
+    }
   }
 
   // Number-kind "שמירה זמנית" — saves the entered value on the target WITHOUT completing it, so
@@ -412,6 +419,9 @@ export default function PersonTaskDetailContent({ taskId, onTaskChange, onlyCurr
                               placeholder="הערה..."
                               className="w-48 text-xs border border-transparent hover:border-slate-200 focus:border-blue-400 rounded-lg px-2 py-1 outline-none bg-transparent focus:bg-white resize-y align-top"
                             />
+                            {noteSaveFailedId === t.id && (
+                              <span role="alert" className="block text-[11px] text-red-600">שמירת ההערה נכשלה — צא מהתיבה שוב כדי לנסות</span>
+                            )}
                           </>
                         ) : (
                           <button

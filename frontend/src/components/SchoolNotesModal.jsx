@@ -73,7 +73,8 @@ export function NotesThread({ groups, currentUser, onCreate, onEdit, onDelete, c
     try {
       await onCreate(content);
     } catch {
-      setError("שמירת ההערה נכשלה — נסה שוב");
+      setNewRecordText(content); // keep what was typed — the composer reopens with it
+      setError("שמירת ההערה נכשלה — הטקסט נשמר בתיבה, נסה שוב");
     } finally {
       setSaving(false);
     }
@@ -87,6 +88,7 @@ export function NotesThread({ groups, currentUser, onCreate, onEdit, onDelete, c
     try {
       await onEdit(segmentId, groupId, content);
     } catch {
+      setEditDraft({ segmentId, groupId, text }); // keep the edit open with what was typed
       setError("עריכת ההערה נכשלה — אין הרשאה או שגיאה זמנית");
     } finally {
       setSaving(false);

@@ -19,7 +19,8 @@ time that touches an event or a day edge exactly, which is allowed off the grid.
 """
 from __future__ import annotations
 
-MIN_FREE_WINDOW_OPTIONS = (0, 30, 60, 90, 120, 180)  # 0 = "ללא הגבלה"
+AUTO_MIN_FREE_WINDOW = -1  # "אוטומטי": X per advisor and day from the requests still waiting (auto_window_by_advisor)
+MIN_FREE_WINDOW_OPTIONS = (AUTO_MIN_FREE_WINDOW, 0, 30, 60, 90, 120, 180)  # 0 = "ללא הגבלה"
 START_GRID_OPTIONS = (30, 60)
 # How far outside a school's requested hours (on each side) a "closest to what you asked"
 # time may still be offered.
@@ -80,11 +81,11 @@ def _gap_value(length: int, min_window: int) -> tuple[int, int]:
     return length // min_window, 0
 
 
-def _candidate_cost(gaps_by_advisor: list[list[tuple[int, int]]], start: int, end: int, min_window: int) -> tuple[int, int] | None:
+def _candidate_cost(gaps_by_advisor: list[tuple[list[tuple[int, int]], int]], start: int, end: int) -> tuple[int, int] | None:
     """(windows lost, locked minutes after booking) for a candidate, or None if any advisor is
-    busy at that time."""
+    busy at that time. Each advisor comes with its own min_window."""
     lost = locked_after = 0
-    for gaps in gaps_by_advisor:
+    for gaps, min_window in gaps_by_advisor:
         containing = next(((gs, ge) for gs, ge in gaps if gs <= start and end <= ge), None)
         if containing is None:
             return None
@@ -102,13 +103,14 @@ def _candidate_cost(gaps_by_advisor: list[list[tuple[int, int]]], start: int, en
 
 
 def allowed_slots(busy_by_advisor: dict[str, list[tuple[int, int]]], work_start: int, work_end: int,
-                  duration: int, min_window: int, start_grid: int) -> list[tuple[int, int]]:
+                  duration: int, min_window: int | dict[str, int], start_grid: int) -> list[tuple[int, int]]:
     """Every allowed (start, end) of one day under the rule, earliest first. A day where the
-    meeting fits nowhere returns []."""
+    meeting fits nowhere returns []. min_window is one X for everyone or {advisor_id: X}."""
     if duration <= 0 or work_end - work_start < duration:
         return []
     advisor_busy = list(busy_by_advisor.values()) or [[]]
-    gaps_by_advisor = [_free_gaps(busy, work_start, work_end) for busy in advisor_busy]
+    windows = [min_window.get(aid, 0) if isinstance(min_window, dict) else min_window for aid in busy_by_advisor] or [0]
+    gaps_by_advisor = [(_free_gaps(busy, work_start, work_end), w) for busy, w in zip(advisor_busy, windows)]
 
     starts = {t for t in range(work_start, work_end - duration + 1) if t % start_grid == 0}
     starts.update({work_start, work_end - duration})
@@ -119,7 +121,7 @@ def allowed_slots(busy_by_advisor: dict[str, list[tuple[int, int]]], work_start:
     for t in sorted(starts):
         if t < work_start or t + duration > work_end:
             continue
-        cost = _candidate_cost(gaps_by_advisor, t, t + duration, min_window)
+        cost = _candidate_cost(gaps_by_advisor, t, t + duration)
         if cost is not None:
             candidates.append((cost, t))
     if not candidates:
@@ -129,7 +131,7 @@ def allowed_slots(busy_by_advisor: dict[str, list[tuple[int, int]]], work_start:
 
 
 def offer_for_day(busy_by_advisor: dict[str, list[tuple[int, int]]], work_start: int, work_end: int,
-                  duration: int, min_window: int, start_grid: int,
+                  duration: int, min_window: int | dict[str, int], start_grid: int,
                   requested: tuple[int, int] | None = None) -> dict:
     """The times shown for one day: "regular" = the earliest allowed time (one per day, as the
     booking page has always shown); "requested" = for a school's "אפשרויות נוספות" hours, the
@@ -154,8 +156,23 @@ def offer_for_day(busy_by_advisor: dict[str, list[tuple[int, int]]], work_start:
 
 
 def is_allowed(busy_by_advisor: dict[str, list[tuple[int, int]]], work_start: int, work_end: int,
-               duration: int, min_window: int, start_grid: int, start: int, end: int) -> bool:
+               duration: int, min_window: int | dict[str, int], start_grid: int, start: int, end: int) -> bool:
     """Booking-time re-check: the submitted time must be one the rule allows right now."""
     if end - start != duration:
         return False
     return (start, end) in allowed_slots(busy_by_advisor, work_start, work_end, duration, min_window, start_grid)
+
+
+def auto_window_by_advisor(pending: list[dict], day_iso: str, advisor_ids: list[str], own_duration: int) -> dict[str, int]:
+    """"אוטומטי": for each advisor, X = the longest request still waiting to be booked with that
+    advisor whose date range covers this day (pending rows: {"advisor_ids", "start_date",
+    "end_date", "duration_minutes"}; the caller leaves out the school's own request). With none,
+    X = the meeting's own length, so meetings of the same length still sit back to back."""
+    out = {}
+    for aid in advisor_ids:
+        lengths = [
+            int(p.get("duration_minutes") or 0) for p in pending
+            if aid in (p.get("advisor_ids") or []) and str(p.get("start_date")) <= day_iso <= str(p.get("end_date"))
+        ]
+        out[aid] = max(lengths) if lengths else own_duration
+    return out

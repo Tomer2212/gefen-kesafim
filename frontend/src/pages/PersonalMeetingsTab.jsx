@@ -203,7 +203,10 @@ export default function PersonalMeetingsTab({ userId, role, canDeleteMeetings, u
     try {
       const res = await axios.put(`/schools/${school_id}/meetings/${id}`, payload, { headers: { "X-Client-Surface": "personal" } });
       setMeetings(prev => prev.map(m => m.id === id ? { ...m, ...res.data } : m));
-    } catch { /* silent */ }
+    } catch (err) {
+      console.error("Update meeting failed:", err);
+      throw err; // let the row (MeetingRow.performSave) keep its draft and surface the failure
+    }
   }
 
   async function deleteMeeting(id) {

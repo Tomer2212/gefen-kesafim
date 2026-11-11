@@ -1,5 +1,6 @@
 import hashlib
 import logging
+import os
 import re
 import shutil
 import tempfile
@@ -17,7 +18,8 @@ logger = logging.getLogger(__name__)
 
 import openpyxl
 import pandas as pd
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile
+from starlette.concurrency import run_in_threadpool
 from fastapi.responses import Response
 
 from academic_years import (
@@ -43,12 +45,17 @@ from logic.tikhnun_exporter import export_tikhnun_excel, export_tikhnun_pdf
 
 router = APIRouter()
 
-_INTERNAL_KEYS = {"_school_ctx"}
+_INTERNAL_KEYS = {"_school_ctx", "_rerun", "_updated_at"}
 
 # Shared cap for every uploaded-file read site in this router (initial /upload,
 # /add-file/{log_id}, /detect-file-year). 50MB is well above any legitimate
 # Gefen/finance/tikhnun workbook.
 MAX_UPLOAD_SIZE_BYTES = 50 * 1024 * 1024
+
+CRON_SECRET = os.getenv("CRON_SECRET", "")
+
+
+_PRESERVED_RUN_KEYS = ("_school_ctx", "_rerun")
 
 
 def _update_run(run_id: str, run_data: dict) -> None:
@@ -64,15 +71,21 @@ def _update_run(run_id: str, run_data: dict) -> None:
     poll to /analyze/result 404s with a misleading "Run not found" instead of surfacing
     the real (possibly error-status, still legitimately owned) result. Preserving the
     existing `_school_ctx` by default here — unless a call explicitly passes its own —
-    fixes every call site at once instead of requiring each of the ~15 to remember it."""
+    fixes every call site at once instead of requiring each of the ~15 to remember it.
+    `_rerun` (what POST /rerun needs to start the run again) is preserved the same way.
+
+    Every write stamps `updated_at`, which is how a run killed mid-work (a deploy restarting
+    the worker) is told apart from one still running — see _interrupt_if_stale."""
     try:
         db = get_admin_client()
-        if "_school_ctx" not in run_data:
-            prior = _get_run(run_id)
-            if prior and prior.get("_school_ctx"):
-                run_data = {**run_data, "_school_ctx": prior["_school_ctx"]}
+        run_data = {k: v for k, v in run_data.items() if k != "_updated_at"}
+        missing = [k for k in _PRESERVED_RUN_KEYS if k not in run_data]
+        if missing:
+            prior = _get_run(run_id) or {}
+            run_data = {**run_data, **{k: prior[k] for k in missing if prior.get(k)}}
         db.table("run_states").upsert(
-            {"id": run_id, "status": run_data.get("status", "processing"), "result": run_data},
+            {"id": run_id, "status": run_data.get("status", "processing"), "result": run_data,
+             "updated_at": datetime.now(timezone.utc).isoformat()},
             on_conflict="id",
         ).execute()
     except Exception as exc:
@@ -94,11 +107,12 @@ def _get_run(run_id: str) -> dict | None:
     for attempt in range(2):
         try:
             db = get_admin_client()
-            rows = db.table("run_states").select("result, status").eq("id", run_id).execute().data
+            rows = db.table("run_states").select("result, status, updated_at").eq("id", run_id).execute().data
             if not rows:
                 return None
             result = rows[0].get("result") or {}
             result["status"] = rows[0]["status"]
+            result["_updated_at"] = rows[0].get("updated_at")
             return result
         except Exception as exc:
             if attempt == 0:
@@ -167,6 +181,53 @@ def _strip_for_response(run: dict) -> dict:
         if result.get(key) and isinstance(result[key], dict) and "_zihuy_ctx" in result[key]:
             result[key] = {k: v for k, v in result[key].items() if k != "_zihuy_ctx"}
     return result
+
+# A run whose state hasn't been written for this long is not running any more: _process()
+# takes seconds to a few tens of seconds, so this only happens when the worker running it was
+# killed (a deploy restarting the backend) and left the row at "processing"/"saving" for good.
+RUN_STALE_AFTER_SECONDS = 10 * 60
+_RUNNING_STATUSES = ("processing", "saving")
+
+
+def _run_is_stale(run: dict) -> bool:
+    if run.get("status") not in _RUNNING_STATUSES:
+        return False
+    raw = run.get("_updated_at")
+    if not raw:
+        return False
+    try:
+        updated = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return (datetime.now(timezone.utc) - updated).total_seconds() > RUN_STALE_AFTER_SECONDS
+
+
+def _interrupt_if_stale(run_id: str, run: dict) -> tuple[dict, bool]:
+    """Settles a run left "processing"/"saving" by a killed worker. One that already saved its
+    check (saved_log_id) is just marked "done"; otherwise it becomes "interrupted", which the UI
+    offers to re-run (POST /rerun). The status flip is conditional on the row still being in a
+    running status, so of two concurrent callers (a poll and the sweep) only one wins — the
+    returned bool says whether this call did."""
+    if not _run_is_stale(run):
+        return run, False
+    new_status = "done" if run.get("saved_log_id") else "interrupted"
+    try:
+        db = get_admin_client()
+        claimed = (
+            db.table("run_states")
+            .update({"status": new_status, "updated_at": datetime.now(timezone.utc).isoformat()})
+            .eq("id", run_id)
+            .in_("status", list(_RUNNING_STATUSES))
+            .execute()
+            .data
+        )
+    except Exception as exc:
+        logger.warning("could not settle stale run %s (non-fatal): %s", run_id, exc)
+        return run, False
+    if claimed:
+        logger.warning("run %s stalled at %s since %s — marked %s", run_id, run.get("status"), run.get("_updated_at"), new_status)
+    return {**run, "status": new_status}, bool(claimed)
+
 
 # Unified JSON column names — same for both finance types and gefen side
 _DISPLAY_COLS = ["קוד דיווח", "שם ספק", "מספר אסמכתה", "תאריך", "סכום", "תיאור"]
@@ -360,12 +421,20 @@ async def upload(
         saved.append(dest)
 
     acknowledged_roles = {r.strip() for r in (acknowledged_file_roles or "").split(",") if r.strip()}
+    # Stored before the background task starts (not inside it), so a run killed mid-work by a
+    # deploy still has its files and can be re-run — see POST /rerun.
+    stored = await run_in_threadpool(_upload_files_to_storage, saved, run_id)
     # Write school_id into _school_ctx immediately (not just once _process() gets to it
     # in the background task) so a poll to /analyze/result (or any other run_id-scoped
     # endpoint) that lands before _process's first update can't 404 out of its own
     # ownership check — see _require_run_access.
-    _update_run(run_id, {"status": "processing", "_school_ctx": {"school_id": school_id}})
-    background_tasks.add_task(_process, run_id, saved, run_dir, user["id"], school_id, gefen_account_id, update_log_id, academic_year, acknowledged_roles)
+    _update_run(run_id, {
+        "status": "processing",
+        "_school_ctx": {"school_id": school_id},
+        "stored_file_paths": stored or None,
+        "_rerun": _upload_rerun_args(len(saved), gefen_account_id, update_log_id, academic_year, acknowledged_roles),
+    })
+    background_tasks.add_task(_process, run_id, saved, run_dir, user["id"], school_id, gefen_account_id, update_log_id, academic_year, acknowledged_roles, stored_file_paths=stored)
     return {"run_id": run_id}
 
 
@@ -489,11 +558,17 @@ async def add_file_to_check(
         file_idx += 1
 
     acknowledged_roles = {r.strip() for r in (acknowledged_file_roles or "").split(",") if r.strip()}
-    _update_run(run_id, {"status": "processing", "_school_ctx": {"school_id": log["school_id"]}})
+    stored = await run_in_threadpool(_upload_files_to_storage, all_paths, run_id)
+    _update_run(run_id, {
+        "status": "processing",
+        "_school_ctx": {"school_id": log["school_id"]},
+        "stored_file_paths": stored or None,
+        "_rerun": _upload_rerun_args(len(all_paths), log.get("gefen_account_id"), log_id, log.get("academic_year"), acknowledged_roles),
+    })
     background_tasks.add_task(
         _process, run_id, all_paths, run_dir,
         user["id"], log["school_id"], log.get("gefen_account_id"), log_id, log.get("academic_year"),
-        acknowledged_roles,
+        acknowledged_roles, stored_file_paths=stored,
     )
     return {"run_id": run_id}
 
@@ -518,7 +593,14 @@ async def run_check_from_uploads(
     meeting = meeting_res.data[0]
     _check_school_access(db, user, meeting.get("school_id"))
     academic_year = academic_year or resolve_requested_upload_years(meeting)[0]
+    return {"run_id": _start_meeting_check(db, meeting, academic_year, user["id"], background_tasks)}
 
+
+def _start_meeting_check(db, meeting: dict, academic_year: str, user_id: str, background_tasks: BackgroundTasks, auto_retried: bool = False) -> str:
+    """Starts a background check from a meeting's uploaded files and returns its run_id. The
+    files live permanently in meeting_upload_files, so an interrupted run is simply started
+    again from here (POST /rerun, or the sweep's one automatic retry — `auto_retried`)."""
+    meeting_id = meeting["id"]
     files_res = db.table("meeting_upload_files").select("storage_key, original_filename, identified_type").eq("meeting_id", meeting_id).eq("academic_year", academic_year).execute()
     uploaded_files = files_res.data or []
     if not uploaded_files:
@@ -556,12 +638,17 @@ async def run_check_from_uploads(
             shutil.rmtree(run_dir, ignore_errors=True)
             raise HTTPException(status_code=500, detail="שגיאה בהורדת הקובץ")
 
-    _update_run(run_id, {"status": "processing", "_school_ctx": {"school_id": meeting["school_id"]}})
+    _update_run(run_id, {
+        "status": "processing",
+        "_school_ctx": {"school_id": meeting["school_id"]},
+        "_rerun": {"kind": "meeting", "meeting_id": meeting_id, "academic_year": academic_year,
+                   "user_id": user_id, "auto_retried": auto_retried},
+    })
     background_tasks.add_task(
         _run_meeting_check_and_notify, run_id, all_paths, run_dir,
-        user["id"], meeting["school_id"], academic_year, skipped_files,
+        user_id, meeting["school_id"], academic_year, skipped_files,
     )
-    return {"run_id": run_id}
+    return run_id
 
 
 # The background meeting-upload check has no acknowledgment UI, and the portal already accepted
@@ -639,13 +726,20 @@ def _run_meeting_check_and_notify(run_id: str, paths: list[Path], run_dir: Path,
     no signal at all when a background run fails. A run awaiting classification gets a
     deeplink (resume_run) that opens ClassifyModal, since nothing else would ever save it."""
     _process(run_id, paths, run_dir, user_id, school_id, None, None, academic_year, _MEETING_CHECK_ACKNOWLEDGED_ROLES)
+    _notify_meeting_check(run_id, user_id, school_id, academic_year, skipped_files)
+
+
+def _notify_meeting_check(run_id: str, user_id: str, school_id: str, academic_year: str | None, skipped_files: list[str] | None = None, summary: dict | None = None) -> None:
+    """The advisor's only signal about a background meeting check (they never poll it). `summary`
+    is read from the finished run unless given (e.g. by the sweep, for a run that was killed)."""
     try:
         db = get_admin_client()
-        run = _get_run(run_id) or {}
-        sub_runs = [_get_run(sub_id) or {} for sub_id in (run.get("division_run_ids") or {}).values()]
+        if summary is None:
+            run = _get_run(run_id) or {}
+            sub_runs = [_get_run(sub_id) or {} for sub_id in (run.get("division_run_ids") or {}).values()]
+            summary = _summarize_meeting_check(run, sub_runs)
         school = db.table("schools").select("name, authority, symbol").eq("id", school_id).single().execute().data or {}
         school_label = " ".join(filter(None, [school.get("name"), school.get("authority"), school.get("symbol") and f"(סמל {school['symbol']})"]))
-        summary = _summarize_meeting_check(run, sub_runs)
         year_param = f"&year={quote(academic_year)}" if academic_year else ""
         deeplink = f"/school/{school_id}?tab=checks{year_param}"
         if summary["outcome"] == "success":
@@ -666,6 +760,133 @@ def _run_meeting_check_and_notify(run_id: str, paths: list[Path], run_dir: Path,
         }).execute()
     except Exception as exc:
         logger.warning("meeting-upload check completion notification failed (non-fatal): %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# Interrupted runs — a deploy restarts the backend and kills whatever _process() was running.
+# ---------------------------------------------------------------------------
+
+_INTERRUPTED_REASON = "הבדיקה נקטעה בגלל עדכון מערכת. יש להפעיל אותה שוב."
+
+
+def _upload_rerun_args(file_count: int, gefen_account_id: str | None, update_log_id: str | None, academic_year: str | None, acknowledged_roles: set[str]) -> dict:
+    """What POST /rerun needs to start an uploaded-files run again from its stored files.
+    `file_count` lets it refuse a run whose files were only partly stored."""
+    return {
+        "kind": "upload",
+        "file_count": file_count,
+        "gefen_account_id": gefen_account_id,
+        "update_log_id": update_log_id,
+        "academic_year": academic_year,
+        "acknowledged_roles": sorted(acknowledged_roles or []),
+    }
+
+
+def _download_stored_files(db, stored: list, run_dir: Path) -> list[Path]:
+    """Downloads a run's stored files back to disk, each in its own numbered subdirectory (same
+    reason as /upload: identical original filenames must not overwrite one another)."""
+    paths: list[Path] = []
+    for i, sp in enumerate(stored):
+        dest = run_dir / str(i) / Path(sp["name"]).name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(db.storage.from_("check-files").download(sp["path"]))
+        paths.append(dest)
+    return paths
+
+
+def _restart_run(run: dict, user_id: str, background_tasks: BackgroundTasks, auto_retried: bool = False) -> str:
+    """Starts an interrupted run again with the same files and parameters; returns the new run_id.
+    An update run (update_log_id) updates the same check, so re-running never duplicates it."""
+    args = run.get("_rerun") or {}
+    school_id = (run.get("_school_ctx") or {}).get("school_id")
+    db = get_admin_client()
+    if args.get("kind") == "meeting":
+        rows = db.table("meetings").select("id, school_id").eq("id", args.get("meeting_id")).execute().data
+        if not rows:
+            raise HTTPException(status_code=404, detail="הפגישה לא נמצאה")
+        return _start_meeting_check(db, rows[0], args.get("academic_year"), user_id, background_tasks, auto_retried=auto_retried)
+
+    stored = [sp for sp in (run.get("stored_file_paths") or []) if isinstance(sp, dict)]
+    if args.get("kind") != "upload" or not stored or len(stored) != args.get("file_count"):
+        raise HTTPException(status_code=400, detail="לא ניתן להריץ את הבדיקה שוב — יש להעלות את הקבצים מחדש")
+
+    new_run_id = str(uuid.uuid4())
+    run_dir = Path(tempfile.mkdtemp(prefix=f"gefen_{new_run_id}_"))
+    try:
+        paths = _download_stored_files(db, stored, run_dir)
+    except Exception as exc:
+        shutil.rmtree(run_dir, ignore_errors=True)
+        logger.error("rerun: failed to download stored files of an interrupted run: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="שגיאה בהורדת הקבצים המקוריים")
+    _update_run(new_run_id, {
+        "status": "processing",
+        "_school_ctx": {"school_id": school_id},
+        "stored_file_paths": stored,
+        "_rerun": args,
+    })
+    background_tasks.add_task(
+        _process, new_run_id, paths, run_dir, user_id, school_id,
+        args.get("gefen_account_id"), args.get("update_log_id"), args.get("academic_year"),
+        set(args.get("acknowledged_roles") or []), stored_file_paths=stored,
+    )
+    return new_run_id
+
+
+@router.post("/rerun/{run_id}")
+def rerun_interrupted(run_id: str, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):
+    """"הרץ שוב" for a run that was killed mid-work (status "interrupted")."""
+    run = _require_run_access(run_id, user)
+    run, _ = _interrupt_if_stale(run_id, run)
+    if run.get("status") != "interrupted":
+        raise HTTPException(status_code=409, detail="הבדיקה לא נקטעה — אין צורך להריץ אותה שוב")
+    return {"run_id": _restart_run(run, user["id"], background_tasks)}
+
+
+@router.post("/sweep-interrupted-runs")
+def sweep_interrupted_runs(request: Request, background_tasks: BackgroundTasks):
+    """Cron (pg_cron, every 10 minutes). Settles runs a killed worker left "processing" — the
+    upload flow notices on its own next poll, but a background meeting check is polled by no one,
+    so without this it would never finish and never notify. Such a check is retried once (its
+    files are kept permanently); if that one is interrupted too, the advisor is told."""
+    if not CRON_SECRET or request.headers.get("X-Cron-Secret") != CRON_SECRET:
+        raise HTTPException(status_code=401, detail="unauthorized")
+    now = datetime.now(timezone.utc)
+    stale_before = datetime.fromtimestamp(now.timestamp() - RUN_STALE_AFTER_SECONDS, timezone.utc).isoformat()
+    # Older rows were settled by earlier sweeps (or predate them); no need to rescan forever.
+    oldest = datetime.fromtimestamp(now.timestamp() - 2 * 24 * 3600, timezone.utc).isoformat()
+    db = get_admin_client()
+    rows = (
+        db.table("run_states").select("id")
+        .in_("status", list(_RUNNING_STATUSES))
+        .lt("updated_at", stale_before)
+        .gte("updated_at", oldest)
+        .execute()
+        .data
+    ) or []
+    settled = retried = notified = 0
+    for row in rows:
+        run = _get_run(row["id"])
+        if not run:
+            continue
+        run, claimed = _interrupt_if_stale(row["id"], run)
+        if not claimed:
+            continue
+        settled += 1
+        args = run.get("_rerun") or {}
+        if run.get("status") != "interrupted" or args.get("kind") != "meeting":
+            continue
+        school_id = (run.get("_school_ctx") or {}).get("school_id")
+        if not args.get("auto_retried"):
+            try:
+                _restart_run(run, args.get("user_id"), background_tasks, auto_retried=True)
+                retried += 1
+                continue
+            except Exception as exc:
+                logger.warning("sweep: retrying interrupted meeting check %s failed: %s", row["id"], exc)
+        _notify_meeting_check(row["id"], args.get("user_id"), school_id, args.get("academic_year"),
+                              summary={"outcome": "failure", "reason": _INTERRUPTED_REASON})
+        notified += 1
+    return {"settled": settled, "retried": retried, "notified": notified}
 
 
 class ComparePlansRequest(BaseModel):
@@ -769,6 +990,7 @@ def compare_plans(body: ComparePlansRequest, user: dict = Depends(get_current_us
 @router.get("/result/{run_id}")
 def get_result(run_id: str, user: dict = Depends(get_current_user)):
     run = _require_run_access(run_id, user)
+    run, _ = _interrupt_if_stale(run_id, run)
     return _strip_for_response(run)
 
 
@@ -3743,11 +3965,13 @@ def _build_division_run_data(
     }
 
 
-def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", school_id: str | None = None, gefen_account_id: str | None = None, update_log_id: str | None = None, academic_year: str | None = None, acknowledged_roles: set[str] | None = None) -> None:
+def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", school_id: str | None = None, gefen_account_id: str | None = None, update_log_id: str | None = None, academic_year: str | None = None, acknowledged_roles: set[str] | None = None, stored_file_paths: list[dict] | None = None) -> None:
     run_data: dict = {"status": "processing"}
     try:
-        # Upload source files to Supabase Storage for future "add file" retrieval
-        stored_file_paths = _upload_files_to_storage(paths, run_id)
+        # Upload source files to Supabase Storage for future "add file" retrieval — unless the
+        # endpoint already did, before starting this task (see /upload).
+        if stored_file_paths is None:
+            stored_file_paths = _upload_files_to_storage(paths, run_id)
         if stored_file_paths:
             run_data["stored_file_paths"] = stored_file_paths
 

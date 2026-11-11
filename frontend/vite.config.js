@@ -2,8 +2,25 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
+// Build id baked into the bundle and published as /version.json, so an open tab can tell a
+// newer deploy is live (useAppVersion → NewVersionBanner).
+const APP_VERSION = new Date().toISOString();
+
+function versionFile() {
+  return {
+    name: "app-version-file",
+    apply: "build",
+    generateBundle() {
+      this.emitFile({ type: "asset", fileName: "version.json", source: JSON.stringify({ version: APP_VERSION }) });
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), versionFile()],
+  define: {
+    __APP_VERSION__: JSON.stringify(APP_VERSION),
+  },
   server: {
     proxy: {
       "/auth": { target: "http://127.0.0.1:8000", changeOrigin: true },

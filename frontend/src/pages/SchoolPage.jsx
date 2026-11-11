@@ -1675,6 +1675,41 @@ async function classifyQueueForSplitRun(r) {
   return queue;
 }
 
+const RUN_POLL_MS = 3000;
+const RUN_POLL_GIVE_UP_MS = 2 * 60 * 1000;
+const RUN_FINAL_STATUSES = new Set(["done", "error", "interrupted"]);
+
+// Polls a reconciliation run until it reaches a final status. Chained timeouts (not
+// setInterval), so a slow response never overlaps the next poll and "done" is handled once.
+// A failed poll — e.g. the backend switching instances during a deploy — doesn't end the
+// watch: it keeps trying, flagging `onReconnecting`, and gives up only after ~2 minutes of
+// uninterrupted failures. Returns a stop function.
+function pollRun(runId, { onFinal, onReconnecting, onGiveUp }) {
+  let stopped = false;
+  let timer = null;
+  let failingSince = null;
+  async function tick() {
+    if (stopped) return;
+    try {
+      const { data } = await axios.get(`/analyze/result/${runId}`);
+      if (stopped) return;
+      if (failingSince !== null) { failingSince = null; onReconnecting(false); }
+      if (RUN_FINAL_STATUSES.has(data.status)) { stopped = true; onFinal(data); return; }
+    } catch (err) {
+      if (stopped) return;
+      const status = err.response?.status;
+      if (status === 401 || status === 403) { stopped = true; onGiveUp(); return; }
+      if (failingSince === null) { failingSince = Date.now(); onReconnecting(true); }
+      if (Date.now() - failingSince > RUN_POLL_GIVE_UP_MS) { stopped = true; onGiveUp(); return; }
+    }
+    timer = setTimeout(tick, RUN_POLL_MS);
+  }
+  timer = setTimeout(tick, RUN_POLL_MS);
+  return () => { stopped = true; clearTimeout(timer); };
+}
+
+const RUN_INTERRUPTED_MSG = "הבדיקה נקטעה בגלל עדכון מערכת — אפשר להריץ אותה שוב";
+
 function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsError, logsLoading, onReloadLogs, activeSubTab, setActiveSubTab, academicYear, setAcademicYear, resumeRunId, onResumeRunHandled }) {
   const isSheshsSnati = schoolStage === "sheshshnati";
   // Only worth naming the division in "missing file" messages when the school
@@ -1758,7 +1793,38 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
     return () => document.removeEventListener("mousedown", h);
   }, []);
 
-  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+  useEffect(() => () => pollRef.current?.(), []);
+
+  // Watches `runId` and routes its final result to `handleFinal`. An interrupted run (the
+  // backend restarted mid-check) gets a "הרץ שוב" action that re-runs it from its stored files.
+  function watchRun(runId, handleFinal) {
+    pollRef.current?.();
+    pollRef.current = pollRun(runId, {
+      onReconnecting: (reconnecting) => setPendingRun(prev => prev && { ...prev, reconnecting }),
+      onGiveUp: () => setPendingRun(prev => prev && { ...prev, status: "error", reconnecting: false, error: "שגיאה בקבלת התוצאות — רענן את הדף כדי לראות אם הבדיקה הסתיימה" }),
+      onFinal: (r) => {
+        if (r.status === "interrupted") {
+          setPendingRun(prev => prev && {
+            ...prev, status: "error", reconnecting: false, error: RUN_INTERRUPTED_MSG,
+            onRerun: () => rerunInterrupted(runId, handleFinal),
+          });
+          return;
+        }
+        handleFinal(r, runId);
+      },
+    });
+  }
+
+  async function rerunInterrupted(runId, handleFinal) {
+    setPendingRun(prev => prev && { ...prev, status: "loading", error: "", onRerun: null, date: new Date().toISOString() });
+    try {
+      const { data } = await axios.post(`/analyze/rerun/${runId}`);
+      setPendingRun(prev => prev && { ...prev, runId: data.run_id });
+      watchRun(data.run_id, handleFinal);
+    } catch (err) {
+      setPendingRun(prev => prev && { ...prev, status: "error", error: err.response?.data?.detail || "ההרצה החוזרת נכשלה" });
+    }
+  }
 
   // Deep link from ReconciliationCompletedPopup: a background check from uploaded meeting files
   // finished but can't be saved until its rows are classified, so reopen that same run here.
@@ -1915,11 +1981,8 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
       const { data } = await axios.post("/analyze/upload", form);
       const runId = data.run_id;
       setPendingRun(prev => ({ ...prev, runId }));
-      pollRef.current = setInterval(async () => {
-        try {
-          const { data: r } = await axios.get(`/analyze/result/${runId}`);
+      watchRun(runId, async (r, runId) => {
           if (r.status === "done") {
-            clearInterval(pollRef.current);
             if (r.split_divisions) {
               // Six-year split: 2 gefen files → 2 distinct divisions, both already
               // saved (each under its own correct gefen_account_id) — no mismatch
@@ -1946,7 +2009,6 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
             const queue = classifyQueueForRun(r, runId);
             if (queue.length > 0) setClassifyQueue(queue);
           } else if (r.status === "error") {
-            clearInterval(pollRef.current);
             if (r.error_code === "symbol_mismatch") {
               setPendingRun(null);
               setSymbolMismatch(true);
@@ -1971,11 +2033,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
               setPendingRun(prev => ({ ...prev, status: "error", error: r.user_message || r.error || "הבדיקה נכשלה" }));
             }
           }
-        } catch {
-          clearInterval(pollRef.current);
-          setPendingRun(prev => ({ ...prev, status: "error", error: "שגיאה בקבלת התוצאות" }));
-        }
-      }, 3000);
+      });
     } catch (err) {
       setPendingRun(prev => ({ ...prev, status: "error", error: err.response?.data?.detail || "שגיאה בהעלאת הקבצים" }));
     }
@@ -2006,18 +2064,14 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
       const { data } = await axios.post(apiUrl, form);
       const runId = data.run_id;
       setPendingRun(prev => ({ ...prev, runId }));
-      pollRef.current = setInterval(async () => {
-        try {
-          const { data: r } = await axios.get(`/analyze/result/${runId}`);
+      watchRun(runId, (r, runId) => {
           if (r.status === "done") {
-            clearInterval(pollRef.current);
             // For update runs: clear immediately so the existing (updated) row takes over
             setPendingRun(prev => prev?.updateLogId ? null : { ...prev, status: "done", result: r });
             onReloadLogs();
             const queue = classifyQueueForRun(r, runId);
             if (queue.length > 0) setClassifyQueue(queue);
           } else if (r.status === "error") {
-            clearInterval(pollRef.current);
             if (r.error_code === "symbol_mismatch") {
               setPendingRun(null);
               setSymbolMismatch(true);
@@ -2047,11 +2101,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
               setPendingRun(prev => ({ ...prev, status: "error", error: r.user_message || r.error || "הבדיקה נכשלה" }));
             }
           }
-        } catch {
-          clearInterval(pollRef.current);
-          setPendingRun(prev => ({ ...prev, status: "error", error: "שגיאה בקבלת התוצאות" }));
-        }
-      }, 3000);
+      });
     } catch (err) {
       setPendingRun(prev => ({ ...prev, status: "error", error: err.response?.data?.detail || "שגיאה בהעלאת הקבצים" }));
     }
@@ -2432,6 +2482,9 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
                             <div aria-hidden="true" className="spinner w-4 h-4" />
                           </div>
                           <span className="text-slate-400 text-xs">{formatDateTime(pendingRun.date)}</span>
+                          {pendingRun.reconnecting && (
+                            <span className="text-amber-600 text-xs">מתחבר מחדש…</span>
+                          )}
                         </div>
                       )}
                       {pendingRun.status === "done" && (
@@ -2447,6 +2500,12 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
                         <div>
                           <span className="text-xs text-slate-500">{formatDateTime(pendingRun.date)}</span>
                           <span role="alert" className="block text-xs text-red-500 mt-0.5">{pendingRun.error}</span>
+                          {pendingRun.onRerun && (
+                            <button type="button" onClick={pendingRun.onRerun}
+                              className="mt-1 text-xs font-semibold text-blue-600 hover:text-blue-800 underline">
+                              הרץ שוב
+                            </button>
+                          )}
                         </div>
                       )}
                     </td>
@@ -3547,7 +3606,9 @@ export default function SchoolPage() {
       setMeetings(prev => prev.map(m => m.id === draft.id ? saved : m));
     } catch (err) {
       console.error("Update meeting failed:", err);
-      loadMeetings(); // revert on error
+      // Silent: a spinner would unmount every row and drop unsaved edits in other rows. The
+      // failed row keeps its draft and re-sends it on its next blur (MeetingRow.performSave).
+      loadMeetings({ silent: true });
       throw err; // let the row (MeetingRow.performSave) detect e.g. a 403 and surface it
     }
   }

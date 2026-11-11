@@ -99,8 +99,17 @@ function actionLabel(ev, profiles, tasks) {
     case "offline_edited":    return "עריכת עבודה אופליין";
     case "offline_deleted":   return "מחיקת עבודה אופליין";
     case "summary_uploaded":  return "העלאת הקלטה לסיכום פגישה";
+    case "request_resolved":
+      return meta.decision === "replaces" ? "הוגדרה כמחליפה בקשת קביעה דרך לינק" : "הוגדרה כפגישה נוספת לבקשת קביעה דרך לינק";
+    case "request_reopened":  return "בקשת הקביעה דרך הלינק נפתחה מחדש";
     default:                  return ev.action;
   }
+}
+
+function requestText(meta) {
+  const dates = meta.start_date && meta.end_date ? ` (${meta.start_date.split("-").reverse().join("/")}–${meta.end_date.split("-").reverse().join("/")})` : "";
+  const origin = meta.task_name ? `משימה: ${meta.task_name}` : "תיאום עצמי";
+  return `${meta.request_label || "בקשת קביעה"}${dates} · ${origin}`;
 }
 
 function offlineText(entry) {
@@ -120,6 +129,14 @@ function describeOther(ev) {
     case "offline_deleted":   return offlineText(meta.entry);
     case "offline_edited":    return `${offlineText(meta.entry)}${meta.previous ? `\n(לפני: ${offlineText(meta.previous)})` : ""}`;
     case "summary_uploaded":  return meta.retry ? "ניסיון חוזר לעיבוד ההקלטה השמורה" : (meta.file_name || "");
+    case "request_resolved":
+      return `${requestText(meta)}
+${meta.decision === "replaces"
+        ? "הבקשה נסגרה — בית הספר לא יתבקש לקבוע דרך הלינק"
+        : "הבקשה נשארה פתוחה — בית הספר עדיין יתבקש לקבוע דרך הלינק"}`;
+    case "request_reopened":
+      return `${requestText(meta)}
+הפגישה ${meta.status === "postponed" ? "נדחתה" : "בוטלה"}, ולכן בית הספר יכול לקבוע שוב דרך הלינק`;
     default:                  return "";
   }
 }
