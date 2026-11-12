@@ -18,6 +18,34 @@ function formatDateDDMMYYYY(iso) {
   return `${d}/${m}/${y}`;
 }
 
+const CALENDAR_UNAVAILABLE_MSG = "לא ניתן היה לבדוק זמינות ביומן כרגע, נסו שוב מאוחר יותר.";
+
+// A failed slots load. No response at all usually means the school's own connection dropped
+// (main.jsx already retried it); a 4xx detail is a real answer (e.g. range already booked),
+// so only the other cases get a "נסו שוב" button.
+function slotsLoadError(err) {
+  if (!err?.response) {
+    return { message: "נראה שיש בעיה בחיבור לאינטרנט. בדקו את החיבור ולחצו \"נסו שוב\".", retryable: true };
+  }
+  const detail = err.response.data?.detail;
+  if (typeof detail === "string" && err.response.status < 500) return { message: detail, retryable: false };
+  return { message: "אירעה שגיאה בטעינת המשבצות הפנויות.", retryable: true };
+}
+
+function SlotsLoadError({ message, canRetry, disabled, onRetry }) {
+  return (
+    <div role="alert" className="flex flex-col items-center gap-2">
+      <p className="text-sm text-red-600 text-center">{message}</p>
+      {canRetry && (
+        <button type="button" onClick={onRetry} disabled={disabled}
+          className="px-4 py-1.5 rounded-full border border-blue-200 bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-semibold transition-colors disabled:opacity-50">
+          נסו שוב
+        </button>
+      )}
+    </div>
+  );
+}
+
 function SlotButton({ selected, disabled, onClick, children }) {
   return (
     <button type="button" disabled={disabled} onClick={onClick}
@@ -37,18 +65,25 @@ function SlotPickerModal({ token, month, onClose, onBooked }) {
   const [loading, setLoading] = useState(true);
   const [days, setDays] = useState([]);
   const [error, setError] = useState("");
+  const [canRetry, setCanRetry] = useState(false);
   const [booking, setBooking] = useState(false);
   const [selected, setSelected] = useState(null); // { date, slot }
   const [confirmed, setConfirmed] = useState(null); // booked details, once confirmed
 
   function loadDays() {
     setLoading(true);
+    setError("");
+    setCanRetry(false);
     return axios.get(`/public/meeting-booking/${token}/freebusy`, { params: { month } })
       .then(res => {
         setDays(res.data.days || []);
-        if (!res.data.ok) setError("לא ניתן היה לבדוק זמינות ביומן כרגע, נסו שוב מאוחר יותר.");
+        if (!res.data.ok) { setError(CALENDAR_UNAVAILABLE_MSG); setCanRetry(true); }
       })
-      .catch(() => setError("אירעה שגיאה בטעינת המשבצות הפנויות."))
+      .catch(err => {
+        const { message, retryable } = slotsLoadError(err);
+        setError(message);
+        setCanRetry(retryable);
+      })
       .finally(() => setLoading(false));
   }
 
@@ -67,11 +102,12 @@ function SlotPickerModal({ token, month, onClose, onBooked }) {
       });
       setConfirmed(selected);
     } catch (err) {
-      setError(err?.response?.data?.detail || "אופס.. הזמן הזה כבר נתפס. נא לבחור מועד אחר.");
       setSelected(null);
       // Round 9: the slot the user just tried is now taken — refresh immediately so the next
       // earliest available slot (if any) shows up right away instead of a stale/dead listing.
+      // Called before setError, since loadDays clears the error on start.
       loadDays();
+      setError(err?.response?.data?.detail || "אופס.. הזמן הזה כבר נתפס. נא לבחור מועד אחר.");
     } finally {
       setBooking(false);
     }
@@ -108,7 +144,7 @@ function SlotPickerModal({ token, month, onClose, onBooked }) {
         </h2>
 
         {loading && <p role="status" aria-label="טוען משבצות פנויות" className="text-sm text-slate-500 text-center py-4">טוען משבצות פנויות...</p>}
-        {error && <p role="alert" className="text-sm text-red-600 text-center">{error}</p>}
+        {error && <SlotsLoadError message={error} canRetry={canRetry} disabled={loading || booking} onRetry={() => loadDays()} />}
 
         {!loading && days.length === 0 && !error && (
           <p className="text-sm text-slate-500 text-center py-4">לא נמצאו משבצות פנויות בחודש זה.</p>
@@ -151,6 +187,7 @@ function RangeSlotPickerModal({ token, range, onClose, onBooked }) {
   const [loading, setLoading] = useState(true);
   const [days, setDays] = useState([]);
   const [error, setError] = useState("");
+  const [canRetry, setCanRetry] = useState(false);
   const [booking, setBooking] = useState(false);
   const [selected, setSelected] = useState(null); // { date, slot }
   const [confirmed, setConfirmed] = useState(null);
@@ -167,15 +204,21 @@ function RangeSlotPickerModal({ token, range, onClose, onBooked }) {
 
   function loadDays(timeRange) {
     setLoading(true);
+    setError("");
+    setCanRetry(false);
     const params = { range_key: range.key };
     if (timeRange) { params.time_from = timeRange.from; params.time_to = timeRange.to; }
     return axios.get(`/public/meeting-booking/${token}/freebusy`, { params })
       .then(res => {
         setDays(res.data.days || []);
         setRequestedDays(res.data.requested_days ?? null);
-        if (!res.data.ok) setError("לא ניתן היה לבדוק זמינות ביומן כרגע, נסו שוב מאוחר יותר.");
+        if (!res.data.ok) { setError(CALENDAR_UNAVAILABLE_MSG); setCanRetry(true); }
       })
-      .catch(() => setError("אירעה שגיאה בטעינת המשבצות הפנויות."))
+      .catch(err => {
+        const { message, retryable } = slotsLoadError(err);
+        setError(message);
+        setCanRetry(retryable);
+      })
       .finally(() => setLoading(false));
   }
 
@@ -207,11 +250,12 @@ function RangeSlotPickerModal({ token, range, onClose, onBooked }) {
       });
       setConfirmed(selected);
     } catch (err) {
-      setError(err?.response?.data?.detail || "אופס.. הזמן הזה כבר נתפס. נא לבחור מועד אחר.");
       setSelected(null);
       // Round 9: refresh immediately so the next earliest available slot shows up right away.
       // Preserves an active "אפשרויות נוספות" narrowed search, if one was applied.
+      // Called before setError, since loadDays clears the error on start.
       loadDays(activeTimeRange);
+      setError(err?.response?.data?.detail || "אופס.. הזמן הזה כבר נתפס. נא לבחור מועד אחר.");
     } finally {
       setBooking(false);
     }
@@ -251,7 +295,7 @@ function RangeSlotPickerModal({ token, range, onClose, onBooked }) {
         </h2>
 
         {loading && <p role="status" aria-label="טוען משבצות פנויות" className="text-sm text-slate-500 text-center py-4">טוען משבצות פנויות...</p>}
-        {error && <p role="alert" className="text-sm text-red-600 text-center">{error}</p>}
+        {error && <SlotsLoadError message={error} canRetry={canRetry} disabled={loading || booking} onRetry={() => loadDays(activeTimeRange)} />}
 
         {!loading && days.length === 0 && !error && (
           <p className="text-sm text-slate-500 text-center py-4">לא נמצאו משבצות פנויות בטווח זה.</p>
@@ -362,7 +406,7 @@ function RangeSlotPickerModal({ token, range, onClose, onBooked }) {
 
 export default function MeetingBookingPage() {
   const { token } = useParams();
-  const [status, setStatus] = useState("loading"); // loading | invalid | expired | ready
+  const [status, setStatus] = useState("loading"); // loading | invalid | expired | error | ready
   const [data, setData] = useState(null);
   const [pickerMonth, setPickerMonth] = useState(null);
   const [pickerRange, setPickerRange] = useState(null);
@@ -371,7 +415,10 @@ export default function MeetingBookingPage() {
     axios.get(`/public/meeting-booking/${token}`)
       .then(res => { setData(res.data); setStatus("ready"); })
       .catch(err => {
-        setStatus(err?.response?.status === 410 ? "expired" : "invalid");
+        // Only the server's own answer means the link is bad; a dropped connection or a server
+        // error must not tell the school to ask for a new link.
+        const httpStatus = err?.response?.status;
+        setStatus(httpStatus === 410 ? "expired" : httpStatus === 404 ? "invalid" : "error");
       });
   }
 
@@ -401,6 +448,11 @@ export default function MeetingBookingPage() {
             <p className="text-sm text-red-600 text-center" role="alert">
               קישור לא תקין. אנא פנו ליועץ שלכם לקבלת קישור חדש.
             </p>
+          )}
+
+          {status === "error" && (
+            <SlotsLoadError message={"לא הצלחנו לטעון את הדף. בדקו את החיבור לאינטרנט ולחצו \"נסו שוב\"."}
+              canRetry onRetry={() => { setStatus("loading"); load(); }} />
           )}
 
           {status === "expired" && (
