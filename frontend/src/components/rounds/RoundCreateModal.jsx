@@ -7,6 +7,7 @@ import { SchoolMultiPickerModal } from "../meetings/SchoolPickerCell";
 import { AcademicYearSelector } from "../AcademicYearSelector";
 import { STAGE_SCOPE_OPTIONS } from "../tasks/taskShared";
 import { DEFAULT_ACADEMIC_YEAR } from "../../constants/academicYears";
+import PhysicalVisitorsModal from "./PhysicalVisitorsModal";
 
 // "סבב פגישות חדש" — four short steps: name + period, which schools, what each needs, and the
 // big constraint (which schools meet in person). Everything else (wording, channel, advisor
@@ -26,28 +27,34 @@ function pill(active) {
   return `text-sm px-4 py-1.5 rounded-lg border transition-colors ${active ? "bg-blue-600 border-blue-600 text-white font-semibold" : "border-black text-black hover:bg-slate-50"}`;
 }
 
-export default function RoundCreateModal({ initialAcademicYear, onClose, onCreated }) {
+// round (optional) = "עריכת הסבב": the same steps, filled from the round; saving PATCHes it. The
+// school list is rebuilt only when the filter or selection was changed.
+export default function RoundCreateModal({ initialAcademicYear, onClose, onCreated, round = null }) {
   const { ref, handleKeyDown } = useFocusTrap(onClose);
+  const req0 = round?.requirement || {};
   const [step, setStep] = useState(1);
   const [attempted, setAttempted] = useState(false);
-  const [name, setName] = useState("");
-  const [academicYear, setAcademicYear] = useState(initialAcademicYear || DEFAULT_ACADEMIC_YEAR);
-  const [startDate, setStartDate] = useState("");
-  const [endDate, setEndDate] = useState("");
-  const [audienceMode, setAudienceMode] = useState("filter");
-  const [groups, setGroups] = useState([{ conditions: DEFAULT_CONDITIONS.map(c => ({ ...c })) }]);
-  const [manualIds, setManualIds] = useState([]);
+  const [name, setName] = useState(round?.name || "");
+  const [academicYear, setAcademicYear] = useState(round?.academic_year || initialAcademicYear || DEFAULT_ACADEMIC_YEAR);
+  const [startDate, setStartDate] = useState(round?.start_date || "");
+  const [endDate, setEndDate] = useState(round?.end_date || "");
+  const initialAudienceMode = round && !round.criteria ? "manual" : "filter";
+  const initialGroups = round?.criteria?.groups?.length ? round.criteria.groups : [{ conditions: DEFAULT_CONDITIONS.map(c => ({ ...c })) }];
+  const initialManualIds = round && !round.criteria ? round.school_ids || [] : [];
+  const [audienceMode, setAudienceMode] = useState(initialAudienceMode);
+  const [groups, setGroups] = useState(initialGroups);
+  const [manualIds, setManualIds] = useState(initialManualIds);
   const [showPicker, setShowPicker] = useState(false);
   const [fieldOptions, setFieldOptions] = useState([]);
   const [allSchools, setAllSchools] = useState([]);
   const [preview, setPreview] = useState(null);
   const [previewLoading, setPreviewLoading] = useState(false);
-  const [type, setType] = useState("by_service");
-  const [split, setSplit] = useState(null);
-  const [count, setCount] = useState(1);
-  const [stageScope, setStageScope] = useState(null);
-  const [hasPhysical, setHasPhysical] = useState(null);
-  const [physicalIds, setPhysicalIds] = useState([]);
+  const [type, setType] = useState(req0.meeting_service_type || "by_service");
+  const [split, setSplit] = useState(req0.gefen_current_split || null);
+  const [count, setCount] = useState(req0.count_per_school || 1);
+  const [stageScope, setStageScope] = useState(req0.stage_scope || null);
+  const [hasPhysical, setHasPhysical] = useState(round ? (round.physical_school_ids || []).length > 0 : null);
+  const [physicalIds, setPhysicalIds] = useState(round?.physical_school_ids || []);
   const [physicalQuery, setPhysicalQuery] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -95,24 +102,71 @@ export default function RoundCreateModal({ initialAcademicYear, onClose, onCreat
     setStep(step + 1);
   }
 
+  const [visitorConflicts, setVisitorConflicts] = useState(null); // schools for the "מי מגיע לשטח?" window
+
+  function requirementPayload() {
+    return {
+      meeting_service_type: type, gefen_current_split: type === "by_service" ? split : null,
+      count_per_school: count, stage_scope: hasSixYear && type !== "current" ? stageScope : null,
+    };
+  }
+
+  // Before creating: physical גפן+שוטף schools with two different advisors must say who visits.
   async function submit() {
     if (!stepValid[4]) { setAttempted(true); return; }
+    if (hasPhysical && physicalIds.length && ["by_service", "gefen_current"].includes(type)) {
+      setSaving(true);
+      setError("");
+      try {
+        const r = await axios.post("/rounds/physical-check", { academic_year: academicYear, school_ids: physicalIds, requirement: requirementPayload() });
+        const conflicts = r.data?.schools || [];
+        // Editing: schools already answered keep their answer; the window opens only for new ones.
+        const known = round?.physical_visitors || {};
+        if (conflicts.some(s => !known[s.school_id])) {
+          setVisitorConflicts(conflicts);
+          return;
+        }
+        if (conflicts.length) {
+          await create(Object.fromEntries(conflicts.map(s => [s.school_id, known[s.school_id]])));
+          return;
+        }
+      } catch {
+        setError("בדיקת בתי הספר הפיזיים נכשלה — נסו שוב.");
+        return;
+      } finally {
+        setSaving(false);
+      }
+    }
+    await create({});
+  }
+
+  async function create(physicalVisitors) {
     setSaving(true);
     setError("");
     try {
-      const res = await axios.post("/rounds/", {
-        name: name.trim(), academic_year: academicYear, start_date: startDate, end_date: endDate,
-        criteria: audienceMode === "filter" ? criteria : null,
-        manual_school_ids: audienceMode === "manual" ? manualIds : null,
-        requirement: {
-          meeting_service_type: type, gefen_current_split: type === "by_service" ? split : null,
-          count_per_school: count, stage_scope: hasSixYear && type !== "current" ? stageScope : null,
-        },
+      const common = {
+        name: name.trim(), start_date: startDate, end_date: endDate,
+        requirement: requirementPayload(),
         physical_school_ids: hasPhysical ? physicalIds : [],
-      });
+        physical_visitors: hasPhysical ? physicalVisitors : {},
+      };
+      let res;
+      if (round) {
+        // The school list is rebuilt only from a changed filter or selection.
+        const audienceChanged = audienceMode !== initialAudienceMode
+          || JSON.stringify(audienceMode === "filter" ? groups : manualIds) !== JSON.stringify(audienceMode === "filter" ? initialGroups : initialManualIds);
+        const audience = !audienceChanged ? {} : audienceMode === "manual" ? { manual_school_ids: manualIds } : { criteria };
+        res = await axios.patch(`/rounds/${round.id}`, { ...common, ...audience });
+      } else {
+        res = await axios.post("/rounds/", {
+          ...common, academic_year: academicYear,
+          criteria: audienceMode === "filter" ? criteria : null,
+          manual_school_ids: audienceMode === "manual" ? manualIds : null,
+        });
+      }
       onCreated(res.data);
     } catch (e) {
-      setError(typeof e.response?.data?.detail === "string" ? e.response.data.detail : "יצירת הסבב נכשלה — נסו שוב.");
+      setError(typeof e.response?.data?.detail === "string" ? e.response.data.detail : round ? "שמירת השינויים נכשלה — נסו שוב." : "יצירת הסבב נכשלה — נסו שוב.");
     } finally {
       setSaving(false);
     }
@@ -125,7 +179,7 @@ export default function RoundCreateModal({ initialAcademicYear, onClose, onCreat
       <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="round-create-title" onKeyDown={handleKeyDown}
         className="bg-white shadow-2xl rounded-2xl w-full max-w-2xl mx-4 max-h-[90vh] flex flex-col">
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
-          <h2 id="round-create-title" className="text-lg font-bold text-slate-800">סבב פגישות חדש — {STEPS[step - 1]} ({step} מתוך {STEPS.length})</h2>
+          <h2 id="round-create-title" className="text-lg font-bold text-slate-800">{round ? "עריכת הסבב" : "סבב פגישות חדש"} — {STEPS[step - 1]} ({step} מתוך {STEPS.length})</h2>
           <button type="button" onClick={onClose} aria-label="סגור" className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400">✕</button>
         </div>
 
@@ -142,7 +196,7 @@ export default function RoundCreateModal({ initialAcademicYear, onClose, onCreat
               </div>
               <div className="flex items-center gap-2">
                 <span className="text-xs font-medium text-black">שנת לימודים</span>
-                <AcademicYearSelector value={academicYear} onChange={setAcademicYear} />
+                {round ? <span className="text-sm">{academicYear}</span> : <AcademicYearSelector value={academicYear} onChange={setAcademicYear} />}
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div className="flex flex-col gap-1">
@@ -155,6 +209,11 @@ export default function RoundCreateModal({ initialAcademicYear, onClose, onCreat
                 </div>
               </div>
               <p className="text-[11px] text-slate-500">כל פגישה מתאימה בתקופה הזו נספרת לסבב — גם כזו שנקבעה בטלפון או במשימה אחרת.</p>
+              {round && (
+                <p role="note" className="text-[12px] bg-amber-50 text-amber-900 rounded-lg px-3 py-2">
+                  עריכה משנה את הגדרת הסבב ואת החישוב בלוח שלו. משימות שכבר נשלחו מתוכו לא משתנות — בתי ספר שכבר קיבלו בקשה ממשיכים איתה.
+                </p>
+              )}
             </>
           )}
 
@@ -270,6 +329,15 @@ export default function RoundCreateModal({ initialAcademicYear, onClose, onCreat
           )}
         </div>
 
+        {visitorConflicts && (
+          <PhysicalVisitorsModal
+            schools={visitorConflicts}
+            initialVisitors={round?.physical_visitors || {}}
+            onCancel={() => setVisitorConflicts(null)}
+            onConfirm={(visitors) => { setVisitorConflicts(null); create(visitors); }}
+          />
+        )}
+
         <div className="flex items-center justify-between px-6 py-4 border-t border-slate-100">
           <button type="button" onClick={() => (step === 1 ? onClose() : setStep(step - 1))} className="text-sm px-4 py-2 rounded-xl font-medium text-slate-500 hover:bg-slate-50">
             {step === 1 ? "ביטול" : "הקודם"}
@@ -277,7 +345,7 @@ export default function RoundCreateModal({ initialAcademicYear, onClose, onCreat
           {step < STEPS.length ? (
             <button type="button" onClick={next} className="btn-blue text-sm px-5 py-2">הבא</button>
           ) : (
-            <button type="button" onClick={submit} disabled={saving} className="btn-blue text-sm px-5 py-2 disabled:opacity-50">{saving ? "יוצר..." : "צור סבב"}</button>
+            <button type="button" onClick={submit} disabled={saving} className="btn-blue text-sm px-5 py-2 disabled:opacity-50">{saving ? "שומר..." : round ? "שמור שינויים" : "צור סבב"}</button>
           )}
         </div>
       </div>

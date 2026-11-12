@@ -65,6 +65,8 @@ const COORDINATOR_ROLE_OPTIONS_SHESHSHNATI = [
 // notes in handleSaveParticipant/handleSaveCoordinator.
 export default function TaskMeetingResolutionModal({
   criteria, manualSchoolIds, meetingRequirements, channel, academicYear, orgUsers, onProceed, onClose,
+  // A task of a "סבב פגישות" — its field-day exemptions apply to the check.
+  roundId = null,
   // taskId — "existing task" mode: re-checks an already-created task's CURRENT problems
   // (GET /tasks/{taskId}/meetings/check) instead of the wizard's transient pre-creation state,
   // used by the red-badge/notification flow for a scheduled task that got blocked because
@@ -108,7 +110,7 @@ export default function TaskMeetingResolutionModal({
       ? axios.get(`/tasks/${taskId}/meetings/check`)
       : axios.post("/tasks/meetings/check", {
           criteria, manual_school_ids: manualSchoolIds, meeting_requirements: meetingRequirements,
-          channel, academic_year: academicYear,
+          channel, academic_year: academicYear, round_id: roundId,
         });
     request
       .then(r => setResult(r.data))

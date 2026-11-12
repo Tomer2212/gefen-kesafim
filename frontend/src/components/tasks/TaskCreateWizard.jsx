@@ -736,6 +736,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
       const { criteria, manual_school_ids } = checkAudiencePayload();
       const res = await axios.post("/tasks/meetings/check", {
         criteria, manual_school_ids, meeting_requirements: requirements, channel, academic_year: academicYear,
+        round_id: roundContext?.round.id || null,
       });
       const hasIssues = (res.data?.schools?.length || 0) > 0;
       setCheckingMeetings(false);
@@ -1435,6 +1436,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
 
       {showMeetingResolutionModal && (
         <TaskMeetingResolutionModal
+          roundId={roundContext?.round.id || null}
           criteria={checkAudiencePayload().criteria}
           manualSchoolIds={checkAudiencePayload().manual_school_ids}
           meetingRequirements={meetingRequirementsPayload().filter(r => r.meeting_service_type && r.participant_roles.length)}

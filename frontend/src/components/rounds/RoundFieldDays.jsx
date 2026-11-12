@@ -13,7 +13,8 @@ function weekday(iso) {
   return WEEKDAYS[new Date(`${iso}T12:00:00`).getDay()];
 }
 
-export default function RoundFieldDays({ roundId }) {
+// refreshKey: the round's updated_at — a round edit (physical schools, who visits) reloads this.
+export default function RoundFieldDays({ roundId, exemptIds = [], onExemptChange, refreshKey }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
   const [draftDay, setDraftDay] = useState({}); // {advisor_id: "YYYY-MM-DD"}
@@ -22,7 +23,7 @@ export default function RoundFieldDays({ roundId }) {
   function load() {
     axios.get(`/rounds/${roundId}/field-days`).then(r => setData(r.data)).catch(() => setError("טעינת ימי השטח נכשלה."));
   }
-  useEffect(() => { load(); }, [roundId]);
+  useEffect(() => { load(); }, [roundId, refreshKey]);
 
   async function addDay(advisorId) {
     const day = draftDay[advisorId];
@@ -50,6 +51,24 @@ export default function RoundFieldDays({ roundId }) {
     }
   }
 
+  // Removing an advisor who doesn't go out (e.g. the שוטף advisor of a גפן+שוטף school when only
+  // the גפן advisor visits): no field days are asked of them, and a physical meeting is offered
+  // on the remaining advisors' field days. Reversible.
+  async function setExempt(advisorId, exempt) {
+    setBusyId(advisorId);
+    setError("");
+    try {
+      const next = exempt ? [...new Set([...exemptIds, advisorId])] : exemptIds.filter(id => id !== advisorId);
+      await axios.patch(`/rounds/${roundId}`, { field_exempt_advisor_ids: next });
+      onExemptChange?.();
+      load();
+    } catch {
+      setError("השמירה נכשלה — נסו שוב.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   if (!data) return error ? <p role="alert" className="text-sm text-red-600">{error}</p> : null;
   if (!data.advisors.length) return null;
 
@@ -63,13 +82,33 @@ export default function RoundFieldDays({ roundId }) {
       {error && <p role="alert" className="text-sm text-red-600">{error}</p>}
       <div className="flex flex-col gap-2">
         {data.advisors.map(a => {
-          const short = a.suggested_days > a.days.length;
+          const short = !a.exempt && a.suggested_days > a.days.length;
+          if (a.exempt) {
+            return (
+              <div key={a.advisor_id} className="border border-slate-200 bg-slate-50 rounded-xl px-3 py-2 flex items-center justify-between gap-2 text-sm">
+                <span className="text-slate-500">
+                  <b className="text-slate-700">{a.name}</b> — הוסר/ה מימי השטח (לא מגיע/ה לבתי הספר; צריך/ה רק להיות פנוי/ה בזמן הפגישה)
+                </span>
+                <button type="button" disabled={busyId === a.advisor_id} onClick={() => setExempt(a.advisor_id, false)}
+                  className="text-xs text-blue-600 hover:underline whitespace-nowrap">החזר לימי השטח</button>
+              </div>
+            );
+          }
           return (
             <div key={a.advisor_id} className={`border rounded-xl p-3 flex flex-col gap-2 ${short ? "border-amber-300 bg-amber-50/40" : "border-slate-200"}`}>
               <div className="flex items-center justify-between gap-2 flex-wrap text-sm">
                 <span className="font-semibold">{a.advisor_id === "__none__" ? <span className="text-red-600">בתי ספר בלי יועץ בכרטיס</span> : a.name}</span>
-                <span className="text-xs text-slate-600">
-                  {a.schools.length} בתי ספר פיזיים · {Math.round(a.minutes / 6) / 10} שעות פגישות שעוד לא נקבעו · מומלץ {a.suggested_days} ימים · הוגדרו {a.days.length}
+                <span className="flex items-center gap-3 flex-wrap">
+                  <span className="text-xs text-slate-600">
+                    {a.schools.length} בתי ספר פיזיים · {Math.round(a.minutes / 6) / 10} שעות פגישות שעוד לא נקבעו · מומלץ {a.suggested_days} ימים · הוגדרו {a.days.length}
+                  </span>
+                  {a.advisor_id !== "__none__" && (
+                    <button type="button" disabled={busyId === a.advisor_id} onClick={() => setExempt(a.advisor_id, true)}
+                      aria-label={`הסרת ${a.name} מימי השטח`}
+                      className="text-xs px-2 py-1 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50 whitespace-nowrap">
+                      הסר — לא מגיע/ה לשטח
+                    </button>
+                  )}
                 </span>
               </div>
               {short && a.advisor_id !== "__none__" && (

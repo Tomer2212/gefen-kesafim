@@ -5,6 +5,7 @@ import { useFocusTrap } from "../../hooks/useFocusTrap";
 import { useTasks } from "../../context/TasksContext";
 import TaskCreateWizard from "../tasks/TaskCreateWizard";
 import RoundFieldDays from "./RoundFieldDays";
+import RoundCreateModal from "./RoundCreateModal";
 import { MEETING_SERVICE_TYPE_LABELS, formatDateDMY } from "../tasks/taskShared";
 import {
   ROUND_STATUS_META, ROUND_STATUS_ORDER, ROUND_PROBLEM_LABELS, STALE_REQUEST_DAYS, requirementLabel, daysSince,
@@ -54,6 +55,7 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
   const [taskDraft, setTaskDraft] = useState(null); // {schoolIds, physical, requireAdditional}
   const [audienceDiff, setAudienceDiff] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
 
@@ -119,8 +121,11 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
       // A physical task offers each school only its advisor's field days — set them first.
       try {
         const fd = await axios.get(`/rounds/${roundId}/field-days`);
-        const wanted = new Set(rows.flatMap(s => s.advisor_ids));
-        const missing = (fd.data?.advisors || []).filter(a => wanted.has(a.advisor_id) && !a.days.length);
+        // Only the advisors who visit (the round's per-school choice, when there is one).
+        const visitors = rnd.physical_visitors || {};
+        const wanted = new Set(rows.flatMap(s => (visitors[s.school_id] ? s.advisor_ids.filter(a => visitors[s.school_id].includes(a)) : s.advisor_ids)));
+        // Advisors removed from field days (they don't visit) don't need any.
+        const missing = (fd.data?.advisors || []).filter(a => wanted.has(a.advisor_id) && !a.exempt && !a.days.length);
         if (missing.length) {
           setNotice(`לפני משימה פיזית יש להגדיר ימי שטח (באזור "ימי שטח" למטה) ל: ${missing.map(a => a.name).join(", ")}.`);
           return;
@@ -259,6 +264,7 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
         <div className="flex flex-wrap gap-2">
           <button type="button" disabled={busy} onClick={() => startTask([])} className="btn-blue text-sm px-4 py-2">+ משימה חדשה בסבב</button>
           {rnd.criteria && <button type="button" disabled={busy} onClick={previewAudience} className="text-sm px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200">עדכון רשימת בתי הספר</button>}
+          <button type="button" onClick={() => setEditing(true)} className="text-sm px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200">עריכת הסבב</button>
           <button type="button" onClick={exportExcel} className="text-sm px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200">ייצוא לאקסל</button>
           <button type="button" disabled={busy} onClick={() => patchRound({ status: rnd.status === "closed" ? "active" : "closed" })} className="text-sm px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200">
             {rnd.status === "closed" ? "פתיחה מחדש" : "סגירת הסבב"}
@@ -389,7 +395,9 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
         </div>
       </section>
 
-      {(rnd.physical_school_ids || []).length > 0 && <RoundFieldDays roundId={roundId} />}
+      {(rnd.physical_school_ids || []).length > 0 && (
+        <RoundFieldDays roundId={roundId} exemptIds={rnd.field_exempt_advisor_ids || []} onExemptChange={load} refreshKey={rnd.updated_at} />
+      )}
 
       <section aria-labelledby="round-schools-title" className="flex flex-col gap-2">
         <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -535,6 +543,14 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
         }>
           <p>הסבב יימחק. המשימות שבתוכו יישארו כמשימות רגילות, וכל הפגישות נשארות כמו שהן.</p>
         </ConfirmDialog>
+      )}
+
+      {editing && (
+        <RoundCreateModal
+          round={rnd}
+          onClose={() => setEditing(false)}
+          onCreated={() => { setEditing(false); load(); onChanged?.(); }}
+        />
       )}
 
       {taskDraft && (

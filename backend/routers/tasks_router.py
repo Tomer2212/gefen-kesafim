@@ -951,13 +951,41 @@ def _field_days_by_advisor(db, org_id: str, advisor_ids: list[str]) -> dict[str,
     return {aid: sorted(days) for aid, days in out.items()}
 
 
-def _field_day_segments(windows: list[tuple[str, str]], advisor_ids: list[str], field_days: dict[str, list[str]]) -> list[dict]:
-    """A physical meeting's dates: the days every one of its advisors is in the field, inside
-    the requested windows — one single-day segment each."""
-    if not advisor_ids:
-        return []
-    common = set(field_days.get(advisor_ids[0]) or [])
-    for aid in advisor_ids[1:]:
+def _round_field_rules(db, org_id: str, round_id: str | None) -> tuple[set[str], dict[str, list[str]]]:
+    """A round's field-day rules: advisors exempted from field days, and per school who visits
+    ({school_id: [advisor_id]}). Nothing outside a round."""
+    if not round_id:
+        return set(), {}
+    rows = (
+        db.table("meeting_rounds").select("field_exempt_advisor_ids, physical_visitors")
+        .eq("id", round_id).eq("org_id", org_id).execute().data or []
+    )
+    if not rows:
+        return set(), {}
+    return set(rows[0].get("field_exempt_advisor_ids") or []), dict(rows[0].get("physical_visitors") or {})
+
+
+def _visiting_advisors(advisor_ids: list[str], exempt: set[str] | None, visitors: list[str] | None) -> list[str]:
+    """The advisors of a physical meeting who actually go to the school: not exempted from field
+    days in the round, and — when the round recorded who visits this school (a גפן+שוטף school
+    with two different advisors, meeting_rounds.physical_visitors) — one of them."""
+    return [aid for aid in advisor_ids
+            if aid not in (exempt or set()) and (visitors is None or aid in visitors)]
+
+
+def _field_day_segments(
+    windows: list[tuple[str, str]], advisor_ids: list[str], field_days: dict[str, list[str]],
+    exempt: set[str] | None = None, visitors: list[str] | None = None,
+) -> list[dict]:
+    """A physical meeting's dates: the days every one of its visiting advisors is in the field,
+    inside the requested windows — one single-day segment each (_visiting_advisors). The others
+    don't narrow the days — they only need to be free then; a meeting with no visiting advisor
+    keeps its windows (it's held remotely, see _build_meeting_ranges)."""
+    field_advisors = _visiting_advisors(advisor_ids, exempt, visitors)
+    if not field_advisors:
+        return [{"start_date": lo, "end_date": hi} for lo, hi in windows] if advisor_ids else []
+    common = set(field_days.get(field_advisors[0]) or [])
+    for aid in field_advisors[1:]:
         common &= set(field_days.get(aid) or [])
     days = sorted(d for d in common if any(lo <= d <= hi for lo, hi in windows))
     return [{"start_date": d, "end_date": d} for d in days]
@@ -1003,6 +1031,7 @@ class MeetingsCheckIn(BaseModel):
     meeting_requirements: list[MeetingRequirementIn]
     channel: str
     academic_year: str = DEFAULT_ACADEMIC_YEAR
+    round_id: str | None = None  # a task of a "סבב פגישות": its field-day exemptions apply
 
 
 def _slot_coordinator_ok(school: dict, slot: str, needs_phone: bool) -> bool:
@@ -1062,7 +1091,7 @@ def _has_blocking_meeting_problem(entry: dict) -> bool:
 def _check_meeting_problems(
     org_id: str, criteria: dict, manual_school_ids: list[str] | None,
     meeting_requirements: list[MeetingRequirementIn], channel: str, academic_year: str,
-    meeting_overrides: dict | None = None,
+    meeting_overrides: dict | None = None, round_id: str | None = None,
 ) -> dict:
     """Round-6 unified pre-creation check (TaskMeetingResolutionModal) for 'קביעת פגישות'
     tasks — replaces both the old split-out advisor/participant-name-only version of this
@@ -1129,6 +1158,7 @@ def _check_meeting_problems(
         candidate_ids = {aid for by_type in advisor_map.values() for ids in by_type.values() for aid in ids}
         candidate_ids |= {aid for r in task_requirements for aid in r.advisor_ids}
         field_days = _field_days_by_advisor(db, org_id, list(candidate_ids))
+    field_exempt, field_visitors = _round_field_rules(db, org_id, round_id) if field_days is not None else (set(), {})
 
     entries_by_school: dict[str, dict] = {}
     coordinator_emails: dict[str, str | None] = {}
@@ -1304,7 +1334,10 @@ def _check_meeting_problems(
             if not req_advisors:
                 continue  # reported as a missing advisor (meeting_defaults)
             window = [(req.date_from or "0000-01-01", req.date_to or "9999-12-31")]
-            if not _field_day_segments(window, req_advisors, field_days or {}):
+            school_visitors = field_visitors.get(school["id"])
+            if not _visiting_advisors(req_advisors, field_exempt, school_visitors):
+                continue  # held remotely — no field day needed
+            if not _field_day_segments(window, req_advisors, field_days or {}, field_exempt, school_visitors):
                 missing_field_days.append({"meeting_service_type": req.meeting_service_type, "advisor_ids": req_advisors})
 
         if (coordinator or participants or meeting_defaults or advisor_access or coordinator_conflict
@@ -1355,7 +1388,7 @@ def check_meetings(body: MeetingsCheckIn, user: Annotated[dict, Depends(get_curr
     criteria = body.criteria.model_dump() if body.criteria else {}
     return _check_meeting_problems(
         user["org_id"], criteria, body.manual_school_ids, body.meeting_requirements,
-        body.channel, body.academic_year,
+        body.channel, body.academic_year, None, body.round_id,
     )
 
 
@@ -1383,7 +1416,7 @@ def check_task_meeting_problems(task_id: str, user: Annotated[dict, Depends(get_
     return _check_meeting_problems(
         user["org_id"], task.get("criteria") or {}, task.get("manual_school_ids"),
         meeting_requirements, channel, task.get("academic_year") or DEFAULT_ACADEMIC_YEAR,
-        task.get("meeting_overrides"),
+        task.get("meeting_overrides"), task.get("round_id"),
     )
 
 
@@ -2126,7 +2159,8 @@ _DIVISION_LABELS = {"tichon": "תיכון", "chativa": 'חט"ב', "both": 'תי�
 def _build_meeting_ranges(
     school: dict, meeting_conditions: list[dict],
     advisor_map: dict[str, list[str]], duration_row: dict, school_overrides: dict | None = None,
-    field_days: dict[str, list[str]] | None = None,
+    field_days: dict[str, list[str]] | None = None, field_exempt: set[str] | None = None,
+    field_visitors: list[str] | None = None,
 ) -> list[dict] | None:
     """Structured, per-meeting-requirement booking link for 'קביעת פגישות' tasks (round 5) —
     mirrors schools_router.send_direct_coordination_request's ranges_data construction
@@ -2181,12 +2215,18 @@ def _build_meeting_ranges(
                 advisor_ids = list(dict.fromkeys(_default_advisor_ids(advisor_map, service_type) + override["advisor_ids"]))
         if not advisor_ids:
             continue
+        held_remotely = False
         if c.get("use_field_days"):
-            # A physical meeting is offered only on its advisors' field days (in the same windows).
-            segments = _field_day_segments([(s["start_date"], s["end_date"]) for s in segments], advisor_ids, field_days or {})
-            if not segments:
-                continue
-            start_date, end_date = segments[0]["start_date"], segments[-1]["end_date"]
+            # A physical meeting is offered only on its visiting advisors' field days (in the same
+            # windows); with no visiting advisor (e.g. the שוטף meeting of a separate גפן+שוטף
+            # pair where only the גפן advisor goes out) it's held remotely on the regular dates.
+            if not _visiting_advisors(advisor_ids, field_exempt, field_visitors):
+                held_remotely = True
+            else:
+                segments = _field_day_segments([(s["start_date"], s["end_date"]) for s in segments], advisor_ids, field_days or {}, field_exempt, field_visitors)
+                if not segments:
+                    continue
+                start_date, end_date = segments[0]["start_date"], segments[-1]["end_date"]
         if c.get("duration_mode") == "manual":
             duration_minutes = c.get("duration_minutes") or 60
         else:
@@ -2245,7 +2285,7 @@ def _build_meeting_ranges(
                 "start_date": start_date, "end_date": end_date, "segments": segments,
                 "service_type": service_type, "duration_minutes": duration_minutes,
                 "label": label, "participants": participants, "advisor_ids": advisor_ids,
-                "meeting_type": c.get("meeting_type") or "remote",
+                "meeting_type": "remote" if held_remotely else (c.get("meeting_type") or "remote"),
                 # Mirrors DirectCoordinationRangeIn.allow_time_range_search — the UI (ConditionGroupsEditor.jsx)
                 # blocks saving until this is explicitly answered, so bool(...) here is a defensive
                 # fallback for a legacy/malformed condition, not a real UX path.
@@ -2465,6 +2505,7 @@ def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[st
         candidate_ids |= {aid for c in meeting_conditions for aid in (c.get("advisor_ids") or [])}
         candidate_ids |= {aid for o in meeting_overrides.values() for t in (o or {}).values() for aid in ((t or {}).get("advisor_ids") or [])}
         field_days = _field_days_by_advisor(db, task["org_id"], list(candidate_ids))
+    field_exempt, field_visitors = _round_field_rules(db, task["org_id"], task.get("round_id")) if field_days is not None else (set(), {})
 
     try:
         notes_map = _fetch_school_notes_map(db, task["id"], school_ids)
@@ -2504,7 +2545,7 @@ def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[st
             ranges_data = school_conditions and _build_meeting_ranges(
                 school, school_conditions,
                 advisor_map.get(school["id"], {}), duration_map.get(school["id"], {}),
-                meeting_overrides.get(school["id"]), field_days,
+                meeting_overrides.get(school["id"]), field_days, field_exempt, field_visitors.get(school["id"]),
             )
             ranges_data = ranges_data or None
             if ranges_data is None:
@@ -3186,7 +3227,7 @@ def _try_activate_scheduled_task(db, task: dict) -> dict:
         academic_year = task.get("academic_year") or DEFAULT_ACADEMIC_YEAR
         check = _check_meeting_problems(
             org_id, task.get("criteria") or {}, task.get("manual_school_ids"),
-            meeting_requirements, channel, academic_year, task.get("meeting_overrides"),
+            meeting_requirements, channel, academic_year, task.get("meeting_overrides"), task.get("round_id"),
         )
         # opted_out-only entries are informational (see _check_meeting_problems) and must never
         # hold back activation on their own — only real coordinator/participants/meeting_defaults/

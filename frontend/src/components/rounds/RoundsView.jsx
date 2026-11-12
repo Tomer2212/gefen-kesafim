@@ -12,11 +12,13 @@ export default function RoundsView({ academicYear, openRoundId, setOpenRoundId, 
   const [rounds, setRounds] = useState([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
+  // A failed load must never read as "no rounds" (e.g. while a deploy is still switching over).
+  const [loadFailed, setLoadFailed] = useState(false);
 
   function load() {
     axios.get("/rounds/", { params: { academic_year: academicYear } })
-      .then(r => { setRounds(r.data || []); onRoundsChanged?.(r.data || []); })
-      .catch(() => setRounds([]))
+      .then(r => { setRounds(r.data || []); setLoadFailed(false); onRoundsChanged?.(r.data || []); })
+      .catch(() => setLoadFailed(true))
       .finally(() => setLoading(false));
   }
   useEffect(() => { setLoading(true); load(); }, [academicYear]);
@@ -35,6 +37,11 @@ export default function RoundsView({ academicYear, openRoundId, setOpenRoundId, 
       </div>
       {loading ? (
         <div role="status" aria-label="טוען סבבים" className="text-sm text-slate-400">טוען...</div>
+      ) : loadFailed ? (
+        <p role="alert" className="text-sm text-red-700 bg-red-50 rounded-xl px-4 py-6 text-center">
+          טעינת הסבבים נכשלה — הסבבים שלך לא נמחקו.{" "}
+          <button type="button" onClick={() => { setLoading(true); load(); }} className="underline font-medium">נסו שוב</button>
+        </p>
       ) : rounds.length === 0 ? (
         <p className="text-sm text-slate-500 bg-slate-50 rounded-xl px-4 py-6 text-center">עוד אין סבבים בשנה הזו.</p>
       ) : (

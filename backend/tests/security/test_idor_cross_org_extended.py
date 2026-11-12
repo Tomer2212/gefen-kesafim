@@ -1682,3 +1682,36 @@ def test_field_days_same_org_works_and_foreign_ids_are_not_deleted(org_b_client,
         assert admin_db.table("advisor_field_days").select("id").eq("id", foreign["id"]).execute().data  # still there
     finally:
         admin_db.table("advisor_field_days").delete().in_("day", ["2099-12-10", "2099-12-11"]).in_("advisor_id", [ORG_B_MANAGER_ID, ORG_B_OWNER_ID]).execute()
+
+
+def test_field_exempt_keeps_only_own_org_advisors(org_b_client, org_b_round):
+    resp = org_b_client.patch(f"/rounds/{org_b_round['id']}", json={"field_exempt_advisor_ids": [ORG_B_MANAGER_ID, ORG_A_MANAGER_ID]})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["field_exempt_advisor_ids"] == [ORG_B_MANAGER_ID]
+
+
+def test_field_exempt_cross_org_rejected(org_a_client, org_b_round, admin_db):
+    assert org_a_client.patch(f"/rounds/{org_b_round['id']}", json={"field_exempt_advisor_ids": [ORG_A_MANAGER_ID]}).status_code == 404
+    row = admin_db.table("meeting_rounds").select("field_exempt_advisor_ids").eq("id", org_b_round["id"]).execute().data[0]
+    assert row["field_exempt_advisor_ids"] == []
+
+
+def test_physical_check_never_reads_another_orgs_school(org_b_client):
+    resp = org_b_client.post("/rounds/physical-check", json={
+        "school_ids": [ORG_A_SCHOOL_ID], "requirement": {"meeting_service_type": "gefen_current"},
+    })
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["schools"] == []
+
+
+def test_round_edit_rebuilds_list_only_from_own_org_schools(org_b_client, org_b_round):
+    resp = org_b_client.patch(f"/rounds/{org_b_round['id']}", json={"manual_school_ids": [ORG_B_SCHOOL_ID, ORG_A_SCHOOL_ID]})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["school_ids"] == [ORG_B_SCHOOL_ID] and resp.json()["criteria"] is None
+
+
+def test_round_edit_cross_org_rejected(org_a_client, org_b_round, admin_db):
+    resp = org_a_client.patch(f"/rounds/{org_b_round['id']}", json={"manual_school_ids": [ORG_A_SCHOOL_ID], "name": "x"})
+    assert resp.status_code == 404
+    row = admin_db.table("meeting_rounds").select("school_ids, name").eq("id", org_b_round["id"]).execute().data[0]
+    assert row["school_ids"] == [ORG_B_SCHOOL_ID] and row["name"] == "בדיקת אבטחה"

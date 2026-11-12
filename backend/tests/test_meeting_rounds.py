@@ -146,3 +146,60 @@ def test_open_request_means_a_live_unanswered_link():
     assert meeting_rounds._is_open_request(sent, {"expires_at": "2026-12-01"}, now) is False
     assert meeting_rounds._is_open_request({**sent, "status": "failed"}, None, now) is False
     assert meeting_rounds._is_open_request(None, None, now) is False
+
+
+# --- advisors removed from field days (don't visit) ---
+
+def test_exempt_advisor_doesnt_narrow_the_field_days():
+    fd = {"g": ["2026-12-10", "2026-12-17"]}  # the שוטף advisor "c" has no field days
+    window = [("2026-12-01", "2026-12-31")]
+    assert tasks_router._field_day_segments(window, ["g", "c"], fd) == []  # both must visit → no day
+    assert [s["start_date"] for s in tasks_router._field_day_segments(window, ["g", "c"], fd, {"c"})] == ["2026-12-10", "2026-12-17"]
+
+
+def test_meeting_whose_advisors_are_all_exempt_keeps_its_dates():
+    window = [("2026-12-01", "2026-12-31")]
+    assert tasks_router._field_day_segments(window, ["c"], {}, {"c"}) == [{"start_date": "2026-12-01", "end_date": "2026-12-31"}]
+    assert tasks_router._field_day_segments(window, [], {}, {"c"}) == []
+
+
+def test_combined_physical_meeting_uses_the_visiting_advisors_days():
+    school = {"id": "s", "name": "א", "stage": "yesodi", "principal_name": "מ", "principal_email": "m@example.com"}
+    cond = {"type": "meeting", "meeting_service_type": "gefen_current", "use_field_days": True, "meeting_type": "physical",
+            "date_segments": [{"date_from": "2026-12-01", "date_to": "2026-12-31"}], "participant_roles": ["principal"]}
+    ranges = tasks_router._build_meeting_ranges(
+        school, [cond], {"gefen": ["g"], "current": ["c"]}, {"meeting_duration_gefen": 60, "meeting_duration_current": 60},
+        None, {"g": ["2026-12-10"]}, {"c"},
+    )
+    assert ranges[0]["advisor_ids"] == ["g", "c"]  # both still attend (and must be free)
+    assert ranges[0]["segments"] == [{"start_date": "2026-12-10", "end_date": "2026-12-10"}]
+
+
+# --- who goes out to each physical school (meeting_rounds.physical_visitors) ---
+
+SCHOOL_GC = {"id": "s", "name": "א", "stage": "yesodi", "principal_name": "מ", "principal_email": "m@example.com"}
+GC_ADVISORS = {"gefen": ["g"], "current": ["c"]}
+GC_DURATIONS = {"meeting_duration_gefen": 60, "meeting_duration_current": 60}
+
+
+def physical_cond(service_type, **extra):
+    return {"type": "meeting", "meeting_service_type": service_type, "use_field_days": True, "meeting_type": "physical",
+            "date_segments": [{"date_from": "2026-12-01", "date_to": "2026-12-31"}], "participant_roles": ["principal"], **extra}
+
+
+def test_visitors_choose_whose_field_days_count():
+    assert tasks_router._visiting_advisors(["g", "c"], set(), ["g"]) == ["g"]
+    assert tasks_router._visiting_advisors(["g", "c"], set(), None) == ["g", "c"]
+    assert tasks_router._visiting_advisors(["g", "c"], {"g"}, ["g", "c"]) == ["c"]
+    ranges = tasks_router._build_meeting_ranges(SCHOOL_GC, [physical_cond("gefen_current")], GC_ADVISORS, GC_DURATIONS,
+                                                None, {"g": ["2026-12-10"], "c": ["2026-12-20"]}, set(), ["c"])
+    assert ranges[0]["segments"] == [{"start_date": "2026-12-20", "end_date": "2026-12-20"}]
+
+
+def test_separate_meeting_of_the_advisor_who_stays_is_remote():
+    conds = [physical_cond("gefen"), physical_cond("current")]  # a separate גפן+שוטף pair
+    ranges = tasks_router._build_meeting_ranges(SCHOOL_GC, conds, GC_ADVISORS, GC_DURATIONS, None, {"g": ["2026-12-10"]}, set(), ["g"])
+    by_type = {r["service_type"]: r for r in ranges}
+    assert by_type["gefen"]["meeting_type"] == "physical" and by_type["gefen"]["segments"] == [{"start_date": "2026-12-10", "end_date": "2026-12-10"}]
+    assert by_type["current"]["meeting_type"] == "remote"
+    assert by_type["current"]["segments"] == [{"start_date": "2026-12-01", "end_date": "2026-12-31"}]

@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 import meeting_rounds
 import task_logic
-from academic_years import DEFAULT_ACADEMIC_YEAR
+from academic_years import DEFAULT_ACADEMIC_YEAR, resolve_inherited_year_admin
 from auth import get_current_user
 from supabase_client import get_admin_client, reset_admin_client
 
@@ -44,6 +44,15 @@ class RoundCreateIn(BaseModel):
     manual_school_ids: list[str] | None = None
     requirement: RequirementIn
     physical_school_ids: list[str] = []
+    # Who goes to each physical גפן+שוטף school whose גפן and שוטף advisors differ —
+    # {school_id: [advisor_id]} from the creation "בעיות" window (POST /rounds/physical-check).
+    physical_visitors: dict[str, list[str]] = {}
+
+
+class PhysicalCheckIn(BaseModel):
+    academic_year: str = DEFAULT_ACADEMIC_YEAR
+    school_ids: list[str]
+    requirement: RequirementIn
 
 
 class RoundPatchIn(BaseModel):
@@ -54,6 +63,14 @@ class RoundPatchIn(BaseModel):
     requirement: RequirementIn | None = None
     physical_school_ids: list[str] | None = None
     excluded_school_ids: list[str] | None = None
+    # Advisors of physical schools who don't go out to the field (e.g. the שוטף advisor of a
+    # גפן+שוטף school when only the גפן advisor visits): no field days are asked of them.
+    field_exempt_advisor_ids: list[str] | None = None
+    # Editing the round's school list ("עריכת הסבב") — sent only when the filter or selection
+    # changed: the list is rebuilt from it (manual_school_ids set = a hand-picked list).
+    criteria: dict | None = None
+    manual_school_ids: list[str] | None = None
+    physical_visitors: dict[str, list[str]] | None = None
 
 
 class AudienceApplyIn(BaseModel):
@@ -90,6 +107,19 @@ def _get_round(db, user: dict, round_id: str) -> dict:
     if not rows:
         raise HTTPException(status_code=404, detail="הסבב לא נמצא")
     return rows[0]
+
+
+def _clean_visitors(db, org_id: str, visitors: dict[str, list[str]], physical_ids: set[str]) -> dict[str, list[str]]:
+    """Only the round's physical schools, only this org's advisors."""
+    advisor_ids = list({aid for ids in visitors.values() for aid in ids or []})
+    allowed = ({r["id"] for r in db.table("profiles").select("id").eq("org_id", org_id).in_("id", advisor_ids).execute().data or []}
+               if advisor_ids else set())
+    out = {}
+    for sid, ids in visitors.items():
+        kept = [aid for aid in dict.fromkeys(ids or []) if aid in allowed]
+        if sid in physical_ids and kept:
+            out[sid] = kept
+    return out
 
 
 def _org_school_ids(db, org_id: str, ids: list[str]) -> set[str]:
@@ -152,9 +182,45 @@ def create_round(body: RoundCreateIn, user: Annotated[dict, Depends(get_current_
         "criteria": None if body.manual_school_ids is not None else (body.criteria or {}),
         "school_ids": school_ids, "requirement": requirement,
         "physical_school_ids": [sid for sid in body.physical_school_ids if sid in set(school_ids)],
+        "physical_visitors": _clean_visitors(db, user["org_id"], body.physical_visitors, set(body.physical_school_ids) & set(school_ids)),
         "cached_total_schools": len(school_ids), "created_by": user["id"],
     }
     return db.table("meeting_rounds").insert(row).execute().data[0]
+
+
+@router.post("/physical-check")
+def physical_check(body: PhysicalCheckIn, user: Annotated[dict, Depends(get_current_user)]):
+    """The physical schools of a new round whose meeting is a combined גפן+שוטף one (by card
+    service type, or the round's own type) with different גפן and שוטף advisors — the creation
+    window asks, per school, which of them goes out to the school."""
+    _require_manager(user)
+    if body.requirement.meeting_service_type not in (task_logic.BY_SERVICE, "gefen_current"):
+        return {"schools": []}
+    db = get_admin_client()
+    ids = list(_org_school_ids(db, user["org_id"], list(dict.fromkeys(body.school_ids))))
+    if not ids:
+        return {"schools": []}
+    if body.requirement.meeting_service_type == task_logic.BY_SERVICE:
+        service = {sid: f.get("service_type") for sid, f in resolve_inherited_year_admin(db, ids, body.academic_year).items()}
+        ids = [sid for sid in ids if service.get(sid) == "gefen_current"]
+    lists: dict[str, dict[str, list[str]]] = {sid: {"gefen": [], "current": []} for sid in ids}
+    for t, table in (("gefen", "school_advisors_gefen"), ("current", "school_advisors_current")):
+        for r in (db.table(table).select("school_id, advisor_id").in_("school_id", ids).execute().data or []) if ids else []:
+            lists[r["school_id"]][t].append(r["advisor_id"])
+    conflicts = [sid for sid, l in lists.items() if l["gefen"] and l["current"] and set(l["gefen"]) != set(l["current"])]
+    if not conflicts:
+        return {"schools": []}
+    advisor_ids = list({a for sid in conflicts for t in ("gefen", "current") for a in lists[sid][t]})
+    names = {p["id"]: p.get("full_name") or p.get("email") or ""
+             for p in db.table("profiles").select("id, full_name, email").in_("id", advisor_ids).execute().data or []}
+    schools = {r["id"]: r for r in db.table("schools").select("id, name, city").in_("id", conflicts).execute().data or []}
+    return {"schools": sorted(
+        ({"school_id": sid, "school_name": schools.get(sid, {}).get("name"), "city": schools.get(sid, {}).get("city"),
+          "gefen": [{"id": a, "name": names.get(a, "")} for a in lists[sid]["gefen"]],
+          "current": [{"id": a, "name": names.get(a, "")} for a in lists[sid]["current"]]}
+         for sid in conflicts),
+        key=lambda x: x["school_name"] or "",
+    )}
 
 
 @router.get("/{round_id}")
@@ -225,10 +291,34 @@ def update_round(round_id: str, body: RoundPatchIn, user: Annotated[dict, Depend
     if body.requirement is not None:
         patch["requirement"] = _validate_requirement(body.requirement)
     members = set(rnd.get("school_ids") or [])
+    if body.criteria is not None or body.manual_school_ids is not None:
+        matched = task_logic.find_matching_schools(
+            user["org_id"], body.criteria or {}, rnd["academic_year"], manual_school_ids=body.manual_school_ids,
+        )
+        if not matched:
+            raise HTTPException(status_code=422, detail="אין בתי ספר שעונים על הסינון")
+        school_ids = [m["school_id"] for m in matched]
+        members = set(school_ids)
+        patch["school_ids"] = school_ids
+        patch["criteria"] = None if body.manual_school_ids is not None else (body.criteria or {})
+        # Kept only for schools still in the round.
+        patch["excluded_school_ids"] = [sid for sid in rnd.get("excluded_school_ids") or [] if sid in members]
+        patch["physical_school_ids"] = [sid for sid in rnd.get("physical_school_ids") or [] if sid in members]
+        patch["physical_visitors"] = {sid: v for sid, v in (rnd.get("physical_visitors") or {}).items() if sid in members}
     if body.physical_school_ids is not None:
         patch["physical_school_ids"] = [sid for sid in dict.fromkeys(body.physical_school_ids) if sid in members]
     if body.excluded_school_ids is not None:
         patch["excluded_school_ids"] = [sid for sid in dict.fromkeys(body.excluded_school_ids) if sid in members]
+    if body.physical_visitors is not None:
+        physical = set(patch.get("physical_school_ids", rnd.get("physical_school_ids") or []))
+        patch["physical_visitors"] = _clean_visitors(db, user["org_id"], body.physical_visitors, physical)
+    elif body.physical_school_ids is not None:
+        physical = set(patch["physical_school_ids"])
+        patch["physical_visitors"] = {sid: v for sid, v in (rnd.get("physical_visitors") or {}).items() if sid in physical}
+    if body.field_exempt_advisor_ids is not None:
+        ids = list(dict.fromkeys(body.field_exempt_advisor_ids))
+        allowed = {r["id"] for r in db.table("profiles").select("id").eq("org_id", user["org_id"]).in_("id", ids).execute().data or []} if ids else set()
+        patch["field_exempt_advisor_ids"] = [aid for aid in ids if aid in allowed]
     if not patch:
         return rnd
     patch["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -281,6 +371,8 @@ def apply_round_audience(round_id: str, body: AudienceApplyIn, user: Annotated[d
         "school_ids": school_ids,
         "physical_school_ids": [sid for sid in (rnd.get("physical_school_ids") or []) if sid in set(school_ids)],
         "excluded_school_ids": [sid for sid in (rnd.get("excluded_school_ids") or []) if sid in set(school_ids)],
+        "physical_visitors": {sid: v for sid, v in (rnd.get("physical_visitors") or {}).items() if sid in set(school_ids)},
+        "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     return db.table("meeting_rounds").update(patch).eq("id", round_id).execute().data[0]
 
@@ -339,12 +431,15 @@ def get_round_field_days(round_id: str, user: Annotated[dict, Depends(get_curren
     except Exception as exc:
         logger.warning("get_round_field_days duration enrichment failed (non-fatal): %s", exc)
 
+    visitors = rnd.get("physical_visitors") or {}
     advisors: dict[str, dict] = {}
     for s in physical:
         row = durations.get(s["school_id"], {})
         minutes = sum(row.get(f) or 60 for t in s["required_types"] for f in _DURATION_FIELDS.get(t, [])) or 60
         minutes *= max(1, (rnd.get("requirement") or {}).get("count_per_school") or 1)
-        for aid in s["advisor_ids"] or ["__none__"]:
+        # Only the advisors who actually go to this school (when the round recorded who does).
+        visiting = [aid for aid in s["advisor_ids"] if aid in visitors[s["school_id"]]] if s["school_id"] in visitors else s["advisor_ids"]
+        for aid in visiting or ["__none__"]:
             a = advisors.setdefault(aid, {"advisor_id": aid, "schools": [], "minutes": 0, "days": []})
             a["schools"].append({"school_id": s["school_id"], "school_name": s["school_name"], "city": s.get("city"), "status": s["status"]})
             if s["status"] not in ("done", "booked"):
@@ -362,12 +457,14 @@ def get_round_field_days(round_id: str, user: Annotated[dict, Depends(get_curren
                  for p in db.table("profiles").select("id, full_name, email").in_("id", real_ids).execute().data or []}
     else:
         names = {}
+    exempt = set(rnd.get("field_exempt_advisor_ids") or [])
     out = []
     for a in advisors.values():
         a["name"] = names.get(a["advisor_id"], "")
+        a["exempt"] = a["advisor_id"] in exempt
         a["suggested_days"] = -(-a["minutes"] // FIELD_DAY_MEETING_MINUTES) if a["minutes"] else 0
         out.append(a)
-    out.sort(key=lambda a: (a["advisor_id"] == "__none__", -(a["suggested_days"] - len(a["days"]))))
+    out.sort(key=lambda a: (a["advisor_id"] == "__none__", a["exempt"], -(a["suggested_days"] - len(a["days"]))))
     return {"advisors": out, "start_date": rnd["start_date"], "end_date": rnd["end_date"],
             "field_day_meeting_minutes": FIELD_DAY_MEETING_MINUTES}
 
