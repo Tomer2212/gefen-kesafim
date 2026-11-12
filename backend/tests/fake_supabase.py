@@ -18,6 +18,7 @@ class _Query:
     def __init__(self, db, table):
         self.db, self.table, self.filters, self.op, self.payload = db, table, [], "select", None
         self.row_limit = None
+        self.order_by = None
 
     def select(self, *_a, **_k):
         self.op = "select"
@@ -43,12 +44,19 @@ class _Query:
         self.row_limit = n
         return self
 
+    def order(self, col, desc=False):
+        self.order_by = (col, desc)
+        return self
+
     def _filter(self, fn):
         self.filters.append(fn)
         return self
 
     def eq(self, col, val):
         return self._filter(lambda r: r.get(col) == val)
+
+    def neq(self, col, val):
+        return self._filter(lambda r: r.get(col) != val)
 
     def gt(self, col, val):
         return self._filter(lambda r: r.get(col) is not None and str(r.get(col)) > str(val))
@@ -93,6 +101,9 @@ class _Query:
                 time.sleep(0.000002)  # distinct created_at values, like now() per statement
                 return _Result([dict(row)])
             matched = [r for r in rows if self._match(r)]
+            if self.order_by:
+                col, desc = self.order_by
+                matched = sorted(matched, key=lambda r: str(r.get(col) or ""), reverse=desc)
             if self.op == "update":
                 for r in matched:
                     r.update(self.payload)

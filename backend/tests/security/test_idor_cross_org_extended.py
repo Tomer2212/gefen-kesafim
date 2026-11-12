@@ -1742,3 +1742,31 @@ def test_round_exclusions_cross_org_rejected(org_a_client, org_b_round, admin_db
     assert org_a_client.patch(f"/rounds/{org_b_round['id']}", json={"advisor_exclusions": {ORG_A_MANAGER_ID: ["all"]}}).status_code == 404
     row = admin_db.table("meeting_rounds").select("advisor_exclusions").eq("id", org_b_round["id"]).execute().data[0]
     assert ORG_A_MANAGER_ID not in (row["advisor_exclusions"] or {})
+
+
+# ---------------------------------------------------------------------------
+# "שלח שוב לנכשלים" — POST /tasks/{task_id}/retry-failed re-sends a task's failed messages.
+# Cross-org: rejected before any write. Same org: a task with no failed messages (nothing is
+# re-sent — no real email goes out from the test).
+# ---------------------------------------------------------------------------
+
+
+def test_retry_failed_cross_org_rejected(org_b_client, admin_db):
+    foreign_task = _any_task_id(admin_db, ORG_A_ID)
+    before = admin_db.table("org_task_messages").select("id, status").eq("task_id", foreign_task).execute().data
+    resp = org_b_client.post(f"/tasks/{foreign_task}/retry-failed")
+    assert resp.status_code in (403, 404), resp.text
+    after = admin_db.table("org_task_messages").select("id, status").eq("task_id", foreign_task).execute().data
+    assert sorted(map(str, after)) == sorted(map(str, before))
+
+
+def test_retry_failed_same_org_works(org_b_client, admin_db):
+    tasks = admin_db.table("org_tasks").select("id").eq("org_id", ORG_B_ID).execute().data or []
+    failed = {r["task_id"] for r in admin_db.table("org_task_messages").select("task_id").eq("status", "failed")
+              .in_("task_id", [t["id"] for t in tasks] or ["00000000-0000-0000-0000-000000000000"]).execute().data or []}
+    clean = [t["id"] for t in tasks if t["id"] not in failed]
+    if not clean:
+        pytest.skip("no org B task without failed messages")
+    resp = org_b_client.post(f"/tasks/{clean[0]}/retry-failed")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"retried": 0}

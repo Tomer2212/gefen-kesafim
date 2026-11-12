@@ -8,8 +8,10 @@ import re
 import secrets
 import shutil
 import tempfile
+import threading
 import time
 import urllib.parse
+import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated
@@ -31,7 +33,7 @@ from routers import schools_router as _schools_router
 from academic_years import DEFAULT_ACADEMIC_YEAR, resolve_inherited_year_admin
 from auth import get_current_user
 from booking_logic import get_org_mailbox_capability, format_ranges_html, format_ranges_text
-from email_resend import send_resend_email
+from email_resend import ResendQuotaExceeded, send_resend_email
 from supabase_client import get_admin_client, reset_admin_client
 
 logger = logging.getLogger(__name__)
@@ -361,6 +363,8 @@ class TaskCreateIn(BaseModel):
     # live request from another task of the round (by default they're left out).
     advisor_exclusions: dict | None = None  # "יועצים שקובעים לעצמם" — {advisor_id: ["all"] |
     # [part, ...]}; stamped on every meeting condition (task_logic.apply_advisor_exclusions).
+    client_request_id: uuid.UUID | None = None  # one per wizard opening — a repeated create
+    # (e.g. clicked again after a timeout) returns the task already created instead of a second one.
 
 
 def _org_default_exclusions(org_id: str) -> dict:
@@ -1687,6 +1691,20 @@ def _prepare_meeting_conditions(success_criteria: dict | None, org_id: str, advi
         c["stage_scope_by_school"] = {sid: scope for sid, scope in c["stage_scope_by_school"].items() if sid in allowed}
 
 
+def _task_by_client_request_id(org_id: str, client_request_id: str | None) -> dict | None:
+    if not client_request_id:
+        return None
+    try:
+        rows = (
+            get_admin_client().table("org_tasks").select("*")
+            .eq("org_id", org_id).eq("client_request_id", client_request_id).execute().data or []
+        )
+        return rows[0] if rows else None
+    except Exception as exc:
+        logger.warning("_task_by_client_request_id failed (non-fatal): %s", exc)
+        return None
+
+
 @router.post("/")
 def create_task(body: TaskCreateIn, user: Annotated[dict, Depends(get_current_user)]):
     """Round-2 redesign: creation now immediately queues messages to whoever matches (see
@@ -1697,6 +1715,10 @@ def create_task(body: TaskCreateIn, user: Annotated[dict, Depends(get_current_us
     resolved/skipped/completed missing contacts — this endpoint doesn't need to know about
     that flow, it just queues to whatever final audience it's given."""
     _require_manager(user)
+    client_request_id = str(body.client_request_id) if body.client_request_id else None
+    existing = _task_by_client_request_id(user["org_id"], client_request_id)
+    if existing:
+        return {**existing, "missing_contact_school_ids": []}
     criteria = body.criteria.model_dump()
     manual_ids = body.manual_school_ids
     if not (criteria.get("groups") or manual_ids):
@@ -1762,12 +1784,17 @@ def create_task(body: TaskCreateIn, user: Annotated[dict, Depends(get_current_us
                     "round_id": body.round_id,
                     "round_include_open_requests": bool(body.round_id and body.include_open_requests),
                     "advisor_exclusions": advisor_exclusions or None,
+                    "client_request_id": client_request_id,
                 })
                 .execute()
             )
             task = row.data[0]
             break
         except Exception as exc:
+            # A concurrent identical request won the unique (org_id, client_request_id) index.
+            existing = _task_by_client_request_id(user["org_id"], client_request_id)
+            if existing:
+                return {**existing, "missing_contact_school_ids": []}
             if attempt == 0:
                 logger.warning("create_task attempt 1 failed: %s — resetting and retrying", exc)
                 reset_admin_client()
@@ -1776,6 +1803,9 @@ def create_task(body: TaskCreateIn, user: Annotated[dict, Depends(get_current_us
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
     missing_contact_school_ids = []
+    if not is_future_scheduled and len(matched_school_ids) > INLINE_SEND_MAX_SCHOOLS:
+        _send_in_background(task, user["org_id"], matched_school_ids, skip_done=body.track_success)
+        return {**task, "missing_contact_school_ids": [], "sending_in_background": True}
     if not is_future_scheduled and matched_school_ids:
         if body.track_success:
             # Never send a "please do the thing" reminder to a school that already satisfies
@@ -2499,6 +2529,22 @@ def _fetch_school_notes_map(db, task_id: str, school_ids: list[str]) -> dict[str
     return {r["school_id"]: r for r in rows}
 
 
+# Above this many schools, a send is built and dispatched in the background (_send_in_background)
+# and the request returns at once: building each school's booking link and emailing it one by
+# one took ~2 minutes for 472 schools (2026-11-12), far past the browser's 45 s timeout — the
+# manager saw "failed" while it was still sending, and created the task a second time.
+INLINE_SEND_MAX_SCHOOLS = 20
+QUEUE_INSERT_CHUNK = 25
+# A send of this task still being built/sent (rows pending or sending, due, created this recently)
+# blocks another bulk send of it — otherwise a click on "שלח תזכורת" right after creating a large
+# task would email every school twice.
+SEND_IN_PROGRESS_WINDOW_MINUTES = 15
+# Resend's per-second rate limit — a background drain spaces its sends at least this far apart.
+BACKGROUND_SEND_MIN_INTERVAL_SECONDS = 0.55
+# A message Resend refused for quota stays "pending" with this note; the queue retries it later.
+QUOTA_PENDING_NOTE = "מכסת שליחת המיילים היומית מוצתה — ההודעה תישלח אוטומטית כשהמכסה תתחדש"
+
+
 def _send_message_now(db, org_id: str, school_id: str, channel: str, subject: str, body: str,
                        recipient_email: str | None, recipient_phone: str | None,
                        attachment_keys: list[dict] | None, created_by: str | None = None) -> tuple[str, str | None]:
@@ -2507,7 +2553,8 @@ def _send_message_now(db, org_id: str, school_id: str, channel: str, subject: st
     immediate-send path below (email_resend/whatsapp no longer wait for the cron at all — see
     that call site's comment for why). Returns ("sent"|"outlook_pending", None) or
     ("failed", error_str); never raises, so callers can always safely write the returned status
-    straight into a row.
+    straight into a row. ("quota", note) means Resend's daily/monthly quota is used up: the row
+    must stay pending, and the caller stops sending further email in this run.
 
     Round 15: email_outlook returns "outlook_pending", not "sent" — Graph accepting the send
     only means the request was queued for delivery, not that it arrived (a real bounce/NDR can
@@ -2548,6 +2595,8 @@ def _send_message_now(db, org_id: str, school_id: str, channel: str, subject: st
         else:  # email_resend (default)
             send_resend_email(recipient_email, subject or "", body or "", attachments=attachments)
         return "sent", None
+    except ResendQuotaExceeded:
+        return "quota", QUOTA_PENDING_NOTE
     except Exception as exc:
         return "failed", str(exc)
 
@@ -2571,7 +2620,7 @@ def _mark_already_done_schools(db, task_id: str, matched_school_ids: list[str], 
 
 
 def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[str],
-                                 scheduled_at: datetime | None = None) -> tuple[list[str], list[dict]]:
+                                 scheduled_at: datetime | None = None, send_now: bool = True) -> tuple[list[str], list[dict]]:
     """Builds and inserts org_task_messages rows. Returns
     ``(missing_contact_ids, broadcast_skipped)`` where:
     - ``missing_contact_ids`` — school_ids missing the contact info required by the chosen
@@ -2588,7 +2637,10 @@ def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[st
     like the existing "תיאום ישיר" feature already does. Previously every channel queued
     uniformly regardless of rate-limit need, which is what caused a single-school Resend
     message to sit "pending" for however long it took the next GitHub Actions cron tick to
-    fire (up to ~5 min nominally, more in practice) instead of sending immediately."""
+    fire (up to ~5 min nominally, more in practice) instead of sending immediately.
+
+    send_now=False only builds the rows (all "pending") — _send_in_background then drains them
+    one by one, so a large send never runs inside a request."""
     message_config = task.get("message_config") or {}
     recipient_role = message_config.get("recipient_role")
     channel = message_config.get("channel")
@@ -2653,6 +2705,7 @@ def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[st
     missing = []
     skipped_broadcast = []
     queue_rows = []
+    quota_hit = False  # Resend quota used up — the remaining rows stay pending for the queue
     _today = date.today()
     for school in schools:
         # Broadcast-reminder exclusion — deliberate manager choice, checked FIRST so an excluded
@@ -2813,18 +2866,28 @@ def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[st
             }
             if scheduled_at:
                 row["scheduled_at"] = scheduled_at.isoformat()
-            elif channel != "email_outlook":
+            elif send_now and channel != "email_outlook" and not quota_hit:
                 status, error = _send_message_now(
                     db, org_id, school["id"], channel, row["subject"], row["body"],
                     row.get("recipient_email"), row.get("recipient_phone"), row.get("attachment_keys"),
                     created_by=task.get("created_by"),
                 )
-                row["status"] = status
-                if status == "sent":
-                    row["sent_at"] = datetime.now(timezone.utc).isoformat()
-                else:
+                if status == "quota":
+                    quota_hit = True
                     row["error"] = error
+                else:
+                    row["status"] = status
+                    if status == "sent":
+                        row["sent_at"] = datetime.now(timezone.utc).isoformat()
+                    else:
+                        row["error"] = error
             queue_rows.append(row)
+            if len(queue_rows) >= QUEUE_INSERT_CHUNK:
+                # Written as they're built: a large send shows up as "pending" within seconds
+                # (and _send_in_running guards against a second send), and a crash mid-way never
+                # loses the record of messages already sent inline.
+                db.table("org_task_messages").insert(queue_rows).execute()
+                queue_rows = []
 
     if queue_rows:
         db.table("org_task_messages").insert(queue_rows).execute()
@@ -2842,6 +2905,80 @@ def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[st
             logger.warning("_queue_messages_for_schools: failed to consume 'once' exclusions (non-fatal): %s", exc)
 
     return missing, skipped_broadcast
+
+
+def _send_in_running(db, task_id: str) -> bool:
+    """True while an immediate send of this task is still going (see SEND_IN_PROGRESS_WINDOW_MINUTES).
+    Rows held back for a future time, or left pending for longer (e.g. Resend quota), don't count."""
+    now = datetime.now(timezone.utc)
+    rows = (
+        db.table("org_task_messages").select("id")
+        .eq("task_id", task_id).in_("status", ["pending", "sending"])
+        .lte("scheduled_at", now.isoformat())
+        .gte("created_at", (now - timedelta(minutes=SEND_IN_PROGRESS_WINDOW_MINUTES)).isoformat())
+        .limit(1).execute().data or []
+    )
+    return bool(rows)
+
+
+def _drain_task_messages(task_id: str) -> None:
+    """Sends a task's pending, due, non-Outlook messages one by one — each claimed first, exactly
+    like process_message_queue (which stays the backstop: it picks up whatever is left if this
+    worker dies, and resets rows stuck in "sending"). Stops at a Resend quota refusal, leaving
+    the rest pending. Outlook rows stay with the queue, which paces them for Graph."""
+    last_send = 0.0
+    while True:
+        db = get_admin_client()
+        rows = (
+            db.table("org_task_messages").select("*")
+            .eq("task_id", task_id).eq("status", "pending").neq("channel", "email_outlook")
+            .lte("scheduled_at", datetime.now(timezone.utc).isoformat())
+            .order("created_at").limit(50).execute().data or []
+        )
+        progressed = False
+        for row in rows:
+            if not _schools_router.claim_queue_row(db, "org_task_messages", row["id"], {"claimed_at": datetime.now(timezone.utc).isoformat()}):
+                continue
+            wait = BACKGROUND_SEND_MIN_INTERVAL_SECONDS - (time.monotonic() - last_send)
+            if wait > 0:
+                time.sleep(wait)
+            outcome = _send_queued_row(db, row)
+            last_send = time.monotonic()
+            if outcome == "quota":
+                return
+            progressed = True
+        if not progressed:
+            return
+
+
+def _send_in_background(task: dict, org_id: str, school_ids: list[str],
+                        scheduled_at: datetime | None = None, skip_done: bool = False) -> None:
+    """A send to more than INLINE_SEND_MAX_SCHOOLS schools: builds the messages (booking links
+    included) and sends them on a background thread, so the request returns at once.
+    skip_done leaves out schools that already meet the task's success condition (as create_task
+    does inline). Rows are written before anything is sent, so a send cut short (deploy, crash)
+    is finished by process_message_queue — never sent twice."""
+    def run():
+        try:
+            db = get_admin_client()
+            targets = school_ids
+            if skip_done:
+                progress = task_logic.compute_task_progress(org_id, task, task.get("academic_year") or DEFAULT_ACADEMIC_YEAR)
+                targets = [r["school_id"] for r in progress["schools"] if not r["done"]]
+                _mark_already_done_schools(db, task["id"], school_ids, targets)
+            if targets:
+                _queue_messages_for_schools(db, task, org_id, targets, scheduled_at, send_now=False)
+            if not scheduled_at:
+                _drain_task_messages(task["id"])
+        except Exception as exc:
+            logger.error("_send_in_background failed for task %s: %s", task.get("id"), exc, exc_info=True)
+        finally:
+            try:
+                task_logic.recompute_task_status_and_cache(get_admin_client(), org_id, task)
+            except Exception as exc:
+                logger.warning("_send_in_background: status recompute failed (non-fatal): %s", exc)
+
+    threading.Thread(target=run, name=f"task-send-{task.get('id')}", daemon=True).start()
 
 
 @router.post("/{task_id}/send")
@@ -2862,6 +2999,11 @@ def send_task_bulk(task_id: str, body: SendIn, user: Annotated[dict, Depends(get
 
     if not target_ids:
         return {"queued": 0, "missing_contact_school_ids": []}
+    if _send_in_running(db, task_id):
+        raise HTTPException(status_code=409, detail={
+            "send_in_progress": True,
+            "message": "שליחת ההודעות של המשימה עדיין מתבצעת — אפשר לשלוח תזכורת אחרי שתסתיים (הסטטוס מתעדכן בטבלה).",
+        })
 
     channel = (task.get("message_config") or {}).get("channel")
     if channel == "email_outlook" and len(target_ids) > OUTLOOK_SEND_WARN_THRESHOLD and not body.confirm_outlook_limit:
@@ -2875,6 +3017,13 @@ def send_task_bulk(task_id: str, body: SendIn, user: Annotated[dict, Depends(get
             "count": len(target_ids),
             "threshold": OUTLOOK_SEND_WARN_THRESHOLD,
         })
+
+    if len(target_ids) > INLINE_SEND_MAX_SCHOOLS:
+        if task.get("needs_outlook_confirmation"):
+            db.table("org_tasks").update({"needs_outlook_confirmation": False}).eq("id", task_id).execute()
+        _send_in_background(task, user["org_id"], target_ids, scheduled_at)
+        return {"queued": len(target_ids), "missing_contact_school_ids": [], "broadcast_skipped_schools": [],
+                "sending_in_background": True}
 
     missing, broadcast_skipped = _queue_messages_for_schools(db, task, user["org_id"], target_ids, scheduled_at)
     queued = len(target_ids) - len(missing) - len(broadcast_skipped)
@@ -2892,6 +3041,45 @@ def send_task_bulk(task_id: str, body: SendIn, user: Annotated[dict, Depends(get
             "queued": queued,
         })
     return {"queued": queued, "missing_contact_school_ids": [], "broadcast_skipped_schools": broadcast_skipped}
+
+
+@router.post("/{task_id}/retry-failed")
+def retry_failed_messages(task_id: str, user: Annotated[dict, Depends(get_current_user)]):
+    """"שלח שוב לנכשלים": sends the task's failed messages again — the very same rows (same
+    recipient, same booking link), not newly built ones, so nobody who was already reached gets
+    a second email. Per recipient only the latest failed row is retried, and only when no other
+    message of this task reached that recipient; schools that already meet the task's success
+    condition are left alone. Sending runs in the background (_drain_task_messages)."""
+    _require_manager(user)
+    db = get_admin_client()
+    task = _get_task_or_404(db, task_id, user["org_id"])
+    rows = (
+        db.table("org_task_messages")
+        .select("id, school_id, recipient_email, recipient_phone, status, created_at")
+        .eq("task_id", task_id).order("created_at", desc=True).execute().data or []
+    )
+
+    def recipient_key(r):
+        return r["school_id"], (r.get("recipient_email") or r.get("recipient_phone") or "").strip().lower()
+
+    reached = {recipient_key(r) for r in rows if r["status"] in ("sent", "outlook_pending", "pending", "sending")}
+    done_ids: set[str] = set()
+    if task.get("track_success", True):
+        progress = task_logic.compute_task_progress(user["org_id"], task, task.get("academic_year") or DEFAULT_ACADEMIC_YEAR)
+        done_ids = {r["school_id"] for r in progress["schools"] if r["done"]}
+    retry_ids, seen = [], set()
+    for r in rows:  # newest first
+        key = recipient_key(r)
+        if r["status"] != "failed" or key in reached or key in seen or r["school_id"] in done_ids:
+            continue
+        seen.add(key)
+        retry_ids.append(r["id"])
+    if retry_ids:
+        db.table("org_task_messages").update({
+            "status": "pending", "error": None, "scheduled_at": datetime.now(timezone.utc).isoformat(),
+        }).in_("id", retry_ids).eq("status", "failed").execute()
+        _send_in_background(task, user["org_id"], [])
+    return {"retried": len(retry_ids)}
 
 
 @router.post("/{task_id}/schools/{school_id}/send")
@@ -3112,6 +3300,78 @@ async def upload_task_attachment(
     return {"storage_key": storage_key, "filename": file.filename}
 
 
+def _send_queued_row(db, row: dict) -> str:
+    """Sends one already-claimed ("sending") org_task_messages row and writes its outcome:
+    "sent" | "failed" | "skipped" | "quota" (Resend quota used up — the row goes back to
+    "pending" with QUOTA_PENDING_NOTE). Shared by process_message_queue and
+    _drain_task_messages. Never raises."""
+    try:
+        task = db.table("org_tasks").select("org_id, created_by, academic_year").eq("id", row["task_id"]).execute().data
+        org_id = task[0]["org_id"] if task else None
+        created_by = task[0]["created_by"] if task else None
+        task_academic_year = (task[0].get("academic_year") if task else None) or DEFAULT_ACADEMIC_YEAR
+        if not org_id:
+            raise ValueError(f"task {row['task_id']} not found for queued message {row['id']}")
+
+        # Belt-and-suspenders re-check (bugs #10/#13): a row can have been queued before an
+        # exclusion/opt-out was recorded, or the school's client_status could have changed
+        # since queue-time, so this is checked again right before the actual send, not only
+        # at queue-time in _queue_messages_for_schools.
+
+        # Broadcast-reminder exclusion — a 'forever'/'until' exclusion may have been added
+        # after this row was queued, or an 'until' date may have "activated" between queue
+        # time and now (never 'once' — those never enter the queue). No email needed.
+        skip_note_rows = (
+            db.table("org_task_school_notes").select("broadcast_skip_mode, broadcast_skip_until")
+            .eq("task_id", row["task_id"]).eq("school_id", row["school_id"]).execute().data or []
+        )
+        if skip_note_rows and _broadcast_skip_active(skip_note_rows[0], date.today()):
+            db.table("org_task_messages").update({"status": "skipped"}).eq("id", row["id"]).execute()
+            return "skipped"
+
+        recipient_email = (row.get("recipient_email") or "").strip().lower()
+        if recipient_email:
+            is_opted_out = bool(task_logic.opted_out_recipients(
+                db, task_academic_year, {row["school_id"]: recipient_email},
+            ))
+            note_rows = (
+                db.table("org_task_school_notes").select("excluded_emails")
+                .eq("task_id", row["task_id"]).eq("school_id", row["school_id"]).execute().data or []
+            )
+            excluded = {e.lower() for e in (note_rows[0].get("excluded_emails") or [])} if note_rows else set()
+            if is_opted_out or recipient_email in excluded:
+                db.table("org_task_messages").update({"status": "skipped"}).eq("id", row["id"]).execute()
+                return "skipped"
+
+        status, error = _send_message_now(
+            db, org_id, row["school_id"], row["channel"], row["subject"], row["body"],
+            row.get("recipient_email"), row.get("recipient_phone"), row.get("attachment_keys"),
+            created_by=created_by,
+        )
+        if status == "quota":
+            db.table("org_task_messages").update({"status": "pending", "error": error}).eq("id", row["id"]).execute()
+            return "quota"
+        if status == "sent":
+            db.table("org_task_messages").update({"status": "sent", "sent_at": "now()", "error": None}).eq("id", row["id"]).execute()
+            return "sent"
+        if status == "outlook_pending":
+            # Round 15 — Graph accepted the send, but that's not confirmed delivery (a bounce
+            # can still arrive minutes later). Held in this interim status until
+            # process_message_queue's grace-window check confirms it or falls back to Resend.
+            db.table("org_task_messages").update({"status": "outlook_pending", "outlook_sent_at": "now()"}).eq("id", row["id"]).execute()
+            return "sent"
+        logger.warning("_send_queued_row: failed to send row %s: %s", row["id"], error)
+        db.table("org_task_messages").update({"status": "failed", "error": error}).eq("id", row["id"]).execute()
+        return "failed"
+    except Exception as exc:
+        logger.warning("_send_queued_row: failed to send row %s: %s", row["id"], exc)
+        try:
+            db.table("org_task_messages").update({"status": "failed", "error": str(exc)}).eq("id", row["id"]).execute()
+        except Exception as log_exc:
+            logger.error("_send_queued_row: failed to mark row %s failed: %s", row["id"], log_exc)
+        return "failed"
+
+
 @router.post("/process-message-queue")
 def process_message_queue(request: Request):
     """Cron-triggered (same GitHub Actions convention as process-booking-email-queue in
@@ -3144,87 +3404,33 @@ def process_message_queue(request: Request):
     touched_task_ids: set[str] = set()  # recomputed once each at the end (not per-row — see below)
     last_outlook_send_at = None  # monotonic clock — paces real email_outlook sends only (see
     # OUTLOOK_SEND_MIN_INTERVAL_SECONDS); other channels in the same batch are unaffected.
+    quota_hit = False
     for row in rows:
+        if quota_hit and row["channel"] == "email_resend":
+            continue  # Resend refused for quota earlier in this run — leave it pending
         # Claim the row first (pending → sending, atomically), so two overlapping runs can
         # never both send it.
         if not _schools_router.claim_queue_row(db, "org_task_messages", row["id"], {"claimed_at": datetime.now(timezone.utc).isoformat()}):
             continue
-        try:
-            task = db.table("org_tasks").select("org_id, created_by, academic_year").eq("id", row["task_id"]).execute().data
-            org_id = task[0]["org_id"] if task else None
-            created_by = task[0]["created_by"] if task else None
-            task_academic_year = (task[0].get("academic_year") if task else None) or DEFAULT_ACADEMIC_YEAR
-            if not org_id:
-                raise ValueError(f"task {row['task_id']} not found for queued message {row['id']}")
-            touched_task_ids.add(row["task_id"])
-
-            # Belt-and-suspenders re-check (bugs #10/#13): a row can have been queued before an
-            # exclusion/opt-out was recorded, or the school's client_status could have changed
-            # since queue-time, so this is checked again right before the actual send, not only
-            # at queue-time in _queue_messages_for_schools.
-
-            # Broadcast-reminder exclusion — a 'forever'/'until' exclusion may have been added
-            # after this row was queued, or an 'until' date may have "activated" between queue
-            # time and now (never 'once' — those never enter the queue). No email needed.
-            skip_note_rows = (
-                db.table("org_task_school_notes").select("broadcast_skip_mode, broadcast_skip_until")
-                .eq("task_id", row["task_id"]).eq("school_id", row["school_id"]).execute().data or []
-            )
-            if skip_note_rows and _broadcast_skip_active(skip_note_rows[0], date.today()):
-                db.table("org_task_messages").update({"status": "skipped"}).eq("id", row["id"]).execute()
-                skipped += 1
-                continue
-
-            recipient_email = (row.get("recipient_email") or "").strip().lower()
-            if recipient_email:
-                is_opted_out = bool(task_logic.opted_out_recipients(
-                    db, task_academic_year, {row["school_id"]: recipient_email},
-                ))
-                note_rows = (
-                    db.table("org_task_school_notes").select("excluded_emails")
-                    .eq("task_id", row["task_id"]).eq("school_id", row["school_id"]).execute().data or []
-                )
-                excluded = {e.lower() for e in (note_rows[0].get("excluded_emails") or [])} if note_rows else set()
-                if is_opted_out or recipient_email in excluded:
-                    db.table("org_task_messages").update({"status": "skipped"}).eq("id", row["id"]).execute()
-                    skipped += 1
-                    continue
-
-            if row["channel"] == "email_outlook" and last_outlook_send_at is not None:
-                # Real pacing (not just the incidental cron-cadence/batch-size protection) —
-                # measured from actual elapsed time so Graph's own response latency counts
-                # toward the interval instead of stacking on top of a blind sleep.
-                wait = OUTLOOK_SEND_MIN_INTERVAL_SECONDS - (time.monotonic() - last_outlook_send_at)
-                if wait > 0:
-                    time.sleep(wait)
-
-            status, error = _send_message_now(
-                db, org_id, row["school_id"], row["channel"], row["subject"], row["body"],
-                row.get("recipient_email"), row.get("recipient_phone"), row.get("attachment_keys"),
-                created_by=created_by,
-            )
-            if row["channel"] == "email_outlook":
-                last_outlook_send_at = time.monotonic()
-            if status == "sent":
-                db.table("org_task_messages").update({"status": "sent", "sent_at": "now()"}).eq("id", row["id"]).execute()
-                sent += 1
-            elif status == "outlook_pending":
-                # Round 15 — Graph accepted the send, but that's not confirmed delivery (a bounce
-                # can still arrive minutes later). Held in this interim status until the
-                # grace-window check below either confirms it or falls back to Resend.
-                db.table("org_task_messages").update({"status": "outlook_pending", "outlook_sent_at": "now()"}).eq("id", row["id"]).execute()
-                sent += 1
-            else:
-                logger.warning("process_message_queue: failed to send row %s: %s", row["id"], error)
-                db.table("org_task_messages").update({"status": "failed", "error": error}).eq("id", row["id"]).execute()
-                failed += 1
-        except Exception as exc:
-            logger.warning("process_message_queue: failed to send row %s: %s", row["id"], exc)
-            try:
-                db.table("org_task_messages").update({"status": "failed", "error": str(exc)}).eq("id", row["id"]).execute()
-            except Exception as log_exc:
-                logger.error("process_message_queue: failed to mark row %s failed: %s", row["id"], log_exc)
+        if row["channel"] == "email_outlook" and last_outlook_send_at is not None:
+            # Real pacing (not just the incidental cron-cadence/batch-size protection) —
+            # measured from actual elapsed time so Graph's own response latency counts
+            # toward the interval instead of stacking on top of a blind sleep.
+            wait = OUTLOOK_SEND_MIN_INTERVAL_SECONDS - (time.monotonic() - last_outlook_send_at)
+            if wait > 0:
+                time.sleep(wait)
+        outcome = _send_queued_row(db, row)
+        touched_task_ids.add(row["task_id"])
+        if row["channel"] == "email_outlook" and outcome != "skipped":
+            last_outlook_send_at = time.monotonic()
+        if outcome == "quota":
+            quota_hit = True
+        elif outcome == "skipped":
+            skipped += 1
+        elif outcome == "failed":
             failed += 1
+        else:
+            sent += 1
 
     # Round 15 — second pass: confirm or fall back any Outlook sends that cleared their grace
     # window (find_bounce_for_subject relies on a real NDR that empirically arrives within ~1
@@ -3402,6 +3608,8 @@ def _try_activate_scheduled_task(db, task: dict) -> dict:
         channel = (task.get("message_config") or {}).get("channel")
         if send_targets and channel == "email_outlook" and len(send_targets) > OUTLOOK_SEND_WARN_THRESHOLD:
             db.table("org_tasks").update({"needs_outlook_confirmation": True}).eq("id", task["id"]).execute()
+        elif len(send_targets) > INLINE_SEND_MAX_SCHOOLS:
+            _send_in_background(task, org_id, send_targets)
         elif send_targets:
             _queue_messages_for_schools(db, task, org_id, send_targets)
 

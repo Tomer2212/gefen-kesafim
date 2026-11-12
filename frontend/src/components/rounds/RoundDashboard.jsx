@@ -146,16 +146,19 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
     for (const s of rows) if (s.request?.task_id) (byTask[s.request.task_id] ||= []).push(s.school_id);
     setBusy(true);
     let sent = 0;
+    let stillSending = 0;
     try {
       for (const [taskId, ids] of Object.entries(byTask)) {
         try {
           const r = await axios.post(`/tasks/${taskId}/send`, { only_school_ids: ids });
           sent += r.data?.queued || 0;
         } catch (e) {
+          if (e.response?.data?.detail?.send_in_progress) stillSending += ids.length;
           sent += e.response?.data?.detail?.queued || 0;
         }
       }
-      setNotice(`נשלחו ${sent} תזכורות (באותו נוסח של כל משימה, עם קישור חדש).`);
+      setNotice(`נשלחו ${sent} תזכורות (באותו נוסח של כל משימה, עם קישור חדש).`
+        + (stillSending ? ` ${stillSending} בתי ספר לא קיבלו תזכורת כי השליחה הקודמת אליהם עדיין מתבצעת — נסו שוב בעוד כמה דקות.` : ""));
       load();
     } finally {
       setBusy(false);

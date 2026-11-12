@@ -158,6 +158,8 @@ export default function TaskDetailContent({ taskId, onTaskChange }) {
   const [task, setTask] = useState(null);
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
+  const [retryingFailed, setRetryingFailed] = useState(false);
+  const [sendNotice, setSendNotice] = useState("");
   const [sendingRow, setSendingRow] = useState(null);
   const [missingContact, setMissingContact] = useState(null); // {schoolIds, channel, recipientRole}
   const [optedOutAlert, setOptedOutAlert] = useState(null); // school_name of a resend that was skipped due to opt-out
@@ -301,6 +303,23 @@ export default function TaskDetailContent({ taskId, onTaskChange }) {
     padBottom: detailPadBottom,
   } = useRowVirtualizer(displayRows, { estimateSize: 44, getItemKey: r => r.school_id });
 
+  // "שלח שוב לנכשלים" — re-sends the failed messages themselves (same recipient and link), in the
+  // background; recipients already reached are never emailed again (POST /tasks/{id}/retry-failed).
+  async function handleRetryFailed() {
+    setRetryingFailed(true);
+    setSendNotice("");
+    try {
+      const res = await axios.post(`/tasks/${taskId}/retry-failed`);
+      const n = res.data?.retried || 0;
+      setSendNotice(n ? `${n} הודעות נשלחות שוב ברקע — הסטטוס יתעדכן תוך כמה דקות.` : "אין הודעות לשליחה חוזרת.");
+    } catch {
+      setSendNotice("השליחה החוזרת נכשלה — נסו שוב.");
+    } finally {
+      setRetryingFailed(false);
+      loadTask();
+    }
+  }
+
   async function handleBulkSend(confirmOutlookLimit = false) {
     setSending(true);
     const wasScheduled = !!scheduleSendAt;
@@ -311,12 +330,17 @@ export default function TaskDetailContent({ taskId, onTaskChange }) {
       });
       setScheduleSendAt("");
       setOutlookLimitWarning(null);
-      setBulkSendResult({ scheduled: wasScheduled, skipped: res.data?.broadcast_skipped_schools || [] });
+      setBulkSendResult({
+        scheduled: wasScheduled, background: !!res.data?.sending_in_background,
+        skipped: res.data?.broadcast_skipped_schools || [],
+      });
       loadTask();
     } catch (err) {
       const detail = err?.response?.data?.detail;
       if (err?.response?.status === 409 && detail?.outlook_limit_exceeded) {
         setOutlookLimitWarning(detail);
+      } else if (err?.response?.status === 409 && detail?.send_in_progress) {
+        setSendNotice(detail.message);
       } else if (err?.response?.status === 409 && detail?.missing_contact_school_ids) {
         setMissingContact({
           schoolIds: detail.missing_contact_school_ids,
@@ -688,8 +712,15 @@ export default function TaskDetailContent({ taskId, onTaskChange }) {
           <span className="font-semibold text-slate-600">סטטוס שליחת הודעות:</span>
           <span className="text-emerald-600">נשלחו בפועל: <b>{task.message_summary.sent}</b></span>
           {task.message_summary.failed > 0 && (
-            <span className="text-red-600">נכשלו: <b>{task.message_summary.failed}</b></span>
+            <>
+              <span className="text-red-600">נכשלו: <b>{task.message_summary.failed}</b></span>
+              <button type="button" onClick={handleRetryFailed} disabled={retryingFailed}
+                className="px-2.5 py-1 rounded-lg bg-red-600 text-white font-semibold hover:bg-red-700 disabled:opacity-50">
+                {retryingFailed ? "שולח..." : "שלח שוב לנכשלים"}
+              </button>
+            </>
           )}
+          {sendNotice && <span role="status" className="text-slate-600">{sendNotice}</span>}
           {task.message_summary.pending > 0 && (
             <span className="text-amber-600">ממתינות: <b>{task.message_summary.pending}</b></span>
           )}
@@ -1195,7 +1226,9 @@ export default function TaskDetailContent({ taskId, onTaskChange }) {
         <div role="status" className="px-4 pb-2 pt-1 text-xs text-right">
           <div className="flex items-start justify-between gap-3">
             <span className="text-emerald-600 font-medium">
-              {bulkSendResult.scheduled ? "התזכורת תוזמנה לשליחה במועד שנבחר." : "התזכורת נשלחה בהצלחה."}
+              {bulkSendResult.scheduled ? "התזכורת תוזמנה לשליחה במועד שנבחר."
+                : bulkSendResult.background ? "התזכורת נשלחת ברקע — הסטטוס בטבלה יתעדכן תוך כמה דקות."
+                : "התזכורת נשלחה בהצלחה."}
             </span>
             <button
               type="button"

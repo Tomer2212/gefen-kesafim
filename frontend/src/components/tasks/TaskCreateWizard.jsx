@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
 import ConditionGroupsEditor, { newConditionGroup, isMeetingRequirementComplete, needsStageScope, BY_SERVICE, GEFEN_CURRENT_SPLIT_OPTIONS } from "./ConditionGroupsEditor";
@@ -170,6 +170,9 @@ function roundMeetingGroup(roundContext) {
 export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, onClose, onCreated, roundContext = null }) {
   const [academicYear, setAcademicYear] = useState(initialAcademicYear || DEFAULT_ACADEMIC_YEAR);
   const { ref, handleKeyDown } = useFocusTrap(onClose);
+  // One id per opening of the wizard: clicking "create" again after a timeout returns the task
+  // the first click already created, instead of creating a second one.
+  const clientRequestId = useRef(crypto.randomUUID());
   const PHASES = isMeetingTask
     ? ["meeting_audience", "message", "review"]
     : ["audience", "success", "message", "review"];
@@ -651,6 +654,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
     try {
       const { criteria, manual_school_ids } = audiencePayload();
       const res = await axios.post("/tasks/", {
+        client_request_id: clientRequestId.current,
         name,
         criteria,
         manual_school_ids,
@@ -681,6 +685,8 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
       const detail = err?.response?.data?.detail;
       if (err?.response?.status === 409 && detail?.outlook_limit_exceeded) {
         setOutlookLimitWarning(detail);
+      } else if (!err?.response) {
+        setError("לא התקבלה תשובה מהשרת — ייתכן שהמשימה כבר נוצרה. לחיצה נוספת על \"יצירת המשימה\" לא תיצור משימה כפולה.");
       } else {
         setError("יצירת המשימה נכשלה — נסה שוב.");
       }
