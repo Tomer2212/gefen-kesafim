@@ -10,6 +10,7 @@ import OutlookLimitModal from "./OutlookLimitModal";
 import TaskContactResolutionModal from "./TaskContactResolutionModal";
 import TaskMeetingResolutionModal from "./TaskMeetingResolutionModal";
 import SavedAudiencesModal from "./SavedAudiencesModal";
+import AdvisorExclusionsEditor from "./AdvisorExclusionsEditor";
 import { SchoolMultiPickerModal } from "../meetings/SchoolPickerCell";
 import { AcademicYearSelector } from "../AcademicYearSelector";
 import { DEFAULT_ACADEMIC_YEAR } from "../../constants/academicYears";
@@ -302,6 +303,10 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
   // from another task of the round unless "שלח גם להם" (the server enforces the same rule).
   const [roundState, setRoundState] = useState(null); // {bySchool: {id: row}, taskNames} | {failed: true}
   const [includeOpenRequests, setIncludeOpenRequests] = useState(!!roundContext?.includeOpenRequests);
+  // "יועצים שקובעים לעצמם" — a round's task starts with the round's list, any other with the
+  // org's default (undefined until AdvisorExclusionsEditor loads it).
+  const [advisorExclusions, setAdvisorExclusions] = useState(roundContext ? (roundContext.round.advisor_exclusions || {}) : undefined);
+  const [selfScheduledNotice, setSelfScheduledNotice] = useState(null); // [{school_id, school_name}] before creating
   useEffect(() => {
     if (!roundContext) return;
     axios.get(`/rounds/${roundContext.round.id}`)
@@ -319,23 +324,26 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
   const roundSplit = useMemo(() => {
     if (!roundContext || !roundState?.bySchool || !preview) return null;
     const physical = new Set(roundContext.round.physical_school_ids || []);
-    const out = { outside: [], booked: [], open: [], mismatch: [], send: [] };
+    const out = { outside: [], booked: [], self: [], open: [], mismatch: [], send: [] };
+    // The round's own status reflects the round's exclusions — valid here only while the task keeps them.
+    const sameExclusions = JSON.stringify(advisorExclusions || {}) === JSON.stringify(roundContext.round.advisor_exclusions || {});
     for (const s of preview.schools || []) {
       const row = roundState.bySchool[s.school_id];
       if (!row) out.outside.push(s);
       else if (["done", "booked"].includes(row.status)) out.booked.push(row);
+      else if (sameExclusions && row.status === "self_scheduled") out.self.push(row);
       // Same rule as the server (meeting_rounds.open_request_school_ids): any live request.
       else if (row.request?.open) out.open.push(row);
       else if (physical.size && physical.has(row.school_id) !== taskIsPhysical) out.mismatch.push(row);
       else out.send.push(row);
     }
     return out;
-  }, [roundContext, roundState, preview, taskIsPhysical]);
+  }, [roundContext, roundState, preview, taskIsPhysical, advisorExclusions]);
   const roundSendIds = roundSplit
     ? [...roundSplit.send, ...(includeOpenRequests ? roundSplit.open : []), ...(skipLocationMismatch ? [] : roundSplit.mismatch)].map(x => x.school_id)
     : [];
   const roundSkipIds = roundSplit
-    ? [...roundSplit.booked, ...(includeOpenRequests ? [] : roundSplit.open), ...(skipLocationMismatch ? roundSplit.mismatch : [])].map(x => x.school_id)
+    ? [...roundSplit.booked, ...roundSplit.self, ...(includeOpenRequests ? [] : roundSplit.open), ...(skipLocationMismatch ? roundSplit.mismatch : [])].map(x => x.school_id)
     : [];
   // The pre-send check covers exactly the schools that will get a request.
   function checkAudiencePayload() {
@@ -654,6 +662,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
         meeting_overrides: overrides || meetingOverrides,
         round_id: roundContext?.round.id || null,
         include_open_requests: !!(roundContext && includeOpenRequests),
+        advisor_exclusions: isMeetingTask ? (advisorExclusions || {}) : null,
         message_config: {
           recipient_role: recipientRole,
           channel: effectiveChannel,
@@ -736,12 +745,16 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
       const { criteria, manual_school_ids } = checkAudiencePayload();
       const res = await axios.post("/tasks/meetings/check", {
         criteria, manual_school_ids, meeting_requirements: requirements, channel, academic_year: academicYear,
-        round_id: roundContext?.round.id || null,
+        round_id: roundContext?.round.id || null, advisor_exclusions: advisorExclusions || {},
       });
       const hasIssues = (res.data?.schools?.length || 0) > 0;
       setCheckingMeetings(false);
       if (hasIssues) {
-        setShowMeetingResolutionModal(true);
+        setShowMeetingResolutionModal(true);  // it lists the self-scheduled schools too
+        return;
+      }
+      if (res.data?.self_scheduled?.length) {
+        setSelfScheduledNotice(res.data.self_scheduled);
         return;
       }
     } catch {
@@ -781,7 +794,8 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
     }
   }
 
-  const canNextFromMeetingAudience = isMeetingTask && nameSet && (
+  // advisorExclusions is undefined only until the org's default list arrives (or fails → {}).
+  const canNextFromMeetingAudience = isMeetingTask && nameSet && advisorExclusions !== undefined && (
     audienceMode === "manual" ? manualSchoolIds.length > 0 : fieldGroups.some(g => g.conditions.length > 0)
   );
   const canNextFromAudience = !isMeetingTask && nameSet && (
@@ -966,6 +980,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
                     <>
                       <span><b>{roundSendIds.length}</b> בתי ספר יקבלו בקשה במשימה הזו.</span>
                       {roundSplit.booked.length > 0 && <span className="text-slate-600">{roundSplit.booked.length} כבר קבעו את הפגישה בסבב — לא יקבלו בקשה.</span>}
+                      {roundSplit.self.length > 0 && <span className="text-slate-600">{roundSplit.self.length} — היועץ קובע בעצמו את כל הפגישות שלהם — לא יקבלו בקשה.</span>}
                       {roundSplit.outside.length > 0 && <span className="text-slate-600">{roundSplit.outside.length} לא שייכים לסבב (או הוחרגו ממנו) — לא ייכללו.</span>}
                       {roundSplit.open.length > 0 && (
                         <span className="flex flex-col gap-1">
@@ -997,6 +1012,8 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
                   )}
                 </div>
               )}
+
+              <AdvisorExclusionsEditor value={advisorExclusions} onChange={setAdvisorExclusions} users={orgUsers} idPrefix="task-exclusions" />
 
               <div className="pt-1">
                 <button type="button" onClick={() => setShowScheduleModal(true)}
@@ -1437,6 +1454,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
       {showMeetingResolutionModal && (
         <TaskMeetingResolutionModal
           roundId={roundContext?.round.id || null}
+          advisorExclusions={advisorExclusions || {}}
           criteria={checkAudiencePayload().criteria}
           manualSchoolIds={checkAudiencePayload().manual_school_ids}
           meetingRequirements={meetingRequirementsPayload().filter(r => r.meeting_service_type && r.participant_roles.length)}
@@ -1449,6 +1467,14 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
             attemptCreate({ excludedIds: removedIds, overrides });
           }}
           onClose={() => setShowMeetingResolutionModal(false)}
+        />
+      )}
+
+      {selfScheduledNotice && (
+        <SelfScheduledNotice
+          schools={selfScheduledNotice}
+          onCancel={() => setSelfScheduledNotice(null)}
+          onConfirm={() => { setSelfScheduledNotice(null); attemptCreate(); }}
         />
       )}
 
@@ -1501,3 +1527,27 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
 
 // (ScheduleCriteriaModal now lives in its own file — see ./ScheduleCriteriaModal.jsx — reused
 // as-is by PersonTaskCreateWizard.jsx.)
+
+// Before creating a meeting task: the schools that won't get a request because every one of their
+// meetings belongs to advisors who book it themselves ("יועצים שקובעים לעצמם").
+function SelfScheduledNotice({ schools, onCancel, onConfirm }) {
+  const { ref, handleKeyDown } = useFocusTrap(onCancel);
+  return (
+    <div className="fixed inset-0 z-[75] flex items-center justify-center bg-black/40 p-4" dir="rtl">
+      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="self-scheduled-title" onKeyDown={handleKeyDown}
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[80vh] flex flex-col">
+        <div className="px-6 py-4 border-b border-slate-100">
+          <h2 id="self-scheduled-title" className="font-bold text-slate-800">{schools.length} בתי ספר לא יקבלו בקשה</h2>
+          <p className="text-sm text-slate-600 mt-1">כל הפגישות שלהם הן של יועצים שקובעים לעצמם, לכן הם לא ייכללו במשימה.</p>
+        </div>
+        <ul className="flex-1 overflow-y-auto px-6 py-3 text-sm text-slate-700 list-disc pr-10">
+          {schools.map(s => <li key={s.school_id}>{s.school_name}</li>)}
+        </ul>
+        <div className="flex justify-end gap-2 px-6 py-4 border-t border-slate-100">
+          <button type="button" onClick={onCancel} className="text-sm px-4 py-2 rounded-xl text-slate-500 hover:bg-slate-50">חזרה</button>
+          <button type="button" onClick={onConfirm} className="btn-blue text-sm px-5 py-2">המשך ליצירת המשימה</button>
+        </div>
+      </div>
+    </div>
+  );
+}

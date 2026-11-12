@@ -543,7 +543,8 @@ def _matching_meetings(cond: dict, school_meetings: list[dict], task_token_ids: 
                 continue
             if answers:
                 continue
-        if meeting_service_type and m.get("meeting_service_type") != meeting_service_type:
+        if (meeting_service_type and m.get("meeting_service_type") != meeting_service_type
+                and m.get("meeting_service_type") not in (cond.get("also_matches_types") or [])):
             continue
         if meeting_type and m.get("meeting_type") != meeting_type:
             continue
@@ -618,10 +619,100 @@ def expand_meeting_condition(cond: dict, card_service_type: str | None, gefen_cu
     return out
 
 
-def _expand_for_school(cond: dict, school: dict, year_row: dict | None) -> list[dict]:
-    return expand_meeting_condition(
+# "יועצים שקובעים לעצמם" — {advisor_id: ["all"] | [part, ...]}: the parts of a meeting no request
+# is sent for, because that advisor books them on their own. A condition carries it as
+# advisor_exclusions (stamped at task creation / from a round); see apply_advisor_exclusions.
+ADVISOR_EXCLUSION_TYPES = ("gefen", "current", "district", "takuma")
+
+
+def clean_advisor_exclusions(raw, allowed_advisor_ids: set[str] | None = None) -> dict[str, list[str]]:
+    """A valid exclusions map: known part types only ("all" alone when present), advisors limited
+    to allowed_advisor_ids when given (the org's users), entries with nothing left dropped."""
+    out: dict[str, list[str]] = {}
+    for aid, types in (raw or {}).items() if isinstance(raw, dict) else []:
+        if not isinstance(aid, str) or (allowed_advisor_ids is not None and aid not in allowed_advisor_ids):
+            continue
+        types = [t for t in (types or []) if t == "all" or t in ADVISOR_EXCLUSION_TYPES]
+        if "all" in types:
+            out[aid] = ["all"]
+        elif types:
+            out[aid] = [t for t in ADVISOR_EXCLUSION_TYPES if t in types]
+    return out
+
+
+def _excluded_from(exclusions: dict, advisor_id: str, part: str) -> bool:
+    types = exclusions.get(advisor_id) or []
+    return "all" in types or part in types
+
+
+def apply_advisor_exclusions(cond: dict, school_advisors: dict) -> list[dict]:
+    """A plain meeting condition minus the parts its excluded advisors book themselves.
+    school_advisors = {"gefen": [ids], "current": [ids], "district": [ids]} from the card
+    (takuma uses the גפן list). A "גפן+שוטף" meeting is a גפן part plus a שוטף part. Each part
+    loses the advisors excluded from its type; a part left with nobody is dropped (one that had
+    nobody on the card to begin with stays, so the pre-check still reports the gap). What's left
+    decides the request: both parts → גפן+שוטף, one → that type (its own card length), none → []
+    (nothing is asked of the school for it). Advisors removed from a part that stays are listed
+    in exclude_advisor_ids (_build_meeting_ranges drops them). A manually chosen advisor list
+    (advisor_mode "manual") keeps its type and only loses advisors excluded from every part of it.
+    No exclusions → [cond] unchanged."""
+    exclusions = cond.get("advisor_exclusions") or {}
+    if not exclusions:
+        return [cond]
+    base = {k: v for k, v in cond.items() if k != "advisor_exclusions"}
+    t = cond.get("meeting_service_type")
+    parts = ["gefen", "current"] if t == "gefen_current" else [t]
+    if any(p not in ADVISOR_EXCLUSION_TYPES for p in parts):
+        return [base]
+    if cond.get("advisor_mode") == "manual":
+        ids = list(cond.get("advisor_ids") or [])
+        kept = [a for a in ids if not all(_excluded_from(exclusions, a, p) for p in parts)]
+        if ids and not kept:
+            return []
+        return [{**base, "advisor_ids": kept}] if ids else [base]
+    lists = {p: list(school_advisors.get("gefen" if p == "takuma" else p) or []) for p in parts}
+    kept_parts = [p for p in parts
+                  if not lists[p] or any(not _excluded_from(exclusions, a, p) for a in lists[p])]
+    if not kept_parts:
+        return []
+    staying = {a for p in kept_parts for a in lists[p] if not _excluded_from(exclusions, a, p)}
+    removed = [a for a in dict.fromkeys(a for p in kept_parts for a in lists[p]) if a not in staying]
+    out = dict(base)
+    if t == "gefen_current" and len(kept_parts) == 1:
+        out["meeting_service_type"] = kept_parts[0]
+        # The advisor who books their own part may well book one combined meeting.
+        out["also_matches_types"] = ["gefen_current"]
+        if kept_parts[0] == "current":
+            out["stage_scope"] = None
+            out["stage_scope_by_school"] = None
+    if removed:
+        out["exclude_advisor_ids"] = removed
+    return [out]
+
+
+def school_advisor_lists(school: dict) -> dict:
+    return {t: school.get(f"advisor_{t}") or [] for t in ("gefen", "current", "district")}
+
+
+def expand_for_school_detail(cond: dict, school: dict, year_row: dict | None) -> tuple[list[dict], bool]:
+    """(the plain conditions asked of this school, self_scheduled). self_scheduled = every part
+    belongs to an advisor who books it themselves, so nothing is asked (not a missing card type)."""
+    expanded = expand_meeting_condition(
         cond, (year_row or {}).get("service_type"), bool(school.get("advisor_gefen_current_same")),
     )
+    if not expanded or not cond.get("advisor_exclusions"):
+        return expanded, False
+    advisors = school_advisor_lists(school)
+    out = [c2 for c in expanded for c2 in apply_advisor_exclusions(c, advisors)]
+    return out, not out
+
+
+def _expand_for_school(cond: dict, school: dict, year_row: dict | None) -> list[dict]:
+    return expand_for_school_detail(cond, school, year_row)[0]
+
+
+def _needs_school_expansion(cond: dict) -> bool:
+    return cond.get("meeting_service_type") == BY_SERVICE or bool(cond.get("advisor_exclusions"))
 
 
 def stage_scope_is_covered(requested_scope: str, meeting_scopes) -> bool:
@@ -932,8 +1023,10 @@ def _resolve_condition(
     task (success_criteria vs. auto-inverted criteria vs. track_success=False), not per
     condition. See compute_task_progress."""
     ctype = cond.get("type")
-    if ctype == "meeting" and cond.get("meeting_service_type") == BY_SERVICE:
-        expanded = _expand_for_school(cond, school, year_row)
+    if ctype == "meeting" and _needs_school_expansion(cond):
+        expanded, self_scheduled = expand_for_school_detail(cond, school, year_row)
+        if self_scheduled:
+            return True  # nothing is asked of the school — its advisor books it themselves
         return bool(expanded) and all(
             _resolve_condition(c, school, school_meetings, year_row, goal_rows, cl_rows, task_token_ids) for c in expanded
         )
@@ -1037,8 +1130,11 @@ def _meeting_condition_result(
     """One results-table cell for a meeting condition. A "לפי סוג שירות" condition stays one
     column: its plain meetings for this school are summed (resolved_types says which they were),
     so the table has the same columns for every school."""
-    expanded = _expand_for_school(cond, school, year_row)
+    expanded, self_scheduled = expand_for_school_detail(cond, school, year_row)
     is_six_year = school.get("stage") == "sheshshnati"
+    if self_scheduled:
+        return {"ok": True, "meeting_exists": False, "actual_count": 0, "required_count": 0,
+                "requested_scope": None, "resolved_types": [], "self_scheduled": True}
     if not expanded:
         return {"ok": False, "meeting_exists": False, "actual_count": 0, "required_count": 1,
                 "requested_scope": None, "resolved_types": []}
@@ -1059,7 +1155,7 @@ def _meeting_condition_result(
         "requested_scope": next((effective_stage_scope(c, school) for c in expanded
                                  if effective_stage_scope(c, school)), None) if is_six_year else None,
     }
-    if cond.get("meeting_service_type") == BY_SERVICE:
+    if _needs_school_expansion(cond):
         result["resolved_types"] = [c["meeting_service_type"] for c in expanded]
     return result
 
@@ -1068,9 +1164,9 @@ def _by_service_stage_row(
     cond: dict, school: dict, school_meetings: list[dict], year_row: dict | None,
     task_token_ids: set[str] | None, row_stage: str,
 ) -> dict:
-    """A "לפי סוג שירות" cell in one division row of a six-year school: each of the school's
-    plain meetings counts in the rows of its own division (a שוטף meeting, with no division, in
-    both) — the same per-stage rules as a plain condition below."""
+    """A "לפי סוג שירות" (or advisor-exclusions) cell in one division row of a six-year school:
+    each of the school's plain meetings counts in the rows of its own division (a שוטף meeting,
+    with no division, in both) — the same per-stage rules as a plain condition below."""
     parts = []
     for c in _expand_for_school(cond, school, year_row):
         scope = effective_stage_scope(c, school)
@@ -1223,7 +1319,7 @@ def compute_task_progress(
                 row_results = []
                 for c, base_res in zip(conds, condition_results):
                     cond_stage_scope = effective_stage_scope(c, school)
-                    if c.get("type") == "meeting" and c.get("meeting_service_type") == BY_SERVICE:
+                    if c.get("type") == "meeting" and _needs_school_expansion(c):
                         row_results.append(_by_service_stage_row(c, school, school_meetings, year_row, task_token_ids, row_stage))
                     elif c.get("type") == "meeting" and cond_stage_scope in ("tichon", "chativa", "separate"):
                         if cond_stage_scope == "separate":

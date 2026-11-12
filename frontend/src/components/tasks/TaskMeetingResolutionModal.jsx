@@ -67,6 +67,8 @@ export default function TaskMeetingResolutionModal({
   criteria, manualSchoolIds, meetingRequirements, channel, academicYear, orgUsers, onProceed, onClose,
   // A task of a "סבב פגישות" — its field-day exemptions apply to the check.
   roundId = null,
+  // "יועצים שקובעים לעצמם" chosen in the wizard (AdvisorExclusionsEditor).
+  advisorExclusions = null,
   // taskId — "existing task" mode: re-checks an already-created task's CURRENT problems
   // (GET /tasks/{taskId}/meetings/check) instead of the wizard's transient pre-creation state,
   // used by the red-badge/notification flow for a scheduled task that got blocked because
@@ -110,7 +112,7 @@ export default function TaskMeetingResolutionModal({
       ? axios.get(`/tasks/${taskId}/meetings/check`)
       : axios.post("/tasks/meetings/check", {
           criteria, manual_school_ids: manualSchoolIds, meeting_requirements: meetingRequirements,
-          channel, academic_year: academicYear, round_id: roundId,
+          channel, academic_year: academicYear, round_id: roundId, advisor_exclusions: advisorExclusions || {},
         });
     request
       .then(r => setResult(r.data))
@@ -507,6 +509,12 @@ export default function TaskMeetingResolutionModal({
         </div>
 
         <div className="overflow-y-auto flex-1 px-6 py-4 space-y-2 text-sm">
+          {!checking && result?.self_scheduled?.length > 0 && (
+            <p className="text-violet-800 bg-violet-50 rounded-lg px-3 py-2">
+              {result.self_scheduled.length} בתי ספר לא יקבלו בקשה — כל הפגישות שלהם הן של יועצים שקובעים לעצמם
+              {` (${result.self_scheduled.slice(0, 8).map(s => s.school_name).join(", ")}${result.self_scheduled.length > 8 ? "..." : ""}).`}
+            </p>
+          )}
           {checking ? (
             <p role="status" className="text-slate-500">בודק...</p>
           ) : !result ? (

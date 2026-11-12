@@ -359,6 +359,48 @@ class TaskCreateIn(BaseModel):
     # audience is always narrowed to the round's schools.
     include_open_requests: bool = False  # round only: also send to schools that already hold a
     # live request from another task of the round (by default they're left out).
+    advisor_exclusions: dict | None = None  # "יועצים שקובעים לעצמם" — {advisor_id: ["all"] |
+    # [part, ...]}; stamped on every meeting condition (task_logic.apply_advisor_exclusions).
+
+
+def _org_default_exclusions(org_id: str) -> dict:
+    rows = get_admin_client().table("organizations").select("advisor_exclusions").eq("id", org_id).execute().data or []
+    return (rows[0].get("advisor_exclusions") if rows else None) or {}
+
+
+def _org_advisor_exclusions(org_id: str, raw: dict | None) -> dict:
+    """raw cleaned (task_logic.clean_advisor_exclusions), advisors limited to this org's users,
+    so a stored exclusion never refers to another org's advisor. None (a caller that doesn't send
+    the field, e.g. a tab opened before it existed) = the org's default list; {} = none."""
+    if raw is None:
+        raw = _org_default_exclusions(org_id)
+    if not raw:
+        return {}
+    ids = [aid for aid in raw if isinstance(aid, str)]
+    if not ids:
+        return {}
+    db = get_admin_client()
+    rows = db.table("profiles").select("id").eq("org_id", org_id).in_("id", ids).execute().data or []
+    return task_logic.clean_advisor_exclusions(raw, {r["id"] for r in rows})
+
+
+def _self_scheduled_school_ids(db, task: dict, school_ids: list[str]) -> set[str]:
+    """Schools whose every meeting in this task is booked by its advisors themselves — they
+    leave the task's audience (no request, not counted in its progress)."""
+    all_conditions = _meeting_conditions_from_success_criteria(task)
+    if not school_ids or not any(c.get("advisor_exclusions") for c in all_conditions):
+        return set()
+    advisor_map: dict[str, dict[str, list[str]]] = {}
+    for service_type, table_name in _TYPED_ADVISOR_TABLES.items():
+        for r in db.table(table_name).select("school_id, advisor_id").in_("school_id", school_ids).execute().data or []:
+            advisor_map.setdefault(r["school_id"], {}).setdefault(service_type, []).append(r["advisor_id"])
+    service_types = {}
+    if any(c.get("meeting_service_type") == task_logic.BY_SERVICE for c in all_conditions):
+        service_types = {sid: f.get("service_type") for sid, f in resolve_inherited_year_admin(
+            db, school_ids, task.get("academic_year") or DEFAULT_ACADEMIC_YEAR).items()}
+    return {sid for sid in school_ids
+            if _is_self_scheduled(all_conditions, _school_meeting_conditions(
+                all_conditions, advisor_map.get(sid, {}), service_types.get(sid)))}
 
 
 def _round_member_ids(db, org_id: str, round_id: str | None, include_open_requests: bool = True) -> set[str] | None:
@@ -647,6 +689,39 @@ def get_channel_availability(user: Annotated[dict, Depends(get_current_user)]):
     return {"email_outlook": outlook["connected"], "whatsapp_twilio": twilio["connected"]}
 
 
+class AdvisorExclusionsIn(BaseModel):
+    advisor_exclusions: dict = {}
+
+
+@router.get("/advisor-exclusions-default")
+def get_advisor_exclusions_default(user: Annotated[dict, Depends(get_current_user)]):
+    """The org's standing "יועצים שקובעים לעצמם" list — what every new round and meeting task
+    starts with (each may change it for itself)."""
+    _require_manager(user)
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            rows = db.table("organizations").select("advisor_exclusions").eq("id", user["org_id"]).execute().data or []
+            break
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("get_advisor_exclusions_default attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("get_advisor_exclusions_default failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+    return {"advisor_exclusions": (rows[0].get("advisor_exclusions") if rows else None) or {}}
+
+
+@router.put("/advisor-exclusions-default")
+def put_advisor_exclusions_default(body: AdvisorExclusionsIn, user: Annotated[dict, Depends(get_current_user)]):
+    _require_manager(user)
+    cleaned = _org_advisor_exclusions(user["org_id"], body.advisor_exclusions)
+    get_admin_client().table("organizations").update({"advisor_exclusions": cleaned}).eq("id", user["org_id"]).execute()
+    return {"advisor_exclusions": cleaned}
+
+
 class TwilioSettingsIn(BaseModel):
     account_sid: str | None = None
     auth_token: str | None = None
@@ -933,6 +1008,11 @@ class MeetingRequirementIn(BaseModel):
     # exceptions to stage_scope; read through _req_stage_scope.
     gefen_current_split: str | None = None  # "לפי סוג שירות" only — see task_logic.expand_meeting_condition
     use_field_days: bool = False  # physical meetings offered only on the advisor's field days
+    # "יועצים שקובעים לעצמם" — see task_logic.apply_advisor_exclusions. advisor_exclusions is
+    # stamped on a task's conditions at creation; the other two are set on a school's expanded copy.
+    advisor_exclusions: dict | None = None
+    exclude_advisor_ids: list[str] = []
+    also_matches_types: list[str] = []
 
 
 def _field_days_by_advisor(db, org_id: str, advisor_ids: list[str]) -> dict[str, list[str]]:
@@ -1001,15 +1081,23 @@ def _school_meeting_conditions(conditions: list[dict], school_advisors: dict, ca
     """A task's meeting conditions as asked of ONE school: each "לפי סוג שירות בכרטיס" condition
     becomes that school's plain meeting(s) (task_logic.expand_meeting_condition), so everything
     after this runs on plain types only. None when one can't be resolved (no service type in the
-    card for the task's year) — the school can't be sent anything sensible."""
+    card for the task's year) — the school can't be sent anything sensible. The parts booked by
+    advisors who schedule their own meetings are then removed (apply_advisor_exclusions), so []
+    means nothing at all is asked of this school (_is_self_scheduled)."""
     same = _same_gefen_current_advisors(school_advisors)
     out: list[dict] = []
     for c in conditions:
         expanded = task_logic.expand_meeting_condition(c, card_service_type, same)
         if not expanded:
             return None
-        out.extend(expanded)
+        for e in expanded:
+            out.extend(task_logic.apply_advisor_exclusions(e, school_advisors))
     return out
+
+
+def _is_self_scheduled(conditions: list[dict], school_conditions: list | None) -> bool:
+    """Every meeting of the task belongs to advisors who book it themselves for this school."""
+    return bool(conditions) and school_conditions == []
 
 
 def _school_meeting_requirements(
@@ -1032,6 +1120,7 @@ class MeetingsCheckIn(BaseModel):
     channel: str
     academic_year: str = DEFAULT_ACADEMIC_YEAR
     round_id: str | None = None  # a task of a "סבב פגישות": its field-day exemptions apply
+    advisor_exclusions: dict | None = None  # "יועצים שקובעים לעצמם" chosen in the wizard
 
 
 def _slot_coordinator_ok(school: dict, slot: str, needs_phone: bool) -> bool:
@@ -1092,6 +1181,7 @@ def _check_meeting_problems(
     org_id: str, criteria: dict, manual_school_ids: list[str] | None,
     meeting_requirements: list[MeetingRequirementIn], channel: str, academic_year: str,
     meeting_overrides: dict | None = None, round_id: str | None = None,
+    advisor_exclusions: dict | None = None,
 ) -> dict:
     """Round-6 unified pre-creation check (TaskMeetingResolutionModal) for 'קביעת פגישות'
     tasks — replaces both the old split-out advisor/participant-name-only version of this
@@ -1121,7 +1211,7 @@ def _check_meeting_problems(
     )
     school_ids = [m["school_id"] for m in matched]
     if not school_ids:
-        return {"schools": [], "total_schools": 0, "ok_schools": 0}
+        return {"schools": [], "total_schools": 0, "ok_schools": 0, "self_scheduled": []}
 
     db = get_admin_client()
     schools = db.table("schools").select("*").in_("id", school_ids).execute().data or []
@@ -1147,6 +1237,11 @@ def _check_meeting_problems(
     # "לפי סוג שירות בכרטיס" — each school's requirements are its own plain meetings, from its
     # service type for this year (carried forward from an earlier year, as everywhere else).
     task_requirements = meeting_requirements
+    if advisor_exclusions:
+        # The wizard's list (an existing task's conditions already carry their own).
+        task_requirements = [r if r.advisor_exclusions else r.model_copy(update={"advisor_exclusions": advisor_exclusions})
+                             for r in task_requirements]
+    has_exclusions = any(r.advisor_exclusions for r in task_requirements)
     has_by_service = any(r.meeting_service_type == task_logic.BY_SERVICE for r in task_requirements)
     service_type_by_school = (
         {sid: f.get("service_type") for sid, f in resolve_inherited_year_admin(db, school_ids, academic_year).items()}
@@ -1162,6 +1257,7 @@ def _check_meeting_problems(
 
     entries_by_school: dict[str, dict] = {}
     coordinator_emails: dict[str, str | None] = {}
+    self_scheduled: list[dict] = []
     for m in matched:
         school = schools_by_id.get(m["school_id"])
         if not school:
@@ -1170,15 +1266,23 @@ def _check_meeting_problems(
         school_advisors = advisor_map.get(school["id"], {})
         meeting_requirements = task_requirements
         missing_service_type = None
-        if has_by_service:
+        if has_by_service or has_exclusions:
             meeting_requirements = _school_meeting_requirements(
                 task_requirements, school_advisors, service_type_by_school.get(school["id"]),
             )
+            if meeting_requirements == [] and task_requirements:
+                # Every meeting here is booked by its advisors themselves — nothing is sent, so
+                # nothing to check (informational: the school leaves the task's audience).
+                self_scheduled.append({"school_id": school["id"], "school_name": school["name"]})
+                continue
             if meeting_requirements is None:
                 # Nothing can be asked of this school until its card says what service it gets;
                 # the other requirements are still checked so one fix-up round covers everything.
                 missing_service_type = {"academic_year": academic_year}
-                meeting_requirements = [r for r in task_requirements if r.meeting_service_type != task_logic.BY_SERVICE]
+                meeting_requirements = _school_meeting_requirements(
+                    [r for r in task_requirements if r.meeting_service_type != task_logic.BY_SERVICE],
+                    school_advisors, None,
+                ) or []
 
         # With nothing resolvable yet there are no ranges whose coordinator could be checked.
         coordinator = _coordinator_problem(school, channel, meeting_requirements) if meeting_requirements or not missing_service_type else None
@@ -1331,6 +1435,7 @@ def _check_meeting_problems(
                 req_advisors = type_override.get("advisor_ids") or _default_advisor_ids(school_advisors, req.meeting_service_type)
                 if req.meeting_service_type == "gefen_current" and type_override.get("advisor_ids"):
                     req_advisors = list(dict.fromkeys(_default_advisor_ids(school_advisors, req.meeting_service_type) + type_override["advisor_ids"]))
+            req_advisors = [a for a in req_advisors if a not in req.exclude_advisor_ids]
             if not req_advisors:
                 continue  # reported as a missing advisor (meeting_defaults)
             window = [(req.date_from or "0000-01-01", req.date_to or "9999-12-31")]
@@ -1377,7 +1482,8 @@ def _check_meeting_problems(
 
     results = list(entries_by_school.values())
     blocking_count = sum(1 for r in results if _has_blocking_meeting_problem(r))
-    return {"schools": results, "total_schools": len(matched), "ok_schools": len(matched) - blocking_count}
+    return {"schools": results, "total_schools": len(matched), "ok_schools": len(matched) - blocking_count,
+            "self_scheduled": self_scheduled}
 
 
 @router.post("/meetings/check")
@@ -1389,6 +1495,7 @@ def check_meetings(body: MeetingsCheckIn, user: Annotated[dict, Depends(get_curr
     return _check_meeting_problems(
         user["org_id"], criteria, body.manual_school_ids, body.meeting_requirements,
         body.channel, body.academic_year, None, body.round_id,
+        _org_advisor_exclusions(user["org_id"], body.advisor_exclusions),
     )
 
 
@@ -1514,7 +1621,7 @@ def export_missing_meetings(body: ExportMissingMeetingsIn, user: Annotated[dict,
 _STAGE_SCOPE_VALUES = {"tichon", "chativa", "both", "separate"}
 
 
-def _prepare_meeting_conditions(success_criteria: dict | None, org_id: str) -> None:
+def _prepare_meeting_conditions(success_criteria: dict | None, org_id: str, advisor_exclusions: dict | None = None) -> None:
     """Prepares a new task's meeting conditions in place. Stamps each with
     explicit_stage_scope_only, the coverage rule of task_logic.stage_scope_is_covered: only new
     tasks get it, so a task created before that rule never changes its results after the fact.
@@ -1526,6 +1633,13 @@ def _prepare_meeting_conditions(success_criteria: dict | None, org_id: str) -> N
         for c in g.get("conditions") or []:
             if c.get("type") == "meeting":
                 c["explicit_stage_scope_only"] = True
+                # Always from the cleaned task-level list (never trusted from the condition body).
+                c.pop("exclude_advisor_ids", None)
+                c.pop("also_matches_types", None)
+                if advisor_exclusions:
+                    c["advisor_exclusions"] = advisor_exclusions
+                else:
+                    c.pop("advisor_exclusions", None)
                 # "יומן יעיל" — required in the wizard; a creator that doesn't send them (older
                 # clients, the agent) gets the original earliest-slot behavior.
                 if c.get("min_free_window_minutes") is not None and c["min_free_window_minutes"] not in slot_policy.MIN_FREE_WINDOW_OPTIONS:
@@ -1588,7 +1702,8 @@ def create_task(body: TaskCreateIn, user: Annotated[dict, Depends(get_current_us
     if not (criteria.get("groups") or manual_ids):
         raise HTTPException(status_code=422, detail="יש לבחור קריטריון סינון או לבחור בתי ספר ידנית")
     success_criteria = body.success_criteria.model_dump() if body.success_criteria else None
-    _prepare_meeting_conditions(success_criteria, user["org_id"])
+    advisor_exclusions = _org_advisor_exclusions(user["org_id"], body.advisor_exclusions)
+    _prepare_meeting_conditions(success_criteria, user["org_id"], advisor_exclusions)
 
     round_members = _round_member_ids(get_admin_client(), user["org_id"], body.round_id, body.include_open_requests)
 
@@ -1602,6 +1717,12 @@ def create_task(body: TaskCreateIn, user: Annotated[dict, Depends(get_current_us
         excluded = set(body.excluded_school_ids or [])
         matched_school_ids = [m["school_id"] for m in matched if m["school_id"] not in excluded
                               and (round_members is None or m["school_id"] in round_members)]
+        if advisor_exclusions:
+            self_scheduled = _self_scheduled_school_ids(
+                get_admin_client(), {"success_criteria": success_criteria, "academic_year": body.academic_year},
+                matched_school_ids,
+            )
+            matched_school_ids = [sid for sid in matched_school_ids if sid not in self_scheduled]
         status = "active"
 
     channel = body.message_config.channel
@@ -1640,6 +1761,7 @@ def create_task(body: TaskCreateIn, user: Annotated[dict, Depends(get_current_us
                     "meeting_overrides": body.meeting_overrides,
                     "round_id": body.round_id,
                     "round_include_open_requests": bool(body.round_id and body.include_open_requests),
+                    "advisor_exclusions": advisor_exclusions or None,
                 })
                 .execute()
             )
@@ -2213,6 +2335,8 @@ def _build_meeting_ranges(
                 # A combined meeting's override only fills the side missing from the card
                 # (TaskMeetingResolutionModal), so it joins the card's advisors, not replaces them.
                 advisor_ids = list(dict.fromkeys(_default_advisor_ids(advisor_map, service_type) + override["advisor_ids"]))
+        # Advisors who book this part themselves (task_logic.apply_advisor_exclusions).
+        advisor_ids = [a for a in advisor_ids or [] if a not in (c.get("exclude_advisor_ids") or [])]
         if not advisor_ids:
             continue
         held_remotely = False
@@ -2542,6 +2666,8 @@ def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[st
             school_conditions = _school_meeting_conditions(
                 meeting_conditions, advisor_map.get(school["id"], {}), service_type_map.get(school["id"]),
             )
+            if _is_self_scheduled(meeting_conditions, school_conditions):
+                continue  # its advisors book every meeting themselves — nothing to request
             ranges_data = school_conditions and _build_meeting_ranges(
                 school, school_conditions,
                 advisor_map.get(school["id"], {}), duration_map.get(school["id"], {}),
@@ -3256,6 +3382,8 @@ def _try_activate_scheduled_task(db, task: dict) -> dict:
     )
     round_members = _round_member_ids(db, org_id, task.get("round_id"), bool(task.get("round_include_open_requests")))
     matched_school_ids = [m["school_id"] for m in matched if round_members is None or m["school_id"] in round_members]
+    self_scheduled = _self_scheduled_school_ids(db, task, matched_school_ids)
+    matched_school_ids = [sid for sid in matched_school_ids if sid not in self_scheduled]
     db.table("org_tasks").update({
         "matched_school_ids": matched_school_ids,
         "status": "active",

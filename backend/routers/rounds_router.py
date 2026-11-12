@@ -47,12 +47,16 @@ class RoundCreateIn(BaseModel):
     # Who goes to each physical גפן+שוטף school whose גפן and שוטף advisors differ —
     # {school_id: [advisor_id]} from the creation "בעיות" window (POST /rounds/physical-check).
     physical_visitors: dict[str, list[str]] = {}
+    # "יועצים שקובעים לעצמם" — {advisor_id: ["all"] | [part, ...]} (task_logic.apply_advisor_exclusions);
+    # every task of the round starts with it.
+    advisor_exclusions: dict | None = None  # None = the org's default list
 
 
 class PhysicalCheckIn(BaseModel):
     academic_year: str = DEFAULT_ACADEMIC_YEAR
     school_ids: list[str]
     requirement: RequirementIn
+    advisor_exclusions: dict = {}
 
 
 class RoundPatchIn(BaseModel):
@@ -71,6 +75,7 @@ class RoundPatchIn(BaseModel):
     criteria: dict | None = None
     manual_school_ids: list[str] | None = None
     physical_visitors: dict[str, list[str]] | None = None
+    advisor_exclusions: dict | None = None
 
 
 class AudienceApplyIn(BaseModel):
@@ -120,6 +125,18 @@ def _clean_visitors(db, org_id: str, visitors: dict[str, list[str]], physical_id
         if sid in physical_ids and kept:
             out[sid] = kept
     return out
+
+
+def _clean_exclusions(db, org_id: str, raw: dict | None) -> dict:
+    """Valid part types only, this org's advisors only. None = the org's default list."""
+    if raw is None:
+        rows = db.table("organizations").select("advisor_exclusions").eq("id", org_id).execute().data or []
+        raw = (rows[0].get("advisor_exclusions") if rows else None) or {}
+    ids = [aid for aid in (raw or {}) if isinstance(aid, str)]
+    if not ids:
+        return {}
+    allowed = {r["id"] for r in db.table("profiles").select("id").eq("org_id", org_id).in_("id", ids).execute().data or []}
+    return task_logic.clean_advisor_exclusions(raw, allowed)
 
 
 def _org_school_ids(db, org_id: str, ids: list[str]) -> set[str]:
@@ -183,6 +200,7 @@ def create_round(body: RoundCreateIn, user: Annotated[dict, Depends(get_current_
         "school_ids": school_ids, "requirement": requirement,
         "physical_school_ids": [sid for sid in body.physical_school_ids if sid in set(school_ids)],
         "physical_visitors": _clean_visitors(db, user["org_id"], body.physical_visitors, set(body.physical_school_ids) & set(school_ids)),
+        "advisor_exclusions": _clean_exclusions(db, user["org_id"], body.advisor_exclusions) or None,
         "cached_total_schools": len(school_ids), "created_by": user["id"],
     }
     return db.table("meeting_rounds").insert(row).execute().data[0]
@@ -207,6 +225,19 @@ def physical_check(body: PhysicalCheckIn, user: Annotated[dict, Depends(get_curr
     for t, table in (("gefen", "school_advisors_gefen"), ("current", "school_advisors_current")):
         for r in (db.table(table).select("school_id, advisor_id").in_("school_id", ids).execute().data or []) if ids else []:
             lists[r["school_id"]][t].append(r["advisor_id"])
+    # Advisors who book their own part leave the meeting: a school whose combined meeting is then
+    # one-sided (or gone) has nobody to choose between.
+    exclusions = _clean_exclusions(db, user["org_id"], body.advisor_exclusions)
+    if exclusions:
+        for sid, l in lists.items():
+            reduced = task_logic.apply_advisor_exclusions(
+                {"meeting_service_type": "gefen_current", "advisor_exclusions": exclusions}, l)
+            if not reduced or reduced[0]["meeting_service_type"] != "gefen_current":
+                l["gefen"], l["current"] = [], []
+            else:
+                removed = set(reduced[0].get("exclude_advisor_ids") or [])
+                l["gefen"] = [a for a in l["gefen"] if a not in removed]
+                l["current"] = [a for a in l["current"] if a not in removed]
     conflicts = [sid for sid, l in lists.items() if l["gefen"] and l["current"] and set(l["gefen"]) != set(l["current"])]
     if not conflicts:
         return {"schools": []}
@@ -252,7 +283,7 @@ def get_round(round_id: str, user: Annotated[dict, Depends(get_current_user)]):
         logger.warning("get_round cache write failed (non-fatal): %s", exc)
     advisor_names: dict[str, str] = {}
     try:
-        ids = list({aid for s in result["schools"] for aid in s["advisor_ids"]})
+        ids = list({aid for s in result["schools"] for aid in s["advisor_ids"]} | set(rnd.get("advisor_exclusions") or {}))
         if ids:
             rows = db.table("profiles").select("id, full_name, email").in_("id", ids).execute().data or []
             advisor_names = {p["id"]: p.get("full_name") or p.get("email") or "" for p in rows}
@@ -315,6 +346,8 @@ def update_round(round_id: str, body: RoundPatchIn, user: Annotated[dict, Depend
     elif body.physical_school_ids is not None:
         physical = set(patch["physical_school_ids"])
         patch["physical_visitors"] = {sid: v for sid, v in (rnd.get("physical_visitors") or {}).items() if sid in physical}
+    if body.advisor_exclusions is not None:
+        patch["advisor_exclusions"] = _clean_exclusions(db, user["org_id"], body.advisor_exclusions) or None
     if body.field_exempt_advisor_ids is not None:
         ids = list(dict.fromkeys(body.field_exempt_advisor_ids))
         allowed = {r["id"] for r in db.table("profiles").select("id").eq("org_id", user["org_id"]).in_("id", ids).execute().data or []} if ids else set()
@@ -418,7 +451,8 @@ def get_round_field_days(round_id: str, user: Annotated[dict, Depends(get_curren
             else:
                 logger.error("get_round_field_days failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
-    physical = [s for s in result["schools"] if s["physical"]]
+    # A school whose advisors book every meeting themselves needs no field day from the round.
+    physical = [s for s in result["schools"] if s["physical"] and s["status"] != "self_scheduled"]
     durations: dict[str, dict] = {}
     try:
         ids = [s["school_id"] for s in physical]

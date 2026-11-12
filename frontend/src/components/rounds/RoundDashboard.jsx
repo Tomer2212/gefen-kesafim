@@ -7,6 +7,7 @@ import TaskCreateWizard from "../tasks/TaskCreateWizard";
 import RoundFieldDays from "./RoundFieldDays";
 import RoundCreateModal from "./RoundCreateModal";
 import { MEETING_SERVICE_TYPE_LABELS, formatDateDMY } from "../tasks/taskShared";
+import { exclusionTypesLabel } from "../tasks/AdvisorExclusionsEditor";
 import {
   ROUND_STATUS_META, ROUND_STATUS_ORDER, ROUND_PROBLEM_LABELS, STALE_REQUEST_DAYS, requirementLabel, daysSince,
   MEETING_KIND_ORDER, meetingKindOf, meetingKindLabel,
@@ -260,6 +261,12 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
           <p className="text-sm text-slate-500">
             <bdi>{formatDateDMY(rnd.start_date)}</bdi>–<bdi>{formatDateDMY(rnd.end_date)}</bdi> · {requirementLabel(rnd.requirement)}
           </p>
+          {Object.keys(rnd.advisor_exclusions || {}).length > 0 && (
+            <p className="text-xs text-violet-700">
+              קובעים לעצמם (לא נשלחת בקשה):{" "}
+              {Object.entries(rnd.advisor_exclusions).map(([id, t]) => `${names[id] || "יועץ"} — ${exclusionTypesLabel(t)}`).join(" · ")}
+            </p>
+          )}
         </div>
         <div className="flex flex-wrap gap-2">
           <button type="button" disabled={busy} onClick={() => startTask([])} className="btn-blue text-sm px-4 py-2">+ משימה חדשה בסבב</button>

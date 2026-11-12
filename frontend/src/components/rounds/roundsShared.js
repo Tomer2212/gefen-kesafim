@@ -9,9 +9,11 @@ export const ROUND_STATUS_META = {
   requested: { label: "קיבל/ה בקשה, טרם פתח/ה", chip: "bg-sky-50 text-sky-800", bar: "bg-sky-400" },
   problem: { label: "בעיה", chip: "bg-red-50 text-red-700", bar: "bg-red-400" },
   untouched: { label: "טרם טופל", chip: "bg-slate-100 text-slate-700", bar: "bg-slate-300" },
+  // Every meeting of the school belongs to advisors who book it themselves ("יועצים שקובעים לעצמם").
+  self_scheduled: { label: "היועץ קובע בעצמו", chip: "bg-violet-50 text-violet-700", bar: "bg-violet-300" },
   excluded: { label: "הוחרג מהסבב", chip: "bg-slate-50 text-slate-400", bar: "bg-slate-200" },
 };
-export const ROUND_STATUS_ORDER = ["done", "booked", "partial", "opened", "requested", "problem", "untouched"];
+export const ROUND_STATUS_ORDER = ["done", "booked", "partial", "opened", "requested", "problem", "untouched", "self_scheduled"];
 
 export const ROUND_PROBLEM_LABELS = {
   missing_service_type: "לא הוגדר סוג שירות בכרטיס",
@@ -26,10 +28,15 @@ export const STALE_REQUEST_DAYS = 7;
 
 // The dashboard's "which meetings" breakdown — one group per kind of meeting a school is asked
 // for. gefen_current splits by whether its גפן and שוטף advisors are the same people.
-export const MEETING_KIND_ORDER = ["gefen", "current", "gefen_current_same", "gefen_current_diff", "district", "takuma", "missing"];
+export const MEETING_KIND_ORDER = ["gefen", "current", "gefen_current_same", "gefen_current_diff", "district", "takuma", "missing", "self_scheduled"];
 
-export function meetingKindOf(school, requirement) {
-  const type = requirement?.meeting_service_type === "by_service" ? school.card_service_type : requirement?.meeting_service_type;
+// From what the school is actually asked (required_types: after "לפי סוג שירות" and after the
+// parts its self-scheduling advisors book are removed).
+export function meetingKindOf(school) {
+  if (school.status === "self_scheduled") return "self_scheduled";
+  const types = school.required_types || [];
+  if (types.length === 2 && types.includes("gefen") && types.includes("current")) return "gefen_current_diff";
+  const type = types[0];
   if (!type || !MEETING_SERVICE_TYPE_LABELS[type]) return "missing";
   if (type === "gefen_current") return school.gefen_current_same ? "gefen_current_same" : "gefen_current_diff";
   return type;
@@ -46,6 +53,7 @@ export function meetingKindLabel(kind, requirement) {
         : "גפן+שוטף עם יועצים שונים — פגישה אחת עם שניהם";
     case "district": return "פגישת מחוז";
     case "takuma": return "פגישת תקומה";
+    case "self_scheduled": return "היועץ קובע בעצמו (לא נשלחת בקשה)";
     default: return "בלי סוג שירות בכרטיס";
   }
 }

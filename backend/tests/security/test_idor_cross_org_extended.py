@@ -1715,3 +1715,30 @@ def test_round_edit_cross_org_rejected(org_a_client, org_b_round, admin_db):
     assert resp.status_code == 404
     row = admin_db.table("meeting_rounds").select("school_ids, name").eq("id", org_b_round["id"]).execute().data[0]
     assert row["school_ids"] == [ORG_B_SCHOOL_ID] and row["name"] == "בדיקת אבטחה"
+
+
+# "יועצים שקובעים לעצמם" (advisor_exclusions): the org default and a round's list keep only the
+# caller's own org advisors, and another org's round can't be changed.
+def test_exclusions_default_keeps_only_own_org_advisors(org_b_client, admin_db):
+    before = admin_db.table("organizations").select("advisor_exclusions").eq("id", ORG_B_ID).execute().data[0]["advisor_exclusions"]
+    try:
+        resp = org_b_client.put("/tasks/advisor-exclusions-default", json={"advisor_exclusions": {
+            ORG_B_MANAGER_ID: ["gefen"], ORG_A_MANAGER_ID: ["all"]}})
+        assert resp.status_code == 200
+        assert resp.json()["advisor_exclusions"] == {ORG_B_MANAGER_ID: ["gefen"]}
+        assert org_b_client.get("/tasks/advisor-exclusions-default").json()["advisor_exclusions"] == {ORG_B_MANAGER_ID: ["gefen"]}
+    finally:
+        admin_db.table("organizations").update({"advisor_exclusions": before}).eq("id", ORG_B_ID).execute()
+
+
+def test_round_exclusions_keep_only_own_org_advisors(org_b_client, org_b_round):
+    resp = org_b_client.patch(f"/rounds/{org_b_round['id']}", json={"advisor_exclusions": {
+        ORG_B_MANAGER_ID: ["current"], ORG_A_MANAGER_ID: ["all"]}})
+    assert resp.status_code == 200
+    assert resp.json()["advisor_exclusions"] == {ORG_B_MANAGER_ID: ["current"]}
+
+
+def test_round_exclusions_cross_org_rejected(org_a_client, org_b_round, admin_db):
+    assert org_a_client.patch(f"/rounds/{org_b_round['id']}", json={"advisor_exclusions": {ORG_A_MANAGER_ID: ["all"]}}).status_code == 404
+    row = admin_db.table("meeting_rounds").select("advisor_exclusions").eq("id", org_b_round["id"]).execute().data[0]
+    assert ORG_A_MANAGER_ID not in (row["advisor_exclusions"] or {})

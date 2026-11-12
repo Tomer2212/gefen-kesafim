@@ -8,6 +8,7 @@ export const MEETING_SERVICE_TYPE_LABELS = { gefen: "גפן", current: "שוטף
 // results cell names what this school was actually asked for (condition_results.resolved_types).
 export function resolvedTypesLabel(res) {
   if (!res?.resolved_types) return null;
+  if (res.self_scheduled) return "היועץ קובע בעצמו";
   if (!res.resolved_types.length) return "אין סוג שירות בכרטיס";
   return res.resolved_types.map(t => MEETING_SERVICE_TYPE_LABELS[t] || t).join(" · ");
 }

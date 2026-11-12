@@ -18,7 +18,7 @@ import task_logic
 _log = logging.getLogger(__name__)
 
 # The order is the funnel's; a school's status is the first that applies.
-STATUSES = ("done", "booked", "partial", "opened", "requested", "problem", "untouched", "excluded")
+STATUSES = ("done", "booked", "partial", "opened", "requested", "problem", "untouched", "self_scheduled", "excluded")
 _REQUEST_PROBLEM_SKIPS = {"missing_contact", "incomplete_meeting_config", "opted_out"}
 # Card advisor lists each meeting type's advisor comes from (takuma: the גפן list).
 _ADVISOR_LISTS = {"gefen": ["gefen"], "current": ["current"], "district": ["district"],
@@ -39,6 +39,8 @@ def round_condition(rnd: dict) -> dict:
     count = int(req.get("count_per_school") or 1)
     if count > 1:
         cond["required_count"] = count
+    if rnd.get("advisor_exclusions"):
+        cond["advisor_exclusions"] = rnd["advisor_exclusions"]
     return cond
 
 
@@ -110,8 +112,10 @@ def school_status(
 ) -> dict:
     """One school's row in the round: what it needs, what it has, and where its request stands."""
     res = task_logic._meeting_condition_result(cond, school, school_meetings, year_row, token_ids)
-    expanded = task_logic._expand_for_school(cond, school, year_row)
+    expanded, self_scheduled = task_logic.expand_for_school_detail(cond, school, year_row)
     types = [c["meeting_service_type"] for c in expanded]
+    # Advisors who book their own part (round's advisor_exclusions) aren't this school's advisors here.
+    removed = {a for c in expanded for a in c.get("exclude_advisor_ids") or []}
     matched: dict[str, dict] = {}
     for c in expanded:
         for m in task_logic._matching_meetings(c, school_meetings, token_ids):
@@ -120,7 +124,9 @@ def school_status(
     required = res["required_count"] if expanded else 0
     have = min(res["actual_count"] or 0, required) if expanded else 0
 
-    if not expanded:
+    if self_scheduled:
+        status = "self_scheduled"  # every meeting is booked by its advisors themselves
+    elif not expanded:
         status = "problem"
     elif res["ok"]:
         status = "done" if meetings and all(m.get("status") == "completed" for m in meetings) else "booked"
@@ -140,7 +146,7 @@ def school_status(
         "authority": school.get("authority"), "district": school.get("district"), "city": school.get("city"),
         "stage": school.get("stage"),
         "status": status,
-        "problem": "missing_service_type" if not expanded else (
+        "problem": "missing_service_type" if not expanded and not self_scheduled else (
             "send_failed" if (msg or {}).get("status") == "failed" else (note or {}).get("skip_reason") if status == "problem" else None),
         "required_types": types,
         # For the dashboard's "by type" breakdown: the card's service type and whether its גפן and
@@ -148,8 +154,9 @@ def school_status(
         "card_service_type": (year_row or {}).get("service_type"),
         "gefen_current_same": bool(school.get("advisor_gefen_current_same")),
         "required_count": required, "booked_count": have,
-        # No service type yet → every advisor on its card, so it still shows under its advisor.
-        "advisor_ids": _advisor_ids_for(school, types or ["gefen", "current", "district"]),
+        # No service type yet (or self-scheduled) → every advisor on its card, so it still shows
+        # under its advisor.
+        "advisor_ids": [a for a in _advisor_ids_for(school, types or ["gefen", "current", "district"]) if a not in removed],
         "meetings": [{"id": m["id"], "date": m.get("meeting_date"), "service_type": m.get("meeting_service_type"),
                       "status": m.get("status"), "via_link": bool(m.get("booking_token_id"))} for m in meetings],
         "request": None if not msg else {

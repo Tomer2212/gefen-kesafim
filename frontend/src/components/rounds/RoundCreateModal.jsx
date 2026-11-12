@@ -8,6 +8,7 @@ import { AcademicYearSelector } from "../AcademicYearSelector";
 import { STAGE_SCOPE_OPTIONS } from "../tasks/taskShared";
 import { DEFAULT_ACADEMIC_YEAR } from "../../constants/academicYears";
 import PhysicalVisitorsModal from "./PhysicalVisitorsModal";
+import AdvisorExclusionsEditor from "../tasks/AdvisorExclusionsEditor";
 
 // "סבב פגישות חדש" — four short steps: name + period, which schools, what each needs, and the
 // big constraint (which schools meet in person). Everything else (wording, channel, advisor
@@ -58,10 +59,14 @@ export default function RoundCreateModal({ initialAcademicYear, onClose, onCreat
   const [physicalQuery, setPhysicalQuery] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  // "יועצים שקובעים לעצמם" — a new round starts from the org's default list (undefined until it loads).
+  const [exclusions, setExclusions] = useState(round ? (round.advisor_exclusions || {}) : undefined);
+  const [orgUsers, setOrgUsers] = useState([]);
 
   useEffect(() => {
     axios.get("/tasks/field-options").then(r => setFieldOptions(r.data?.fields || [])).catch(() => {});
     axios.get("/schools/").then(r => setAllSchools(r.data || [])).catch(() => {});
+    axios.get("/schools/users/all").then(r => setOrgUsers(r.data || [])).catch(() => {});
   }, []);
 
   const criteria = { groups: audienceMode === "filter" ? groups : [] };
@@ -91,7 +96,7 @@ export default function RoundCreateModal({ initialAcademicYear, onClose, onCreat
 
   const stepValid = {
     1: name.trim() && startDate && endDate && startDate <= endDate,
-    2: hasAudience && !previewLoading && previewSchools.length > 0,
+    2: hasAudience && !previewLoading && previewSchools.length > 0 && exclusions !== undefined,
     3: type && (type !== "by_service" || split) && (!hasSixYear || type === "current" || stageScope),
     4: hasPhysical === false || (hasPhysical === true && physicalIds.length > 0),
   };
@@ -118,7 +123,9 @@ export default function RoundCreateModal({ initialAcademicYear, onClose, onCreat
       setSaving(true);
       setError("");
       try {
-        const r = await axios.post("/rounds/physical-check", { academic_year: academicYear, school_ids: physicalIds, requirement: requirementPayload() });
+        const r = await axios.post("/rounds/physical-check", {
+          academic_year: academicYear, school_ids: physicalIds, requirement: requirementPayload(), advisor_exclusions: exclusions || {},
+        });
         const conflicts = r.data?.schools || [];
         // Editing: schools already answered keep their answer; the window opens only for new ones.
         const known = round?.physical_visitors || {};
@@ -149,6 +156,7 @@ export default function RoundCreateModal({ initialAcademicYear, onClose, onCreat
         requirement: requirementPayload(),
         physical_school_ids: hasPhysical ? physicalIds : [],
         physical_visitors: hasPhysical ? physicalVisitors : {},
+        advisor_exclusions: exclusions || {},
       };
       let res;
       if (round) {
@@ -242,6 +250,7 @@ export default function RoundCreateModal({ initialAcademicYear, onClose, onCreat
                 {previewLoading ? "בודק..." : preview ? <><b>{preview.count}</b> בתי ספר בסבב</> : "בחרו בתי ספר"}
               </div>
               {attempted && !stepValid[2] && <p role="alert" className="text-xs text-red-600">יש לבחור לפחות בית ספר אחד.</p>}
+              <AdvisorExclusionsEditor value={exclusions} onChange={setExclusions} users={orgUsers} idPrefix="round-exclusions" />
             </>
           )}
 
