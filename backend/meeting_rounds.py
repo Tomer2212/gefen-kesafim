@@ -108,14 +108,31 @@ def _is_open_request(msg: dict | None, token: dict | None, now_iso: str) -> bool
 
 def school_status(
     cond: dict, school: dict, school_meetings: list[dict], year_row: dict | None, token_ids: set[str],
-    msg: dict | None, token: dict | None, note: dict | None, now_iso: str,
+    msg: dict | None, token: dict | None, note: dict | None, now_iso: str, advisor_choices: dict | None = None,
 ) -> dict:
-    """One school's row in the round: what it needs, what it has, and where its request stands."""
+    """One school's row in the round: what it needs, what it has, and where its request stands.
+    advisor_choices = the round's remembered "which of several card advisors" answers for this
+    school (meeting_rounds.advisor_choices[sid]): its advisors are the chosen ones; the advisors
+    of a part still to be chosen are also listed in advisor_choice_open_ids."""
     res = task_logic._meeting_condition_result(cond, school, school_meetings, year_row, token_ids)
     expanded, self_scheduled = task_logic.expand_for_school_detail(cond, school, year_row)
     types = [c["meeting_service_type"] for c in expanded]
     # Advisors who book their own part (round's advisor_exclusions) aren't this school's advisors here.
     removed = {a for c in expanded for a in c.get("exclude_advisor_ids") or []}
+    lists = task_logic.school_advisor_lists(school)
+    advisor_ids: list[str] = []
+    open_ids: set[str] = set()
+    for c in expanded:
+        for scope in task_logic.range_split_scopes(school, task_logic.effective_stage_scope(c, school)):
+            ids, questions = task_logic.chosen_default_advisors(
+                lists, c["meeting_service_type"], c.get("exclude_advisor_ids"), scope, advisor_choices,
+            )
+            advisor_ids += [a for a in ids if a not in advisor_ids]
+            open_ids |= {a for q in questions for a in q["advisor_ids"]}
+    if not expanded:
+        # No service type yet (or self-scheduled) → every advisor on its card, so it still shows
+        # under its advisor.
+        advisor_ids = [a for a in _advisor_ids_for(school, ["gefen", "current", "district"]) if a not in removed]
     matched: dict[str, dict] = {}
     for c in expanded:
         for m in task_logic._matching_meetings(c, school_meetings, token_ids):
@@ -154,9 +171,10 @@ def school_status(
         "card_service_type": (year_row or {}).get("service_type"),
         "gefen_current_same": bool(school.get("advisor_gefen_current_same")),
         "required_count": required, "booked_count": have,
-        # No service type yet (or self-scheduled) → every advisor on its card, so it still shows
-        # under its advisor.
-        "advisor_ids": [a for a in _advisor_ids_for(school, types or ["gefen", "current", "district"]) if a not in removed],
+        "advisor_ids": advisor_ids,
+        # Advisors of a part with several card advisors not chosen yet (the task's pre-check asks):
+        # whether they're needed (e.g. their field days) isn't known until then.
+        "advisor_choice_open_ids": sorted(open_ids),
         "meetings": [{"id": m["id"], "date": m.get("meeting_date"), "service_type": m.get("meeting_service_type"),
                       "status": m.get("status"), "via_link": bool(m.get("booking_token_id"))} for m in meetings],
         "request": None if not msg else {
@@ -189,6 +207,7 @@ def compute_round(db, rnd: dict) -> dict:
         row = school_status(
             cond, s, meetings_by_school.get(s["id"], []), year_map.get(s["id"]), token_ids,
             msg, tokens.get((msg or {}).get("booking_token_id")), notes.get(s["id"]), now_iso,
+            (rnd.get("advisor_choices") or {}).get(s["id"]),
         )
         row["physical"] = s["id"] in physical
         rows.append(row)

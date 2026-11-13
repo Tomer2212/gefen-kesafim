@@ -694,6 +694,63 @@ def school_advisor_lists(school: dict) -> dict:
     return {t: school.get(f"advisor_{t}") or [] for t in ("gefen", "current", "district")}
 
 
+# "יותר מיועץ מלווה אחד מאותו סוג" — when a part of a school-booked meeting has 2+ card advisors,
+# the manager picks which of them (or all) the meeting is for. Stored per school as
+# {choice key: [advisor ids]} in org_tasks.meeting_overrides[sid]["advisor_choices"] and, for a
+# round, meeting_rounds.advisor_choices[sid]. Key = the part ("gefen" / "current" / "district",
+# or "gefen_current" when both lists are the same people) + "@tichon"/"@chativa" for a range of
+# one division, so a six-year school is asked per division. Used by the task pre-check and
+# ranges (tasks_router) and by the round's per-school advisors (meeting_rounds.school_status).
+ADVISOR_CHOICE_PART_LABELS = {"gefen": "גפן", "current": "שוטף", "district": "מחוז", "gefen_current": "גפן+שוטף"}
+_CARD_LISTS_FOR_MEETING = {"gefen": ["gefen"], "current": ["current"], "district": ["district"],
+                           "takuma": ["gefen"], "gefen_current": ["gefen", "current"]}
+
+
+def advisor_choice_parts(by_type: dict, service_type: str, exclude: list[str] | None = None) -> list[tuple[str, list[str]]]:
+    """[(part, advisor ids)] a meeting type draws from the card, minus advisors who book it
+    themselves. A combined meeting whose גפן and שוטף lists are the same people is one part."""
+    parts = [(t, [a for a in by_type.get(t) or [] if a not in (exclude or [])])
+             for t in _CARD_LISTS_FOR_MEETING.get(service_type, [])]
+    if len(parts) == 2 and parts[0][1] and set(parts[0][1]) == set(parts[1][1]):
+        return [("gefen_current", parts[0][1])]
+    return parts
+
+
+def advisor_choice_key(part: str, split_scope: str | None) -> str:
+    return f"{part}@{split_scope}" if split_scope in ("tichon", "chativa") else part
+
+
+def chosen_default_advisors(
+    by_type: dict, service_type: str, exclude: list[str] | None, split_scope: str | None, choices: dict | None,
+) -> tuple[list[str], list[dict]]:
+    """(advisor ids, open questions) of one range in "default" advisor mode. A part with 2+
+    advisors uses the saved choice (only ids still on the card count); with none it keeps every
+    advisor — the original behavior — and is returned as an open question for the pre-check."""
+    out: list[str] = []
+    questions: list[dict] = []
+    for part, ids in advisor_choice_parts(by_type, service_type, exclude):
+        picked = ids
+        if len(ids) > 1:
+            key = advisor_choice_key(part, split_scope)
+            chosen = [a for a in (choices or {}).get(key) or [] if a in ids]
+            if chosen:
+                picked = chosen
+            else:
+                questions.append({"key": key, "part": part, "stage_scope": split_scope, "advisor_ids": ids})
+        for aid in picked:
+            if aid not in out:
+                out.append(aid)
+    return out, questions
+
+
+def range_split_scopes(school: dict, stage_scope: str | None) -> list[str | None]:
+    """The division of each range one meeting condition becomes for a school (_build_meeting_ranges):
+    a six-year school's "separate" is two ranges; any other school has one, whatever was chosen."""
+    if school.get("stage") != "sheshshnati":
+        return [None]
+    return ["tichon", "chativa"] if stage_scope == "separate" else [stage_scope]
+
+
 def expand_for_school_detail(cond: dict, school: dict, year_row: dict | None) -> tuple[list[dict], bool]:
     """(the plain conditions asked of this school, self_scheduled). self_scheduled = every part
     belongs to an advisor who books it themselves, so nothing is asked (not a missing card type)."""

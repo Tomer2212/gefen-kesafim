@@ -63,6 +63,10 @@ const COORDINATOR_ROLE_OPTIONS_SHESHSHNATI = [
 // same underlying contact from two different problems (e.g. the principal is both a meeting
 // participant AND the coordinator) auto-resolves the other one too — see the cross-resolution
 // notes in handleSaveParticipant/handleSaveCoordinator.
+function advisorChoiceLeaf(schoolId, key) {
+  return `advisor_choice:${schoolId}:${key}`;
+}
+
 export default function TaskMeetingResolutionModal({
   criteria, manualSchoolIds, meetingRequirements, channel, academicYear, orgUsers, onProceed, onClose,
   // A task of a "סבב פגישות" — its field-day exemptions apply to the check.
@@ -94,6 +98,8 @@ export default function TaskMeetingResolutionModal({
   const [saveError, setSaveError] = useState(null);
   const [retrying, setRetrying] = useState(false);
   const [retrySuccess, setRetrySuccess] = useState(false);
+  // Answered advisor choices the manager reopened with "שנה" (leaf keys).
+  const [changingChoices, setChangingChoices] = useState(new Set());
 
   const needsPhone = channel === "whatsapp_twilio";
   function roleLabel(school, role) {
@@ -165,6 +171,8 @@ export default function TaskMeetingResolutionModal({
     if (school.coordinator_conflict) leaves.push(`conflict:${school.school_id}`);
     if (school.missing_service_type) leaves.push(`service_type:${school.school_id}`);
     for (const fd of school.missing_field_days || []) leaves.push(`field_days:${school.school_id}:${fd.meeting_service_type}`);
+    // Answered ones (the task's own / remembered by the round) are shown, but aren't problems.
+    for (const q of school.advisor_choice || []) if (!q.chosen) leaves.push(advisorChoiceLeaf(school.school_id, q.key));
     return leaves;
   }
   function schoolUnresolvedCount(school) {
@@ -178,6 +186,10 @@ export default function TaskMeetingResolutionModal({
   const unresolvedConflictIds = activeSchools
     .filter(s => s.coordinator_conflict && !resolved(`conflict:${s.school_id}`))
     .map(s => s.school_id);
+  const openAdvisorChoices = activeSchools.flatMap(s => (s.advisor_choice || [])
+    .filter(q => !q.chosen && !resolved(advisorChoiceLeaf(s.school_id, q.key)))
+    .map(q => ({ school: s, q })));
+  const openAdvisorChoiceSchoolCount = new Set(openAdvisorChoices.map(o => o.school.school_id)).size;
 
   // Existing-task mode: once every visible problem is marked resolved, immediately attempt
   // the real send instead of making the manager click a button — the scheduled time has
@@ -452,6 +464,66 @@ export default function TaskMeetingResolutionModal({
     });
   }
 
+  // --- Several card advisors of one type: which of them the meeting is for ---
+  // items: [{school, q}]; pickedIds: null = all of each question's own advisors.
+  async function chooseAdvisors(items, pickedIds) {
+    setSaveError(null);
+    const picks = items.map(({ school, q }) => ({ schoolId: school.school_id, key: q.key, ids: pickedIds || q.advisor_ids }));
+    if (taskId) {
+      setSavingKey("advisor_choice");
+      try {
+        for (const p of picks) {
+          await axios.patch(`/tasks/${taskId}/meeting-overrides/${p.schoolId}`, { advisor_choice_key: p.key, advisor_ids: p.ids });
+        }
+      } catch {
+        setSaveError("שמירת בחירת היועץ נכשלה — נסה שוב.");
+        setSavingKey(null);
+        return;
+      }
+      setSavingKey(null);
+    } else {
+      setMeetingOverrides(prev => {
+        const next = { ...prev };
+        for (const p of picks) {
+          next[p.schoolId] = { ...next[p.schoolId], advisor_choices: { ...next[p.schoolId]?.advisor_choices, [p.key]: p.ids } };
+        }
+        return next;
+      });
+    }
+    setDrafts(prev => {
+      const next = { ...prev };
+      for (const p of picks) next[advisorChoiceLeaf(p.schoolId, p.key)] = p.ids;
+      return next;
+    });
+    setResolvedKeys(prev => {
+      const next = new Set(prev);
+      for (const p of picks) next.add(advisorChoiceLeaf(p.schoolId, p.key));
+      return next;
+    });
+    setChangingChoices(prev => {
+      const next = new Set(prev);
+      for (const p of picks) next.delete(advisorChoiceLeaf(p.schoolId, p.key));
+      return next;
+    });
+  }
+  // Other still-open questions with exactly the same advisors — offered the same answer in one click.
+  function similarOpenChoices(school, q) {
+    const ids = [...q.advisor_ids].sort().join(",");
+    return openAdvisorChoices.filter(o => o.q.part === q.part && [...o.q.advisor_ids].sort().join(",") === ids
+      && !(o.school.school_id === school.school_id && o.q.key === q.key));
+  }
+  function advisorNames(q, ids) {
+    return ids.map(id => q.advisors?.find(a => a.id === id)?.name || orgUsers?.find(u => u.id === id)?.full_name || "").filter(Boolean).join(", ");
+  }
+  function describeChoice(q, ids) {
+    return ids.length === q.advisor_ids.length && ids.length > 1
+      ? `כלל היועצים המלווים (${advisorNames(q, ids)})`
+      : advisorNames(q, ids);
+  }
+  function choicePartLabel(q) {
+    return `${q.part_label}${q.stage_scope && DIVISION_LABELS[q.stage_scope] ? ` — ${DIVISION_LABELS[q.stage_scope]}` : ""}`;
+  }
+
   async function handleExport() {
     const rows = [];
     for (const school of remainingSchools) {
@@ -483,6 +555,11 @@ export default function TaskMeetingResolutionModal({
       }
       if (school.missing_service_type && !resolved(`service_type:${school.school_id}`)) {
         rows.push({ school_id: school.school_id, school_name: school.school_name, symbol: school.symbol, authority: school.authority, kind: "missing_service_type" });
+      }
+      for (const q of school.advisor_choice || []) {
+        if (!q.chosen && !resolved(advisorChoiceLeaf(school.school_id, q.key))) {
+          rows.push({ school_id: school.school_id, school_name: school.school_name, symbol: school.symbol, authority: school.authority, kind: "advisor_choice", detail: `${choicePartLabel(q)}: ${advisorNames(q, q.advisor_ids)}` });
+        }
       }
     }
     const res = await axios.post("/tasks/meetings/export-missing", { rows }, { responseType: "blob" });
@@ -542,6 +619,19 @@ export default function TaskMeetingResolutionModal({
                       שלח לאחראי/ת התיאום של {COORDINATOR_TYPE_LABELS[type]}
                     </button>
                   ))}
+                </div>
+              )}
+
+              {openAdvisorChoiceSchoolCount > 1 && (
+                <div className="flex items-center gap-1.5 flex-wrap bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
+                  <span className="text-xs text-slate-700">
+                    ל-<b>{openAdvisorChoiceSchoolCount}</b> בתי ספר מוגדר יותר מיועץ מלווה אחד מאותו סוג, וצריך לבחור עבור מי לקבוע את הפגישה. לכולם:
+                  </span>
+                  <button type="button" disabled={!!savingKey} onClick={() => chooseAdvisors(openAdvisorChoices, null)}
+                    className="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-white border border-amber-300 text-amber-800 hover:bg-amber-100 disabled:opacity-50">
+                    כלל היועצים המלווים — פגישה אחת עם כולם
+                  </button>
+                  <span className="text-xs text-slate-500">(או בחרו יועץ לכל בית ספר בנפרד, למטה)</span>
                 </div>
               )}
 
@@ -953,6 +1043,71 @@ export default function TaskMeetingResolutionModal({
                             </div>
                           );
                         })()}
+
+                        {(school.advisor_choice || []).map(q => {
+                          const key = advisorChoiceLeaf(school.school_id, q.key);
+                          const isProblem = !q.chosen;
+                          const n = isProblem ? (cardCounter += 1) : null;
+                          const picked = draftValue(key, null) || q.chosen;
+                          const saving = savingKey === "advisor_choice";
+                          const answered = (isProblem ? resolved(key) : true) && !changingChoices.has(key);
+                          if (answered) {
+                            const similar = similarOpenChoices(school, q);
+                            return (
+                              <div key={key} className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 space-y-1.5">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span aria-hidden="true" className="text-emerald-600 text-xs font-bold">✓</span>
+                                  <span className="text-xs text-emerald-800">
+                                    {n && <b>בעיה {n}: </b>}
+                                    פגישת {choicePartLabel(q)} תיקבע עבור: <b>{describeChoice(q, picked || [])}</b>
+                                    {!draftValue(key, null) && q.from_round && " (נבחר קודם בסבב)"}
+                                  </span>
+                                  <button type="button" disabled={saving}
+                                    onClick={() => setChangingChoices(prev => new Set(prev).add(key))}
+                                    className="text-xs text-blue-600 hover:underline disabled:opacity-50">
+                                    שנה
+                                  </button>
+                                </div>
+                                {similar.length > 0 && picked && (
+                                  <button type="button" disabled={saving}
+                                    onClick={() => chooseAdvisors(similar, picked.length === q.advisor_ids.length ? null : picked)}
+                                    className="text-xs px-2.5 py-1 rounded-lg font-medium bg-white border border-emerald-300 text-emerald-800 hover:bg-emerald-100 disabled:opacity-50">
+                                    החל את אותה בחירה גם על עוד {similar.length} {similar.length === 1 ? "בית ספר" : "בתי ספר"} עם אותם יועצים
+                                  </button>
+                                )}
+                              </div>
+                            );
+                          }
+                          return (
+                            <div key={key} className="bg-white rounded-lg border border-amber-100 p-3 space-y-2">
+                              <p className="text-xs text-slate-700">
+                                {n && <b>בעיה {n}: </b>}
+                                לבית הספר <b>{school.school_name}</b> מוגדרים <b>{q.advisor_ids.length} יועצים מלווים ל{q.part_label}</b>
+                                {q.stage_scope && DIVISION_LABELS[q.stage_scope] && <> (בפגישת ה{DIVISION_LABELS[q.stage_scope]})</>}.
+                                {" "}עבור מי לקבוע את הפגישה?
+                              </p>
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                {q.advisor_ids.map(id => (
+                                  <button key={id} type="button" disabled={saving} onClick={() => chooseAdvisors([{ school, q }], [id])}
+                                    className="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">
+                                    {advisorNames(q, [id]) || "יועץ"}
+                                  </button>
+                                ))}
+                                <button type="button" disabled={saving} onClick={() => chooseAdvisors([{ school, q }], null)}
+                                  className="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-white border border-amber-300 text-amber-800 hover:bg-amber-100 disabled:opacity-50">
+                                  כלל היועצים המלווים — פגישה אחת עם כולם
+                                </button>
+                                {changingChoices.has(key) && (
+                                  <button type="button" onClick={() => setChangingChoices(prev => { const next = new Set(prev); next.delete(key); return next; })}
+                                    className="text-xs text-slate-500 hover:underline">
+                                    ביטול
+                                  </button>
+                                )}
+                              </div>
+                              <p className="text-[11px] text-slate-500">בבחירת כלל היועצים, בית הספר יוכל לבחור רק מועדים שבהם כולם פנויים.</p>
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
                   </div>

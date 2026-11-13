@@ -83,6 +83,14 @@ def _default_advisor_ids(by_type: dict, service_type: str) -> list[str]:
     return out
 
 
+# "יותר מיועץ מלווה אחד מאותו סוג" — see task_logic.chosen_default_advisors (shared with the rounds).
+ADVISOR_CHOICE_PART_LABELS = task_logic.ADVISOR_CHOICE_PART_LABELS
+_advisor_choice_parts = task_logic.advisor_choice_parts
+advisor_choice_key = task_logic.advisor_choice_key
+_chosen_default_advisors = task_logic.chosen_default_advisors
+_range_split_scopes = task_logic.range_split_scopes
+
+
 def _missing_default_advisor_types(by_type: dict, service_type: str) -> list[str]:
     return [t for t in _card_types_for_meeting(service_type) if not by_type.get(t)]
 
@@ -1034,6 +1042,76 @@ class MeetingRequirementIn(BaseModel):
     advisor_exclusions: dict | None = None
     exclude_advisor_ids: list[str] = []
     also_matches_types: list[str] = []
+    # Stamped at creation (_prepare_meeting_conditions): the pre-check asks which advisor when a
+    # part has several. Tasks created before that keep sending to all of them, never held back.
+    ask_advisor_choice: bool = False
+
+
+def _round_advisor_choices(db, org_id: str, round_id: str | None) -> dict[str, dict]:
+    """{school_id: {choice key: [advisor ids]}} remembered by a round for its tasks."""
+    if not round_id:
+        return {}
+    try:
+        rows = (
+            db.table("meeting_rounds").select("advisor_choices")
+            .eq("id", round_id).eq("org_id", org_id).execute().data or []
+        )
+    except Exception as exc:
+        logger.warning("_round_advisor_choices failed (non-fatal): %s", exc)
+        return {}
+    return dict((rows[0].get("advisor_choices") if rows else None) or {})
+
+
+def _merge_round_advisor_choices(db, org_id: str, round_id: str | None, by_school: dict) -> None:
+    """Remembers a task's advisor choices on its round, so the round's next tasks aren't asked again."""
+    by_school = {sid: c for sid, c in (by_school or {}).items() if c}
+    if not round_id or not by_school:
+        return
+    try:
+        current = _round_advisor_choices(db, org_id, round_id)
+        for sid, choices in by_school.items():
+            current[sid] = {**(current.get(sid) or {}), **choices}
+        db.table("meeting_rounds").update({"advisor_choices": current}).eq("id", round_id).eq("org_id", org_id).execute()
+    except Exception as exc:
+        logger.warning("_merge_round_advisor_choices failed (non-fatal): %s", exc)
+
+
+def _clean_override_advisor_choices(db, org_id: str, meeting_overrides: dict | None) -> dict | None:
+    """The wizard's meeting_overrides with each school's advisor_choices narrowed to this org's
+    schools, valid keys and advisors on that school's card list for the part — a client can
+    never put another advisor on a booking link through it."""
+    if not meeting_overrides:
+        return meeting_overrides
+    raw = {sid: (o or {}).get("advisor_choices") for sid, o in meeting_overrides.items() if isinstance(o, dict) and (o or {}).get("advisor_choices")}
+    if not raw:
+        return meeting_overrides
+    own_ids = {r["id"] for r in db.table("schools").select("id").eq("org_id", org_id).in_("id", list(raw)).execute().data or []}
+    card: dict[str, dict[str, set[str]]] = {}
+    for t, table_name in _TYPED_ADVISOR_TABLES.items() if own_ids else ():
+        for r in db.table(table_name).select("school_id, advisor_id").in_("school_id", list(own_ids)).execute().data or []:
+            card.setdefault(r["school_id"], {}).setdefault(t, set()).add(r["advisor_id"])
+    out = dict(meeting_overrides)
+    for sid, choices in raw.items():
+        cleaned = {}
+        for key, ids in (choices if isinstance(choices, dict) else {}).items():
+            part, _, scope = str(key).partition("@")
+            if part not in ADVISOR_CHOICE_PART_LABELS or scope not in ("", "tichon", "chativa"):
+                continue
+            allowed = set().union(*(card.get(sid, {}).get(t, set()) for t in (("gefen", "current") if part == "gefen_current" else (part,))))
+            kept = [a for a in dict.fromkeys(ids or []) if a in allowed]
+            if kept:
+                cleaned[key] = kept
+        school = {k: v for k, v in out[sid].items() if k != "advisor_choices"}
+        if cleaned and sid in own_ids:
+            school["advisor_choices"] = cleaned
+        out[sid] = school
+    return out
+
+
+def _effective_advisor_choices(school_id: str, meeting_overrides: dict | None, round_choices: dict | None) -> dict:
+    """A school's advisor choices: the task's own over the round's."""
+    task_choices = (((meeting_overrides or {}).get(school_id) or {}).get("advisor_choices")) or {}
+    return {**((round_choices or {}).get(school_id) or {}), **task_choices}
 
 
 def _field_days_by_advisor(db, org_id: str, advisor_ids: list[str]) -> dict[str, list[str]]:
@@ -1195,14 +1273,15 @@ def _has_blocking_meeting_problem(entry: dict) -> bool:
     """Every problem kind except the informational opted_out one blocks sending."""
     return bool(entry["coordinator"] or entry["participants"] or entry["meeting_defaults"]
                 or entry["advisor_access"] or entry.get("coordinator_conflict") or entry.get("missing_service_type")
-                or entry.get("missing_field_days"))
+                or entry.get("missing_field_days")
+                or any(not q.get("chosen") for q in entry.get("advisor_choice") or []))
 
 
 def _check_meeting_problems(
     org_id: str, criteria: dict, manual_school_ids: list[str] | None,
     meeting_requirements: list[MeetingRequirementIn], channel: str, academic_year: str,
     meeting_overrides: dict | None = None, round_id: str | None = None,
-    advisor_exclusions: dict | None = None,
+    advisor_exclusions: dict | None = None, ask_all_advisor_choices: bool = False,
 ) -> dict:
     """Round-6 unified pre-creation check (TaskMeetingResolutionModal) for 'קביעת פגישות'
     tasks — replaces both the old split-out advisor/participant-name-only version of this
@@ -1222,6 +1301,11 @@ def _check_meeting_problems(
     - coordinator_conflict: a combined "גפן+שוטף" meeting whose גפן and שוטף coordinators are
       different people, with no choice yet in meeting_overrides (the existing task's saved
       overrides; the wizard keeps its choices client-side until creation).
+    - advisor_choice: a part of a requested meeting with 2+ card advisors of its type — which of
+      them (or all) the meeting is for (_chosen_default_advisors). Asked for every requirement
+      in the wizard (ask_all_advisor_choices), and for a stored task only on conditions stamped
+      ask_advisor_choice. Answered ones (the task's own, or remembered by its round) are listed
+      too, non-blocking, so the manager can change them.
 
     Extracted out of the /meetings/check endpoint handler so it can be reused both for the
     pre-creation wizard check AND for re-validating an already-created task right before a
@@ -1275,6 +1359,7 @@ def _check_meeting_problems(
         candidate_ids |= {aid for r in task_requirements for aid in r.advisor_ids}
         field_days = _field_days_by_advisor(db, org_id, list(candidate_ids))
     field_exempt, field_visitors = _round_field_rules(db, org_id, round_id) if field_days is not None else (set(), {})
+    round_choices = _round_advisor_choices(db, org_id, round_id)
 
     entries_by_school: dict[str, dict] = {}
     coordinator_emails: dict[str, str | None] = {}
@@ -1427,6 +1512,27 @@ def _check_meeting_problems(
             if conflict_scopes:
                 coordinator_conflict = {"scopes": conflict_scopes}
 
+        task_choices = school_overrides.get("advisor_choices") or {}
+        school_round_choices = round_choices.get(school["id"]) or {}
+        choices = _effective_advisor_choices(school["id"], meeting_overrides, round_choices)
+        advisor_choice: dict[str, dict] = {}
+        for req in meeting_requirements:
+            if (req.advisor_mode == "manual" or req.meeting_service_type not in _MEETING_TYPE_LABELS
+                    or not (ask_all_advisor_choices or req.ask_advisor_choice)
+                    or (school_overrides.get(req.meeting_service_type) or {}).get("advisor_ids")):
+                continue
+            for split_scope in _range_split_scopes(school, _req_stage_scope(req, school)):
+                for part, ids in _advisor_choice_parts(school_advisors, req.meeting_service_type, req.exclude_advisor_ids):
+                    key = advisor_choice_key(part, split_scope)
+                    if len(ids) < 2 or key in advisor_choice:
+                        continue
+                    chosen = [a for a in choices.get(key) or [] if a in ids]
+                    advisor_choice[key] = {
+                        "key": key, "part": part, "part_label": ADVISOR_CHOICE_PART_LABELS[part],
+                        "stage_scope": split_scope, "advisor_ids": ids, "chosen": chosen or None,
+                        "from_round": bool(chosen) and key not in task_choices and key in school_round_choices,
+                    }
+
         # Advisor-access check — the "the manually picked advisor can't actually reach this
         # school's card" case from the temp-access-grant feature. Only relevant for manual-mode
         # requirements (a "default" advisor is resolved from the school's own card, which
@@ -1450,24 +1556,30 @@ def _check_meeting_problems(
             if not req.use_field_days or req.meeting_service_type not in _MEETING_TYPE_LABELS:
                 continue
             type_override = school_overrides.get(req.meeting_service_type) or {}
-            if req.advisor_mode == "manual":
-                req_advisors = req.advisor_ids
-            else:
-                req_advisors = type_override.get("advisor_ids") or _default_advisor_ids(school_advisors, req.meeting_service_type)
-                if req.meeting_service_type == "gefen_current" and type_override.get("advisor_ids"):
-                    req_advisors = list(dict.fromkeys(_default_advisor_ids(school_advisors, req.meeting_service_type) + type_override["advisor_ids"]))
-            req_advisors = [a for a in req_advisors if a not in req.exclude_advisor_ids]
-            if not req_advisors:
-                continue  # reported as a missing advisor (meeting_defaults)
-            window = [(req.date_from or "0000-01-01", req.date_to or "9999-12-31")]
-            school_visitors = field_visitors.get(school["id"])
-            if not _visiting_advisors(req_advisors, field_exempt, school_visitors):
-                continue  # held remotely — no field day needed
-            if not _field_day_segments(window, req_advisors, field_days or {}, field_exempt, school_visitors):
-                missing_field_days.append({"meeting_service_type": req.meeting_service_type, "advisor_ids": req_advisors})
+            # Per range, with the advisors it will really have (the advisor choice narrows them).
+            for split_scope in _range_split_scopes(school, _req_stage_scope(req, school)):
+                if req.advisor_mode == "manual":
+                    req_advisors = req.advisor_ids
+                elif type_override.get("advisor_ids"):
+                    req_advisors = type_override["advisor_ids"]
+                    if req.meeting_service_type == "gefen_current":
+                        req_advisors = list(dict.fromkeys(_default_advisor_ids(school_advisors, req.meeting_service_type) + type_override["advisor_ids"]))
+                else:
+                    req_advisors, _ = _chosen_default_advisors(school_advisors, req.meeting_service_type, req.exclude_advisor_ids, split_scope, choices)
+                req_advisors = [a for a in req_advisors if a not in req.exclude_advisor_ids]
+                if not req_advisors:
+                    continue  # reported as a missing advisor (meeting_defaults)
+                window = [(req.date_from or "0000-01-01", req.date_to or "9999-12-31")]
+                school_visitors = field_visitors.get(school["id"])
+                if not _visiting_advisors(req_advisors, field_exempt, school_visitors):
+                    continue  # held remotely — no field day needed
+                if not _field_day_segments(window, req_advisors, field_days or {}, field_exempt, school_visitors):
+                    missing_field_days.append({"meeting_service_type": req.meeting_service_type, "advisor_ids": req_advisors})
+                    break
 
+        open_advisor_choice = any(not q["chosen"] for q in advisor_choice.values())
         if (coordinator or participants or meeting_defaults or advisor_access or coordinator_conflict
-                or coordinator_missing_contact or missing_service_type or missing_field_days):
+                or coordinator_missing_contact or missing_service_type or missing_field_days or open_advisor_choice):
             entries_by_school[school["id"]] = {
                 "school_id": school["id"], "school_name": school["name"],
                 "symbol": school.get("symbol"), "authority": school.get("authority"),
@@ -1476,6 +1588,8 @@ def _check_meeting_problems(
                 "advisor_access": advisor_access, "coordinator_conflict": coordinator_conflict, "opted_out": None,
                 "missing_service_type": missing_service_type,
                 "missing_field_days": missing_field_days or None,
+                # Answered questions ride along (to stay changeable) only when the school is listed anyway.
+                "advisor_choice": list(advisor_choice.values()) or None,
                 # Informational only (never blocks) — see card_only above.
                 "coordinator_missing_contact": coordinator_missing_contact,
             }
@@ -1502,6 +1616,19 @@ def _check_meeting_problems(
         entry["opted_out"] = {"email": email}
 
     results = list(entries_by_school.values())
+    choice_advisor_ids = {aid for r in results for q in r.get("advisor_choice") or [] for aid in q["advisor_ids"]}
+    names: dict[str, str] = {}
+    if choice_advisor_ids:
+        try:
+            names = {
+                p["id"]: p.get("full_name") or p.get("email") or ""
+                for p in db.table("profiles").select("id, full_name, email").in_("id", list(choice_advisor_ids)).execute().data or []
+            }
+        except Exception as exc:
+            logger.warning("_check_meeting_problems: advisor names lookup failed (non-fatal): %s", exc)
+    for r in results:
+        for q in r.get("advisor_choice") or []:
+            q["advisors"] = [{"id": aid, "name": names.get(aid) or ""} for aid in q["advisor_ids"]]
     blocking_count = sum(1 for r in results if _has_blocking_meeting_problem(r))
     return {"schools": results, "total_schools": len(matched), "ok_schools": len(matched) - blocking_count,
             "self_scheduled": self_scheduled}
@@ -1516,7 +1643,7 @@ def check_meetings(body: MeetingsCheckIn, user: Annotated[dict, Depends(get_curr
     return _check_meeting_problems(
         user["org_id"], criteria, body.manual_school_ids, body.meeting_requirements,
         body.channel, body.academic_year, None, body.round_id,
-        _org_advisor_exclusions(user["org_id"], body.advisor_exclusions),
+        _org_advisor_exclusions(user["org_id"], body.advisor_exclusions), ask_all_advisor_choices=True,
     )
 
 
@@ -1549,8 +1676,12 @@ def check_task_meeting_problems(task_id: str, user: Annotated[dict, Depends(get_
 
 
 class MeetingOverrideIn(BaseModel):
-    meeting_service_type: str
-    coordinator_type: str  # "gefen" | "current"
+    # One of two choices per call: a combined meeting's coordinator...
+    meeting_service_type: str | None = None
+    coordinator_type: str | None = None  # "gefen" | "current"
+    # ...or which of several card advisors a part is for (see ADVISOR_CHOICE_PART_LABELS).
+    advisor_choice_key: str | None = None
+    advisor_ids: list[str] | None = None
 
 
 @router.patch("/{task_id}/meeting-overrides/{school_id}")
@@ -1560,13 +1691,20 @@ def set_task_meeting_override(
     """Saves the manager's choice of who receives a combined "גפן+שוטף" meeting's link when the
     school's גפן and שוטף coordinators differ, on an already-created task (the 'בעיות' screen of a
     scheduled task that was held back). The wizard sends the same choice in meeting_overrides at
-    creation instead."""
+    creation instead. Also saves which of a school's several card advisors of a type a meeting is
+    for (advisor_choice_key + advisor_ids, only advisors on that card list), and remembers it on
+    the task's round."""
     _require_manager(user)
-    if body.meeting_service_type != "gefen_current" or body.coordinator_type not in ("gefen", "current"):
+    is_advisor_choice = body.advisor_choice_key is not None
+    if is_advisor_choice:
+        part, _, scope = body.advisor_choice_key.partition("@")
+        if part not in ADVISOR_CHOICE_PART_LABELS or scope not in ("", "tichon", "chativa") or not body.advisor_ids:
+            raise HTTPException(status_code=400, detail="בחירה לא תקינה")
+    elif body.meeting_service_type != "gefen_current" or body.coordinator_type not in ("gefen", "current"):
         raise HTTPException(status_code=400, detail="בחירה לא תקינה")
     db = get_admin_client()
     task_rows = (
-        db.table("org_tasks").select("id, meeting_overrides")
+        db.table("org_tasks").select("id, meeting_overrides, round_id")
         .eq("id", task_id).eq("org_id", user["org_id"]).execute().data
     )
     if not task_rows:
@@ -1576,11 +1714,22 @@ def set_task_meeting_override(
         raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
     overrides = dict(task_rows[0].get("meeting_overrides") or {})
     school_overrides = dict(overrides.get(school_id) or {})
-    type_override = dict(school_overrides.get(body.meeting_service_type) or {})
-    type_override["coordinator_type"] = body.coordinator_type
-    school_overrides[body.meeting_service_type] = type_override
+    if is_advisor_choice:
+        card_ids: set[str] = set()
+        for t in ("gefen", "current") if part == "gefen_current" else (part,):
+            card_ids |= {r["advisor_id"] for r in db.table(_TYPED_ADVISOR_TABLES[t]).select("advisor_id").eq("school_id", school_id).execute().data or []}
+        if not set(body.advisor_ids) <= card_ids:
+            raise HTTPException(status_code=400, detail="היועץ אינו מוגדר כיועץ מלווה בבית הספר")
+        choice = {body.advisor_choice_key: list(dict.fromkeys(body.advisor_ids))}
+        school_overrides["advisor_choices"] = {**(school_overrides.get("advisor_choices") or {}), **choice}
+    else:
+        type_override = dict(school_overrides.get(body.meeting_service_type) or {})
+        type_override["coordinator_type"] = body.coordinator_type
+        school_overrides[body.meeting_service_type] = type_override
     overrides[school_id] = school_overrides
     db.table("org_tasks").update({"meeting_overrides": overrides}).eq("id", task_id).execute()
+    if is_advisor_choice:
+        _merge_round_advisor_choices(db, user["org_id"], task_rows[0].get("round_id"), {school_id: choice})
     return {"ok": True}
 
 
@@ -1603,6 +1752,7 @@ _MEETING_PROBLEM_KIND_LABELS = {
     "coordinator_conflict": "אחראי/ת תיאום שונה לגפן ולשוטף",
     "missing_service_type": "לא הוגדר סוג שירות בכרטיס",
     "missing_field_days": "אין ימי שטח ליועץ בטווח (פגישה פיזית)",
+    "advisor_choice": "יותר מיועץ מלווה אחד — לא נבחר עבור מי הפגישה",
 }
 
 
@@ -1619,7 +1769,9 @@ def export_missing_meetings(body: ExportMissingMeetingsIn, user: Annotated[dict,
     ws.append(["שם מוסד", "סמל מוסד", "בעלות", "סוג בעיה", "פרט"])
     for r in body.rows:
         kind_label = _MEETING_PROBLEM_KIND_LABELS.get(r.kind, r.kind)
-        if r.kind in ("advisor", "duration"):
+        if r.kind == "advisor_choice":
+            detail_label = r.detail or ""
+        elif r.kind in ("advisor", "duration"):
             detail_label = _MEETING_TYPE_LABELS.get(r.detail, r.detail)
         elif r.kind == "participant":
             detail_label = _PARTICIPANT_ROLE_LABELS.get(r.detail, r.detail)
@@ -1667,6 +1819,7 @@ def _prepare_meeting_conditions(success_criteria: dict | None, org_id: str, advi
                     raise HTTPException(status_code=422, detail="ערך לא תקין בשאלה \"שמירה על יומן יעיל\"")
                 if c.get("start_grid_minutes") is not None and c["start_grid_minutes"] not in slot_policy.START_GRID_OPTIONS:
                     raise HTTPException(status_code=422, detail="ערך לא תקין בשאלה \"שעת התחלה של הפגישה\"")
+                c["ask_advisor_choice"] = True  # see MeetingRequirementIn.ask_advisor_choice
                 if c.get("use_field_days"):
                     c["meeting_type"] = "physical"  # field days are for in-person meetings only
                 if c.get("meeting_service_type") == task_logic.BY_SERVICE:
@@ -1745,6 +1898,7 @@ def create_task(body: TaskCreateIn, user: Annotated[dict, Depends(get_current_us
     _prepare_meeting_conditions(success_criteria, user["org_id"], advisor_exclusions)
 
     round_members = _round_member_ids(get_admin_client(), user["org_id"], body.round_id, body.include_open_requests)
+    meeting_overrides = _clean_override_advisor_choices(get_admin_client(), user["org_id"], body.meeting_overrides)
 
     scheduled_for_dt = _parse_dt(body.scheduled_for)
     is_future_scheduled = bool(scheduled_for_dt and scheduled_for_dt > datetime.now(timezone.utc))
@@ -1797,7 +1951,7 @@ def create_task(body: TaskCreateIn, user: Annotated[dict, Depends(get_current_us
                     "success_criteria": success_criteria,
                     "track_success": body.track_success,
                     "is_meeting_task": body.is_meeting_task,
-                    "meeting_overrides": body.meeting_overrides,
+                    "meeting_overrides": meeting_overrides,
                     "round_id": body.round_id,
                     "round_include_open_requests": bool(body.round_id and body.include_open_requests),
                     "advisor_exclusions": advisor_exclusions or None,
@@ -1818,6 +1972,11 @@ def create_task(body: TaskCreateIn, user: Annotated[dict, Depends(get_current_us
             else:
                 logger.error("create_task failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    _merge_round_advisor_choices(
+        get_admin_client(), user["org_id"], body.round_id,
+        {sid: (o or {}).get("advisor_choices") for sid, o in (meeting_overrides or {}).items()},
+    )
 
     missing_contact_school_ids = []
     if not is_future_scheduled and len(matched_school_ids) > INLINE_SEND_MAX_SCHOOLS:
@@ -2473,7 +2632,7 @@ def _build_meeting_ranges(
     school: dict, meeting_conditions: list[dict],
     advisor_map: dict[str, list[str]], duration_row: dict, school_overrides: dict | None = None,
     field_days: dict[str, list[str]] | None = None, field_exempt: set[str] | None = None,
-    field_visitors: list[str] | None = None,
+    field_visitors: list[str] | None = None, advisor_choices: dict | None = None,
 ) -> list[dict] | None:
     """Structured, per-meeting-requirement booking link for 'קביעת פגישות' tasks (round 5) —
     mirrors schools_router.send_direct_coordination_request's ranges_data construction
@@ -2496,7 +2655,9 @@ def _build_meeting_ranges(
     inviting every advisor from every OTHER meeting type too; meeting_booking_router.py prefers a
     range's own advisor_ids over the token-level union when present). Token minting is a separate
     step (_mint_meeting_booking_link) so the caller can group ranges by resolved coordinator
-    (_group_ranges_by_coordinator) and mint one token per group instead of always one per school."""
+    (_group_ranges_by_coordinator) and mint one token per group instead of always one per school.
+    advisor_choices = the school's {choice key: [advisor ids]} (_effective_advisor_choices) — which
+    of several card advisors of a type a range is for; an unanswered part keeps them all."""
     school_overrides = school_overrides or {}
     valid_conditions = [c for c in meeting_conditions if c.get("meeting_service_type") in _MEETING_TYPE_LABELS]
     type_counts: dict[str, int] = {}
@@ -2518,30 +2679,6 @@ def _build_meeting_ranges(
             continue
         start_date = min(s["start_date"] for s in segments)
         end_date = max(s["end_date"] for s in segments)
-        if c.get("advisor_mode") == "manual":
-            advisor_ids = c.get("advisor_ids")
-        else:
-            advisor_ids = override.get("advisor_ids") or _default_advisor_ids(advisor_map, service_type)
-            if service_type == "gefen_current" and override.get("advisor_ids"):
-                # A combined meeting's override only fills the side missing from the card
-                # (TaskMeetingResolutionModal), so it joins the card's advisors, not replaces them.
-                advisor_ids = list(dict.fromkeys(_default_advisor_ids(advisor_map, service_type) + override["advisor_ids"]))
-        # Advisors who book this part themselves (task_logic.apply_advisor_exclusions).
-        advisor_ids = [a for a in advisor_ids or [] if a not in (c.get("exclude_advisor_ids") or [])]
-        if not advisor_ids:
-            continue
-        held_remotely = False
-        if c.get("use_field_days"):
-            # A physical meeting is offered only on its visiting advisors' field days (in the same
-            # windows); with no visiting advisor (e.g. the שוטף meeting of a separate גפן+שוטף
-            # pair where only the גפן advisor goes out) it's held remotely on the regular dates.
-            if not _visiting_advisors(advisor_ids, field_exempt, field_visitors):
-                held_remotely = True
-            else:
-                segments = _field_day_segments([(s["start_date"], s["end_date"]) for s in segments], advisor_ids, field_days or {}, field_exempt, field_visitors)
-                if not segments:
-                    continue
-                start_date, end_date = segments[0]["start_date"], segments[-1]["end_date"]
         if c.get("duration_mode") == "manual":
             duration_minutes = c.get("duration_minutes") or 60
         else:
@@ -2561,26 +2698,51 @@ def _build_meeting_ranges(
         #
         # BUG FIX: a meeting-requirement condition is defined ONCE for the whole task, shared by
         # every matched school — but stage_scope (tichon/chativa/both/separate) only means
-        # anything for a six-year school. Without the `school.get("stage") == "sheshshnati"`
-        # guard below, a task with stage_scope="separate" used to split into two ranges
+        # anything for a six-year school. Without the six-year guard (_range_split_scopes), a task with stage_scope="separate" used to split into two ranges
         # (tichon + chativa) for EVERY matched school, including plain יסודי/other schools that
         # have only one principal — _role_slots_for_school already collapses stage_scope to a
         # single slot for those (same contact either way), so the result was two separate
         # booking requests sent to the SAME person for the SAME meeting. For a non-six-year
         # school, stage_scope is meaningless — always exactly one merged range, regardless of
         # what was selected at the condition level.
-        is_six_year = school.get("stage") == "sheshshnati"
-        if not is_six_year:
-            split_scopes = [None]
-        elif stage_scope == "separate":
-            # Whatever the roles: progress requires 2 for any "separate" on a six-year school,
-            # and a single range tagged "separate" could never fulfil either division.
-            split_scopes = ["tichon", "chativa"]
-        else:
-            split_scopes = [stage_scope]
+        # Whatever the roles: progress requires 2 for any "separate" on a six-year school, and a
+        # single range tagged "separate" could never fulfil either division.
+        split_scopes = _range_split_scopes(school, stage_scope)
 
         counted_for_label = False
         for split_scope in split_scopes:
+            # Advisors per range: a six-year school's two divisions may each have their own
+            # (the manager's advisor choice, _chosen_default_advisors).
+            if c.get("advisor_mode") == "manual":
+                advisor_ids = c.get("advisor_ids")
+            elif override.get("advisor_ids"):
+                advisor_ids = override["advisor_ids"]
+                if service_type == "gefen_current":
+                    # A combined meeting's override only fills the side missing from the card
+                    # (TaskMeetingResolutionModal), so it joins the card's advisors, not replaces them.
+                    advisor_ids = list(dict.fromkeys(_default_advisor_ids(advisor_map, service_type) + override["advisor_ids"]))
+            else:
+                advisor_ids, _ = _chosen_default_advisors(
+                    advisor_map, service_type, c.get("exclude_advisor_ids"), split_scope, advisor_choices,
+                )
+            # Advisors who book this part themselves (task_logic.apply_advisor_exclusions).
+            advisor_ids = [a for a in advisor_ids or [] if a not in (c.get("exclude_advisor_ids") or [])]
+            if not advisor_ids:
+                continue
+            range_segments, range_start, range_end = segments, start_date, end_date
+            held_remotely = False
+            if c.get("use_field_days"):
+                # A physical meeting is offered only on its visiting advisors' field days (in the same
+                # windows); with no visiting advisor (e.g. the שוטף meeting of a separate גפן+שוטף
+                # pair where only the גפן advisor goes out) it's held remotely on the regular dates.
+                if not _visiting_advisors(advisor_ids, field_exempt, field_visitors):
+                    held_remotely = True
+                else:
+                    range_segments = _field_day_segments([(s["start_date"], s["end_date"]) for s in segments], advisor_ids, field_days or {}, field_exempt, field_visitors)
+                    if not range_segments:
+                        continue
+                    range_start, range_end = range_segments[0]["start_date"], range_segments[-1]["end_date"]
+
             participants = _build_school_contacts(school, roles, split_scope, service_type)
             if not participants:
                 continue
@@ -2597,7 +2759,7 @@ def _build_meeting_ranges(
                 label = f"{label} — {_DIVISION_LABELS[split_scope]}"
             range_row = {
                 "key": f"r{len(ranges_data)}-{secrets.token_urlsafe(6)}",
-                "start_date": start_date, "end_date": end_date, "segments": segments,
+                "start_date": range_start, "end_date": range_end, "segments": range_segments,
                 "service_type": service_type, "duration_minutes": duration_minutes,
                 "label": label, "participants": participants, "advisor_ids": advisor_ids,
                 "meeting_type": "remote" if held_remotely else (c.get("meeting_type") or "remote"),
@@ -2847,9 +3009,10 @@ def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[st
     if needs_booking_link and any(c.get("use_field_days") for c in meeting_conditions):
         candidate_ids = {aid for by_type in advisor_map.values() for ids in by_type.values() for aid in ids}
         candidate_ids |= {aid for c in meeting_conditions for aid in (c.get("advisor_ids") or [])}
-        candidate_ids |= {aid for o in meeting_overrides.values() for t in (o or {}).values() for aid in ((t or {}).get("advisor_ids") or [])}
+        candidate_ids |= {aid for o in meeting_overrides.values() for k, t in (o or {}).items() if k != "advisor_choices" for aid in ((t or {}).get("advisor_ids") or [])}
         field_days = _field_days_by_advisor(db, task["org_id"], list(candidate_ids))
     field_exempt, field_visitors = _round_field_rules(db, task["org_id"], task.get("round_id")) if field_days is not None else (set(), {})
+    round_choices = _round_advisor_choices(db, task.get("org_id"), task.get("round_id")) if needs_booking_link and meeting_conditions else {}
 
     try:
         notes_map = _fetch_school_notes_map(db, task["id"], school_ids)
@@ -2893,6 +3056,7 @@ def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[st
                 school, school_conditions,
                 advisor_map.get(school["id"], {}), duration_map.get(school["id"], {}),
                 meeting_overrides.get(school["id"]), field_days, field_exempt, field_visitors.get(school["id"]),
+                _effective_advisor_choices(school["id"], meeting_overrides, round_choices),
             )
             ranges_data = ranges_data or None
             if ranges_data is None:

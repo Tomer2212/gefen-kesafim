@@ -14,14 +14,18 @@ function weekday(iso) {
 }
 
 // refreshKey: the round's updated_at — a round edit (physical schools, who visits) reloads this.
-export default function RoundFieldDays({ roundId, exemptIds = [], onExemptChange, refreshKey }) {
+// onData / onError: every (re)load is reported to the dashboard, so its physical-task buttons know
+// at once whether field days are missing, without a request of their own on click.
+export default function RoundFieldDays({ roundId, exemptIds = [], onExemptChange, refreshKey, onData, onError }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
   const [draftDay, setDraftDay] = useState({}); // {advisor_id: "YYYY-MM-DD"}
   const [busyId, setBusyId] = useState(null);
 
   function load() {
-    axios.get(`/rounds/${roundId}/field-days`).then(r => setData(r.data)).catch(() => setError("טעינת ימי השטח נכשלה."));
+    axios.get(`/rounds/${roundId}/field-days`)
+      .then(r => { setData(r.data); onData?.(r.data); })
+      .catch(() => { setError("טעינת ימי השטח נכשלה."); onError?.(); });
   }
   useEffect(() => { load(); }, [roundId, refreshKey]);
 

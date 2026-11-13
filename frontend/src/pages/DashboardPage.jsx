@@ -75,16 +75,22 @@ function defaultGefenDivisions(school) {
 }
 // Rows of a school under a visible gefen-closure column: the default "גפן" divisions, the
 // physical divisions (gefen_accounts), and every division with a check-derived section the
-// card shows (a "גפן" check outside a known stage's divisions is hidden there, so skipped).
+// card shows (a "גפן" check outside a known stage's divisions is hidden there, so skipped),
+// plus every "גפן" section with a saved status — the card never hides those (saved_gefen in
+// list_gefen_closures), e.g. after the school's stage changed.
 function gefenClosureRowDivisions(school) {
   const stageDivs = stageGefenDivisions(school.stage);
   const checkDivs = (school.check_metrics || [])
     .filter(m => m.budget_name !== GEFEN_DEFAULT_BUDGET || stageDivs.includes("general") || stageDivs.includes(m.division_type))
     .map(m => m.division_type);
+  const savedGefenDivs = (school.gefen_closures || [])
+    .filter(c => c.budget_name === GEFEN_DEFAULT_BUDGET && c.status != null)
+    .map(c => c.division_type);
   return uniq([
     ...defaultGefenDivisions(school),
     ...(school.gefen_accounts || []).map(acc => acc.division_type),
     ...checkDivs,
+    ...savedGefenDivs,
   ]).filter(Boolean);
 }
 
@@ -601,6 +607,38 @@ function formatFilterValueLabel(raw, fmt) {
   if (fmt === "pct") return fmtPct2(raw);
   if (fmt === "int") return fmtInt(raw);
   return fmtMoney(raw);
+}
+
+// Short human summary of a column filter spec, for the "סינונים פעילים" bar above the table.
+// allValues = the column's distinct values (same set the header menu lists), so a filter made
+// by unchecking one value reads "הכל חוץ מ: X" instead of a long list of the kept ones.
+function describeColumnFilter(spec, fmt, allValues = []) {
+  if (!spec) return "";
+  const isTextLike = fmt === "text" || fmt === "textMulti";
+  if (spec.mode === "values") {
+    const selected = spec.selected || [];
+    const excluded = allValues.filter(v => !selected.includes(v));
+    const useExcluded = excluded.length > 0 && excluded.length < selected.length;
+    const labels = (useExcluded ? excluded : selected).map(v =>
+      v === "__BLANK__" ? "(ריקים)" : formatFilterValueLabel(isTextLike ? v : Number(v), fmt)
+    );
+    const shown = labels.slice(0, 3).join(", ");
+    const list = labels.length > 3 ? `${shown} ועוד ${labels.length - 3}` : shown;
+    return useExcluded ? `הכל חוץ מ: ${list}` : list;
+  }
+  const ops = isTextLike ? TEXT_FILTER_OPERATORS : NUMBER_FILTER_OPERATORS;
+  const describeCond = c => {
+    if (!c || !String(c.value ?? "").trim()) return "";
+    const opLabel = (ops.find(o => o.op === c.op)?.label || c.op).replace(/\.\.\.$/, "");
+    const value = isTextLike ? `"${c.value}"`
+      : fmt === "date" ? formatDDMMYY(c.value)
+      : fmt === "pct" ? `${c.value}%`
+      : fmt === "hours" ? `${c.value} שעות`
+      : c.value;
+    return `${opLabel} ${value}`;
+  };
+  const parts = [describeCond(spec.cond1), describeCond(spec.cond2)].filter(Boolean);
+  return parts.join(spec.joiner === "OR" ? " או " : " וגם ");
 }
 
 // Resolves a goal's met/not-met/unset status for a school row — same lookup evalGoalConditions
@@ -1921,6 +1959,12 @@ function BulkAccessModal({ schools, users, loadingUsers, onClose, onSaved }) {
   );
 }
 
+// "סוג תקציב" cell of a split row — shared by the table and the exports.
+function comboLabel(combo) {
+  if (!combo) return "";
+  return `${combo.budget_name ? `${combo.budget_name} · ` : ""}${DIVISION_LABEL[combo.division_type] || combo.division_type || ""}`;
+}
+
 // One row of the schools table. Memoized so that, with virtualization, the ~40 mounted rows
 // don't re-render on unrelated parent state changes (e.g. a filter popover opening).
 const DashboardSchoolRow = memo(function DashboardSchoolRow({
@@ -1970,7 +2014,7 @@ const DashboardSchoolRow = memo(function DashboardSchoolRow({
         <td className="px-4 py-3 border-l border-slate-100 text-slate-600">
           <div className="flex flex-col gap-0.5 text-xs">
             <span className="font-medium text-slate-700">
-              {combo.budget_name ? `${combo.budget_name} · ` : ""}{DIVISION_LABEL[combo.division_type] || combo.division_type}
+              {comboLabel(combo)}
             </span>
           </div>
         </td>
@@ -2470,9 +2514,11 @@ export default function DashboardPage() {
     : filteredSchools.flatMap(school => {
         let combos;
         if (goalConditions.length > 0) {
+          // No check yet: one row per real division (not school.stage — "" / "sheshshnati"
+          // match no goal and no closure section, so a closure column read "לא רלוונטי").
           combos = (school.check_metrics && school.check_metrics.length
             ? school.check_metrics
-            : [{ division_type: school.stage, budget_name: "כללי" }]
+            : gefenClosureRowDivisions(school).map(division_type => ({ division_type, budget_name: "כללי" }))
           );
           if (hasVisibleSummaryCol) {
             const narrowed = combos.filter(combo => combo.budget_name === activeSummaryBudget);
@@ -2518,6 +2564,25 @@ export default function DashboardPage() {
     () => [...new Set(finalDisplayRows.map(r => r.school.id))],
     [finalDisplayRows]
   );
+
+  // Per value-filtered column: its distinct values among rows passing the OTHER filters —
+  // the same list its header menu shows — for the "סינונים פעילים" bar's summary.
+  const valueFilterOptions = useMemo(() => {
+    const out = {};
+    for (const [key, spec] of Object.entries(columnFilters)) {
+      if (spec?.mode !== "values") continue;
+      const seen = new Set();
+      for (const row of baseDisplayRows) {
+        if (!passesAllColumnFilters(row, columnFilters, allFilterColumnMeta, key)) continue;
+        const raw = row.filterValues[key];
+        const items = Array.isArray(raw) ? raw : [raw];
+        if (items.length === 0) seen.add("__BLANK__");
+        for (const item of items) seen.add(item === null || item === undefined || item === "" ? "__BLANK__" : String(item));
+      }
+      out[key] = [...seen];
+    }
+    return out;
+  }, [columnFilters, baseDisplayRows, allFilterColumnMeta]);
 
   // Row virtualization for the schools table — keeps only ~40 <tr>s in the DOM regardless of
   // how many rows the filters produce (a six-year school can split into several combo rows),
@@ -2565,22 +2630,29 @@ export default function DashboardPage() {
     setSearchQuery("");
     setGoalConditions([]);
     setColumnFilters({});
-    setSortSpecs([]);
   }
 
   function addGoalCondition(goalKey) {
     setGoalConditions(prev => [...prev, { id: `${Date.now()}-${Math.random()}`, goalKey, met: "", connector: "AND" }]);
   }
 
+  // Exports follow the table's own rows (one per division under a split), each with its combo,
+  // so per-division cells (closure/summary/goal columns) match what the screen shows.
+  const selectedRows = useMemo(
+    () => finalDisplayRows.filter(r => selectedIds[r.school.id]),
+    [finalDisplayRows, selectedIds]
+  );
+
   function exportSelectedToExcel() {
-    const selected = selectedSchools;
     const colLabels = [
       "שם מוסד",
+      ...(advancedFilterActive ? ["סוג תקציב"] : []),
       ...visibleColOrder.map(key => dynamicAllColumns.find(c => c.key === key)?.label || key),
     ];
-    const rows = selected.map(school => [
+    const rows = selectedRows.map(({ school, combo }) => [
       school.name || "",
-      ...visibleColOrder.map(key => renderCellText(school, key, meetingsStats, null, activeSummaryBudget, goalColumnsByKey, gefenClosureColumnsByKey)),
+      ...(advancedFilterActive ? [comboLabel(combo)] : []),
+      ...visibleColOrder.map(key => renderCellText(school, key, meetingsStats, combo, activeSummaryBudget, goalColumnsByKey, gefenClosureColumnsByKey)),
     ]);
     const wsData = [colLabels, ...rows];
     const ws = XLSX.utils.aoa_to_sheet(wsData);
@@ -2596,11 +2668,13 @@ export default function DashboardPage() {
     const selected = selectedSchools;
     const headers = [
       "שם מוסד",
+      ...(advancedFilterActive ? ["סוג תקציב"] : []),
       ...visibleColOrder.map(key => dynamicAllColumns.find(c => c.key === key)?.label || key),
     ];
-    const rows = selected.map(school => [
+    const rows = selectedRows.map(({ school, combo }) => [
       school.name || "",
-      ...visibleColOrder.map(key => renderCellText(school, key, meetingsStats, null, activeSummaryBudget, goalColumnsByKey, gefenClosureColumnsByKey)),
+      ...(advancedFilterActive ? [comboLabel(combo)] : []),
+      ...visibleColOrder.map(key => renderCellText(school, key, meetingsStats, combo, activeSummaryBudget, goalColumnsByKey, gefenClosureColumnsByKey)),
     ]);
     try {
       const res = await axios.post(
@@ -2622,11 +2696,13 @@ export default function DashboardPage() {
   function exportToExcel() {
     const colLabels = [
       "שם מוסד",
+      ...(advancedFilterActive ? ["סוג תקציב"] : []),
       ...visibleColOrder.map(key => dynamicAllColumns.find(c => c.key === key)?.label || key),
     ];
-    const rows = displayedSchools.map(school => [
+    const rows = finalDisplayRows.map(({ school, combo }) => [
       school.name || "",
-      ...visibleColOrder.map(key => renderCellText(school, key, meetingsStats, null, activeSummaryBudget, goalColumnsByKey, gefenClosureColumnsByKey)),
+      ...(advancedFilterActive ? [comboLabel(combo)] : []),
+      ...visibleColOrder.map(key => renderCellText(school, key, meetingsStats, combo, activeSummaryBudget, goalColumnsByKey, gefenClosureColumnsByKey)),
     ]);
     const wsData = [colLabels, ...rows];
     const ws = XLSX.utils.aoa_to_sheet(wsData);
@@ -2789,12 +2865,6 @@ export default function DashboardPage() {
                     )}
                   </div>
 
-                  {activeFilterCount > 0 && (
-                    <button onClick={() => { setGoalConditions([]); setColumnFilters({}); setSortSpecs([]); }} className="text-xs text-slate-400 hover:text-slate-600 transition-colors px-2 py-1">
-                      נקה סינון
-                    </button>
-                  )}
-
                   {selectMode && Object.values(selectedIds).some(Boolean) && (
                     <>
                       {(role === "owner" || (role === "manager" && canEditSchools)) && (
@@ -2948,6 +3018,69 @@ export default function DashboardPage() {
                   ? `סה"כ ${visibleSchoolIds.length} בתי ספר מתוך ${schools.length}`
                   : `סה"כ ${schools.length} בתי ספר`}
               </p>
+
+              {/* Filters are restored from sessionStorage and may sit on a hidden column, so
+                  always spell out what is hiding schools and how to drop it. Sorting is not
+                  listed — it never hides a school. */}
+              {(!!searchQuery.trim() || Object.keys(columnFilters).length > 0 || goalConditions.length > 0) && (
+                <div className="flex flex-wrap items-center gap-2 mb-3 px-3 py-2 rounded-xl bg-blue-50 border border-blue-100 text-sm" role="group" aria-label="סינונים פעילים בטבלה">
+                  <span className="font-medium text-blue-800">
+                    סינונים פעילים · מוצגים {visibleSchoolIds.length} מתוך {schools.length}:
+                  </span>
+                  {!!searchQuery.trim() && (
+                    <span className="inline-flex items-center gap-1 pl-1 pr-2.5 py-0.5 rounded-full bg-white border border-blue-200 text-blue-800">
+                      חיפוש: "{searchQuery.trim()}"
+                      <button
+                        type="button"
+                        onClick={() => setSearchQuery("")}
+                        className="w-5 h-5 rounded-full hover:bg-blue-100 leading-none"
+                        aria-label="הסר סינון: חיפוש"
+                      >
+                        ✕
+                      </button>
+                    </span>
+                  )}
+                  {Object.entries(columnFilters).map(([key, spec]) => {
+                    const meta = allFilterColumnMeta.find(c => c.key === key);
+                    const label = meta?.label || key;
+                    const summary = describeColumnFilter(spec, meta?.fmt, valueFilterOptions[key]);
+                    const hidden = !visibleColOrder.includes(key);
+                    return (
+                      <span key={key} className="inline-flex items-center gap-1 pl-1 pr-2.5 py-0.5 rounded-full bg-white border border-blue-200 text-blue-800">
+                        <span>
+                          <span className="font-medium">{label}</span>
+                          {summary && `: ${summary}`}
+                          {hidden && <span className="text-blue-500"> (עמודה מוסתרת)</span>}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setColumnFilters(prev => { const next = { ...prev }; delete next[key]; return next; })}
+                          className="w-5 h-5 rounded-full hover:bg-blue-100 leading-none"
+                          aria-label={`הסר סינון: ${label}`}
+                        >
+                          ✕
+                        </button>
+                      </span>
+                    );
+                  })}
+                  {goalConditions.length > 0 && (
+                    <span className="inline-flex items-center gap-1 pl-1 pr-2.5 py-0.5 rounded-full bg-white border border-blue-200 text-blue-800">
+                      סינון יעדים
+                      <button
+                        type="button"
+                        onClick={() => setGoalConditions([])}
+                        className="w-5 h-5 rounded-full hover:bg-blue-100 leading-none"
+                        aria-label="הסר סינון: סינון יעדים"
+                      >
+                        ✕
+                      </button>
+                    </span>
+                  )}
+                  <button type="button" onClick={clearAll} className="mr-auto text-blue-700 underline hover:text-blue-900">
+                    נקה סינון
+                  </button>
+                </div>
+              )}
               <div className="glass-card rounded-2xl overflow-hidden relative">
                 {finalDisplayRows.length === 0 ? (
                   <div className="p-8 text-center">

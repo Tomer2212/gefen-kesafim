@@ -69,6 +69,7 @@ function newRange() {
     participantKeys: [],
     advisorMode: "default",
     advisorId: "",
+    advisorChoices: {}, // {part: [advisor ids]} — see advisorChoiceParts
     coordinatorType: "", // gefen_current only, when the גפן and שוטף coordinators differ
     meetingType: "remote",
     allowTimeRangeSearch: null, // required yes/no — no default, must be explicitly answered
@@ -91,9 +92,36 @@ function typedAdvisorIdsForServiceType(serviceType, school) {
   return [...new Set((list || []).map(a => a.id))];
 }
 
+// "יותר מיועץ מלווה אחד מאותו סוג" — same rule as the backend's _advisor_choice_parts: the card
+// lists a range draws on ("גפן+שוטף" = a גפן part + a שוטף part, or one part when both lists are the
+// same people). A part with 2+ advisors needs the manager's pick: one of them, or all of them.
+const ADVISOR_CHOICE_PART_LABELS = { gefen: "גפן", current: "שוטף", district: "מחוז", gefen_current: "גפן+שוטף" };
+function advisorChoiceParts(serviceType, school) {
+  const types = serviceType === "gefen_current" ? ["gefen", "current"] : serviceType === "takuma" ? ["gefen"] : [serviceType];
+  const parts = types.filter(t => ADVISOR_CHOICE_PART_LABELS[t]).map(t => ({ part: t, ids: typedAdvisorIdsForServiceType(t, school) }));
+  if (parts.length === 2 && parts[0].ids.length && parts[0].ids.length === parts[1].ids.length
+      && parts[0].ids.every(id => parts[1].ids.includes(id))) {
+    return [{ part: "gefen_current", ids: parts[0].ids }];
+  }
+  return parts;
+}
+function chosenPartIds(r, part, ids) {
+  return (r.advisorChoices?.[part] || []).filter(id => ids.includes(id));
+}
+// Parts of a "default"-advisor range still waiting for the manager's pick.
+function openAdvisorChoiceParts(r, school) {
+  if (r.advisorMode === "manual" || !r.serviceType) return [];
+  return advisorChoiceParts(r.serviceType, school).filter(({ part, ids }) => ids.length > 1 && !chosenPartIds(r, part, ids).length);
+}
+
 function resolveRangeAdvisorIds(r, school) {
   if (r.advisorMode === "manual") return r.advisorId ? [r.advisorId] : [];
-  return typedAdvisorIdsForServiceType(r.serviceType, school);
+  const out = [];
+  for (const { part, ids } of advisorChoiceParts(r.serviceType, school)) {
+    const chosen = ids.length > 1 ? chosenPartIds(r, part, ids) : [];
+    for (const id of chosen.length ? chosen : ids) if (!out.includes(id)) out.push(id);
+  }
+  return out;
 }
 
 // "גפן+שוטף" is offered whenever the school has both a גפן and a שוטף advisor — the same or
@@ -297,6 +325,10 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
     for (const r of ranges) {
       if (!r.serviceType) return "יש לבחור סוג פגישה (גפן/שוטף/מחוז/תקומה) לכל טווח";
       if (resolveRangeAdvisorIds(r, school).length === 0) return "יש לבחור יועץ מבצע לכל פגישה";
+      const openChoice = openAdvisorChoiceParts(r, school)[0];
+      if (openChoice) {
+        return `לבית הספר מוגדרים כמה יועצים מלווים ל${ADVISOR_CHOICE_PART_LABELS[openChoice.part]} — יש לבחור עבור מי לקבוע את הפגישה`;
+      }
       for (const seg of r.dateSegments) {
         if (!seg.start || !seg.end) return "יש למלא תאריך תקין לכל טווח תאריכים";
         if (seg.start > seg.end) return "תאריך ההתחלה מאוחר מתאריך הסיום באחד הטווחים";
@@ -672,6 +704,48 @@ export function DirectCoordinationModal({ school: initialSchool, advisors, onClo
                       </fieldset>
                     );
                   })()}
+
+                  {r.advisorMode !== "manual" && r.serviceType && advisorChoiceParts(r.serviceType, school).filter(p => p.ids.length > 1).map(({ part, ids }) => {
+                    const chosen = chosenPartIds(r, part, ids);
+                    const allChosen = chosen.length === ids.length;
+                    const missing = !chosen.length;
+                    const nameOf = id => {
+                      const a = advisors.find(x => x.id === id)
+                        || [...(school.advisors_gefen || []), ...(school.advisors_current || []), ...(school.advisors_district || [])].find(x => x.id === id);
+                      return a?.full_name || a?.email || "יועץ";
+                    };
+                    const pick = value => updateRange(r.localId, { advisorChoices: { ...r.advisorChoices, [part]: value } });
+                    return (
+                      <fieldset key={part} className="flex flex-col gap-1.5 rounded-lg border border-blue-200 bg-blue-50/60 p-2.5">
+                        <legend className="sr-only">בחירת יועץ מלווה ל{ADVISOR_CHOICE_PART_LABELS[part]}</legend>
+                        <p className="text-xs text-slate-700">
+                          לבית הספר מוגדרים <b>{ids.length} יועצים מלווים ל{ADVISOR_CHOICE_PART_LABELS[part]}</b>
+                          {school.stage === "sheshshnati" && r.stageScope === "tichon" ? " (פגישת התיכון)" : school.stage === "sheshshnati" && r.stageScope === "chativa" ? ' (פגישת החט"ב)' : ""}.
+                          {" "}עבור מי לקבוע את הפגישה? <span className="text-red-600">(שדה חובה)</span>
+                        </p>
+                        <div className={`flex flex-wrap gap-2 ${error && missing ? "border border-red-400 rounded-lg p-1.5 -m-1.5" : ""}`}>
+                          {ids.map(id => {
+                            const selected = !allChosen && chosen.length === 1 && chosen[0] === id;
+                            return (
+                              <button key={id} type="button" aria-pressed={selected} onClick={() => pick([id])}
+                                className={`text-sm px-4 py-1.5 rounded-lg border transition-colors ${
+                                  selected ? "bg-blue-600 border-blue-600 text-white font-semibold" : "border-black bg-white text-slate-700 hover:bg-slate-50"
+                                }`}>
+                                {nameOf(id)}
+                              </button>
+                            );
+                          })}
+                          <button type="button" aria-pressed={allChosen} onClick={() => pick(ids)}
+                            className={`text-sm px-4 py-1.5 rounded-lg border transition-colors ${
+                              allChosen ? "bg-blue-600 border-blue-600 text-white font-semibold" : "border-black bg-white text-slate-700 hover:bg-slate-50"
+                            }`}>
+                            כלל היועצים המלווים — פגישה אחת עם כולם
+                          </button>
+                        </div>
+                        <p className="text-[11px] text-slate-500">בבחירת כלל היועצים, בית הספר יוכל לבחור רק מועדים שבהם כולם פנויים.</p>
+                      </fieldset>
+                    );
+                  })}
 
                   <div className="grid grid-cols-3 gap-3">
                     <div className="flex flex-col gap-1">

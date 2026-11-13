@@ -28,6 +28,17 @@ function Kpi({ label, value, sub, tone = "text-slate-800" }) {
   );
 }
 
+// Why a physical-task button is disabled, right under it, with a way to fix it.
+function FieldDaysMissingNote({ id, names, onGo }) {
+  return (
+    <p id={id} className="text-xs text-amber-800 bg-amber-100/70 rounded-lg px-2 py-1.5">
+      כדי ליצור משימה פיזית צריך קודם להגדיר לפחות יום שטח אחד בתקופת הסבב ל: <b>{names.join(", ")}</b>.
+      {" "}אם יועץ לא מגיע לבתי הספר, אפשר להסיר אותו מימי השטח.{" "}
+      <button type="button" onClick={onGo} className="underline font-semibold">מעבר לימי שטח</button>
+    </p>
+  );
+}
+
 function ConfirmDialog({ title, children, actions, onClose }) {
   const { ref, handleKeyDown } = useFocusTrap(onClose);
   return (
@@ -53,7 +64,9 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
   const [physicalFilter, setPhysicalFilter] = useState("");
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(new Set());
-  const [taskDraft, setTaskDraft] = useState(null); // {schoolIds, physical, requireAdditional}
+  const [taskDraft, setTaskDraft] = useState(null); // {key, schoolIds, physical, requireAdditional}
+  // GET /rounds/{id}/field-days as RoundFieldDays last loaded it: null = still loading, {failed: true}.
+  const [fieldDays, setFieldDays] = useState(null);
   const [audienceDiff, setAudienceDiff] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -115,30 +128,45 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
     && (!query.trim() || `${s.school_name} ${s.symbol || ""} ${s.authority || ""} ${s.city || ""}`.includes(query.trim())),
   );
 
+  // Whether a physical task can start for these schools. A physical task offers each school only
+  // its visiting advisors' field days, so each of them (unless removed from field days) needs at
+  // least one. Read from the data RoundFieldDays already loaded — a click never waits on the
+  // network (that wait, with no feedback, let another button open a remote task meanwhile).
+  // Returns {loading} | {missing: [names]} | {} (ready; also when loading failed — the task's own
+  // pre-send check reports missing field days then).
+  function physicalReadiness(rows) {
+    if (!fieldDays) return { loading: true };
+    if (fieldDays.failed) return {};
+    // Only the advisors who visit (the round's per-school choice, when there is one).
+    const visitors = rnd.physical_visitors || {};
+    // An advisor of a part with several card advisors isn't required yet: the task's pre-check
+    // asks which of them the meeting is for, and then checks the chosen one's field days.
+    const wanted = new Set(rows.flatMap(s => (visitors[s.school_id] ? s.advisor_ids.filter(a => visitors[s.school_id].includes(a)) : s.advisor_ids)
+      .filter(a => !(s.advisor_choice_open_ids || []).includes(a))));
+    const missing = (fieldDays.advisors || []).filter(a => wanted.has(a.advisor_id) && !a.exempt && !a.days.length);
+    return missing.length ? { missing: missing.map(a => a.name || "יועץ"), missingIds: missing.map(a => a.advisor_id) } : {};
+  }
+
   // A new task in the round — for these schools (a dashboard selection), or with no schools to
-  // start from a filter in the task window.
-  async function startTask(rows, { physical = false, requireAdditional = false } = {}) {
-    if (physical) {
-      // A physical task offers each school only its advisor's field days — set them first.
-      try {
-        const fd = await axios.get(`/rounds/${roundId}/field-days`);
-        // Only the advisors who visit (the round's per-school choice, when there is one).
-        const visitors = rnd.physical_visitors || {};
-        const wanted = new Set(rows.flatMap(s => (visitors[s.school_id] ? s.advisor_ids.filter(a => visitors[s.school_id].includes(a)) : s.advisor_ids)));
-        // Advisors removed from field days (they don't visit) don't need any.
-        const missing = (fd.data?.advisors || []).filter(a => wanted.has(a.advisor_id) && !a.exempt && !a.days.length);
-        if (missing.length) {
-          setNotice(`לפני משימה פיזית יש להגדיר ימי שטח (באזור "ימי שטח" למטה) ל: ${missing.map(a => a.name).join(", ")}.`);
-          return;
-        }
-      } catch {
-        // The task's own pre-send check reports missing field days anyway.
-      }
-    }
+  // start from a filter in the task window. A fresh key per opening, so the window is always
+  // built from this draft.
+  function startTask(rows, { physical = false, requireAdditional = false } = {}) {
+    if (taskDraft) return;
     // The task window splits these schools against the round: already booked → left out,
     // live request from another task of the round → left out unless chosen (also enforced by
     // the server), the rest get a request.
-    setTaskDraft({ schoolIds: rows.map(s => s.school_id), physical, requireAdditional });
+    setTaskDraft({ key: Date.now(), schoolIds: rows.map(s => s.school_id), physical, requireAdditional });
+  }
+
+  // Straight to the "הוספת יום" field of the first advisor missing days (RoundFieldDays' input ids).
+  function goToFieldDays(advisorIds = []) {
+    const input = advisorIds.map(id => document.getElementById(`field-day-${id}`)).find(Boolean);
+    if (input) {
+      input.scrollIntoView({ behavior: "smooth", block: "center" });
+      input.focus({ preventScroll: true });
+    } else {
+      document.getElementById("round-field-days-title")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
   }
 
   async function sendReminders(rows) {
@@ -251,6 +279,11 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
   const physicalUntouched = untouched.filter(s => s.physical);
   const remoteUntouched = untouched.filter(s => !s.physical);
   const excludedNames = (data.excluded_school_ids || []).length;
+  const physicalReady = physicalReadiness(physicalUntouched);
+  const selectedAllPhysical = selectedRows.length > 0 && selectedRows.every(s => s.physical);
+  const selectedMixed = selectedRows.some(s => s.physical) && !selectedAllPhysical;
+  const selectedReady = selectedAllPhysical ? physicalReadiness(selectedRows) : {};
+  const ACTION_BTN = "text-xs px-3 py-1.5 rounded-lg bg-blue-600 text-white disabled:opacity-50 disabled:cursor-not-allowed";
 
   return (
     <div dir="rtl" className="flex flex-col gap-5">
@@ -272,7 +305,7 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
           )}
         </div>
         <div className="flex flex-wrap gap-2">
-          <button type="button" disabled={busy} onClick={() => startTask([])} className="btn-blue text-sm px-4 py-2">+ משימה חדשה בסבב</button>
+          <button type="button" disabled={busy} onClick={() => startTask([])} className="btn-blue text-sm px-4 py-2 disabled:opacity-50 disabled:cursor-not-allowed">+ משימה חדשה בסבב</button>
           {rnd.criteria && <button type="button" disabled={busy} onClick={previewAudience} className="text-sm px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200">עדכון רשימת בתי הספר</button>}
           <button type="button" onClick={() => setEditing(true)} className="text-sm px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200">עריכת הסבב</button>
           <button type="button" onClick={exportExcel} className="text-sm px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200">ייצוא לאקסל</button>
@@ -338,19 +371,28 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
           {remoteUntouched.length > 0 && (
             <div className="flex items-center justify-between gap-2 flex-wrap">
               <span><b>{remoteUntouched.length}</b> בתי ספר עוד לא קיבלו שום בקשה.</span>
-              <button type="button" disabled={busy} onClick={() => startTask(remoteUntouched)} className="text-xs px-3 py-1.5 rounded-lg bg-blue-600 text-white">צור משימה עבורם</button>
+              <button type="button" disabled={busy} onClick={() => startTask(remoteUntouched)} className={ACTION_BTN}>צור משימה עבורם</button>
             </div>
           )}
           {physicalUntouched.length > 0 && (
-            <div className="flex items-center justify-between gap-2 flex-wrap">
-              <span><b>{physicalUntouched.length}</b> בתי ספר עם פגישה פיזית עוד לא קיבלו בקשה.</span>
-              <button type="button" disabled={busy} onClick={() => startTask(physicalUntouched, { physical: true })} className="text-xs px-3 py-1.5 rounded-lg bg-blue-600 text-white">צור משימה פיזית עבורם</button>
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <span><b>{physicalUntouched.length}</b> בתי ספר עם פגישה פיזית עוד לא קיבלו בקשה.</span>
+                <button type="button" disabled={busy || physicalReady.loading || !!physicalReady.missing}
+                  aria-describedby={physicalReady.missing ? "round-physical-missing" : undefined}
+                  onClick={() => startTask(physicalUntouched, { physical: true })} className={ACTION_BTN}>
+                  {physicalReady.loading ? "בודק ימי שטח…" : "צור משימה פיזית עבורם"}
+                </button>
+              </div>
+              {physicalReady.missing && (
+                <FieldDaysMissingNote id="round-physical-missing" names={physicalReady.missing} onGo={() => goToFieldDays(physicalReady.missingIds)} />
+              )}
             </div>
           )}
           {partial.length > 0 && (
             <div className="flex items-center justify-between gap-2 flex-wrap">
               <span><b>{partial.length}</b> בתי ספר קבעו רק חלק מהפגישות הנדרשות.</span>
-              <button type="button" disabled={busy} onClick={() => startTask(partial, { requireAdditional: (rnd.requirement?.count_per_school || 1) > 1 })} className="text-xs px-3 py-1.5 rounded-lg bg-blue-600 text-white">צור משימה לפגישות שחסרות</button>
+              <button type="button" disabled={busy} onClick={() => startTask(partial, { requireAdditional: (rnd.requirement?.count_per_school || 1) > 1 })} className={ACTION_BTN}>צור משימה לפגישות שחסרות</button>
             </div>
           )}
           {stale.length > 0 && (
@@ -358,7 +400,7 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
               <span><b>{stale.length}</b> בתי ספר קיבלו בקשה לפני {STALE_REQUEST_DAYS} ימים ויותר ועדיין לא קבעו.</span>
               <span className="flex gap-2">
                 <button type="button" onClick={() => setStatusFilter("stale")} className="text-xs px-3 py-1.5 rounded-lg bg-white border border-slate-300">הצג</button>
-                <button type="button" disabled={busy} onClick={() => sendReminders(stale)} className="text-xs px-3 py-1.5 rounded-lg bg-blue-600 text-white">שלח להם תזכורת</button>
+                <button type="button" disabled={busy} onClick={() => sendReminders(stale)} className={ACTION_BTN}>שלח להם תזכורת</button>
               </span>
             </div>
           )}
@@ -406,7 +448,8 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
       </section>
 
       {(rnd.physical_school_ids || []).length > 0 && (
-        <RoundFieldDays roundId={roundId} exemptIds={rnd.field_exempt_advisor_ids || []} onExemptChange={load} refreshKey={rnd.updated_at} />
+        <RoundFieldDays roundId={roundId} exemptIds={rnd.field_exempt_advisor_ids || []} onExemptChange={load} refreshKey={rnd.updated_at}
+          onData={setFieldDays} onError={() => setFieldDays(prev => prev || { failed: true })} />
       )}
 
       <section aria-labelledby="round-schools-title" className="flex flex-col gap-2">
@@ -434,11 +477,26 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
           </div>
         </div>
         {selected.size > 0 && (
-          <div className="flex items-center gap-2 bg-blue-50 rounded-lg px-3 py-2 text-sm flex-wrap">
-            <span>{selected.size} נבחרו</span>
-            <button type="button" disabled={busy} onClick={() => startTask(selectedRows, { physical: selectedRows.every(s => s.physical) })} className="text-xs px-3 py-1.5 rounded-lg bg-blue-600 text-white">צור משימה לנבחרים</button>
-            <button type="button" disabled={busy} onClick={excludeSelected} className="text-xs px-3 py-1.5 rounded-lg bg-white border border-slate-300">החרג מהסבב</button>
-            <button type="button" onClick={() => setSelected(new Set())} className="text-xs text-slate-500 hover:underline">ניקוי בחירה</button>
+          <div className="flex flex-col gap-1 bg-blue-50 rounded-lg px-3 py-2 text-sm">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span>{selected.size} נבחרו</span>
+              <button type="button" disabled={busy || selectedReady.loading || !!selectedReady.missing}
+                aria-describedby={selectedReady.missing ? "round-selected-missing" : selectedMixed ? "round-selected-mixed" : undefined}
+                onClick={() => startTask(selectedRows, { physical: selectedAllPhysical })} className={ACTION_BTN}>
+                {selectedReady.loading ? "בודק ימי שטח…" : "צור משימה לנבחרים"}
+              </button>
+              <button type="button" disabled={busy} onClick={excludeSelected} className="text-xs px-3 py-1.5 rounded-lg bg-white border border-slate-300 disabled:opacity-50 disabled:cursor-not-allowed">החרג מהסבב</button>
+              <button type="button" onClick={() => setSelected(new Set())} className="text-xs text-slate-500 hover:underline">ניקוי בחירה</button>
+            </div>
+            {selectedReady.missing && (
+              <FieldDaysMissingNote id="round-selected-missing" names={selectedReady.missing} onGo={() => goToFieldDays(selectedReady.missingIds)} />
+            )}
+            {selectedMixed && (
+              <p id="round-selected-mixed" className="text-xs text-slate-600">
+                בבחירה יש בתי ספר פיזיים ובתי ספר מרחוק — המשימה תהיה מרחוק, ובתי הספר הפיזיים יסומנו בחלון המשימה וידולגו כברירת מחדל.
+                ליצירת משימה פיזית בחרו רק בתי ספר פיזיים (סינון "פיזי בלבד").
+              </p>
+            )}
           </div>
         )}
         <div className="border border-slate-200 rounded-xl overflow-x-auto max-h-[60vh] overflow-y-auto">
@@ -565,6 +623,7 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
 
       {taskDraft && (
         <TaskCreateWizard
+          key={taskDraft.key}
           isMeetingTask
           initialAcademicYear={rnd.academic_year}
           roundContext={{ round: rnd, ...taskDraft }}

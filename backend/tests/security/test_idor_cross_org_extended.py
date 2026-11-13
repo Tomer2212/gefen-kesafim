@@ -1471,6 +1471,56 @@ def test_meeting_override_same_org_works(org_b_client, admin_db):
         admin_db.table("org_tasks").update({"meeting_overrides": original}).eq("id", own_task).execute()
 
 
+# The same endpoint also saves which of a school's several card advisors a meeting is for: only
+# advisors on that school's card list are accepted, so no one else can be put on a booking link.
+
+def _task_without_round(admin_db, org_id):
+    rows = admin_db.table("org_tasks").select("id").eq("org_id", org_id).is_("round_id", "null").limit(1).execute().data
+    if not rows:
+        pytest.skip(f"no org_tasks row without a round in org {org_id}")
+    return rows[0]["id"]
+
+
+def test_advisor_choice_cross_org_task_rejected(org_b_client, admin_db):
+    foreign_task = _any_task_id(admin_db, ORG_A_ID)
+    before = admin_db.table("org_tasks").select("meeting_overrides").eq("id", foreign_task).execute().data[0]
+    resp = org_b_client.patch(f"/tasks/{foreign_task}/meeting-overrides/{ORG_B_SCHOOL_ID}",
+                              json={"advisor_choice_key": "gefen", "advisor_ids": [ORG_B_MANAGER_ID]})
+    assert resp.status_code in (403, 404), resp.text
+    after = admin_db.table("org_tasks").select("meeting_overrides").eq("id", foreign_task).execute().data[0]
+    assert after == before
+
+
+def test_advisor_choice_advisor_not_on_card_rejected(org_b_client, admin_db):
+    own_task = _task_without_round(admin_db, ORG_B_ID)
+    before = admin_db.table("org_tasks").select("meeting_overrides").eq("id", own_task).execute().data[0]
+    resp = org_b_client.patch(f"/tasks/{own_task}/meeting-overrides/{ORG_B_SCHOOL_ID}",
+                              json={"advisor_choice_key": "gefen", "advisor_ids": [ORG_A_MANAGER_ID]})
+    assert resp.status_code == 400, resp.text
+    after = admin_db.table("org_tasks").select("meeting_overrides").eq("id", own_task).execute().data[0]
+    assert after == before
+
+
+def test_advisor_choice_same_org_works(org_b_client, admin_db):
+    own_task = _task_without_round(admin_db, ORG_B_ID)
+    card = admin_db.table("school_advisors_gefen").select("advisor_id").eq("school_id", ORG_B_SCHOOL_ID).execute().data
+    added_to_card = not card
+    if added_to_card:  # temporarily, removed below
+        admin_db.table("school_advisors_gefen").insert({"school_id": ORG_B_SCHOOL_ID, "advisor_id": ORG_B_MANAGER_ID}).execute()
+    advisor_id = card[0]["advisor_id"] if card else ORG_B_MANAGER_ID
+    original = admin_db.table("org_tasks").select("meeting_overrides").eq("id", own_task).execute().data[0]["meeting_overrides"]
+    try:
+        resp = org_b_client.patch(f"/tasks/{own_task}/meeting-overrides/{ORG_B_SCHOOL_ID}",
+                                  json={"advisor_choice_key": "gefen@tichon", "advisor_ids": [advisor_id]})
+        assert resp.status_code == 200, resp.text
+        saved = admin_db.table("org_tasks").select("meeting_overrides").eq("id", own_task).execute().data[0]["meeting_overrides"]
+        assert saved[ORG_B_SCHOOL_ID]["advisor_choices"]["gefen@tichon"] == [advisor_id]
+    finally:
+        admin_db.table("org_tasks").update({"meeting_overrides": original}).eq("id", own_task).execute()
+        if added_to_card:
+            admin_db.table("school_advisors_gefen").delete().eq("school_id", ORG_B_SCHOOL_ID).eq("advisor_id", ORG_B_MANAGER_ID).execute()
+
+
 # ---------------------------------------------------------------------------
 # "מחליפה או נוספת?" — POST /schools/{school_id}/meetings/{meeting_id}/booking-request-resolutions.
 # The meeting, the school and the booking link must all be the caller's own org's. Org A is never
