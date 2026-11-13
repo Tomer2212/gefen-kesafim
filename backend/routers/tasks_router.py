@@ -13,16 +13,18 @@ import time
 import urllib.parse
 import uuid
 from datetime import date, datetime, timedelta, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from fastapi.responses import Response
 from openpyxl import load_workbook, Workbook
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 import booking_requests
 import meeting_rounds
+import rich_html
 import booking_token_logic
 import graph_client
 import school_activity
@@ -330,7 +332,15 @@ class MessageConfigIn(BaseModel):
     channel: str  # 'email_resend' | 'email_outlook' | 'whatsapp_twilio'
     subject: str | None = None
     body_template: str = ""
+    # Formatted version of body_template (RichNoteEditor / TipTap HTML, placeholders kept as
+    # literal {key} text). Optional: without it email sends use body_template as before.
+    body_html: str | None = None
     attachment_keys: list[AttachmentKeyIn] = []
+
+    @field_validator("body_html")
+    @classmethod
+    def _clean_body_html(cls, v):
+        return rich_html.sanitize_rich_html(v, too_long_detail="תוכן ההודעה ארוך מדי")
 
 
 class TaskCreateIn(BaseModel):
@@ -509,6 +519,12 @@ class TemplateIn(BaseModel):
     name: str
     subject: str | None = None
     body_template: str = ""
+    body_html: str | None = None
+
+    @field_validator("body_html")
+    @classmethod
+    def _clean_body_html(cls, v):
+        return rich_html.sanitize_rich_html(v, too_long_detail="תוכן ההודעה ארוך מדי")
 
 
 @router.get("/templates")
@@ -549,6 +565,7 @@ def create_template(body: TemplateIn, user: Annotated[dict, Depends(get_current_
                     "name": body.name,
                     "subject": body.subject,
                     "body_template": body.body_template,
+                    "body_html": body.body_html,
                 })
                 .execute()
             )
@@ -2168,8 +2185,10 @@ def _wrap_email_html(rendered_text: str, booking_url: str | None, meetings_list_
                     continue
                 escaped = html.escape(paragraph).replace("\n", "<br/>")
                 html_parts.append(f'<p style="margin: 0 0 16px 0; color: #334155; line-height: 1.8;">{escaped}</p>')
-    body_html = "".join(html_parts)
+    return _email_shell("".join(html_parts), branded)
 
+
+def _email_shell(body_html: str, branded: bool) -> str:
     if not branded:
         return f"""
 <html>
@@ -2195,6 +2214,148 @@ def _wrap_email_html(rendered_text: str, booking_url: str | None, meetings_list_
 </body>
 </html>"""
 
+
+
+def _booking_button_html(booking_url: str) -> str:
+    return (
+        f'<div style="text-align: center; margin: 8px 0 16px 0;">'
+        f'<a href="{html.escape(booking_url, quote=True)}" style="display: inline-block; background: #0070F3; color: white; '
+        f'font-size: 14px; font-weight: 700; padding: 12px 28px; border-radius: 8px; '
+        f'text-decoration: none;">קביעת מועד</a></div>'
+    )
+
+
+# Inline styles for the formatted (TipTap) body: email clients ignore stylesheets, so each tag
+# gets the look it has in the editor (.rich-note in index.css). The tag's own style (colour,
+# alignment, font size the user picked) is appended after these, so it wins.
+_RICH_EMAIL_STYLES = {
+    "p": "margin: 0; line-height: 1.7;",
+    "h1": "font-size: 18px; font-weight: 700; margin: 8px 0 5px 0;",
+    "h2": "font-size: 16px; font-weight: 700; margin: 7px 0 4px 0;",
+    "h3": "font-size: 14px; font-weight: 700; margin: 6px 0 3px 0;",
+    "ul": "margin: 4px 0 8px 0; padding: 0 22px 0 0;",
+    "ol": "margin: 4px 0 8px 0; padding: 0 22px 0 0;",
+    "blockquote": "margin: 6px 0; padding: 5px 10px; border-right: 3px solid #93c5fd; background: #eff6ff; color: #334155;",
+    "hr": "border: 0; border-top: 1.5px solid #cbd5e1; margin: 10px 0;",
+    "table": "border-collapse: collapse; width: 100%; margin: 6px 0;",
+    "th": "border: 1px solid #cbd5e1; padding: 4px 6px; vertical-align: top; background: #f1f5f9; font-weight: 700;",
+    "td": "border: 1px solid #cbd5e1; padding: 4px 6px; vertical-align: top;",
+    "a": "color: #2563eb; text-decoration: underline;",
+    "mark": "padding: 0 2px;",
+}
+_VOID_TAGS = {"br", "hr", "img", "input", "col"}
+
+
+class _RichEmailRewriter(HTMLParser):
+    """Re-emits already-sanitized TipTap HTML with inline styles, and turns task-list items
+    (checkboxes, which no email client can show) into ☐ / ☑ text."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.out: list[str] = []
+        self._skip_depth = 0          # inside a task item's <label> (its checkbox)
+        self._pending_mark: str | None = None
+        self._li_checked = False
+        self._task_stack: list[bool] = []  # per open <ul>: is it a task list?
+
+    def _emit_start(self, tag, attrs, self_closing=False):
+        attrs = dict(attrs)
+        base = _RICH_EMAIL_STYLES.get(tag, "")
+        if tag == "ul" and attrs.get("data-type") == "taskList":
+            base = "margin: 4px 0 8px 0; padding: 0; list-style: none;"
+        if tag == "div" and attrs.get("data-task-checked") == "true":
+            base = "color: #94a3b8; text-decoration: line-through;"
+        own = (attrs.pop("style", None) or "").strip()
+        style = " ".join(x for x in (base, own + (";" if own and not own.endswith(";") else "")) if x)
+        attrs.pop("class", None)
+        attrs.pop("data-task-checked", None)
+        if style:
+            attrs["style"] = style
+        rendered = "".join(
+            f' {k}' if v is None else f' {k}="{html.escape(v, quote=True)}"' for k, v in attrs.items()
+        )
+        self.out.append(f"<{tag}{rendered}{' /' if self_closing else ''}>")
+
+    def handle_starttag(self, tag, attrs):
+        if self._skip_depth:
+            if tag not in _VOID_TAGS:
+                self._skip_depth += 1
+            return
+        a = dict(attrs)
+        if tag == "ul":
+            self._task_stack.append(a.get("data-type") == "taskList")
+        if tag == "li" and self._task_stack and self._task_stack[-1]:
+            checked = a.get("data-checked") == "true"
+            self._pending_mark = "☑" if checked else "☐"
+            self._li_checked = checked
+        if tag == "label" and self._pending_mark is not None:
+            self._skip_depth = 1
+            return
+        if tag == "div" and self._pending_mark is not None and self._li_checked:
+            attrs = list(attrs) + [("data-task-checked", "true")]
+        self._emit_start(tag, attrs, self_closing=tag in _VOID_TAGS)
+        if tag in ("p", "h1", "h2", "h3") and self._pending_mark is not None:
+            self.out.append(f"{self._pending_mark}&nbsp;")
+            self._pending_mark = None
+
+    def handle_startendtag(self, tag, attrs):
+        if self._skip_depth:
+            return
+        self._emit_start(tag, attrs, self_closing=True)
+
+    def handle_endtag(self, tag):
+        if self._skip_depth:
+            if tag not in _VOID_TAGS:
+                self._skip_depth -= 1
+            return
+        if tag in _VOID_TAGS:
+            return
+        if tag == "ul" and self._task_stack:
+            self._task_stack.pop()
+        if tag == "li":
+            self._pending_mark = None
+        self.out.append(f"</{tag}>")
+
+    def handle_data(self, data):
+        if not self._skip_depth:
+            self.out.append(html.escape(data, quote=False))
+
+
+_RICH_BLOCK_TOKEN_RE = re.compile(r"<p\b[^>]*>\s*(\{meetings_list\}|\{booking_link\})\s*</p>")
+
+
+def _rich_body_to_email_html(rich_body: str, school: dict, *, recipient_name: str | None = None,
+                             advisor_names: str | None = None, booking_url: str | None = None,
+                             meetings_list_html: str | None = None, opt_out_link: str | None = None) -> str:
+    """The email body for a task whose message was written with formatting (message_config.
+    body_html, already sanitized when the task was saved). Mirrors _render_template +
+    _wrap_email_html for the plain body: the same placeholders, the same meetings block and
+    booking button, the same opt-out line — only the free text keeps its formatting. Returns
+    the inner HTML; the caller wraps it with _email_shell."""
+    def esc(v):
+        return html.escape(v or "", quote=False)
+    body = (rich_body.replace("{school_name}", esc(school.get("name")))
+            .replace("{recipient_name}", esc(recipient_name))
+            .replace("{advisor_names}", esc(advisor_names)))
+    rewriter = _RichEmailRewriter()
+    rewriter.feed(body)
+    rewriter.close()
+    out = "".join(rewriter.out)
+    # An empty paragraph is a blank line in the editor; email clients collapse it.
+    out = re.sub(r"(<p\b[^>]*>)\s*</p>", r"\1<br /></p>", out)
+
+    blocks = {
+        "{meetings_list}": meetings_list_html or "",
+        "{booking_link}": _booking_button_html(booking_url) if booking_url else "",
+    }
+    out = _RICH_BLOCK_TOKEN_RE.sub(lambda m: blocks[m.group(1)], out)
+    for token, block in blocks.items():
+        out = out.replace(token, block)
+    if opt_out_link:
+        safe = html.escape(opt_out_link, quote=True)
+        out += (f'<p style="margin: 16px 0 0 0; font-size: 12px; color: #64748b;">להסרה מרשימת התפוצה: '
+                f'<a href="{safe}" style="color: #64748b;">{safe}</a></p>')
+    return out
 
 def _first_meeting_condition(criteria: dict) -> dict | None:
     for group in (criteria or {}).get("groups") or []:
@@ -2645,6 +2806,13 @@ def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[st
     recipient_role = message_config.get("recipient_role")
     channel = message_config.get("channel")
     body_template = message_config.get("body_template") or ""
+    # Email only — WhatsApp can't show formatting and keeps the plain body_template.
+    body_html_template = message_config.get("body_html") or None
+    # Both come from the same editor; should they ever disagree on the link / meetings list, the
+    # plain body wins rather than sending a request without its link.
+    if body_html_template and any(t in body_template and t not in body_html_template
+                                  for t in ("{booking_link}", "{meetings_list}")):
+        body_html_template = None
     needs_booking_link = "{booking_link}" in body_template
     academic_year = task.get("academic_year") or DEFAULT_ACADEMIC_YEAR
 
@@ -2843,6 +3011,13 @@ def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[st
                 body = _render_template(body_template, school, booking_link, opt_out_link,
                                          meetings_list=meetings_list_text, recipient_name=recipient.get("name"),
                                          advisor_names=advisor_names_value)
+            elif body_html_template:
+                body = _email_shell(_rich_body_to_email_html(
+                    body_html_template, school, recipient_name=recipient.get("name"),
+                    advisor_names=advisor_names_value, booking_url=booking_link,
+                    meetings_list_html=format_ranges_html(send_ranges) if send_ranges else None,
+                    opt_out_link=opt_out_link,
+                ), branded=(channel != "email_outlook"))
             else:
                 meetings_list_html = format_ranges_html(send_ranges) if send_ranges else None
                 rendered = _render_template(body_template, school, opt_out_link=opt_out_link,

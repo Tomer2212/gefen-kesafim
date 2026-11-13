@@ -16,7 +16,7 @@ jobs:
           URL="${BACKEND_URL%/}"
           curl -sf -X POST "${URL}/calendar/renew-subscriptions" \
             -H "X-Cron-Secret: ${CRON_SECRET}" \
-            --max-time 60
+            --max-time 300
         env:
           BACKEND_URL: ${{ secrets.BACKEND_URL }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}

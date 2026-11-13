@@ -26,6 +26,10 @@ import {
 // instance (to restore focus after a dialog / un-minimize). `onChange` receives { html, text } where `text` is the
 // plain-text version the backend uses for @-mention detection, notification previews and the
 // activity log (mentions render there as "@Full Name", exactly like the old textarea).
+// Also the task-message body editor (TemplateBodyEditor): `enableMentions={false}` drops the
+// @-tag (a school can't be notified), `extraExtensions` adds its placeholder tags,
+// `contentClassName` its email-sized text, and `resizable` a drag grip under the box that
+// grows it downwards (starting at `height`, never below `minHeight`).
 
 const POPOVER_Z = 80;
 const MENTION_LIST_MAX = 260;
@@ -79,7 +83,10 @@ function filterMentionUsers(users, query) {
     .sort((a, b) => name(a).localeCompare(name(b), "he"));
 }
 
-export function RichNoteEditor({ id, value, onChange, onSave, onEscape, canSave = false, footer, onReady, users, autoFocus, placeholder, height, ariaLabel }) {
+export function RichNoteEditor({
+  id, value, onChange, onSave, onEscape, canSave = false, footer, onReady, users, autoFocus, placeholder, height, ariaLabel,
+  enableMentions = true, extraExtensions = null, contentClassName = "", resizable = false, minHeight = 160,
+}) {
   const wrapperRef = useRef(null);
   const layerRef = useRef(null);
   const mentionListRef = useRef(null);
@@ -97,6 +104,7 @@ export function RichNoteEditor({ id, value, onChange, onSave, onEscape, canSave 
   const toolbarRef = useRef(null);
   const [popover, setPopover] = useState(null); // { kind, rect }
   const [focused, setFocused] = useState(false);
+  const [resizedHeight, setResizedHeight] = useState(null);
 
   const extensions = useMemo(() => [
     StarterKit.configure({
@@ -122,7 +130,8 @@ export function RichNoteEditor({ id, value, onChange, onSave, onEscape, canSave 
     TableHeader,
     TableCell,
     Placeholder.configure({ placeholder: placeholder || "" }),
-    Mention.configure({
+    ...(extraExtensions || []),
+    ...(enableMentions ? [Mention.configure({
       HTMLAttributes: { class: "rt-mention" },
       renderText: ({ node }) => `@${node.attrs.label ?? node.attrs.id}`,
       renderHTML: ({ node, options }) => ["span", { ...options.HTMLAttributes, "data-type": "mention", "data-id": node.attrs.id, "data-label": node.attrs.label }, `@${node.attrs.label ?? node.attrs.id}`],
@@ -137,14 +146,15 @@ export function RichNoteEditor({ id, value, onChange, onSave, onEscape, canSave 
           onExit: () => setMention(null),
         }),
       },
-    }),
+    })] : []),
     Extension.create({
       name: "richNoteShortcuts",
       addKeyboardShortcuts() {
         return {
           "Mod-k": () => { openLinkRef.current(); return true; },
           "Mod-s": () => { onSaveRef.current?.(); return true; },
-          Escape: () => { onEscapeRef.current?.(); return true; },
+          // Without an onEscape (task message), Esc is left to the surrounding dialog.
+          Escape: () => { if (!onEscapeRef.current) return false; onEscapeRef.current(); return true; },
           // WAI-ARIA toolbar pattern: Alt+F10 jumps from the text to the first toolbar button.
           "Alt-F10": () => {
             toolbarRef.current?.querySelector("button:not(:disabled)")?.focus();
@@ -164,7 +174,7 @@ export function RichNoteEditor({ id, value, onChange, onSave, onEscape, canSave 
     shouldRerenderOnTransaction: true,
     editorProps: {
       attributes: {
-        class: "rich-note",
+        class: `rich-note ${contentClassName}`.trim(),
         id: id || "",
         role: "textbox",
         "aria-multiline": "true",
@@ -250,7 +260,7 @@ export function RichNoteEditor({ id, value, onChange, onSave, onEscape, canSave 
     if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "s") {
       e.preventDefault();
       onSave?.();
-    } else if (e.key === "Escape") {
+    } else if (e.key === "Escape" && onEscape) {
       e.preventDefault();
       onEscape?.();
     }
@@ -278,8 +288,38 @@ export function RichNoteEditor({ id, value, onChange, onSave, onEscape, canSave 
     background: focused ? "white" : "rgba(255,255,255,0.85)",
     boxShadow: focused ? "0 0 0 3px rgba(0,112,243,0.12)" : "none",
     transition: "border-color 0.18s ease, box-shadow 0.18s ease",
-    height: height || 240,
+    height: resizedHeight ?? (height || 240),
   };
+
+  // Bottom grip: drag (mouse / touch) or ↑/↓ keys. Only the height changes; the page / dialog
+  // around the editor simply gets longer.
+  function startResize(e) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const grip = e.currentTarget;
+    grip.setPointerCapture?.(e.pointerId);
+    const startY = e.clientY;
+    const startH = resizedHeight ?? (height || 240);
+    function onMove(ev) { setResizedHeight(Math.max(minHeight, Math.round(startH + ev.clientY - startY))); }
+    function onUp() {
+      grip.removeEventListener("pointermove", onMove);
+      grip.removeEventListener("pointerup", onUp);
+      grip.removeEventListener("pointercancel", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    }
+    document.body.style.cursor = "ns-resize";
+    document.body.style.userSelect = "none";
+    grip.addEventListener("pointermove", onMove);
+    grip.addEventListener("pointerup", onUp);
+    grip.addEventListener("pointercancel", onUp);
+  }
+  function onResizeKey(e) {
+    const step = e.key === "ArrowDown" ? 40 : e.key === "ArrowUp" ? -40 : 0;
+    if (!step) return;
+    e.preventDefault();
+    setResizedHeight(h => Math.max(minHeight, (h ?? (height || 240)) + step));
+  }
 
   return (
     <div
@@ -291,7 +331,7 @@ export function RichNoteEditor({ id, value, onChange, onSave, onEscape, canSave 
       style={{ width: "100%" }}
     >
       <div style={boxStyle}>
-        <Toolbar editor={editor} popover={popover} openPopover={openPopover} toolbarRef={toolbarRef} onSave={onSave} canSave={canSave} />
+        <Toolbar editor={editor} popover={popover} openPopover={openPopover} toolbarRef={toolbarRef} onSave={onSave} canSave={canSave} enableMentions={enableMentions} />
         {/* The editable area is only as tall as its content — a mousedown on the empty space below
             it lands on this non-focusable div; keep focus and move the caret to the end instead. */}
         <div className="flex-1 min-h-0 overflow-y-auto cursor-text"
@@ -308,6 +348,22 @@ export function RichNoteEditor({ id, value, onChange, onSave, onEscape, canSave 
           </div>
         )}
       </div>
+      {resizable && (
+        <div
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="שינוי גובה תיבת התוכן (גרירה, או חצים למעלה ולמטה)"
+          aria-valuenow={boxStyle.height}
+          aria-valuemin={minHeight}
+          tabIndex={0}
+          title="גררו למטה כדי להגדיל את התיבה"
+          onPointerDown={startResize}
+          onKeyDown={onResizeKey}
+          className="group flex justify-center items-center h-3 -mt-1 cursor-ns-resize touch-none outline-none rounded focus-visible:ring-2 focus-visible:ring-blue-300"
+        >
+          <span aria-hidden="true" className="block w-12 h-1 rounded-full bg-slate-300 group-hover:bg-blue-400 group-focus-visible:bg-blue-400 transition-colors" />
+        </div>
+      )}
 
       {/* Popovers render in a body-level layer: the notes window uses backdrop-filter, which
           turns it into the containing block for position:fixed and clips anything inside its
@@ -400,7 +456,7 @@ function currentDir(editor) {
   return attrs.dir === "ltr" ? "ltr" : "rtl";
 }
 
-function Toolbar({ editor, popover, openPopover, toolbarRef, onSave, canSave }) {
+function Toolbar({ editor, popover, openPopover, toolbarRef, onSave, canSave, enableMentions }) {
   const chain = () => editor.chain().focus();
   const textColor = editor.getAttributes("textStyle").color;
   const highlightColor = editor.getAttributes("highlight").color;
@@ -487,12 +543,14 @@ function Toolbar({ editor, popover, openPopover, toolbarRef, onSave, canSave }) 
         <TableIcon {...ICON} /><ChevronDown size={11} aria-hidden="true" />
       </ToolButton>
       <Sep />
-      <ToolButton label="תיוג משתמש" onClick={() => {
-        // The suggestion only triggers after whitespace / line start — add a space only when needed.
-        const { from } = editor.state.selection;
-        const before = editor.state.doc.textBetween(Math.max(0, from - 1), from, " ", " ");
-        chain().insertContent(before && !/\s/.test(before) ? " @" : "@").run();
-      }}><AtSign {...ICON} /></ToolButton>
+      {enableMentions && (
+        <ToolButton label="תיוג משתמש" onClick={() => {
+          // The suggestion only triggers after whitespace / line start — add a space only when needed.
+          const { from } = editor.state.selection;
+          const before = editor.state.doc.textBetween(Math.max(0, from - 1), from, " ", " ");
+          chain().insertContent(before && !/\s/.test(before) ? " @" : "@").run();
+        }}><AtSign {...ICON} /></ToolButton>
+      )}
       <ToolButton label="ניקוי עיצוב" onClick={() => chain().unsetAllMarks().clearNodes().unsetTextAlign().run()}><RemoveFormatting {...ICON} /></ToolButton>
     </div>
   );

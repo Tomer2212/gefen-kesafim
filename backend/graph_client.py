@@ -763,7 +763,9 @@ def renew_subscription(db, sub_row: dict) -> bool:
             f"{GRAPH_BASE}/subscriptions/{sub_row['subscription_id']}",
             headers=_headers(token),
             json={"expirationDateTime": expiration.isoformat()},
-            timeout=15,
+            # Graph sometimes takes 15-30 s on a slow mailbox (2026-11-13); renewals run in a
+            # cron, so waiting longer costs nothing.
+            timeout=30,
         )
         if resp.status_code == 404:
             db.table("calendar_subscriptions").delete().eq("id", sub_row["id"]).execute()

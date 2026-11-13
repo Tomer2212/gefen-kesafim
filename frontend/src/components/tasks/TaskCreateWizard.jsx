@@ -1,10 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Component, lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
 import ConditionGroupsEditor, { newConditionGroup, isMeetingRequirementComplete, needsStageScope, BY_SERVICE, GEFEN_CURRENT_SPLIT_OPTIONS } from "./ConditionGroupsEditor";
 import StageScopeCustomizeModal from "./StageScopeCustomizeModal";
 import StageScopeSummaryModal from "./StageScopeSummaryModal";
-import TemplateBodyEditor from "./TemplateBodyEditor";
 import ScheduleCriteriaModal from "./ScheduleCriteriaModal";
 import OutlookLimitModal from "./OutlookLimitModal";
 import TaskContactResolutionModal from "./TaskContactResolutionModal";
@@ -14,6 +13,31 @@ import AdvisorExclusionsEditor from "./AdvisorExclusionsEditor";
 import { SchoolMultiPickerModal } from "../meetings/SchoolPickerCell";
 import { AcademicYearSelector } from "../AcademicYearSelector";
 import { DEFAULT_ACADEMIC_YEAR } from "../../constants/academicYears";
+
+// The rich editor (TipTap) is large — loaded only when the message step opens.
+const TemplateBodyEditor = lazy(() => import("./TemplateBodyEditor"));
+
+// A tab opened before a deploy can request an editor chunk that no longer exists — keep that
+// failure inside the message box instead of unmounting the whole page.
+class EditorBoundary extends Component {
+  state = { failed: false };
+  static getDerivedStateFromError() { return { failed: true }; }
+  componentDidCatch(err) { console.error("TemplateBodyEditor failed:", err); }
+  render() {
+    if (this.state.failed) {
+      return (
+        <div role="alert" className="flex items-center justify-between gap-2 text-xs text-red-600 border border-red-200 bg-red-50 rounded-lg px-3 py-2">
+          <span>טעינת עורך ההודעה נכשלה — יש לרענן את הדף</span>
+          <button type="button" onClick={() => window.location.reload()}
+                  className="shrink-0 rounded-md bg-red-600 text-white font-semibold px-2 py-1 hover:bg-red-700">
+            רענן
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 import {
   RECIPIENT_ROLE_OPTIONS, CHANNEL_OPTIONS, describeCondition, stageScopeLabel, MEETING_SERVICE_TYPE_LABELS,
 } from "./taskShared";
@@ -251,6 +275,9 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
   const [channel, setChannel] = useState("email_resend");
   const [subject, setSubject] = useState("");
   const [bodyTemplate, setBodyTemplate] = useState("");
+  // The same body with its formatting ("" = plain only). Kept next to bodyTemplate so the
+  // formatting survives going back and forth between steps, templates and the saved task.
+  const [bodyHtml, setBodyHtml] = useState("");
   const [attachments, setAttachments] = useState([]); // [{storageKey, filename}] — already uploaded, see handleAttachmentUpload
   const [uploading, setUploading] = useState(false);
   const [templates, setTemplates] = useState([]);
@@ -425,6 +452,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
       const tpl = isMeetingTask ? MEETING_TASK_BUILT_IN_TEMPLATE : BUILT_IN_TEMPLATE;
       setSubject(tpl.subject);
       setBodyTemplate(tpl.body_template);
+      setBodyHtml("");
       setSelectedTemplateId(tpl.id);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -441,6 +469,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
     if (tpl) {
       setSubject(tpl.subject || "");
       setBodyTemplate(tpl.body_template || "");
+      setBodyHtml(tpl.body_html || "");
     }
   }
 
@@ -449,7 +478,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
     setSavingTemplate(true);
     try {
       const res = await axios.post("/tasks/templates", {
-        name: newTemplateName.trim(), subject, body_template: bodyTemplate,
+        name: newTemplateName.trim(), subject, body_template: bodyTemplate, body_html: bodyHtml || null,
       });
       setTemplates(prev => [res.data, ...prev]);
       setSelectedTemplateId(res.data.id);
@@ -672,6 +701,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
           channel: effectiveChannel,
           subject,
           body_template: bodyTemplate,
+          body_html: bodyHtml || null,
           attachment_keys: attachments.map(a => ({ key: a.storageKey, filename: a.filename })),
         },
         scheduled_for: scheduledFor ? new Date(scheduledFor).toISOString() : null,
@@ -1233,12 +1263,15 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
                 <span className="text-sm font-medium text-slate-700 mb-1.5 block">
                   תוכן ההודעה — לחצו על תגית כדי להוסיף אותה בנקודת הסמן. תגיות מסומנות ב-🔒 (כמו קישור קביעת הפגישה ורשימת הפגישות) יתווספו אוטומטית ולא ניתן להסירן, כי הן חיוניות לשליחת הבקשה.
                 </span>
-                <TemplateBodyEditor
-                  value={bodyTemplate}
-                  onChange={setBodyTemplate}
-                  badges={messageBadges}
-                  ariaLabel="תוכן ההודעה"
-                />
+                <EditorBoundary><Suspense fallback={<div role="status" aria-label="טוען עורך" className="h-[300px] rounded-[0.6rem] border-[1.5px] border-slate-200 bg-white/80" />}>
+                  <TemplateBodyEditor
+                    value={bodyTemplate}
+                    html={bodyHtml}
+                    onChange={({ text, html }) => { setBodyTemplate(text); setBodyHtml(html); }}
+                    badges={messageBadges}
+                    ariaLabel="תוכן ההודעה"
+                  />
+                </Suspense></EditorBoundary>
               </div>
 
               {showSaveTemplate ? (

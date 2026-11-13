@@ -16,7 +16,7 @@ from typing import Annotated, Any
 from uuid import uuid4
 
 import httpx
-import nh3
+from rich_html import sanitize_rich_html
 from bidi.algorithm import get_display
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import Response
@@ -11517,44 +11517,11 @@ class MeetingNoteCreateIn(BaseModel):
     content_html: str | None = None
 
 
-# Allowlist for the rich-text meeting notes (RichNoteEditor / TipTap output). `content` stays
-# the plain-text version (mentions, notification previews, activity log); `content_html` is only
-# ever rendered by RichNoteView, which runs DOMPurify with the same allowlist as a second layer.
-_NOTE_HTML_TAGS = {
-    "p", "br", "strong", "b", "em", "i", "u", "s", "span", "mark", "a", "h1", "h2", "h3",
-    "ul", "ol", "li", "blockquote", "hr", "table", "colgroup", "col", "tbody", "thead", "tr", "th", "td",
-    "label", "input", "div",
-}
-_NOTE_HTML_ATTRS = {
-    "*": {"dir", "style", "class", "data-type"},
-    "a": {"href", "target"},
-    "mark": {"data-color"},
-    "li": {"data-checked"},
-    "input": {"type", "checked"},
-    "th": {"colspan", "rowspan"},
-    "td": {"colspan", "rowspan"},
-    "ol": {"start"},
-    "span": {"data-id", "data-label", "data-mention-suggestion-char"},
-}
-_NOTE_HTML_STYLES = {"color", "background-color", "font-size", "text-align", "min-width", "width"}
-_NOTE_HTML_MAX_LEN = 200_000
-
-
+# Rich-text meeting notes (RichNoteEditor / TipTap output). `content` stays the plain-text
+# version (mentions, notification previews, activity log); `content_html` is only ever rendered
+# by RichNoteView, which runs DOMPurify with the same allowlist (rich_html.py) as a second layer.
 def _sanitize_note_html(html: str | None) -> str | None:
-    if not html or not html.strip():
-        return None
-    if len(html) > _NOTE_HTML_MAX_LEN:
-        raise HTTPException(status_code=400, detail="ההערה ארוכה מדי")
-    cleaned = nh3.clean(
-        html,
-        tags=_NOTE_HTML_TAGS,
-        clean_content_tags={"script", "style"},
-        attributes=_NOTE_HTML_ATTRS,
-        url_schemes={"http", "https", "mailto"},
-        link_rel="noopener noreferrer",
-        filter_style_properties=_NOTE_HTML_STYLES,
-    )
-    return cleaned or None
+    return sanitize_rich_html(html, too_long_detail="ההערה ארוכה מדי")
 
 
 @router.post("/{school_id}/meetings/{meeting_id}/notes")
