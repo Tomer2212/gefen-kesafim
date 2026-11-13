@@ -1,5 +1,6 @@
 import { memo, useState } from "react";
 import axios from "axios";
+import { Link } from "react-router-dom";
 import { useCallNoteWindows } from "../../context/CallNoteWindowsContext";
 import { SchoolPickerModal } from "../meetings/SchoolPickerCell";
 
@@ -187,7 +188,15 @@ function CallRowBase({ call, onDelete, hideSchoolColumn, hideAdvisorColumn, canM
         <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap">
           {call.pending_school_resolution
             ? <span className="text-amber-600 text-xs font-medium">ממתין לשיוך</span>
-            : (call.school_name || "—")}
+            : call.school_id && call.school_name
+              ? (
+                <Link to={`/school/${call.school_id}?tab=meetings`}
+                  title="לחץ למעבר לאזור הפגישות בכרטיס בית הספר."
+                  className="text-blue-700 hover:text-blue-900 hover:underline">
+                  {call.school_name}
+                </Link>
+              )
+              : (call.school_name || "—")}
         </td>
       )}
       <td className="py-2.5 px-2 text-center">

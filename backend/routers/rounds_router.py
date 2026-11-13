@@ -244,9 +244,10 @@ def physical_check(body: PhysicalCheckIn, user: Annotated[dict, Depends(get_curr
     advisor_ids = list({a for sid in conflicts for t in ("gefen", "current") for a in lists[sid][t]})
     names = {p["id"]: p.get("full_name") or p.get("email") or ""
              for p in db.table("profiles").select("id, full_name, email").in_("id", advisor_ids).execute().data or []}
-    schools = {r["id"]: r for r in db.table("schools").select("id, name, city").in_("id", conflicts).execute().data or []}
+    schools = {r["id"]: r for r in db.table("schools").select("id, name, symbol, authority, city").in_("id", conflicts).execute().data or []}
     return {"schools": sorted(
         ({"school_id": sid, "school_name": schools.get(sid, {}).get("name"), "city": schools.get(sid, {}).get("city"),
+          "symbol": schools.get(sid, {}).get("symbol"), "authority": schools.get(sid, {}).get("authority"),
           "gefen": [{"id": a, "name": names.get(a, "")} for a in lists[sid]["gefen"]],
           "current": [{"id": a, "name": names.get(a, "")} for a in lists[sid]["current"]]}
          for sid in conflicts),

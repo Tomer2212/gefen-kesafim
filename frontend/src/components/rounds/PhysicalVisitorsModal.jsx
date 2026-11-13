@@ -75,7 +75,7 @@ export default function PhysicalVisitorsModal({ schools, onCancel, onConfirm, in
             ];
             return (
               <li key={s.school_id} className={`border rounded-xl p-3 flex flex-col gap-2 ${attempted && !c ? "border-red-300 bg-red-50/40" : "border-slate-200"}`}>
-                <span className="text-sm font-semibold text-slate-800">{s.school_name}{s.city ? <span className="font-normal text-slate-500"> · {s.city}</span> : null}</span>
+                <span className="text-sm font-semibold text-slate-800">{[s.school_name, s.symbol && !(s.school_name || "").includes(s.symbol) ? s.symbol : null, s.authority].filter(Boolean).join(" - ")}</span>
                 <div className="flex flex-wrap gap-2" role="radiogroup" aria-label={`מי מגיע ל${s.school_name}`}>
                   {options.map(o => (
                     <button key={o.value} type="button" role="radio" aria-checked={c === o.value} onClick={() => choose(s, o.value)}

@@ -11118,6 +11118,9 @@ def _group_meeting_note_rows(rows: list[dict], profiles_map: dict) -> list[dict]
             "author_name": "סיכום אוטומטי מהקלטה" if r.get("author_id") is None else author_profile.get("full_name"),
             "author_role": author_profile.get("role"),
             "content": r["content"],
+            # Without it the window shows (and re-opens for editing) only the plain text, so a
+            # re-saved note silently lost all of its formatting.
+            "content_html": r.get("content_html"),
             "created_at": r["created_at"],
             "updated_at": r["updated_at"],
         }
@@ -11185,7 +11188,18 @@ def get_meeting_notes(school_id: str, meeting_id: str, user: Annotated[dict, Dep
         except Exception as exc:
             logger.warning("get_meeting_notes profile enrichment failed (non-fatal): %s", exc)
 
-    return {"groups": _group_meeting_note_rows(rows, profiles_map)}
+    # For the delete-confirmation title; the window may be opened from a notification, which
+    # doesn't know the meeting's date.
+    meeting_date = None
+    try:
+        db = get_admin_client()
+        m_rows = (db.table("meetings").select("meeting_date")
+                  .eq("id", meeting_id).eq("school_id", school_id).execute().data or [])
+        meeting_date = m_rows[0].get("meeting_date") if m_rows else None
+    except Exception as exc:
+        logger.warning("get_meeting_notes meeting date enrichment failed (non-fatal): %s", exc)
+
+    return {"groups": _group_meeting_note_rows(rows, profiles_map), "meeting_date": meeting_date}
 
 
 _ACTIVITY_MERGE_WINDOW_SECONDS = 600

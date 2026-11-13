@@ -134,7 +134,8 @@ function MeetingNotesWindowItem({ win, minimizedOrder }) {
   const [unsavedPrompt, setUnsavedPrompt] = useState(null); // { action } — the leave action waiting on the answer
   const [drafts, setDrafts] = useState([]);
   const [listHeight, setListHeight] = useState(0);
-  const [deleteConfirm, setDeleteConfirm] = useState(null); // { groupId, segmentId, authorName } — cross-user delete by owner/manager only
+  const [deleteConfirm, setDeleteConfirm] = useState(null); // { groupId, segmentId, authorName } — authorName only for someone else's note
+  const [meetingDate, setMeetingDate] = useState(null);
   const [error, setError] = useState("");
   const editingRef = useRef(null);
   editingRef.current = editing;
@@ -162,6 +163,7 @@ function MeetingNotesWindowItem({ win, minimizedOrder }) {
     axios.get(`/schools/${schoolId}/meetings/${meetingId}/notes`).then(({ data }) => {
       if (cancelled) return;
       setGroups(data.groups || []);
+      setMeetingDate(data.meeting_date || null);
       setLoading(false);
     }).catch(() => {
       if (cancelled) return;
@@ -395,15 +397,13 @@ function MeetingNotesWindowItem({ win, minimizedOrder }) {
     }
   }
 
-  // Clicking the X: own note deletes immediately (as before); someone else's note (owner/manager
-  // only — see isDeletable below) instead opens a confirmation naming the original author, since
-  // this is a cross-user destructive action.
+  // Clicking the X always asks first (a stray click used to delete a note for good); someone
+  // else's note (owner/manager only) also names its original author.
   function requestDelete(groupId, seg) {
-    if (isOwnSegment(currentUser, seg)) {
-      handleDelete(groupId, seg.id);
-    } else {
-      setDeleteConfirm({ groupId, segmentId: seg.id, authorName: seg.author_name || "משתמש" });
-    }
+    setDeleteConfirm({
+      groupId, segmentId: seg.id,
+      authorName: isOwnSegment(currentUser, seg) ? null : (seg.author_name || "משתמש"),
+    });
   }
 
   function confirmDeleteNow() {
@@ -736,6 +736,7 @@ function MeetingNotesWindowItem({ win, minimizedOrder }) {
 
         {deleteConfirm && (
           <DeleteConfirmDialog
+            title={deleteDialogTitle(win.schoolName, meetingDate)}
             authorName={deleteConfirm.authorName}
             onCancel={() => setDeleteConfirm(null)}
             onConfirm={confirmDeleteNow}
@@ -808,29 +809,42 @@ function UnsavedChangesDialog({ onSave, onDiscard, onCancel }) {
   );
 }
 
+// "YYYY-MM-DD" → "DD/MM/YYYY" without going through Date (no timezone shift).
+function formatMeetingDate(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso || "");
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : "";
+}
+
+function deleteDialogTitle(schoolName, meetingDate) {
+  return ["מחיקת הערת פגישה", schoolName, formatMeetingDate(meetingDate)].filter(Boolean).join(" - ");
+}
+
 // A separate component (not inline JSX) so useFocusTrap's mount-time auto-focus effect fires
 // fresh every time this specific confirmation opens — it wouldn't if the hook were called at
 // the top of MeetingNotesWindowItem, which stays mounted the whole time the window is open.
-function DeleteConfirmDialog({ authorName, onCancel, onConfirm }) {
+// Focus starts on "לא" (useFocusTrap focuses the first button), so Enter / Esc / a backdrop click
+// all keep the note.
+function DeleteConfirmDialog({ title, authorName, onCancel, onConfirm }) {
   const { ref, handleKeyDown } = useFocusTrap(onCancel);
   return (
     <div className="fixed inset-0 flex items-center justify-center bg-black/30 backdrop-blur-sm" style={{ zIndex: 70 }} dir="rtl"
       onClick={e => { if (e.target === e.currentTarget) onCancel(); }}>
-      <div ref={ref} role="alertdialog" aria-modal="true" aria-labelledby="delete-note-confirm-title"
+      <div ref={ref} role="alertdialog" aria-modal="true" aria-labelledby="delete-note-confirm-title" aria-describedby="delete-note-confirm-desc"
         onKeyDown={handleKeyDown}
-        className="glass-card rounded-2xl p-6 w-[360px] flex flex-col gap-4">
-        <h2 id="delete-note-confirm-title" className="text-base font-bold text-slate-800 text-center">שים לב!</h2>
-        <p className="text-sm text-slate-600 text-center leading-relaxed">
-          אתה עומד למחוק את ההערה של <strong>{authorName}</strong>. האם אתה בטוח שאתה רוצה למחוק את ההערה?
+        className="glass-card rounded-2xl p-6 w-[380px] max-w-[calc(100vw-32px)] flex flex-col gap-4">
+        <h2 id="delete-note-confirm-title" className="text-base font-bold text-slate-800 text-center">{title}</h2>
+        <p id="delete-note-confirm-desc" className="text-sm text-slate-600 text-center leading-relaxed">
+          {authorName && <>זו הערה של <strong>{authorName}</strong>.<br /></>}
+          האם למחוק את ההערה באופן סופי?
         </p>
         <div className="flex gap-3 justify-center mt-1">
           <button type="button" onClick={onCancel}
-            className="px-5 py-2 rounded-full border border-slate-300 hover:border-slate-400 text-slate-600 text-sm font-semibold transition-colors">
-            ביטול הפעולה
+            className="px-6 py-2 rounded-full border border-slate-300 hover:border-slate-400 text-slate-600 text-sm font-semibold transition-colors">
+            לא
           </button>
           <button type="button" onClick={onConfirm}
-            className="px-5 py-2 rounded-full bg-red-600 hover:bg-red-700 text-white text-sm font-semibold transition-colors">
-            מחק בכל זאת
+            className="px-6 py-2 rounded-full bg-red-600 hover:bg-red-700 text-white text-sm font-semibold transition-colors">
+            כן
           </button>
         </div>
       </div>
