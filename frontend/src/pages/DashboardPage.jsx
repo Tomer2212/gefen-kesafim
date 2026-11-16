@@ -13,6 +13,7 @@ import { AcademicYearSelector } from "../components/AcademicYearSelector";
 import { CONTROL_LETTER_STATUS_MAP, CONTROL_LETTER_STATUS_OPTIONS } from "../components/controlLetter/constants";
 import { MEETING_SERVICE_TYPE_BREAKDOWN_COL_ORDER } from "../components/meetings/constants";
 import { diagnoseConnectionError } from "../lib/connectionError";
+import { principalNames, gefenFilesResponsibleLines, meetingCoordinatorLines } from "../components/schoolContactLines";
 
 // Tags school-data writes for the school card's "תיעוד פעולות" log (backend school_activity.py).
 const SURFACE_HEADERS = { headers: { "X-Client-Surface": "dashboard" } };
@@ -698,21 +699,6 @@ function gefenClosureStateText(relevant, status) {
   return status === true ? "סגור" : "לא סגור";
 }
 
-// One raw numeric value per filterable column, uniformly (school.check_metrics/combo
-// for the 19 SUMMARY_COLUMNS, meetingsStats for the 2 movable ones, goal_statuses for the
-// dynamic goal columns) — computed once per row so filtering/sorting/value-list logic never
-// needs to know where a value comes from. Goal columns are ordinally encoded (0=טרם הוגדר,
-// 1=לא, 2=כן) for sort — never null, since "not yet set" is itself a valid distinct state.
-// A שש-שנתי school with a separate חט"ב principal (principal_same_person === false) has two
-// principals; every other school has at most one. Mirrors buildSchoolContacts' "principal"/
-// "principal_chativa" entries (components/meetings/schoolContacts.js).
-function principalNames(school) {
-  return [
-    school.principal_name || null,
-    (school.stage === "sheshshnati" && school.principal_same_person === false) ? school.principal_chativa_name : null,
-  ].filter(Boolean);
-}
-
 // "יועץ מלווה [כל הסוגים]" column — union of the three typed advisor lists, one entry per
 // person even when assigned to several types. advisor_schools is deliberately excluded: it
 // grants access (including temporary access), which doesn't make someone an accompanying advisor.
@@ -726,32 +712,11 @@ function allTypedAdvisorNames(school) {
   return [...byId.values()];
 }
 
-// "מתאם פגישות" / "אחראי/ת קבצי גפן" dashboard columns — built from the per-slot display
-// dicts the backend attaches to each school (meeting_coordinators_display /
-// gefen_files_responsible_display, see schools_router.py's _resolve_slot_display). A slot
-// with no ref chosen is omitted entirely; a slot with a ref chosen but missing_email=true
-// (no valid email for that contact, backend-checked) shows a warning line instead of the
-// role, so an org can spot who still needs real contact info to actually be coordinated with.
-const GEFEN_FILES_SLOT_PREFIX = { default: null, tichon: "תיכון", beinayim: 'חט"ב' };
-const MISSING_EMAIL_TEXT = "חסר מייל של איש הקשר המוגדר";
-
-function gefenFilesResponsibleLines(school) {
-  const data = school.gefen_files_responsible_display || {};
-  return Object.entries(data).filter(([, v]) => v).map(([slot, v]) => {
-    const prefix = GEFEN_FILES_SLOT_PREFIX[slot];
-    const text = v.missing_email ? MISSING_EMAIL_TEXT : v.role_label;
-    return { text: prefix ? `${prefix} - ${text}` : text, missingEmail: !!v.missing_email };
-  });
-}
-
-function meetingCoordinatorLines(school) {
-  const data = school.meeting_coordinators_display || {};
-  return Object.entries(data).filter(([, v]) => v).map(([slot, v]) => {
-    const text = v.missing_email ? MISSING_EMAIL_TEXT : v.role_label;
-    return { text: `${v.slot_label}: ${text}`, missingEmail: !!v.missing_email };
-  });
-}
-
+// One raw numeric value per filterable column, uniformly (school.check_metrics/combo
+// for the 19 SUMMARY_COLUMNS, meetingsStats for the 2 movable ones, goal_statuses for the
+// dynamic goal columns) — computed once per row so filtering/sorting/value-list logic never
+// needs to know where a value comes from. Goal columns are ordinally encoded (0=טרם הוגדר,
+// 1=לא, 2=כן) for sort — never null, since "not yet set" is itself a valid distinct state.
 function computeFilterValues(school, combo, meetingsStats, activeSummaryBudget, goalColumns = [], gefenClosureColumns = []) {
   const out = {};
   const stats = meetingsStats[school.id];

@@ -31,6 +31,7 @@ import school_activity
 import slot_policy
 import task_logic
 import whatsapp_twilio
+from routers import meeting_booking_router as _meeting_booking_router
 from routers import schools_router as _schools_router
 from academic_years import DEFAULT_ACADEMIC_YEAR, resolve_inherited_year_admin
 from auth import get_current_user
@@ -1191,6 +1192,43 @@ def _school_meeting_conditions(conditions: list[dict], school_advisors: dict, ca
             return None
         for e in expanded:
             out.extend(task_logic.apply_advisor_exclusions(e, school_advisors))
+    return out
+
+
+def _booked_meetings_for_send(task: dict, org_id: str, school_ids: list[str]) -> tuple[dict[str, list[dict]], set[str]] | None:
+    """({school_id: meetings}, the task's token ids) exactly as task progress reads them, so a
+    send can leave out what each school already booked (_still_missing_conditions). None when
+    the lookup fails — the send then asks for everything, as before."""
+    try:
+        _schools, meetings, _year, _goals, _cl = task_logic._fetch_schools_and_meetings(
+            org_id, task.get("academic_year") or DEFAULT_ACADEMIC_YEAR, only_school_ids=school_ids,
+        )
+        token_rows = get_admin_client().table("meeting_booking_tokens").select("id").eq("task_id", task["id"]).execute().data or []
+    except Exception as exc:
+        logger.warning("_booked_meetings_for_send failed for task %s (non-fatal, asking for everything): %s", task.get("id"), exc)
+        return None
+    by_school: dict[str, list[dict]] = {}
+    for m in meetings:
+        by_school.setdefault(m["school_id"], []).append(m)
+    return by_school, {r["id"] for r in token_rows}
+
+
+def _still_missing_conditions(conditions: list[dict], school: dict, school_meetings: list[dict], token_ids: set[str]) -> list[dict]:
+    """The school's plain meeting conditions minus what it already booked, judged by the task
+    progress rule itself — a reminder never asks again for a meeting that counts. A six-year
+    "separate" condition with one division already covered keeps only the other one
+    (skip_split_scopes, read by _build_meeting_ranges)."""
+    out = []
+    for c in conditions:
+        if (task_logic._fulfilled_count_for_meeting_condition(c, school_meetings, token_ids, school)
+                >= task_logic._required_count_for_condition(c, school)):
+            continue
+        if school.get("stage") == "sheshshnati" and task_logic.effective_stage_scope(c, school) == "separate":
+            scopes = [m.get("stage_scope") for m in task_logic._matching_meetings(c, school_meetings, token_ids)]
+            covered = [s for s in ("tichon", "chativa") if task_logic.stage_scope_is_covered(s, scopes)]
+            if covered:
+                c = {**c, "skip_split_scopes": covered}
+        out.append(c)
     return out
 
 
@@ -2711,6 +2749,8 @@ def _build_meeting_ranges(
 
         counted_for_label = False
         for split_scope in split_scopes:
+            if split_scope in (c.get("skip_split_scopes") or ()):
+                continue  # this division's meeting is already booked (_still_missing_conditions)
             # Advisors per range: a six-year school's two divisions may each have their own
             # (the manager's advisor choice, _chosen_default_advisors).
             if c.get("advisor_mode") == "manual":
@@ -3013,6 +3053,8 @@ def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[st
         field_days = _field_days_by_advisor(db, task["org_id"], list(candidate_ids))
     field_exempt, field_visitors = _round_field_rules(db, task["org_id"], task.get("round_id")) if field_days is not None else (set(), {})
     round_choices = _round_advisor_choices(db, task.get("org_id"), task.get("round_id")) if needs_booking_link and meeting_conditions else {}
+    # What each school already booked — a reminder's link asks only for what's still missing.
+    booked = _booked_meetings_for_send(task, org_id, school_ids) if needs_booking_link and meeting_conditions else None
 
     try:
         notes_map = _fetch_school_notes_map(db, task["id"], school_ids)
@@ -3052,6 +3094,12 @@ def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[st
             )
             if _is_self_scheduled(meeting_conditions, school_conditions):
                 continue  # its advisors book every meeting themselves — nothing to request
+            if school_conditions and booked is not None:
+                school_conditions = _still_missing_conditions(
+                    school_conditions, school, booked[0].get(school["id"], []), booked[1],
+                )
+                if not school_conditions:
+                    continue  # already booked everything the task asks for — nothing to remind about
             ranges_data = school_conditions and _build_meeting_ranges(
                 school, school_conditions,
                 advisor_map.get(school["id"], {}), duration_map.get(school["id"], {}),
@@ -3443,6 +3491,21 @@ def send_task_single(task_id: str, school_id: str, user: Annotated[dict, Depends
             "mode": skip_note[0].get("broadcast_skip_mode"),
         })
 
+    if task.get("is_meeting_task") and task.get("track_success", True):
+        year = task.get("academic_year") or DEFAULT_ACADEMIC_YEAR
+        try:
+            prefetched = task_logic._fetch_schools_and_meetings(user["org_id"], year, only_school_ids=[school_id])
+            progress = task_logic.compute_task_progress(user["org_id"], task, year, prefetched)
+            already_done = any(r["school_id"] == school_id and r["done"] for r in progress["schools"])
+        except Exception as exc:
+            logger.warning("send_task_single: done check failed (non-fatal): %s", exc)
+            already_done = False
+        if already_done:
+            raise HTTPException(status_code=409, detail={
+                "message": "בית הספר כבר קבע את כל הפגישות שהתבקשו — לא נשלחה תזכורת",
+                "already_done": True,
+            })
+
     missing, _skipped_broadcast = _queue_messages_for_schools(db, task, user["org_id"], [school_id])
     task_logic.recompute_task_status_and_cache(db, user["org_id"], task)
     if missing:
@@ -3639,6 +3702,27 @@ async def upload_task_attachment(
     return {"storage_key": storage_key, "filename": file.filename}
 
 
+def _link_has_nothing_open(db, token_id: str) -> bool:
+    """True when the message's booking link asks for nothing anymore: closed by the staff, or
+    every request already booked or filled by a meeting — by the booking page's own rule
+    (_range_blocking_meeting). Non-fatal: False (send as before) on failure."""
+    try:
+        rows = db.table("meeting_booking_tokens").select("*").eq("id", token_id).execute().data or []
+        if not rows:
+            return False
+        token = rows[0]
+        if token.get("closed_message"):
+            return True
+        ranges = token.get("date_ranges") or []
+        booked = set(token.get("booked_ranges") or [])
+        return bool(ranges) and all(
+            r["key"] in booked or _meeting_booking_router._range_blocking_meeting(db, token, r) for r in ranges
+        )
+    except Exception as exc:
+        logger.warning("_link_has_nothing_open failed for token %s (non-fatal, sending): %s", token_id, exc)
+        return False
+
+
 def _send_queued_row(db, row: dict) -> str:
     """Sends one already-claimed ("sending") org_task_messages row and writes its outcome:
     "sent" | "failed" | "skipped" | "quota" (Resend quota used up — the row goes back to
@@ -3665,6 +3749,12 @@ def _send_queued_row(db, row: dict) -> str:
             .eq("task_id", row["task_id"]).eq("school_id", row["school_id"]).execute().data or []
         )
         if skip_note_rows and _broadcast_skip_active(skip_note_rows[0], date.today()):
+            db.table("org_task_messages").update({"status": "skipped"}).eq("id", row["id"]).execute()
+            return "skipped"
+
+        # Everything its link asks for was booked since it was queued (a scheduled reminder, or a
+        # long background send), or the link was closed — sending would only ask again.
+        if row.get("booking_token_id") and _link_has_nothing_open(db, row["booking_token_id"]):
             db.table("org_task_messages").update({"status": "skipped"}).eq("id", row["id"]).execute()
             return "skipped"
 

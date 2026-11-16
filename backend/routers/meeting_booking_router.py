@@ -36,7 +36,9 @@ def _not_started_yet(meeting_date: str, start_time: str) -> bool:
     return (meeting_date, start_time) > (now.date().isoformat(), now.strftime("%H:%M"))
 
 
-def _get_valid_token(db, token: str) -> dict:
+def _get_valid_token(db, token: str, allow_closed: bool = False) -> dict:
+    """allow_closed: the page itself still loads a link closed by the staff (closed_message —
+    e.g. a request sent by mistake) to show its message; nothing can be booked through it."""
     res = db.table("meeting_booking_tokens").select("*").eq("token", token).execute()
     if not res.data:
         raise HTTPException(status_code=404, detail="קישור לא נמצא")
@@ -44,6 +46,8 @@ def _get_valid_token(db, token: str) -> dict:
     expires_at = datetime.fromisoformat(row["expires_at"].replace("Z", "+00:00"))
     if datetime.now(timezone.utc) > expires_at:
         raise HTTPException(status_code=410, detail="פג תוקפו של קישור זה")
+    if row.get("closed_message") and not allow_closed:
+        raise HTTPException(status_code=410, detail=row["closed_message"])
     return row
 
 
@@ -324,6 +328,33 @@ def _range_existing_meeting(db, token_row: dict, range_row: dict) -> dict | None
     )
 
 
+def _same_task_booked_meeting(db, token_row: dict, range_row: dict) -> dict | None:
+    """"בקש לקבוע פגישה נוספת": a meeting that existed before the task never blocks the range,
+    but one the school already booked through ANY link of the same task (an earlier request or
+    reminder) does — otherwise every reminder link would let it book the same meeting again.
+    The rule itself: booking_requests.same_task_fillers. Non-fatal: on failure nothing blocks,
+    as before."""
+    if not token_row.get("task_id"):
+        return None
+    row = {"token_id": token_row["id"], "school_id": token_row["school_id"], "range_key": range_row["key"],
+           "range_row": range_row, "task_id": token_row["task_id"]}
+    try:
+        m = booking_requests.same_task_fillers(db, [row]).get((str(token_row["id"]), range_row["key"]))
+    except Exception as exc:
+        logger.warning("same-task booked meeting lookup failed for token %s (non-fatal): %s", token_row.get("id"), exc)
+        return None
+    return {k: m.get(k) for k in ("meeting_date", "start_time", "end_time")} if m else None
+
+
+def _range_blocking_meeting(db, token_row: dict, range_row: dict) -> dict | None:
+    """The meeting that already fills this range, so it can't be booked again: any existing one
+    of the school (_range_existing_meeting), or — for "בקש לקבוע פגישה נוספת" — only one booked
+    through this same task (_same_task_booked_meeting)."""
+    if range_row.get("require_additional_meeting"):
+        return _same_task_booked_meeting(db, token_row, range_row)
+    return _range_existing_meeting(db, token_row, range_row)
+
+
 def _time_overlaps(s1: str, e1: str, s2: str, e2: str) -> bool:
     return s1 < e2 and s2 < e1
 
@@ -423,7 +454,11 @@ def _slots_for_day(day_iso: str, window: dict, busy_blocks: list[dict]) -> list[
 @router.get("/public/meeting-booking/{token}")
 def get_booking_info(token: str):
     db = get_admin_client()
-    token_row = _get_valid_token(db, token)
+    token_row = _get_valid_token(db, token, allow_closed=True)
+    if token_row.get("closed_message"):
+        school_res = db.table("schools").select("name").eq("id", token_row["school_id"]).execute()
+        return {"mode": "closed", "message": token_row["closed_message"],
+                "school_name": (school_res.data or [{}])[0].get("name")}
 
     # Round-7: record the first time this link is actually opened — a 100%-reliable "link
     # clicked" signal for TaskPanel's send-status tooltip (unlike email-open pixel tracking,
@@ -455,9 +490,11 @@ def get_booking_info(token: str):
                 found = _range_existing_meeting(db, token_row, r)
                 # "בקש לקבוע פגישה נוספת" — a pre-existing meeting must not block offering a
                 # NEW slot for this range; surfaced as a non-blocking FYI instead (the frontend
-                # still shows "בחר מועד").
-                if found and r.get("require_additional_meeting"):
-                    existing_fyi = found
+                # still shows "בחר מועד"). One already booked through this same task does block.
+                if r.get("require_additional_meeting"):
+                    existing = _same_task_booked_meeting(db, token_row, r)
+                    if not existing:
+                        existing_fyi = found
                 else:
                     existing = found
             # Round 9 fix: show which specific advisor(s) THIS meeting is with — previously
@@ -554,7 +591,7 @@ def get_booking_freebusy(token: str, month: str | None = None, range_key: str | 
         if _range_is_booked(token_row, range_key):
             raise HTTPException(status_code=400, detail="הפגישה הזו כבר נקבעה")
         segments = _range_segments(range_row)
-        if not range_row.get("require_additional_meeting") and _range_existing_meeting(db, token_row, range_row):
+        if _range_blocking_meeting(db, token_row, range_row):
             raise HTTPException(status_code=400, detail="כבר קיימת פגישה מסוג זה בטווח התאריכים הזה")
 
         if _uses_slot_policy(range_row):
@@ -774,7 +811,7 @@ def _book_range_slot(db, token_row: dict, range_key: str, body: dict) -> dict:
     # below. Also the actual safety net behind round-7's booked_ranges write becoming best-
     # effort (see the retry block at the end of this function): even if that write silently
     # failed for a prior booking, this live check against `meetings` itself still catches it.
-    if not range_row.get("require_additional_meeting") and _range_existing_meeting(db, token_row, range_row):
+    if _range_blocking_meeting(db, token_row, range_row):
         raise HTTPException(status_code=400, detail="כבר קיימת פגישה מסוג זה בטווח התאריכים הזה")
 
     meeting_date = body.get("meeting_date")
@@ -858,7 +895,7 @@ def _book_range_slot(db, token_row: dict, range_key: str, body: dict) -> dict:
         booked_ranges = fresh_token[0].get("booked_ranges") or []
         if range_key in booked_ranges:
             raise HTTPException(status_code=400, detail="הפגישה הזו כבר נקבעה")
-        if not range_row.get("require_additional_meeting") and _range_existing_meeting(db, token_row, range_row):
+        if _range_blocking_meeting(db, token_row, range_row):
             raise HTTPException(status_code=400, detail="כבר קיימת פגישה מסוג זה בטווח התאריכים הזה")
 
         local_busy = _local_meeting_busy_by_advisor(db, advisor_ids, day_start, day_end, _is_remote(range_row))

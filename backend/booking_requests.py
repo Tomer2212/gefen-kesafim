@@ -39,6 +39,67 @@ def range_contains(range_row: dict, day_iso: str) -> bool:
     return any(seg["start_date"] <= day_iso <= seg["end_date"] for seg in range_segments(range_row))
 
 
+def same_task_fillers(db, rows: list[dict], additional: dict | None = None,
+                      exclude_meeting_id: str | None = None) -> dict[tuple[str, str], dict]:
+    """(token_id, range_key) → the meeting filling a "בקש לקבוע פגישה נוספת" request: one the
+    school booked through ANY link of the same task (its first request or a reminder) — same type,
+    a date of the request, its division. A meeting from before the task never fills it, and only a
+    link asking one meeting of that type and division is filled this way. additional = meetings
+    marked "additional" per request (fetched when omitted). One rule for the booking page, the
+    "מחליפה או נוספת?" question and "יומן יעיל" auto demand. Rows as in requests_already_filled
+    plus task_id."""
+    rows = [r for r in rows if r.get("task_id") and r["range_row"].get("require_additional_meeting")]
+    if not rows:
+        return {}
+    tokens = (
+        db.table("meeting_booking_tokens").select("id, task_id, date_ranges")
+        .in_("task_id", list({str(r["task_id"]) for r in rows})).execute().data or []
+    )
+    task_of = {str(t["id"]): str(t["task_id"]) for t in tokens}
+    ranges_of = {str(t["id"]): t.get("date_ranges") or [] for t in tokens}
+    segments = [seg for r in rows for seg in range_segments(r["range_row"])]
+    meetings = (
+        db.table("meetings").select("id, school_id, meeting_service_type, meeting_date, start_time, end_time, stage_scope, booking_token_id")
+        .in_("school_id", list({str(r["school_id"]) for r in rows})).in_("status", list(LIVE_STATUSES))
+        .in_("booking_token_id", list(task_of))
+        .gte("meeting_date", min(s["start_date"] for s in segments)).lte("meeting_date", max(s["end_date"] for s in segments))
+        .execute().data or []
+    ) if task_of else []
+    if additional is None:
+        additional = {}
+        for res in (
+            db.table("meeting_request_resolutions").select("meeting_id, token_id, range_key")
+            .in_("token_id", list({str(r["token_id"]) for r in rows})).eq("decision", "additional").execute().data or []
+        ):
+            additional.setdefault((str(res["token_id"]), res["range_key"]), set()).add(res["meeting_id"])
+    out: dict[tuple[str, str], dict] = {}
+    for r in rows:
+        rng = r["range_row"]
+        key = (str(r["token_id"]), r["range_key"])
+        same_kind = [x for x in ranges_of.get(str(r["token_id"]), [rng])
+                     if x.get("service_type") == rng.get("service_type") and x.get("stage_scope") == rng.get("stage_scope")]
+        if len(same_kind) > 1:
+            continue
+        found = [
+            m for m in meetings
+            if m["id"] != exclude_meeting_id and str(m["school_id"]) == str(r["school_id"])
+            and task_of.get(str(m["booking_token_id"])) == str(r["task_id"])
+            and m["meeting_service_type"] == rng.get("service_type")
+            and m["id"] not in additional.get(key, set()) and range_contains(rng, m["meeting_date"])
+        ]
+        scope = rng.get("stage_scope")
+        if scope in ("tichon", "chativa"):
+            found = [m for m in found if m.get("stage_scope") in (scope, "both")]
+        elif scope == "both":
+            # Same rule as task_logic.stage_scope_is_covered: both divisions must be covered.
+            scopes = {m.get("stage_scope") for m in found}
+            if not (scopes & {"tichon", "both"} and scopes & {"chativa", "both"}):
+                found = []
+        if found:
+            out[key] = min(found, key=lambda m: m["meeting_date"])
+    return out
+
+
 def requests_already_filled(db, rows: list[dict], exclude_meeting_id: str | None = None) -> set[tuple[str, str]]:
     """(token_id, range_key) of the request rows ({token_id, school_id, range_key, range_row})
     that a meeting already fills: one marked "replaces" for it, or — unless the request asks for
@@ -57,6 +118,7 @@ def requests_already_filled(db, rows: list[dict], exclude_meeting_id: str | None
     for r in resolutions:
         if r["decision"] == "additional":
             additional.setdefault((str(r["token_id"]), r["range_key"]), set()).add(r["meeting_id"])
+    filled |= set(same_task_fillers(db, rows, additional, exclude_meeting_id))
     segments = [seg for r in rows for seg in range_segments(r["range_row"])]
     meetings = (
         db.table("meetings").select("id, school_id, meeting_service_type, meeting_date, stage_scope")
@@ -88,6 +150,7 @@ def _live_tokens(db, org_id: str, school_id: str | None = None, token_ids: list[
     query = (
         db.table("meeting_booking_tokens").select("id, task_id, school_id, date_ranges, booked_ranges")
         .eq("org_id", org_id).gt("expires_at", datetime.now(timezone.utc).isoformat())
+        .is_("closed_message", "null")  # closed by the staff (e.g. sent by mistake) — not a request
     )
     if school_id:
         query = query.eq("school_id", school_id)

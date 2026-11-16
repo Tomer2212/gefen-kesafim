@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { useBlocker, useLocation, useNavigate } from "react-router-dom";
 import axios from "axios";
 import * as XLSX from "xlsx";
+import { principalNames, gefenFilesResponsibleLines, meetingCoordinatorLines } from "../components/schoolContactLines";
 import { Building2, Phone, Handshake, UsersRound } from "lucide-react";
 import Sidebar from "../components/Sidebar";
 
@@ -309,6 +310,9 @@ const ADMIN_IDENTITY_COLUMNS = [
   { key: "authority",           label: "בעלות" },
   { key: "stage",                label: "שלב מוסד" },
   { key: "district",            label: "מחוז" },
+  { key: "education_authority", label: "רשות חינוך" },
+  { key: "sector",              label: "מגזר" },
+  { key: "client_status",       label: "סטטוס לקוח" },
   { key: "finance_software",    label: "תוכנת כספים" },
   { key: "advisor_gefen",       label: "יועץ מלווה [גפן]" },
   { key: "advisor_current",     label: "יועץ מלווה [שוטף]" },
@@ -360,6 +364,15 @@ const CLIENT_STATUS_OPTIONS = [
   { value: "former", label: "לקוח עבר" },
 ];
 
+const SECTOR_OPTIONS = [
+  { value: "", label: "בחר" },
+  { value: "יהודי", label: "יהודי" },
+  { value: "ערבי", label: "ערבי" },
+  { value: "צ'רקסי", label: "צ'רקסי" },
+  { value: "בדואי", label: "בדואי" },
+  { value: "דרוזי", label: "דרוזי" },
+];
+
 // Which of the 3 typed advisor lists are mandatory, given the school's own "סוג שירות" value —
 // gefen_current requires both גפן and שוטף advisors to be set. Mirrors SchoolPage.jsx/AddSchoolPage.jsx.
 function activeServiceTypes(serviceType) {
@@ -374,7 +387,6 @@ function activeServiceTypes(serviceType) {
 // New admin/financial columns, per-school-year (stored in school_year_admin_data).
 const ADMIN_DATA_COLUMNS = [
   { key: "service_type",          label: "סוג שירות" },
-  { key: "requested_price",       label: "מחיר מבוקש" },
   { key: "order_method",          label: "אמצעי הזמנה" },
   { key: "order_amount_gefen",    label: 'מחיר כולל מע"מ' },
   { key: "hours_ordered",         label: "מספר שעות שהוזמנו" },
@@ -409,6 +421,36 @@ const ADMIN_CONTROL_LETTER_COLUMNS = [
   { key: "control_letter_original_file",  label: "מכתב בקרה - מכתב מקורי" },
   { key: "control_letter_response_file",  label: "מכתב בקרה - מכתב תשובה" },
 ];
+
+// "אנשי קשר" columns — same keys/labels as DashboardPage's CONTACT_COLUMNS, read-only here
+// (contacts are edited in the school card). Read off the school row via schoolContactLines.
+const ADMIN_CONTACT_COLUMNS = [
+  { key: "principal_name",        label: "מנהל/ת" },
+  { key: "secretary_name",        label: "מנהלנ/ית" },
+  { key: "finance_contact_name",  label: "אחראי/ת כספים" },
+  { key: "principal_email",       label: "מייל מנהל/ת" },
+  { key: "secretary_email",       label: "מייל מנהלנ/ית" },
+  { key: "finance_contact_email", label: "מייל אחראי/ת כספים" },
+  { key: "principal_phone",       label: "טלפון מנהל/ת" },
+  { key: "secretary_phone",       label: "טלפון מנהלנ/ית" },
+  { key: "finance_contact_phone", label: "טלפון אחראי/ת כספים" },
+  { key: "meeting_coordinator_slots",     label: "מתאם פגישות" },
+  { key: "gefen_files_responsible_slots", label: 'אחראי/ת קבצי גפן' },
+];
+const ADMIN_CONTACT_KEYS = ADMIN_CONTACT_COLUMNS.map(c => c.key);
+const ADMIN_CONTACT_KEY_SET = new Set(ADMIN_CONTACT_KEYS);
+
+// Columns added after users already had saved admin prefs — hidden by default, like the
+// meeting breakdown columns (the back-fill effect also adds them hidden for saved prefs).
+const ADMIN_HIDDEN_BY_DEFAULT_KEYS = ["education_authority", "sector", "client_status", ...ADMIN_CONTACT_KEYS];
+
+// Display text of a contact column — shared by sorting/text filtering.
+function adminContactText(school, key) {
+  if (key === "principal_name") return principalNames(school).join(", ");
+  if (key === "meeting_coordinator_slots") return meetingCoordinatorLines(school).map(l => l.text).join("; ");
+  if (key === "gefen_files_responsible_slots") return gefenFilesResponsibleLines(school).map(l => l.text).join("; ");
+  return school[key] || "";
+}
 
 function formatDDMMYY(iso) {
   if (!iso) return "";
@@ -451,7 +493,7 @@ function controlLetterFieldValue(school, field) {
 
 const ADMIN_ALL_COLUMNS = [
   ...ADMIN_IDENTITY_COLUMNS, ...ADMIN_ALLOCATION_COLUMNS, ...ADMIN_MEETINGS_DONE_COLUMNS,
-  ...ADMIN_DATA_COLUMNS, ...ADMIN_CONTROL_LETTER_COLUMNS,
+  ...ADMIN_DATA_COLUMNS, ...ADMIN_CONTROL_LETTER_COLUMNS, ...ADMIN_CONTACT_COLUMNS,
 ];
 
 // Columns eligible for bulk-edit (ניהול → בתי ספר). Never symbol/name (not part of any set
@@ -462,14 +504,14 @@ const ADMIN_ALL_COLUMNS = [
 //  - "advisor" fields: additive only — adding an advisor on one selected cell adds that same
 //    advisor to the other selected cells' lists, without touching advisors already there.
 const BULK_OVERWRITE_YEAR_ADMIN_FIELDS = new Set([
-  "service_type", "requested_price", "order_method", "order_method_other_text",
+  "service_type", "client_status", "order_method", "order_method_other_text",
   "order_amount_gefen", "hours_ordered", "rate", "payment_received", "payment_requests_sent",
   "receipts_sent", "contract_sent", "contract_received",
   "closure_parents_status", "closure_authority_status",
   "meeting_allocation_gefen", "meeting_allocation_current", "meeting_allocation_district",
   "meeting_duration_gefen", "meeting_duration_current", "meeting_duration_district",
 ]);
-const BULK_OVERWRITE_SCHOOL_FIELDS = new Set(["finance_software", "finance_software_other_text"]);
+const BULK_OVERWRITE_SCHOOL_FIELDS = new Set(["finance_software", "finance_software_other_text", "education_authority", "sector"]);
 const BULK_ADVISOR_FIELDS = new Set(["advisor_gefen", "advisor_current", "advisor_district"]);
 
 function bulkFieldKind(key) {
@@ -493,17 +535,18 @@ const ADMIN_DEFAULT_COL_VISIBLE = {
   // The per-service-type meeting breakdown columns are the one exception — hidden by default,
   // opt-in via "עמודות לתצוגה" (matches DashboardPage, where they're also off by default).
   ...Object.fromEntries(MEETING_TYPE_BREAKDOWN_KEYS.map(k => [k, false])),
+  ...Object.fromEntries(ADMIN_HIDDEN_BY_DEFAULT_KEYS.map(k => [k, false])),
 };
 function isKnownAdminColumnKey(k) { return ADMIN_DEFAULT_COL_ORDER.includes(k); }
 
 // Column-filter type map for the admin schools table (ניהול → בתי ספר). "select" columns use
 // raw underlying values (not display labels) so the agent/tool layer can target them directly.
 const ADMIN_TEXT_FILTER_COLS = new Set([
-  "symbol", "city", "authority", "contract_file",
+  "symbol", "city", "authority", "education_authority", "contract_file", ...ADMIN_CONTACT_KEYS,
   "quarterly_notes_1", "quarterly_notes_2", "quarterly_notes_3", "quarterly_notes_4",
 ]);
 const ADMIN_NUMBER_FILTER_COLS = new Set([
-  "meetings_completed", "meetings_hours", "requested_price", "order_amount_gefen",
+  "meetings_completed", "meetings_hours", "order_amount_gefen",
   "hours_ordered", "rate", "payment_received", "payment_requests_sent", "receipts_sent",
   "meeting_allocation_gefen", "meeting_allocation_current", "meeting_allocation_district",
   ...MEETING_TYPE_BREAKDOWN_KEYS,
@@ -514,6 +557,8 @@ const ADMIN_ADVISOR_FILTER_COLS = new Set(["advisor_gefen", "advisor_current", "
 const ADMIN_SELECT_FILTER_OPTIONS = {
   stage: Object.entries(ADMIN_SCHOOL_STAGE_LABEL).map(([value, label]) => ({ value, label })),
   service_type: SERVICE_TYPE_OPTIONS,
+  sector: SECTOR_OPTIONS.filter(o => o.value),
+  client_status: CLIENT_STATUS_OPTIONS,
   order_method: FUNDING_METHOD_OPTIONS,
   contract_sent: [{ value: "yes", label: "כן" }, { value: "no", label: "לא" }],
   contract_received: [{ value: "yes", label: "כן" }, { value: "no", label: "לא" }],
@@ -533,6 +578,8 @@ function getAdminRawFilterValue(school, yad, key) {
   switch (key) {
     case "stage": return school.stage || null;
     case "service_type": return yad.service_type || null;
+    case "sector": return school.sector || null;
+    case "client_status": return yad.client_status || null;
     case "order_method": return yad.order_method || [];
     case "advisor_gefen": return (school.advisors_gefen || []).map(a => a.id);
     case "advisor_current": return (school.advisors_current || []).map(a => a.id);
@@ -702,15 +749,6 @@ const WEEKDAY_OPTIONS = [
 const STUDY_DAY_OPTIONS = [
   ...WEEKDAY_OPTIONS,
   { value: "sat", label: "ש" },
-];
-
-const SECTOR_OPTIONS = [
-  { value: "", label: "בחר" },
-  { value: "יהודי", label: "יהודי" },
-  { value: "ערבי", label: "ערבי" },
-  { value: "צ'רקסי", label: "צ'רקסי" },
-  { value: "בדואי", label: "בדואי" },
-  { value: "דרוזי", label: "דרוזי" },
 ];
 
 const SUPERVISION_OPTIONS = [
@@ -1849,7 +1887,7 @@ const AdminNotesTextarea = memo(function AdminNotesTextarea({ initialValue, onCo
 });
 
 const NUMERIC_ADMIN_FIELDS = new Set([
-  "requested_price", "hours_ordered", "rate", "payment_received", "payment_requests_sent", "receipts_sent",
+  "hours_ordered", "rate", "payment_received", "payment_requests_sent", "receipts_sent",
   "meeting_allocation_gefen", "meeting_allocation_current", "meeting_allocation_district",
 ]);
 
@@ -1903,6 +1941,51 @@ const SchoolRow = memo(function SchoolRow({
         if (key === "city") return bc(school.city || "—");
         if (key === "authority") return bc(school.authority || "—");
         if (key === "district") return bc(school.district || "—");
+        if (key === "education_authority") return bc(
+          <AdminAutosaveInput
+            key={`${rowKey}-edu-auth`}
+            type="text"
+            value={school.education_authority ?? null}
+            onCommit={v => handlers.onSaveSchoolField(school.id, "education_authority", v)}
+            ariaLabel="רשות חינוך"
+            className={`${ADMIN_FIELD_CLS} w-32`}
+          />
+        );
+        if (key === "sector") return bc(
+          <>
+            <label htmlFor={`sector-${rowKey}`} className="sr-only">מגזר</label>
+            <select id={`sector-${rowKey}`} className={`${ADMIN_FIELD_CLS} w-24`}
+              value={school.sector || ""}
+              onChange={e => handlers.onSaveSchoolField(school.id, "sector", e.target.value || null)}>
+              {SECTOR_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              {school.sector && !SECTOR_OPTIONS.some(o => o.value === school.sector) && (
+                <option value={school.sector}>{school.sector}</option>
+              )}
+            </select>
+          </>
+        );
+        if (key === "client_status") return bc(
+          <>
+            <label htmlFor={`client-status-${rowKey}`} className="sr-only">סטטוס לקוח</label>
+            <select id={`client-status-${rowKey}`} className={`${ADMIN_FIELD_CLS} w-24`}
+              value={yad.client_status || ""}
+              onChange={e => handlers.onSaveField(school.id, "client_status", e.target.value || null)}>
+              <option value="">בחר</option>
+              {CLIENT_STATUS_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </>
+        );
+        if (key === "meeting_coordinator_slots" || key === "gefen_files_responsible_slots") {
+          const lines = key === "meeting_coordinator_slots" ? meetingCoordinatorLines(school) : gefenFilesResponsibleLines(school);
+          return bc(lines.length ? (
+            <div className="flex flex-col gap-0.5 whitespace-nowrap">
+              {lines.map((l, i) => (
+                <div key={i} className={l.missingEmail ? "text-red-600 font-medium" : undefined}>{l.text}</div>
+              ))}
+            </div>
+          ) : "—");
+        }
+        if (ADMIN_CONTACT_KEY_SET.has(key)) return bc(adminContactText(school, key) || "—");
         if (key === "finance_software") return bc(
           <>
             <label htmlFor={`fin-${rowKey}`} className="sr-only">תוכנת כספים</label>
@@ -2225,6 +2308,9 @@ export default function AdminPage() {
   // Single-slot undo buffer (not a stack) — only the most recent bulk action is undoable.
   // kind: "overwrite" (year-admin-data or schools field) | "advisor_add" (additive typed-advisor assignment).
   const [bulkUndo, setBulkUndo] = useState(null);
+  // Shown when a grid edit is refused because an active client would be left without a
+  // required accompanying advisor (see missingActiveAdvisorTypes).
+  const [advisorGapNotice, setAdvisorGapNotice] = useState("");
   const [myFullName, setMyFullName] = useState("");
   const adminContractInputRef = useRef(null);
   const adminColPickerRef = useRef(null);
@@ -2768,13 +2854,46 @@ export default function AdminPage() {
   // Wraps the existing single-cell saves: the cell's own autosave always fires normally and
   // immediately; if bulk-edit mode is on and other cells are selected in this same column, a
   // short confirmation is offered before propagating the same value to them too.
+  // Same rule as the edit modal's save (saveSchool): an "active" client must have an
+  // accompanying advisor for every type its service type requires. `overrides` = the
+  // year-admin values about to be saved; `advisorOverrides` = {type: ids} about to be saved.
+  function missingActiveAdvisorTypes(schoolId, overrides = {}, advisorOverrides = {}) {
+    const yad = { ...(yearAdminData[schoolId] || {}), ...overrides };
+    if (yad.client_status !== "active") return [];
+    const school = schools.find(s => s.id === schoolId);
+    return activeServiceTypes(yad.service_type).filter(t =>
+      (advisorOverrides[t] ?? (school?.[`advisors_${t}`] || [])).length === 0);
+  }
+
+  function advisorGapMessage(schoolId, types, field) {
+    const name = schools.find(s => s.id === schoolId)?.name || "בית הספר";
+    const labels = types.map(t => `[${SERVICE_TYPE_TABS.find(s => s.key === t)?.label || t}]`).join(", ");
+    const action = field === "advisor" ? "להסיר את היועץ המלווה האחרון"
+      : field === "service_type" ? "לשנות את סוג השירות" : 'לסמן "פעיל"';
+    return `לא ניתן ${action} של ${name}: לקוח פעיל חייב יועץ מלווה ${labels}. יש להגדיר יועץ מלווה קודם.`;
+  }
+
   function onSaveFieldBulkAware(schoolId, field, value) {
+    const guarded = field === "client_status" || field === "service_type";
+    if (guarded) {
+      const missing = missingActiveAdvisorTypes(schoolId, { [field]: value });
+      if (missing.length) { setAdvisorGapNotice(advisorGapMessage(schoolId, missing, field)); return; }
+    }
     const prevValue = (yearAdminData[schoolId] || {})[field] ?? null;
     saveYearAdminField(schoolId, field, value);
     if (!bulkEditMode || bulkSelection.field !== field) return;
-    const otherSchoolIds = [...bulkSelection.schoolIds].filter(id => id !== schoolId);
-    if (otherSchoolIds.length === 0) return;
-    setBulkConfirm({ domain: "year_admin", field, value, editedSchoolId: schoolId, editedPrevValue: prevValue, otherSchoolIds });
+    let otherSchoolIds = [...bulkSelection.schoolIds].filter(id => id !== schoolId);
+    let skippedCount = 0;
+    if (guarded) {
+      const allowed = otherSchoolIds.filter(id => missingActiveAdvisorTypes(id, { [field]: value }).length === 0);
+      skippedCount = otherSchoolIds.length - allowed.length;
+      otherSchoolIds = allowed;
+    }
+    if (otherSchoolIds.length === 0) {
+      if (skippedCount) setAdvisorGapNotice(`השינוי לא הוחל על ${skippedCount} בתי ספר נוספים שנבחרו: לקוח פעיל חייב יועץ מלווה לפי סוג השירות.`);
+      return;
+    }
+    setBulkConfirm({ domain: "year_admin", field, value, editedSchoolId: schoolId, editedPrevValue: prevValue, otherSchoolIds, skippedCount });
   }
 
   function onSaveSchoolFieldBulkAware(schoolId, field, value) {
@@ -2795,6 +2914,10 @@ export default function AdminPage() {
     const school = schools.find(s => s.id === schoolId);
     const oldIds = (school?.[listField] || []).map(a => a.id);
     const addedIds = newIds.filter(id => !oldIds.includes(id));
+    if (newIds.length === 0 && missingActiveAdvisorTypes(schoolId, {}, { [serviceType]: [] }).includes(serviceType)) {
+      setAdvisorGapNotice(advisorGapMessage(schoolId, [serviceType], "advisor"));
+      return;
+    }
     saveTypedAdvisorIds(schoolId, serviceType, newIds);
     if (!bulkEditMode || bulkSelection.field !== advisorKey || addedIds.length !== 1) return;
     const otherSchoolIds = [...bulkSelection.schoolIds].filter(id => id !== schoolId);
@@ -2808,7 +2931,10 @@ export default function AdminPage() {
   function bulkConfirmMessage(confirm) {
     const n = confirm.otherSchoolIds.length;
     if (confirm.domain === "advisor") return `להוסיף יועץ זה גם ל-${n} בתי ספר נוספים (בנוסף ליועצים הקיימים)?`;
-    return `להחיל שינוי זה גם על ${n} בתי ספר נוספים?`;
+    const skipped = confirm.skippedCount
+      ? ` (${confirm.skippedCount} בתי ספר נוספים שנבחרו ידולגו: לקוח פעיל חייב יועץ מלווה)`
+      : "";
+    return `להחיל שינוי זה גם על ${n} בתי ספר נוספים?${skipped}`;
   }
 
   async function applyBulkConfirm() {
@@ -4262,11 +4388,18 @@ export default function AdminPage() {
     if (breakdownCol) {
       return school.meetings_stats?.by_type?.[breakdownCol.breakdownType]?.[breakdownCol.breakdownMetric] ?? -1;
     }
+    if (ADMIN_CONTACT_KEY_SET.has(key)) return adminContactText(school, key);
     switch (key) {
       case "symbol": return school.symbol || "";
       case "city": return school.city || "";
       case "authority": return school.authority || "";
       case "district": return school.district || "";
+      case "education_authority": return school.education_authority || "";
+      case "sector": return school.sector || "";
+      case "client_status": {
+        const opt = CLIENT_STATUS_OPTIONS.find(o => o.value === yad.client_status);
+        return opt ? opt.label : (yad.client_status || "");
+      }
       case "finance_software":
         return financeSoftwareDisplay(school);
       case "stage": return ADMIN_SCHOOL_STAGE_LABEL[school.stage] || school.stage || "";
@@ -4371,6 +4504,7 @@ export default function AdminPage() {
     { title: "הקצאות", cols: ADMIN_ALLOCATION_COLUMNS },
     { title: "פגישות שבוצעו", cols: ADMIN_MEETINGS_DONE_COLUMNS },
     { title: "ניהולי", cols: ADMIN_DATA_COLUMNS },
+    { title: "אנשי קשר", cols: ADMIN_CONTACT_COLUMNS },
   ], []);
 
   // Stable handler bag for <SchoolRow> — always calls the latest closures (via ref) so the
@@ -4537,6 +4671,12 @@ export default function AdminPage() {
                     {bulkApplying ? "מחיל..." : "כן, החל"}
                   </button>
                   <button type="button" onClick={() => setBulkConfirm(null)} className="btn-ghost text-xs px-3 py-1.5">ביטול</button>
+                </div>
+              )}
+              {advisorGapNotice && (
+                <div role="alert" className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 max-w-xl bg-amber-50 border border-amber-300 text-amber-900 rounded-xl shadow-lg px-5 py-3 flex items-start gap-3">
+                  <span className="text-sm">{advisorGapNotice}</span>
+                  <button type="button" onClick={() => setAdvisorGapNotice("")} aria-label="סגור הודעה" className="text-amber-700 hover:text-amber-900">✕</button>
                 </div>
               )}
               {!bulkConfirm && bulkUndo?.message && (

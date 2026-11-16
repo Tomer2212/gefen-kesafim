@@ -69,7 +69,7 @@ def _fetch_round_requests(db, round_id: str) -> tuple[list[dict], dict[str, dict
     token_ids = list({m["booking_token_id"] for m in latest_msg.values() if m.get("booking_token_id")})
     if token_ids:
         rows = (
-            db.table("meeting_booking_tokens").select("id, first_viewed_at, expires_at")
+            db.table("meeting_booking_tokens").select("id, first_viewed_at, expires_at, closed_message")
             .in_("id", token_ids).execute().data or []
         )
         tokens = {t["id"]: t for t in rows}
@@ -103,6 +103,8 @@ def _advisor_ids_for(school: dict, types: list[str]) -> list[str]:
 def _is_open_request(msg: dict | None, token: dict | None, now_iso: str) -> bool:
     if not msg or msg.get("status") not in ("sent", "pending", "sending", "outlook_pending"):
         return False
+    if (token or {}).get("closed_message"):
+        return False  # closed by the staff (e.g. sent by mistake)
     return not token or not token.get("expires_at") or token["expires_at"] > now_iso
 
 

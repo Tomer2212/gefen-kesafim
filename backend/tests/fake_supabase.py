@@ -73,6 +73,11 @@ class _Query:
     def in_(self, col, vals):
         return self._filter(lambda r: r.get(col) in vals)
 
+    def is_(self, col, val):
+        # PostgREST "is": only null (or true/false) — "null" matches a missing/None value.
+        expected = {"null": None, "true": True, "false": False}[str(val).lower()]
+        return self._filter(lambda r: r.get(col) is expected)
+
     def _match(self, row):
         return all(f(row) for f in self.filters)
 

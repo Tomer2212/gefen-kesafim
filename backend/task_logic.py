@@ -104,7 +104,7 @@ CONTROL_LETTER_FIELD_LABELS = {
 }
 
 YEAR_ADMIN_FIELDS = {
-    "service_type": "select", "client_status": "select", "requested_price": "number",
+    "service_type": "select", "client_status": "select",
     "order_method": "select", "order_method_other_text": "text",
     "order_amount_gefen": "number", "hours_ordered": "number", "rate": "number",
     "payment_received": "number", "payment_requests_sent": "number",
@@ -194,7 +194,7 @@ FIELD_LABELS = {
     "advisor_gefen": "יועץ מלווה [גפן]", "advisor_current": "יועץ מלווה [שוטף]", "advisor_district": "יועץ מלווה [מחוז]",
     "advisor_gefen_current_same": "יועץ גפן ויועץ שוטף זהים",
     "meetings_completed": 'סה"כ פגישות שבוצעו', "meetings_hours": 'סה"כ שעות שבוצעו',
-    "service_type": "סוג שירות", "client_status": "סטטוס לקוח", "requested_price": "מחיר מבוקש",
+    "service_type": "סוג שירות", "client_status": "סטטוס לקוח",
     "order_method": "אמצעי הזמנה", "order_method_other_text": "אמצעי הזמנה - טקסט חופשי (אחר)",
     "order_amount_gefen": 'מחיר כולל מע"מ',
     "hours_ordered": "מספר שעות שהוזמנו", "rate": "תעריף",
@@ -546,7 +546,12 @@ def _matching_meetings(cond: dict, school_meetings: list[dict], task_token_ids: 
         if (meeting_service_type and m.get("meeting_service_type") != meeting_service_type
                 and m.get("meeting_service_type") not in (cond.get("also_matches_types") or [])):
             continue
-        if meeting_type and m.get("meeting_type") != meeting_type:
+        # A meeting booked through one of THIS task's own links is what the link offered: its
+        # type can differ from the condition's only when the range was offered remotely on
+        # purpose (a physical meeting no visiting advisor goes to — tasks_router
+        # _build_meeting_ranges, held_remotely), so it counts as booked.
+        booked_via_task_link = task_token_ids is not None and m.get("booking_token_id") in task_token_ids
+        if meeting_type and m.get("meeting_type") != meeting_type and not booked_via_task_link:
             continue
         if require_additional and m.get("booking_token_id") not in task_token_ids:
             continue
@@ -852,6 +857,10 @@ def _meeting_exists_for_school(cond: dict, school_meetings: list[dict], school: 
                for m in school_meetings):
             return True
         school_meetings = [m for m in school_meetings if not answers(m)]
+    if task_token_ids and cond.get("meeting_type"):
+        # Booked through this task's own link = the type the link offered (see _matching_meetings).
+        school_meetings = [{**m, "meeting_type": cond["meeting_type"]} if m.get("booking_token_id") in task_token_ids else m
+                           for m in school_meetings]
     if cond.get("explicit_stage_scope_only") and (school or {}).get("stage") == "sheshshnati" and effective_stage_scope(cond, school):
         return _fulfilled_count_for_meeting_condition(cond, school_meetings, None, school) > 0
     return _meeting_exists(cond, school_meetings)
@@ -1164,7 +1173,7 @@ def find_matching_schools(
     if manual_school_ids is not None:
         wanted = set(manual_school_ids)
         return [
-            {"school_id": s["id"], "school_name": s["name"], "symbol": s.get("symbol"), "authority": s.get("authority"), "stage": s.get("stage")}
+            {"school_id": s["id"], "school_name": s["name"], "symbol": s.get("symbol"), "city": s.get("city"), "authority": s.get("authority"), "stage": s.get("stage")}
             for s in schools if s["id"] in wanted
         ]
     matched = []
@@ -1176,7 +1185,7 @@ def find_matching_schools(
         ):
             matched.append({
                 "school_id": s["id"], "school_name": s["name"],
-                "symbol": s.get("symbol"), "authority": s.get("authority"), "stage": s.get("stage"),
+                "symbol": s.get("symbol"), "city": s.get("city"), "authority": s.get("authority"), "stage": s.get("stage"),
             })
     return matched
 

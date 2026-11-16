@@ -31,15 +31,23 @@ MAX_HISTORY_MESSAGES = 16
 # (ADMIN_TEXT_FILTER_COLS / ADMIN_NUMBER_FILTER_COLS / ADMIN_SELECT_FILTER_OPTIONS) and
 # frontend/src/pages/AdminMeetingsTab.jsx's filters. Keep these two lists in sync by hand —
 # there's no shared source of truth between the Python backend and the JS frontend here.
-ADMIN_TEXT_COLUMNS = ["symbol", "city", "authority", "contract_file"]
+ADMIN_CONTACT_COLUMN_LABELS = {
+    "principal_name": "מנהל/ת", "secretary_name": "מנהלנ/ית", "finance_contact_name": "אחראי/ת כספים",
+    "principal_email": "מייל מנהל/ת", "secretary_email": "מייל מנהלנ/ית", "finance_contact_email": "מייל אחראי/ת כספים",
+    "principal_phone": "טלפון מנהל/ת", "secretary_phone": "טלפון מנהלנ/ית", "finance_contact_phone": "טלפון אחראי/ת כספים",
+    "meeting_coordinator_slots": "מתאם פגישות", "gefen_files_responsible_slots": "אחראי/ת קבצי גפן",
+}
+ADMIN_TEXT_COLUMNS = ["symbol", "city", "authority", "education_authority", "contract_file", *ADMIN_CONTACT_COLUMN_LABELS]
 ADMIN_NUMBER_COLUMNS = [
-    "meetings_completed", "meetings_hours", "requested_price", "order_amount_gefen",
+    "meetings_completed", "meetings_hours", "order_amount_gefen",
     "hours_ordered", "rate", "payment_received", "payment_requests_sent", "receipts_sent",
 ]
 ADMIN_SELECT_COLUMNS = {
     "stage": ["yesodi", "beinayim", "tikkon", "sheshshnati", "other"],
-    "service_type": ["gefen", "current", "gefen_current"],
-    "order_method": ["gefen", "tnufa", "tkuma", "dokati", "palg", "self_managed"],
+    "service_type": ["gefen", "current", "gefen_current", "district", "takuma"],
+    "sector": ["יהודי", "ערבי", "צ'רקסי", "בדואי", "דרוזי"],
+    "client_status": ["active", "inactive", "in_progress", "former"],
+    "order_method": ["private", "authority", "district", "other"],
     "contract_sent": ["yes", "no"],
     "contract_received": ["yes", "no"],
 }
@@ -47,11 +55,13 @@ ADMIN_ALL_COLUMN_KEYS = ADMIN_TEXT_COLUMNS + ADMIN_NUMBER_COLUMNS + list(ADMIN_S
 ADMIN_COLUMN_LABELS = {
     "symbol": "סמל מוסד", "city": "עיר", "authority": "בעלות", "contract_file": "קובץ חוזה",
     "meetings_completed": 'סה"כ פגישות שבוצעו', "meetings_hours": 'סה"כ שעות שבוצעו',
-    "requested_price": "מחיר מבוקש", "order_amount_gefen": 'מחיר כולל מע"מ',
+    "order_amount_gefen": 'מחיר כולל מע"מ',
     "hours_ordered": "מספר שעות שהוזמנו", "rate": "תעריף", "payment_received": "תשלום שהתקבל",
     "payment_requests_sent": "דרישות תשלום שנשלחו", "receipts_sent": "אסמכתאות שנשלחו",
     "stage": "שלב מוסד", "service_type": "סוג שירות", "order_method": "אמצעי הזמנה",
     "contract_sent": "חוזה נשלח", "contract_received": "חוזה התקבל",
+    "education_authority": "רשות חינוך", "sector": "מגזר", "client_status": "סטטוס לקוח",
+    **ADMIN_CONTACT_COLUMN_LABELS,
 }
 NUMBER_OPS = {"eq", "ne", "gt", "gte", "lt", "lte"}
 MEETING_STATUSES = ["scheduled", "completed", "cancelled", "postponed", "other"]

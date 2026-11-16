@@ -1319,7 +1319,7 @@ def bulk_update_school_field(
     identity fields like symbol/name — as defense in depth beyond the frontend's own
     restrictions."""
     _require_manager(user)
-    allowed_bulk_fields = {"finance_software", "finance_software_other_text"}
+    allowed_bulk_fields = {"finance_software", "finance_software_other_text", "education_authority", "sector"}
     if body.field not in allowed_bulk_fields:
         raise HTTPException(status_code=400, detail="שדה לא תקין לעריכה מרובה")
     if not body.items:

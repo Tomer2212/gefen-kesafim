@@ -21,7 +21,7 @@ const FIELD_CATEGORIES = [
   },
   {
     title: "סטטוס והתקשרות",
-    fields: ["service_type", "client_status", "order_method", "requested_price", "contract_sent", "contract_received", "receipts_sent"],
+    fields: ["service_type", "client_status", "order_method", "contract_sent", "contract_received", "receipts_sent"],
   },
   {
     // advisor_gefen/current/district — no advisor_takuma field: "תקומה" reuses the school's

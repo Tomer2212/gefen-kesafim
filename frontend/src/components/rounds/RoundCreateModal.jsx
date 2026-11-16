@@ -23,6 +23,14 @@ const TYPE_PILLS = [
   { value: "district", label: "מחוז" }, { value: "takuma", label: "תקומה" },
 ];
 const COUNT_OPTIONS = [1, 2, 3, 4, 5];
+const EMPTY_PHYSICAL_GROUPS = [{ conditions: [{ type: "field", field: "", op: "eq", value: "" }] }];
+
+// The physical-schools filter's conditions that can already be evaluated: a field condition
+// counts once a field and a value were chosen. Empty groups are dropped; [] = no active filter.
+function readyGroups(groups) {
+  const ready = c => c.type !== "field" || (c.field && c.value !== "" && c.value != null && !(Array.isArray(c.value) && !c.value.length));
+  return groups.map(g => ({ ...g, conditions: g.conditions.filter(ready) })).filter(g => g.conditions.length);
+}
 
 function pill(active) {
   return `text-sm px-4 py-1.5 rounded-lg border transition-colors ${active ? "bg-blue-600 border-blue-600 text-white font-semibold" : "border-black text-black hover:bg-slate-50"}`;
@@ -57,6 +65,13 @@ export default function RoundCreateModal({ initialAcademicYear, onClose, onCreat
   const [hasPhysical, setHasPhysical] = useState(round ? (round.physical_school_ids || []).length > 0 : null);
   const [physicalIds, setPhysicalIds] = useState(round?.physical_school_ids || []);
   const [physicalQuery, setPhysicalQuery] = useState("");
+  // "סימון לפי סינון": the same field filter as step 2, run on the round's schools only.
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [physicalGroups, setPhysicalGroups] = useState(EMPTY_PHYSICAL_GROUPS);
+  const [physicalMatchIds, setPhysicalMatchIds] = useState(null); // null = no active filter
+  const [physicalMatchLoading, setPhysicalMatchLoading] = useState(false);
+  const [showOnlySelected, setShowOnlySelected] = useState(false);
+  const [physicalMatchError, setPhysicalMatchError] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   // "יועצים שקובעים לעצמם" — a new round starts from the org's default list (undefined until it loads).
@@ -89,16 +104,45 @@ export default function RoundCreateModal({ initialAcademicYear, onClose, onCreat
 
   const previewSchools = preview?.schools || [];
   const hasSixYear = previewSchools.some(s => s.stage === "sheshshnati");
+  const activePhysicalGroups = readyGroups(physicalGroups);
+  useEffect(() => {
+    setPhysicalMatchError(false);
+    if (!activePhysicalGroups.length) { setPhysicalMatchIds(null); setPhysicalMatchLoading(false); return; }
+    let stale = false;
+    setPhysicalMatchLoading(true);
+    const timer = setTimeout(() => {
+      axios.post("/tasks/preview", { criteria: { groups: activePhysicalGroups }, academic_year: academicYear })
+        .then(r => { if (!stale) setPhysicalMatchIds(new Set((r.data?.schools || []).map(s => s.school_id))); })
+        // A failed check must not read as "0 schools match" — show it, and offer no bulk action.
+        .catch(() => { if (!stale) { setPhysicalMatchIds(null); setPhysicalMatchError(true); } })
+        .finally(() => { if (!stale) setPhysicalMatchLoading(false); });
+    }, 400);
+    return () => { stale = true; clearTimeout(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [academicYear, JSON.stringify(activePhysicalGroups)]);
+
+  // The round's schools that match the filter (the preview itself runs on the whole org).
+  const physicalMatches = useMemo(
+    () => physicalMatchIds ? previewSchools.filter(s => physicalMatchIds.has(s.school_id)) : null,
+    [previewSchools, physicalMatchIds],
+  );
+  const physicalIdSet = useMemo(() => new Set(physicalIds), [physicalIds]);
+  // Marks outside the round (its school list changed in step 2) are kept in case the school comes
+  // back, but they are never counted, validated or sent — the server would drop them anyway.
+  const physicalIdsInRound = previewSchools.filter(s => physicalIdSet.has(s.school_id)).map(s => s.school_id);
+  const physicalMatchSelected = physicalMatches ? physicalMatches.filter(s => physicalIdSet.has(s.school_id)).length : 0;
   const physicalCandidates = useMemo(() => {
     const q = physicalQuery.trim();
-    return q ? previewSchools.filter(s => `${s.school_name} ${s.symbol || ""} ${s.authority || ""}`.includes(q)) : previewSchools;
-  }, [previewSchools, physicalQuery]);
+    let list = physicalMatches || previewSchools;
+    if (showOnlySelected) list = list.filter(s => physicalIdSet.has(s.school_id));
+    return q ? list.filter(s => `${s.school_name} ${s.symbol || ""} ${s.city || ""} ${s.authority || ""}`.includes(q)) : list;
+  }, [previewSchools, physicalMatches, physicalQuery, showOnlySelected, physicalIdSet]);
 
   const stepValid = {
     1: name.trim() && startDate && endDate && startDate <= endDate,
     2: hasAudience && !previewLoading && previewSchools.length > 0 && exclusions !== undefined,
     3: type && (type !== "by_service" || split) && (!hasSixYear || type === "current" || stageScope),
-    4: hasPhysical === false || (hasPhysical === true && physicalIds.length > 0),
+    4: hasPhysical === false || (hasPhysical === true && physicalIdsInRound.length > 0),
   };
 
   function next() {
@@ -119,12 +163,12 @@ export default function RoundCreateModal({ initialAcademicYear, onClose, onCreat
   // Before creating: physical גפן+שוטף schools with two different advisors must say who visits.
   async function submit() {
     if (!stepValid[4]) { setAttempted(true); return; }
-    if (hasPhysical && physicalIds.length && ["by_service", "gefen_current"].includes(type)) {
+    if (hasPhysical && physicalIdsInRound.length && ["by_service", "gefen_current"].includes(type)) {
       setSaving(true);
       setError("");
       try {
         const r = await axios.post("/rounds/physical-check", {
-          academic_year: academicYear, school_ids: physicalIds, requirement: requirementPayload(), advisor_exclusions: exclusions || {},
+          academic_year: academicYear, school_ids: physicalIdsInRound, requirement: requirementPayload(), advisor_exclusions: exclusions || {},
         });
         const conflicts = r.data?.schools || [];
         // Editing: schools already answered keep their answer; the window opens only for new ones.
@@ -154,7 +198,7 @@ export default function RoundCreateModal({ initialAcademicYear, onClose, onCreat
       const common = {
         name: name.trim(), start_date: startDate, end_date: endDate,
         requirement: requirementPayload(),
-        physical_school_ids: hasPhysical ? physicalIds : [],
+        physical_school_ids: hasPhysical ? physicalIdsInRound : [],
         physical_visitors: hasPhysical ? physicalVisitors : {},
         advisor_exclusions: exclusions || {},
       };
@@ -271,7 +315,7 @@ export default function RoundCreateModal({ initialAcademicYear, onClose, onCreat
                   </legend>
                   <div className={`flex flex-wrap gap-2 ${invalid(split)}`}>
                     {GEFEN_CURRENT_SPLIT_OPTIONS.map(o => (
-                      <button key={o.value} type="button" aria-pressed={split === o.value} onClick={() => setSplit(o.value)} className={`${pill(split === o.value)} bg-white`}>{o.label}</button>
+                      <button key={o.value} type="button" aria-pressed={split === o.value} onClick={() => setSplit(o.value)} className={`${pill(split === o.value)}${split === o.value ? "" : " bg-white"}`}>{o.label}</button>
                     ))}
                   </div>
                   <p className="text-[11px] text-slate-600">גפן ← פגישת גפן, שוטף ← פגישת שוטף, מחוז ← מחוז, תקומה ← תקומה; גפן+שוטף עם אותו יועץ ← פגישה משותפת אחת.</p>
@@ -308,29 +352,82 @@ export default function RoundCreateModal({ initialAcademicYear, onClose, onCreat
                 </div>
               </fieldset>
               {hasPhysical && (
-                <div className="flex flex-col gap-2">
+                <div className="flex flex-col gap-2.5">
                   <p className="text-[12px] text-slate-600">
-                    סמנו את בתי הספר שהפגישה שלהם פיזית ({physicalIds.length} נבחרו). בתוך הסבב הם יוצגו בנפרד, כדי ליצור להם משימה עם מיקום "פיזי" ובתאריכים שבהם היועץ בשטח.
+                    סמנו את בתי הספר שהפגישה שלהם פיזית. בתוך הסבב הם יוצגו בנפרד, כדי ליצור להם משימה עם מיקום "פיזי" ובתאריכים שבהם היועץ בשטח.
                   </p>
-                  <label htmlFor="round-physical-search" className="sr-only">חיפוש בית ספר</label>
-                  <input id="round-physical-search" value={physicalQuery} onChange={e => setPhysicalQuery(e.target.value)} placeholder="חיפוש..."
-                    className="text-sm border border-slate-300 rounded-lg px-3 py-1.5" />
-                  <div className="flex gap-2 text-xs">
-                    <button type="button" className="text-blue-600 hover:underline" onClick={() => setPhysicalIds(Array.from(new Set([...physicalIds, ...physicalCandidates.map(s => s.school_id)])))}>סמן את כל המוצגים</button>
-                    <button type="button" className="text-slate-500 hover:underline" onClick={() => setPhysicalIds([])}>נקה</button>
+                  <div className="flex items-center justify-between gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2">
+                    <span role="status" aria-live="polite" className="text-sm text-slate-800">
+                      <b className="text-base text-blue-700">{physicalIdsInRound.length}</b> מתוך {previewSchools.length} בתי הספר בסבב סומנו כפגישה פיזית
+                    </span>
+                    {physicalIds.length > 0 && (
+                      <button type="button" className="text-xs text-slate-600 hover:underline whitespace-nowrap" onClick={() => { setPhysicalIds([]); setShowOnlySelected(false); }}>נקה הכל</button>
+                    )}
                   </div>
+
+                  <div className="rounded-lg border border-slate-200">
+                    <button type="button" aria-expanded={filterOpen} aria-controls="round-physical-filter" onClick={() => setFilterOpen(o => !o)}
+                      className="w-full flex items-center justify-between px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 rounded-lg">
+                      <span>סימון לפי סינון (למשל: כל בתי הספר בעיר מסוימת)</span>
+                      <span aria-hidden="true">{filterOpen ? "▴" : "▾"}</span>
+                    </button>
+                    {filterOpen && (
+                      <div id="round-physical-filter" className="flex flex-col gap-2 border-t border-slate-200 p-3">
+                        <ConditionGroupsEditor groups={physicalGroups} setGroups={setPhysicalGroups} fieldOptions={fieldOptions} meetingTypes={[]}
+                          allSchools={allSchools} allowedTypes={["field"]} goalValueContext="audience" />
+                        <div role="status" className="text-sm bg-slate-50 rounded-lg px-3 py-2">
+                          {!activePhysicalGroups.length ? "בחרו שדה וערך כדי לראות כמה בתי ספר בסבב עונים לסינון."
+                            : physicalMatchLoading ? "בודק..."
+                            : physicalMatchError ? <span role="alert" className="text-red-600">בדיקת הסינון נכשלה — שנו את הסינון או נסו שוב.</span>
+                            : <><b>{physicalMatches?.length || 0}</b> בתי ספר בסבב עונים לסינון{physicalMatchSelected > 0 && ` · ${physicalMatchSelected} מהם כבר מסומנים`}</>}
+                        </div>
+                        {physicalMatches && !physicalMatchLoading && (
+                          <div className="flex flex-wrap items-center gap-2">
+                            <button type="button" disabled={!physicalMatches?.length || physicalMatchSelected === physicalMatches.length}
+                              onClick={() => setPhysicalIds(prev => Array.from(new Set([...prev, ...physicalMatches.map(s => s.school_id)])))}
+                              className="text-sm px-3 py-1.5 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 disabled:opacity-40">
+                              סמן את כל ה-{physicalMatches?.length || 0}
+                            </button>
+                            <button type="button" disabled={!physicalMatchSelected}
+                              onClick={() => { const drop = new Set(physicalMatches.map(s => s.school_id)); setPhysicalIds(prev => prev.filter(id => !drop.has(id))); }}
+                              className="text-sm px-3 py-1.5 rounded-lg border border-black text-black bg-white hover:bg-slate-50 disabled:opacity-40">
+                              בטל סימון מה-{physicalMatches?.length || 0}
+                            </button>
+                            <button type="button" onClick={() => setPhysicalGroups(EMPTY_PHYSICAL_GROUPS)} className="text-xs text-slate-500 hover:underline mr-auto">נקה סינון</button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    <label htmlFor="round-physical-search" className="sr-only">חיפוש בית ספר</label>
+                    <input id="round-physical-search" value={physicalQuery} onChange={e => setPhysicalQuery(e.target.value)} placeholder="חיפוש לפי שם, סמל, עיר או בעלות..."
+                      className="flex-1 text-sm border border-slate-300 rounded-lg px-3 py-1.5" />
+                    <label className="flex items-center gap-1.5 text-xs text-slate-700 whitespace-nowrap cursor-pointer">
+                      <input type="checkbox" checked={showOnlySelected} onChange={e => setShowOnlySelected(e.target.checked)} className="accent-blue-600" />
+                      הצג רק מסומנים
+                    </label>
+                  </div>
+                  {physicalMatches && (
+                    <p className="text-[11px] text-slate-500">הרשימה מציגה רק את בתי הספר שעונים לסינון.</p>
+                  )}
                   <ul className="border border-slate-200 rounded-xl max-h-56 overflow-y-auto divide-y divide-slate-100">
                     {physicalCandidates.slice(0, 300).map(s => (
                       <li key={s.school_id}>
                         <label className="flex items-center gap-2 px-3 py-1.5 cursor-pointer hover:bg-slate-50">
-                          <input type="checkbox" checked={physicalIds.includes(s.school_id)} className="accent-blue-600"
+                          <input type="checkbox" checked={physicalIdSet.has(s.school_id)} className="accent-blue-600"
                             onChange={() => setPhysicalIds(prev => prev.includes(s.school_id) ? prev.filter(x => x !== s.school_id) : [...prev, s.school_id])} />
-                          <span>{[s.school_name, s.authority, s.symbol].filter(Boolean).join(" - ")}</span>
+                          <span>{[s.school_name, s.city, s.authority, s.symbol].filter(Boolean).join(" - ")}</span>
                         </label>
                       </li>
                     ))}
+                    {!physicalCandidates.length && <li className="px-3 py-2 text-xs text-slate-500">אין בתי ספר להצגה.</li>}
                   </ul>
-                  {attempted && !physicalIds.length && <p role="alert" className="text-xs text-red-600">יש לסמן לפחות בית ספר אחד, או לבחור "לא".</p>}
+                  {physicalCandidates.length > 300 && (
+                    <p className="text-[11px] text-slate-500">מוצגים 300 מתוך {physicalCandidates.length} — צמצמו בחיפוש או בסינון. "סמן את כל ה-N" מסמן את כולם, גם את מי שלא מוצג.</p>
+                  )}
+                  {attempted && !physicalIdsInRound.length &&<p role="alert" className="text-xs text-red-600">יש לסמן לפחות בית ספר אחד, או לבחור "לא".</p>}
                 </div>
               )}
               {error && <p role="alert" className="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">{error}</p>}

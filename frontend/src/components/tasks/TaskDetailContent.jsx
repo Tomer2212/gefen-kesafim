@@ -385,6 +385,9 @@ export default function TaskDetailContent({ taskId, onTaskChange }) {
       } else if (err?.response?.status === 409 && detail?.broadcast_skipped) {
         const schoolName = task?.progress?.schools?.find(r => r.school_id === schoolId)?.school_name || schoolId;
         setBroadcastSkipAlert(`${schoolName} מוחרג מתזכורות גורפות — הסר את ההחרגה בעמודת "החרגות" כדי לשלוח לו תזכורת.`);
+      } else if (err?.response?.status === 409 && detail?.already_done) {
+        const schoolName = task?.progress?.schools?.find(r => r.school_id === schoolId)?.school_name || schoolId;
+        setBroadcastSkipAlert(`${schoolName}: ${detail.message}`);
       } else if (err?.response?.status === 409 && detail?.missing_contact_school_ids) {
         setMissingContact({
           schoolIds: detail.missing_contact_school_ids,

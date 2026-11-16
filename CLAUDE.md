@@ -903,6 +903,20 @@ The "school card" — a school's fields, contact table, and related sections (ל
 
 ---
 
+## Dashboard ↔ Admin Schools Column Sync Rule (MANDATORY)
+
+The home screen (`DashboardPage.jsx`, "עמודות לתצוגה" — `GENERAL_COLUMNS`, `CONTACT_COLUMNS`, etc.) and ניהול → בתי ספר (`AdminPage.jsx`, `ADMIN_*_COLUMNS`) each keep their **own** column lists.
+
+**Rule:** whenever a column is added to (or removed from) **either** screen, before implementing, ask the user whether to add (or remove) it on the other screen too. Never assume, never silently skip.
+
+- **Kept dashboard-only on purpose** (decided 2026-11-15): "יועץ מלווה [כל הסוגים]", check summary columns (בדיקות), goals (יעדים), per-budget "סגירת שנה גפן". Each row there can split per budget/division, which doesn't fit the admin table's one-row-per-school inline/bulk editing.
+- **Admin-only by design:** the financial/contract columns in `ADMIN_DATA_COLUMNS` (requested price, hours ordered, rate, payments, contract, receipts, quarterly notes).
+- **In the admin table**, a new column is hidden by default (`ADMIN_HIDDEN_BY_DEFAULT_KEYS`). Also decide its column filter (`ADMIN_TEXT_FILTER_COLS` / `ADMIN_SELECT_FILTER_OPTIONS`) and whether it gets inline/bulk edit. A `schools` field saved from the grid must be in `allowed_bulk_fields` of `PUT /schools/bulk-field`. Also add the column to the admin agent's hand-kept mirror in `backend/routers/agent_router.py` (`ADMIN_TEXT_COLUMNS` / `ADMIN_NUMBER_COLUMNS` / `ADMIN_SELECT_COLUMNS` + `ADMIN_COLUMN_LABELS`), or "סוכן ניהול" can't filter by it.
+- **Active client ⇒ accompanying advisor:** grid edits of `client_status`, `service_type` and the typed advisor cells go through `missingActiveAdvisorTypes` (same rule as the edit modal's `saveSchool`), including bulk propagation (schools that would break the rule are skipped).
+- The contact-column helpers (`principalNames`, `meetingCoordinatorLines`, `gefenFilesResponsibleLines`) live in `frontend/src/components/schoolContactLines.js`, shared by both screens. Don't copy them.
+
+---
+
 ## Architecture Invariants (HARD RULES — never break without explicit user approval)
 
 ### 1. No In-Memory Run State

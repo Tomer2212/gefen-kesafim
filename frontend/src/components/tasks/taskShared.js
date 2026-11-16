@@ -28,7 +28,7 @@ export const FIELD_LABELS = {
   finance_contact_email: "מייל אחראי/ת כספים",
   school_phone: "טלפון בית ספר", address: "כתובת", notes: "הערות",
   meeting_coordinator: "אחראי/ת לתיאום פגישות",
-  service_type: "סוג שירות", client_status: "סטטוס לקוח", requested_price: "מחיר מבוקש",
+  service_type: "סוג שירות", client_status: "סטטוס לקוח",
   order_method: "אמצעי הזמנה",
   order_amount_gefen: 'מחיר כולל מע"מ', hours_ordered: "מספר שעות שהוזמנו", rate: "תעריף",
   payment_received: "תשלום שהתקבל", payment_requests_sent: "דרישות תשלום שנשלחו",

@@ -461,6 +461,14 @@ export default function MeetingBookingPage() {
             </p>
           )}
 
+          {status === "ready" && data && data.mode === "closed" && (
+            <>
+              <h1 className="text-lg font-bold text-slate-800 mb-1 text-center">קביעת מועד לפגישות</h1>
+              <p className="text-sm text-slate-500 mb-6 text-center">{data.school_name}</p>
+              <p className="text-sm text-slate-700 text-center leading-relaxed whitespace-pre-line">{data.message}</p>
+            </>
+          )}
+
           {status === "ready" && data && data.mode === "ranges" && (
             <>
               <h1 className="text-lg font-bold text-slate-800 mb-1 text-center">קביעת מועד לפגישות</h1>
