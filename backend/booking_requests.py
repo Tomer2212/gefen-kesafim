@@ -316,6 +316,34 @@ def requests_filled_by_meeting(db, meeting_id: str) -> list[tuple[str, str]]:
     return out
 
 
+def _type_covers(meeting_type: str | None, request_type: str | None) -> bool:
+    """A meeting of meeting_type still holds what a request of request_type asked for: the same
+    type, or a combined גפן+שוטף meeting for a גפן or a שוטף request."""
+    return meeting_type == request_type or (meeting_type == "gefen_current" and request_type in ("gefen", "current"))
+
+
+def drop_replaces_after_type_change(db, org_id: str, meeting_id: str, new_type: str | None) -> int:
+    """The meeting's type changed after the staff answered "מחליפה" for some requests: an answer
+    the new type no longer holds (e.g. a גפן request, after a גפן+שוטף meeting became שוטף only)
+    is removed and its request reopens, so the meeting no longer counts as that request and the
+    staff are asked again (open_requests_for_meeting). Returns how many answers were removed.
+    Never raises."""
+    try:
+        rows = (
+            db.table("meeting_request_resolutions").select("id, token_id, range_key, service_type")
+            .eq("meeting_id", meeting_id).eq("decision", "replaces").execute().data or []
+        )
+        stale = [r for r in rows if not _type_covers(new_type, r.get("service_type"))]
+        if not stale:
+            return 0
+        db.table("meeting_request_resolutions").delete().in_("id", [r["id"] for r in stale]).execute()
+        reopen_for_deleted_meeting(db, org_id, [(r["token_id"], r["range_key"]) for r in stale])
+        return len(stale)
+    except Exception as exc:
+        logger.warning("drop_replaces_after_type_change failed for meeting %s (non-fatal): %s", meeting_id, exc)
+        return 0
+
+
 def reopen_for_deleted_meeting(db, org_id: str, filled: list[tuple[str, str]]) -> None:
     """After a meeting is deleted (or stops replacing a request): its requests reopen unless another live meeting still fills
     them (reconcile decides) or their dates are over. Never raises."""

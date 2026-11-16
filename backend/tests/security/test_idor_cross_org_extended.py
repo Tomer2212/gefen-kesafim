@@ -1820,3 +1820,25 @@ def test_retry_failed_same_org_works(org_b_client, admin_db):
     resp = org_b_client.post(f"/tasks/{clean[0]}/retry-failed")
     assert resp.status_code == 200, resp.text
     assert resp.json() == {"retried": 0}
+
+
+# ===========================================================================
+# תיאום ישיר — POST /schools/{id}/meetings/direct-coordination
+# ===========================================================================
+# A real send emails the school's coordinator, so the same-org test sends an unknown meeting
+# type: rejected (400) right after the org check, before any link is minted or email sent.
+_DIRECT_COORDINATION_BODY = {"ranges": [{
+    "date_segments": [{"start_date": "2099-12-01", "end_date": "2099-12-31"}],
+    "meeting_service_type": "not-a-type", "duration_minutes": 60, "advisor_ids": [],
+    "participants": [], "allow_time_range_search": False,
+}]}
+
+
+def test_direct_coordination_cross_org_rejected(org_a_client):
+    resp = org_a_client.post(f"/schools/{ORG_B_SCHOOL_ID}/meetings/direct-coordination", json=_DIRECT_COORDINATION_BODY)
+    assert resp.status_code in (403, 404), resp.text
+
+
+def test_direct_coordination_same_org_passes_org_check(org_b_client):
+    resp = org_b_client.post(f"/schools/{ORG_B_SCHOOL_ID}/meetings/direct-coordination", json=_DIRECT_COORDINATION_BODY)
+    assert resp.status_code == 400 and "סוג פגישה" in resp.text, resp.text

@@ -637,8 +637,14 @@ function MeetingRowImpl({
       .filter(r => !dismissedRequestsRef.current.has(`${r.token_id}:${r.range_key}`));
     if (fresh.length) setBookingRequests(fresh);
   }, [meeting.open_booking_requests]);
-  function closeBookingRequests() {
-    for (const r of bookingRequests || []) dismissedRequestsRef.current.add(`${r.token_id}:${r.range_key}`);
+  // answeredKeys: answered in the window — not "dismissed", so if one comes back (its answer
+  // was dropped because the meeting's type changed) it's asked again.
+  function closeBookingRequests(answeredKeys = []) {
+    const answered = new Set(Array.isArray(answeredKeys) ? answeredKeys : []);
+    for (const r of bookingRequests || []) {
+      const key = `${r.token_id}:${r.range_key}`;
+      if (!answered.has(key)) dismissedRequestsRef.current.add(key);
+    }
     setBookingRequests(null);
   }
 

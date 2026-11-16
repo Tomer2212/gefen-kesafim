@@ -10463,6 +10463,41 @@ _DIRECT_COORDINATION_SERVICE_TYPES = {
 _DIRECT_COORDINATION_DURATIONS = set(range(30, 301, 15))
 
 
+_EMAIL_FORMAT_RE = re.compile(r"^[^@\s<>,;]+@[^@\s<>,;]+\.[^@\s<>,;]+$")
+
+
+def _email_maybe_sent(exc: Exception) -> bool:
+    """The request reached the mail service but its answer never came back (timed out / cut off
+    mid-response), so the email may have gone out. A failure to connect never sent anything."""
+    import httpx
+    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
+        return False
+    return isinstance(exc, (httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.ReadError))
+
+
+def _booking_email_failure(exc: Exception, to_email: str) -> tuple[int, str]:
+    """(status, message the manager can act on) for a booking-request email that wasn't sent:
+    an address the mail service rejected (fix it in the card), the daily sending quota (try
+    tomorrow), or a fault on our side (not their input — retrying right away won't help)."""
+    from email_resend import ResendQuotaExceeded
+    if isinstance(exc, ResendQuotaExceeded):
+        return 503, ("הבקשה לא נשלחה: המערכת הגיעה למכסת שליחת המיילים היומית. "
+                     "אפשר לשלוח את הבקשה שוב מחר.")
+    response = getattr(exc, "response", None)
+    if response is not None and response.status_code in (400, 422):
+        try:
+            message = str((response.json() or {}).get("message") or "")
+        except ValueError:
+            message = ""
+        # Only the recipient field ("Invalid `to` field…") is the coordinator's address — not
+        # `reply_to` (the advisor's) or `from` (ours).
+        if "`to`" in message:
+            return 400, (f"הבקשה לא נשלחה: שירות המיילים דחה את הכתובת של אחראי/ת התיאום ({to_email}), "
+                         "כנראה בגלל טעות בכתובת. יש לבדוק ולתקן אותה בכרטיס בית הספר ואז לשלוח שוב.")
+    return 503, ("הבקשה לא נשלחה בגלל תקלה במערכת, לא בגלל הפרטים שהוזנו. "
+                 "אפשר לנסות שוב בעוד כמה דקות; אם זה חוזר, נא לפנות לתמיכה.")
+
+
 @router.post("/{school_id}/meetings/direct-coordination")
 def send_direct_coordination_request(
     school_id: str, body: DirectCoordinationIn, user: Annotated[dict, Depends(get_current_user)],
@@ -10558,16 +10593,27 @@ def send_direct_coordination_request(
     # single coordinator for the whole request; ranges are grouped by resolved coordinator email
     # below and one email is sent per group.
     missing_slot_labels = []
+    invalid_emails = []
     range_coordinators: list[dict | None] = []
     for slot in range_slots:
         c = _resolve_meeting_coordinator_for_slot(school, slot)
-        if not c or not c.get("email"):
+        if not c or not (c.get("email") or "").strip():
             missing_slot_labels.append(_SLOT_LABELS.get(slot, slot))
+        else:
+            c = {**c, "email": c["email"].strip()}
+            if not _EMAIL_FORMAT_RE.match(c["email"]) and c["email"] not in invalid_emails:
+                invalid_emails.append(c["email"])
         range_coordinators.append(c)
     if missing_slot_labels:
         raise HTTPException(
             status_code=400,
             detail=f"יש להגדיר אחראי/ת לתיאום פגישות עם כתובת מייל עבור: {', '.join(missing_slot_labels)}",
+        )
+    if invalid_emails:
+        # Caught before a link is minted or anything is sent.
+        raise HTTPException(
+            status_code=400,
+            detail=f"כתובת המייל של אחראי/ת התיאום לא תקינה ({', '.join(invalid_emails)}). יש לתקן אותה בכרטיס בית הספר ואז לשלוח שוב.",
         )
 
     advisor_rows = (
@@ -10653,7 +10699,21 @@ def send_direct_coordination_request(
             booking_logic.send_booking_request_email(user["org_id"], group_advisor_ids[0], email, subject, html)
         except Exception as exc:
             logger.error("send_direct_coordination_request: email send failed for school %s: %s", school_id, exc, exc_info=True)
-            raise HTTPException(status_code=502, detail="שליחת המייל נכשלה, נסה שוב")
+            if _email_maybe_sent(exc):
+                # The mail service may have accepted it before the answer was lost: the school may
+                # hold this link, so it stays.
+                status_code, detail = 503, ("לא התקבל אישור משירות המיילים על שליחת הבקשה, ולכן ייתכן שהיא כן נשלחה. "
+                                            "לפני ששולחים שוב, כדאי לבדוק עם בית הספר אם המייל הגיע.")
+            else:
+                # Nobody received this link — it must not stay live as an open request.
+                try:
+                    db.table("meeting_booking_tokens").delete().eq("id", token_row["id"]).execute()
+                except Exception as cleanup_exc:
+                    logger.warning("send_direct_coordination_request: unsent token cleanup failed (non-fatal): %s", cleanup_exc)
+                status_code, detail = _booking_email_failure(exc, email)
+            if booking_urls:
+                detail += " שימו לב: הבקשה לשאר אנשי הקשר כבר נשלחה בהצלחה."
+            raise HTTPException(status_code=status_code, detail=detail)
         booking_urls.append(booking_url)
 
     return {"ok": True, "booking_urls": booking_urls}
@@ -10747,6 +10807,9 @@ def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annot
             actor_id=user["id"], actor_type="user", source=meeting_activity.client_surface(x_client_surface),
             action="updated", before=activity_before, after=meeting,
         )
+        if activity_before and meeting.get("meeting_service_type") != activity_before.get("meeting_service_type"):
+            # "מחליפה" answers the new type no longer holds reopen their requests (asked again below).
+            booking_requests.drop_replaces_after_type_change(db, user["org_id"], meeting_id, meeting.get("meeting_service_type"))
 
     try:
         with graph_client.calendar_sync_lock(db, meeting_id) as acquired:
@@ -10788,6 +10851,9 @@ def _apply_meeting_patch(db, org_id: str, school_id: str, meeting_id: str, patch
         actor_id=actor_id, actor_type=actor_type, source=source, action="updated",
         before=activity_before, after=patch_dict,
     )
+    if (activity_before and "meeting_service_type" in patch_dict
+            and patch_dict["meeting_service_type"] != activity_before.get("meeting_service_type")):
+        booking_requests.drop_replaces_after_type_change(db, org_id, meeting_id, patch_dict["meeting_service_type"])
 
     try:
         with graph_client.calendar_sync_lock(db, meeting_id) as acquired:

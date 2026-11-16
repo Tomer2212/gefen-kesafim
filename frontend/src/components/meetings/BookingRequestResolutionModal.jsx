@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import axios from "axios";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
@@ -20,7 +20,11 @@ function formatDate(iso) {
 }
 
 export default function BookingRequestResolutionModal({ schoolId, meetingId, schoolName, requests, clientSurface, onClose }) {
-  const { ref, handleKeyDown } = useFocusTrap(onClose);
+  // onClose gets the keys answered here: only the others count as "אחליט אחר כך" — an answered
+  // request that comes back (its answer dropped after the meeting's type changed) is asked again.
+  const answeredRef = useRef({});
+  const close = () => onClose(Object.keys(answeredRef.current));
+  const { ref, handleKeyDown } = useFocusTrap(close);
   const [answered, setAnswered] = useState({}); // {token_id:range_key: "replaces" | "additional"}
   const [savingKey, setSavingKey] = useState(null);
   const [error, setError] = useState("");
@@ -34,8 +38,9 @@ export default function BookingRequestResolutionModal({ schoolId, meetingId, sch
         { token_id: req.token_id, range_key: req.range_key, decision },
         clientSurface ? { headers: { "X-Client-Surface": clientSurface } } : undefined);
       const next = { ...answered, [key]: decision };
+      answeredRef.current = next;
       setAnswered(next);
-      if (requests.every(r => next[`${r.token_id}:${r.range_key}`])) onClose();
+      if (requests.every(r => next[`${r.token_id}:${r.range_key}`])) close();
     } catch {
       setError("שמירת הבחירה נכשלה — נסו שוב.");
     } finally {
@@ -91,7 +96,7 @@ export default function BookingRequestResolutionModal({ schoolId, meetingId, sch
 
         {error && <p role="alert" className="text-sm text-red-600">{error}</p>}
         <p className="text-[11px] text-slate-500">הבחירה נרשמת ב"תיעוד פעילות" של הפגישה.</p>
-        <button type="button" onClick={onClose}
+        <button type="button" onClick={close}
           className="self-center px-5 py-2 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-semibold">
           אחליט אחר כך
         </button>
