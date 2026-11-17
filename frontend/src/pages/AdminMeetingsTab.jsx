@@ -23,6 +23,7 @@ import { useMeetingsPolling } from "../hooks/useMeetingsPolling";
 import { useAiSummaryEnabled } from "../hooks/useAiSummaryEnabled";
 import { mergeMeetingsSilently, recentDateBounds, visibleDateBounds } from "../components/meetings/mergeMeetings";
 import { useMeetingNotes } from "../context/MeetingNotesContext";
+import { useMeetingDirectorySchools } from "../hooks/useMeetingDirectorySchools";
 
 // Local (Asia/Jerusalem) date, computed on each call — toISOString() is UTC and would show
 // yesterday between midnight and 02:00/03:00, and a module-level constant goes stale overnight.
@@ -85,6 +86,8 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
 
   const [schools, setSchools] = useState([]);
   const [loadingSchools, setLoadingSchools] = useState(true);
+  const [schoolsLoaded, setSchoolsLoaded] = useState(false);
+  useMeetingDirectorySchools(meetings, schools, setSchools, schoolsLoaded);
 
   const [selectable, setSelectable] = useState(false);
   const [dotsOpen, setDotsOpen] = useState(false);
@@ -260,6 +263,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
       setSchools([]);
     } finally {
       setLoadingSchools(false);
+      setSchoolsLoaded(true);
     }
   }
 

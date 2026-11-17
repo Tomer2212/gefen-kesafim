@@ -1,9 +1,54 @@
 import { useEffect, useRef, useState } from "react";
 import axios from "axios";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
+import { adoptDirectorySchool } from "../../lib/directory";
 
 function schoolLabel(s) {
   return `${s.name || ""} - ${s.symbol || ""} - ${s.city || ""}`;
+}
+
+// Whether the org has the national school directory ("מאגר בתי ספר") — asked once per page load.
+let directoryEnabledPromise = null;
+function useDirectoryEnabled() {
+  const [enabled, setEnabled] = useState(false);
+  useEffect(() => {
+    if (!directoryEnabledPromise) {
+      directoryEnabledPromise = axios.get("/directory/enabled").then(r => !!r.data?.enabled).catch(() => false);
+    }
+    let cancelled = false;
+    directoryEnabledPromise.then(v => { if (!cancelled) setEnabled(v); });
+    return () => { cancelled = true; };
+  }, []);
+  return enabled;
+}
+
+const EMPTY_DIRECTORY_RESULTS = { met: [], items: [], total: 0 };
+
+// "מהמאגר" results for `query` (debounced): directory schools the org already met first, then directory entries.
+function useDirectoryResults(query, active) {
+  const [data, setData] = useState(EMPTY_DIRECTORY_RESULTS);
+  const [loading, setLoading] = useState(false);
+  useEffect(() => {
+    if (!active) return undefined;
+    let cancelled = false;
+    setLoading(true);
+    const t = setTimeout(() => {
+      axios.get("/directory/picker", { params: { q: query.trim() } })
+        .then(r => { if (!cancelled) setData(r.data || EMPTY_DIRECTORY_RESULTS); })
+        .catch(() => { if (!cancelled) setData(EMPTY_DIRECTORY_RESULTS); })
+        .finally(() => { if (!cancelled) setLoading(false); });
+    }, 300);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [query, active]);
+  return { ...data, loading };
+}
+
+// A directory choice -> the full school object callers expect. The org's copy is created
+// (adopted) only here, on confirm — never on a mere pick.
+async function resolveDirectoryChoice(choice) {
+  const schoolId = choice.schoolId || await adoptDirectorySchool(choice.directoryId);
+  const res = await axios.get("/schools/", { params: { ids: schoolId } });
+  return (res.data || [])[0] || { id: schoolId, name: choice.name, symbol: choice.symbol, city: choice.city, status: "directory" };
 }
 
 export function SchoolResultsList({ schools, query, setQuery, pendingId, setPendingId, onConfirm, onCancel, submittingLabel = "יוצר..." }) {
@@ -13,7 +58,13 @@ export function SchoolResultsList({ schools, query, setQuery, pendingId, setPend
   // each click fired a brand new meeting since nothing stopped the button from re-firing
   // mid-request. Guard against that here, once, for every caller of this shared list.
   const [submitting, setSubmitting] = useState(false);
+  const directoryEnabled = useDirectoryEnabled();
+  const [tab, setTab] = useState("clients");
+  const [dirChoice, setDirChoice] = useState(null);
+  const [dirError, setDirError] = useState("");
+  // Directory copies a screen loaded for its meetings are not clients — they show under "מהמאגר".
   const filtered = schools.filter(s => {
+    if (s.status === "directory") return false;
     if (!query.trim()) return true;
     const q = query.trim().toLowerCase();
     return (s.name || "").toLowerCase().includes(q)
@@ -22,9 +73,42 @@ export function SchoolResultsList({ schools, query, setQuery, pendingId, setPend
       || (s.authority || "").toLowerCase().includes(q)
       || (s.district || "").toLowerCase().includes(q);
   });
+  const onDirectoryTab = directoryEnabled && tab === "directory";
+  // On the clients tab, directory matches are counted only when nothing matched ("לא מצאת?").
+  const wantsHint = directoryEnabled && tab === "clients" && filtered.length === 0 && query.trim().length >= 2;
+  const directory = useDirectoryResults(query, onDirectoryTab || wantsHint);
+  const directoryOptions = [
+    ...(directory.met || []).map(w => ({ key: `s:${w.id}`, schoolId: w.id, name: w.name, symbol: w.symbol, city: w.city, met: true })),
+    ...directory.items.map(i => ({
+      key: i.school_id ? `s:${i.school_id}` : `d:${i.directory_id}`, schoolId: i.school_id, directoryId: i.directory_id,
+      name: i.name, symbol: i.symbol, city: i.city, tag: i.tag,
+    })),
+  ];
+
+  async function confirmDirectory() {
+    const choice = directoryOptions.find(o => o.key === dirChoice);
+    if (!choice || submitting) return;
+    setDirError("");
+    setSubmitting(true);
+    try {
+      await onConfirm(await resolveDirectoryChoice(choice));
+    } catch (err) {
+      setDirError(err.message || "הפעולה נכשלה. נסו שוב.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  const tabCls = active => `px-3 py-1.5 text-xs font-medium border-b-2 -mb-px ${active ? "border-blue-600 text-blue-700" : "border-transparent text-slate-500 hover:text-slate-800"}`;
 
   return (
     <div className="flex flex-col gap-2" style={{ minWidth: 280 }}>
+      {directoryEnabled && (
+        <div className="flex border-b border-slate-200" role="tablist" aria-label="מקור בתי הספר">
+          <button type="button" role="tab" aria-selected={tab === "clients"} className={tabCls(tab === "clients")} onClick={() => setTab("clients")}>הלקוחות שלנו</button>
+          <button type="button" role="tab" aria-selected={tab === "directory"} className={tabCls(tab === "directory")} onClick={() => setTab("directory")}>מהמאגר</button>
+        </div>
+      )}
       <label htmlFor="school-picker-search" className="sr-only">חיפוש בית ספר</label>
       <input
         id="school-picker-search"
@@ -32,13 +116,53 @@ export function SchoolResultsList({ schools, query, setQuery, pendingId, setPend
         autoFocus
         value={query}
         onChange={e => setQuery(e.target.value)}
-        placeholder="חיפוש לפי שם מוסד, סמל מוסד, עיר, בעלות או מחוז..."
+        placeholder={onDirectoryTab ? "חיפוש במאגר לפי שם, סמל, יישוב או מנהל/ת..." : "חיפוש לפי שם מוסד, סמל מוסד, עיר, בעלות או מחוז..."}
         className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 outline-none focus:border-blue-400 bg-white"
         aria-label="חיפוש בית ספר"
       />
+      {onDirectoryTab && (
+        <>
+          <div className="max-h-56 overflow-y-auto border border-slate-100 rounded-lg" role="listbox" aria-label="תוצאות חיפוש במאגר">
+            {directory.loading ? (
+              <p role="status" className="text-xs text-slate-400 px-3 py-3 text-center">מחפש…</p>
+            ) : directoryOptions.length === 0 ? (
+              <p className="text-xs text-slate-400 px-3 py-3 text-center">{query.trim() ? "לא נמצאו בתי ספר במאגר" : "הקלידו שם, סמל או יישוב לחיפוש במאגר"}</p>
+            ) : directoryOptions.map(o => (
+              <label key={o.key} className="flex items-center gap-2.5 px-3 py-2 hover:bg-slate-50 cursor-pointer border-b border-slate-50 last:border-0">
+                <input
+                  type="checkbox"
+                  checked={dirChoice === o.key}
+                  onChange={() => setDirChoice(dirChoice === o.key ? null : o.key)}
+                  className="w-3.5 h-3.5 rounded accent-blue-600 flex-shrink-0"
+                />
+                <span className="text-sm text-slate-700">{schoolLabel(o)}</span>
+                {(o.met || o.tag === "met") && <span className="text-[11px] text-blue-700 bg-blue-50 border border-blue-200 rounded-full px-1.5">היו פגישות</span>}
+                {o.tag === "client" && <span className="text-[11px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-1.5">לקוח</span>}
+              </label>
+            ))}
+          </div>
+          {dirError && <p role="alert" className="text-xs text-red-600">{dirError}</p>}
+          <div className="flex items-center gap-2 justify-end mt-1">
+            <button type="button" onClick={onCancel} disabled={submitting} className="btn-ghost text-sm px-4 py-1.5 disabled:opacity-40">ביטול</button>
+            <button type="button" disabled={!dirChoice || submitting} onClick={confirmDirectory}
+              className="btn-blue text-sm px-4 py-1.5 disabled:opacity-40 disabled:cursor-not-allowed">
+              {submitting ? submittingLabel : "אישור"}
+            </button>
+          </div>
+        </>
+      )}
+      {!onDirectoryTab && (
+      <>
       <div className="max-h-56 overflow-y-auto border border-slate-100 rounded-lg" role="listbox" aria-label="תוצאות חיפוש בתי ספר">
         {filtered.length === 0 ? (
-          <p className="text-xs text-slate-400 px-3 py-3 text-center">לא נמצאו בתי ספר</p>
+          <div className="px-3 py-3 text-center">
+            <p className="text-xs text-slate-400">לא נמצאו בתי ספר</p>
+            {wantsHint && directory.total > 0 && (
+              <button type="button" onClick={() => setTab("directory")} className="mt-1 text-xs text-blue-700 hover:underline">
+                לא מצאת? יש {directory.total.toLocaleString("he-IL")} תוצאות במאגר ←
+              </button>
+            )}
+          </div>
         ) : filtered.map(s => (
           <label key={s.id} className="flex items-center gap-2.5 px-3 py-2 hover:bg-slate-50 cursor-pointer border-b border-slate-50 last:border-0">
             <input
@@ -68,6 +192,8 @@ export function SchoolResultsList({ schools, query, setQuery, pendingId, setPend
           {submitting ? submittingLabel : "אישור"}
         </button>
       </div>
+      </>
+      )}
     </div>
   );
 }

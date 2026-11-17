@@ -25,6 +25,7 @@ const SOURCE_LABELS = {
   calls: "מסך השיחות",
   collection: "ניהול — גבייה",
   update_request: "בקשת עדכון",
+  directory: "מאגר בתי ספר",
 };
 
 const INSTITUTION_FIELDS = new Set([

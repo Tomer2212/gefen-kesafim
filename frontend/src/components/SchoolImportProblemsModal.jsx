@@ -362,7 +362,7 @@ export function SchoolImportProblemsModal({ rows, users, requiredTypesFor, autoC
                         <div className="bg-white rounded-lg border border-amber-100 p-2.5 space-y-1.5">
                           <p className="text-xs text-slate-700">
                             <b>סמל מוסד זה כבר קיים במערכת</b> — <b>{row.duplicateSymbol.name}</b>
-                            {row.duplicateSymbol.status === "pending_deletion" ? " (בסל מחזור)" : ""}
+                            {row.duplicateSymbol.status === "pending_deletion" ? " (בסל מחזור)" : row.duplicateSymbol.status === "directory" ? " (פתחו אותו בעבר ממאגר בתי הספר — בכרטיס שלו אפשר להוסיף אותו לרשימת הלקוחות)" : ""}
                           </p>
                           <p className="text-[11px] text-slate-500">
                             "עדכן" יחליף את השדות שהופיעו בקובץ בבית הספר הקיים (גם אם הם כבר מלאים) — לא ייווצר רישום כפול.

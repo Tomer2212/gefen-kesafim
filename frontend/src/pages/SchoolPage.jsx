@@ -61,6 +61,7 @@ import { SLOT_LABELS, slotsForSchool } from "../components/meetings/meetingCoord
 import { GEFEN_FILES_SLOT_LABELS, gefenFilesSlotsForSchool, resolveGefenFilesResponsibleForSlot } from "../components/meetings/gefenFilesResponsibleSlots";
 import { QuestionTooltip } from "../components/QuestionTooltip";
 import { PartialAmount, partialBalance } from "../components/PartialBalanceWarning";
+import SchoolDirectoryBanner from "../components/SchoolDirectoryBanner";
 
 const DIVISION_LABEL = {
   tikkon: "חטיבה עליונה",
@@ -4415,6 +4416,14 @@ export default function SchoolPage() {
             </button>
           </div>
 
+          <SchoolDirectoryBanner
+            school={school} role={role} academicYear={academicYear}
+            onChanged={({ status, client_status }) => {
+              setSchool(prev => (prev ? { ...prev, status } : prev));
+              if (client_status) setYearAdminData(prev => ({ ...prev, client_status }));
+            }}
+          />
+
           {/* Tab bar */}
           <div className="flex items-end border-b border-slate-200 mb-6 gap-1" dir="rtl">
             {[
@@ -4713,12 +4722,17 @@ export default function SchoolPage() {
                       {(role === "owner" || role === "manager") && (
                         <div className={tileCls}>
                           <label htmlFor="client-status-select" className={`${tileLabelCls} block`}>סטטוס לקוח</label>
+                          {school?.status === "directory" ? (
+                            // A directory copy has no client status until it joins the client list (banner above).
+                            <p id="client-status-select" className={tileValueCls}>מהמאגר – לא ברשימת הלקוחות</p>
+                          ) : (
                           <select id="client-status-select" className={editFieldCls(false, !yearAdminData.client_status)}
                             value={yearAdminData.client_status || ""}
                             onChange={e => saveYearAdminField("client_status", e.target.value || null)}>
                             <option value="">בחר</option>
                             {CLIENT_STATUS_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                           </select>
+                          )}
                         </div>
                       )}
 
@@ -5228,7 +5242,9 @@ export default function SchoolPage() {
                     <div className="grid grid-cols-3 gap-3">
                       <div className={tileCls}>
                         <p className={tileLabelCls}>סטטוס לקוח</p>
-                        {yearAdminData.client_status ? (
+                        {school?.status === "directory" ? (
+                          <p className={tileValueCls}>מהמאגר – לא ברשימת הלקוחות</p>
+                        ) : yearAdminData.client_status ? (
                           <span className={`inline-flex items-center text-xs font-medium px-2.5 py-1 rounded-full border ${CLIENT_STATUS_BADGE_CLS[yearAdminData.client_status] || "bg-slate-100 text-slate-500 border-slate-200"}`}>
                             {CLIENT_STATUS_OPTIONS.find(o => o.value === yearAdminData.client_status)?.label}
                           </span>

@@ -19,6 +19,7 @@ import { useMeetingsPolling } from "../hooks/useMeetingsPolling";
 import { useAiSummaryEnabled } from "../hooks/useAiSummaryEnabled";
 import { mergeMeetingsSilently, recentDateBounds, visibleDateBounds } from "../components/meetings/mergeMeetings";
 import { useMeetingNotes } from "../context/MeetingNotesContext";
+import { useMeetingDirectorySchools } from "../hooks/useMeetingDirectorySchools";
 
 const TODAY = new Date().toISOString().slice(0, 10);
 // date_from defaults to the start of a given academic year (not a fixed value) so the list
@@ -172,9 +173,12 @@ export default function PersonalMeetingsTab({ userId, role, canDeleteMeetings, u
   useMeetingsPolling(() => loadMeetings(filters, { silent: true }), true, [filters, academicYear]);
   const aiSummaryEnabled = useAiSummaryEnabled();
 
+  const [schoolsLoaded, setSchoolsLoaded] = useState(false);
   useEffect(() => {
-    axios.get("/schools/").then(r => setSchools((r.data || []).filter(s => s.status !== "deleted"))).catch(() => {});
+    axios.get("/schools/").then(r => setSchools((r.data || []).filter(s => s.status !== "deleted"))).catch(() => {})
+      .finally(() => setSchoolsLoaded(true));
   }, []);
+  useMeetingDirectorySchools(meetings, schools, setSchools, schoolsLoaded);
 
   useEffect(() => {
     axios.get("/calendar/connection")

@@ -615,7 +615,7 @@ export default function AddSchoolPage() {
                   <div role="alert" className="text-xs text-red-600 mt-1 flex items-center gap-2 flex-wrap">
                     <span>
                       בית ספר עם סמל זה כבר קיים — <b>{schoolConflict.existing_school_name}</b>
-                      {schoolConflict.existing_school_status === "pending_deletion" ? " (בסל מחזור)" : ""}
+                      {schoolConflict.existing_school_status === "pending_deletion" ? " (בסל מחזור)" : schoolConflict.existing_school_status === "directory" ? " (פתחו אותו בעבר ממאגר בתי הספר — בכרטיס שלו אפשר להוסיף אותו לרשימת הלקוחות)" : ""}
                     </span>
                     <button type="button" onClick={() => navigate(`/school/${schoolConflict.existing_school_id}`)}
                       className="underline font-medium hover:text-red-700">

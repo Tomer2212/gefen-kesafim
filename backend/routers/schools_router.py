@@ -64,6 +64,7 @@ from meeting_upload_logic import build_upload_checklist, get_or_create_upload_to
 import booking_requests
 import meeting_activity
 import school_activity
+import school_directory
 import gefen_accounts
 import slot_policy
 from supabase_client import get_admin_client, reset_admin_client
@@ -924,7 +925,11 @@ def list_schools(
     include_deleted: bool = False,
     academic_year: str = DEFAULT_ACADEMIC_YEAR,
     lite: bool = False,
+    ids: str | None = None,
 ):
+    # `ids` (comma-separated): only these schools, and then also the org's national-directory
+    # copies (status 'directory') among them — the meetings screens fetch the schools of the
+    # meetings they show this way. Without `ids`, directory copies are never listed.
     # `lite=True`: return only id/name/symbol/city/status with the same role-based row
     # filtering, and skip every enrichment query (profiles, meetings stats, check_metrics,
     # goals, control letters, typed advisors, ...). Used by screens that only need a school
@@ -934,6 +939,17 @@ def list_schools(
         include_deleted = False
     schools = []
     sel = "id, name, symbol, city, status" if lite else "*, gefen_accounts(*), advisor_schools(advisor_id)"
+    id_filter = [i.strip() for i in (ids or "").split(",") if i.strip()][:500]
+    if ids is not None and not id_filter:
+        return []
+    statuses = ["active", "directory"] if id_filter else ["active"]
+
+    def _scoped(builder):
+        if id_filter:
+            builder = builder.in_("id", id_filter)
+            return builder if include_deleted else builder.in_("status", statuses)
+        # include_deleted (admin tab, recycle bin) still never lists directory copies.
+        return builder.neq("status", "directory") if include_deleted else builder.in_("status", statuses)
 
     for attempt in range(2):
         try:
@@ -958,8 +974,7 @@ def list_schools(
                     .eq("org_id", user["org_id"])
                     .is_("restrict_access_to", "null")
                 )
-                if not include_deleted:
-                    q1_builder = q1_builder.eq("status", "active")
+                q1_builder = _scoped(q1_builder)
                 q1_rows = q1_builder.execute().data or []
                 if assigned_ids:
                     q1b_builder = (
@@ -968,8 +983,7 @@ def list_schools(
                         .eq("org_id", user["org_id"])
                         .in_("id", assigned_ids)
                     )
-                    if not include_deleted:
-                        q1b_builder = q1b_builder.eq("status", "active")
+                    q1b_builder = _scoped(q1b_builder)
                     q1_ids = {s["id"] for s in q1_rows}
                     q1_rows += [s for s in (q1b_builder.execute().data or []) if s["id"] not in q1_ids]
 
@@ -981,8 +995,7 @@ def list_schools(
                     .eq("org_id", user["org_id"])
                     .filter("restrict_access_to", "cs", json.dumps([user["id"]]))
                 )
-                if not include_deleted:
-                    q2_builder = q2_builder.eq("status", "active")
+                q2_builder = _scoped(q2_builder)
                 q2 = q2_builder.execute()
 
                 # Merge Q1 + Q2, deduplicate by ID, re-sort by name
@@ -997,8 +1010,7 @@ def list_schools(
                     .eq("org_id", user["org_id"])
                     .order("name")
                 )
-                if not include_deleted:
-                    all_builder = all_builder.eq("status", "active")
+                all_builder = _scoped(all_builder)
                 all_res = all_builder.execute()
                 schools = all_res.data or []
 
@@ -1297,6 +1309,11 @@ def create_school(
     school_activity.log_school_activity(
         db, school_id=new_school_id, org_id=user["org_id"], actor_id=user["id"],
         source=school_activity.client_surface(x_client_surface), action="created", after=new_school,
+    )
+    # Tie it to the national directory when its symbol is there (no school column changes).
+    school_directory.link_school_if_in_directory(
+        db, user["org_id"], new_school_id, body.symbol,
+        "import" if x_client_surface == "import" else "create", user["id"],
     )
     # Auto-assign advisor creators so subsequent account creation is authorized
     if user["role"] == "advisor":
@@ -6202,6 +6219,15 @@ def get_school(
         except Exception as exc:
             logger.warning("%s enrichment failed on get_school (non-fatal): %s", table_name, exc)
             school_data[f"advisors_{service_type}"] = []
+
+    # Whether the school is tied to the national directory (offers "החזר למאגר"). Non-fatal.
+    try:
+        school_data["directory_linked"] = bool(
+            db.table("school_directory_links").select("id").eq("school_id", school_id).execute().data
+        )
+    except Exception as exc:
+        logger.warning("directory link enrichment failed on get_school (non-fatal): %s", exc)
+        school_data["directory_linked"] = False
 
     return school_data
 

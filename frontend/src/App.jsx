@@ -41,6 +41,7 @@ import TaskOptOutPage from "./pages/TaskOptOutPage";
 import ProfilePage from "./pages/ProfilePage";
 import ConnectionsLimitPage from "./pages/ConnectionsLimitPage";
 import AddSchoolPage from "./pages/AddSchoolPage";
+import DirectoryPage from "./pages/DirectoryPage";
 import MeetingUploadPage from "./pages/MeetingUploadPage";
 import MeetingBookingPage from "./pages/MeetingBookingPage";
 
@@ -113,6 +114,7 @@ const router = createBrowserRouter([
       { path: "/admin", element: <AdminRoute><AdminPage /></AdminRoute> },
       { path: "/school/new", element: <AdminRoute><AddSchoolPage /></AdminRoute> },
       { path: "/notifications", element: <PrivateRoute><NotificationsPage /></PrivateRoute> },
+      { path: "/school-directory", element: <PrivateRoute><DirectoryPage /></PrivateRoute> },
       { path: "/profile", element: <PrivateRoute><ProfilePage /></PrivateRoute> },
       { path: "/connections-limit", element: <PrivateRoute><ConnectionsLimitPage /></PrivateRoute> },
       { path: "/super-admin", element: <PrivateRoute><SuperAdminPage /></PrivateRoute> },

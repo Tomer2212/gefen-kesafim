@@ -7,7 +7,7 @@ import { SLOT_LABELS } from "./meetings/meetingCoordinatorSlots";
 import { GEFEN_FILES_SLOT_LABELS } from "./meetings/gefenFilesResponsibleSlots";
 
 export const FIELD_LABEL = {
-  name: "שם מוסד", symbol: "סמל מוסד", city: "עיר", authority: "בעלות",
+  name: "שם מוסד", symbol: "סמל מוסד", city: "עיר", authority: "בעלות", status: "רשימת הלקוחות",
   stage: "חשבונות במערכת גפן", gefen_accounts: "חשבונות במערכת גפן", ministry_stage: "שלב חינוך", ministry_stage_other_text: "שלב חינוך - פירוט",
   finance_software: "תוכנת כספים", finance_software_other_text: "תוכנת כספים - פירוט",
   address: "כתובת", district: "מחוז", notes: "הערות", school_phone: "טלפון בית הספר",
@@ -115,6 +115,8 @@ const FIELD_FORMATTERS = {
   principal_day_off: formatWeekdays, secretary_day_off: formatWeekdays, finance_contact_day_off: formatWeekdays,
   principal_chativa_day_off: formatWeekdays, secretary_chativa_day_off: formatWeekdays, finance_contact_chativa_day_off: formatWeekdays,
   study_days: formatWeekdays,
+  // schools.status as logged by the directory's "הוסף לרשימת הלקוחות" / "החזר למאגר".
+  status: (val) => ({ active: "ברשימת הלקוחות", directory: "במאגר בלבד" }[val] || val || "—"),
   grade_levels: (val) => (Array.isArray(val) && val.length ? val.join(", ") : "—"),
   principal_same_person: formatBool, secretary_same_person: formatBool, finance_same_person: formatBool,
   restrict_access_to: (val) => (val == null ? "כולם" : `${val.length} יועצים נבחרו`),

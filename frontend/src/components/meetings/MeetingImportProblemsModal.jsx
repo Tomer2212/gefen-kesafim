@@ -294,7 +294,7 @@ function QuickAddSchoolForm({ row, orgUsers, academicYear, onCreated, onCancel }
         <div role="alert" className="bg-amber-50 border border-amber-200 rounded-lg p-2.5 space-y-1.5">
           <p className="text-xs text-amber-800">
             בית ספר עם סמל מוסד זה כבר קיים במערכת — <b>{conflict.existing_school_name}</b>
-            {conflict.existing_school_status === "pending_deletion" ? " (בסל מחזור)" : ""}.
+            {conflict.existing_school_status === "pending_deletion" ? " (בסל מחזור)" : conflict.existing_school_status === "directory" ? " (פתחו אותו בעבר ממאגר בתי הספר — בכרטיס שלו אפשר להוסיף אותו לרשימת הלקוחות)" : ""}.
           </p>
           <button type="button" onClick={() => onCreated(conflict.existing_school_id, conflict.existing_school_name)}
             className="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-amber-600 text-white hover:bg-amber-700">

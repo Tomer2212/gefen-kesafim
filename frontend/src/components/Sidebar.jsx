@@ -364,6 +364,16 @@ export default function Sidebar({ dark = false }) {
     load();
   }, []);
 
+  // "מאגר בתי ספר" is shown only to orgs where the superadmin enabled the directory.
+  const [directoryEnabled, setDirectoryEnabled] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    axios.get("/directory/enabled")
+      .then(res => { if (!cancelled) setDirectoryEnabled(!!res.data?.enabled); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
   useEffect(() => {
     async function fetchCount() {
       if (wakeRefreshRef.current) await wakeRefreshRef.current;
@@ -654,6 +664,12 @@ export default function Sidebar({ dark = false }) {
             icon={<Icon d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" d2="M13.73 21a2 2 0 0 1-3.46 0" />}
             label="התראות" active={is("/notifications")} onClick={() => navigate("/notifications")} badge={notifCount}
           />
+          {directoryEnabled && (
+            <NavItem dark={dark} collapsed={collapsed}
+              icon={<Icon d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V2H6.5A2.5 2.5 0 0 0 4 4.5v15z" d2="M9 7h7M9 11h5" />}
+              label="מאגר בתי ספר" active={is("/school-directory")} onClick={() => navigate("/school-directory")}
+            />
+          )}
           {(role === "owner" || role === "manager") && (
             <NavItem dark={dark} collapsed={collapsed}
               icon={<Icon d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" circle={[12, 12, 3]} />}

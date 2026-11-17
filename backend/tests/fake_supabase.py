@@ -82,6 +82,14 @@ class _Query:
         return all(f(row) for f in self.filters)
 
     def execute(self):
+        if self.op in ("insert", "upsert") and isinstance(self.payload, list):
+            # Bulk write = one row at a time (not atomic as a whole, unlike PostgREST).
+            out = []
+            for row in self.payload:
+                q = _Query(self.db, self.table)
+                q.op, q.payload, q.conflict = self.op, row, getattr(self, "conflict", [])
+                out.extend(q.execute().data)
+            return _Result(out)
         with self.db.lock:
             rows = self.db.tables.setdefault(self.table, [])
             if self.db.latency:
