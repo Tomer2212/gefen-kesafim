@@ -55,7 +55,9 @@ def main(apply: bool) -> None:
                     fill_rows.append({"id": a["id"], "covers": covers, "custom_label": a.get("custom_label") or ga.covers_label(covers) or None})
             if s["id"] not in with_year_value:
                 year_rows.append({"school_id": s["id"], "entries": [{"division_type": a["division_type"], "covers": ga.account_covers(a)} for a in ga.sort_accounts(accs)]})
-            if ga.derive_stage(accs) != (s.get("stage") or None):
+            # A school that already has a per-year list keeps its stage — the accounts editor
+            # derived it from that list (its catalog may hold removed, archived accounts).
+            if s["id"] not in with_year_value and ga.derive_stage(accs) != (s.get("stage") or None):
                 conflicts.append({
                     "school_id": s["id"], "name": s["name"], "status": s.get("status"), "stage": s.get("stage"),
                     "accounts": [ga.account_label(a) for a in ga.sort_accounts(accs)],
