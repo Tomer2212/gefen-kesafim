@@ -8,7 +8,8 @@ import { GEFEN_FILES_SLOT_LABELS } from "./meetings/gefenFilesResponsibleSlots";
 
 export const FIELD_LABEL = {
   name: "שם מוסד", symbol: "סמל מוסד", city: "עיר", authority: "בעלות",
-  stage: "שלב מוסד", finance_software: "תוכנת כספים", finance_software_other_text: "תוכנת כספים - פירוט",
+  stage: "חשבונות במערכת גפן", gefen_accounts: "חשבונות במערכת גפן", ministry_stage: "שלב חינוך", ministry_stage_other_text: "שלב חינוך - פירוט",
+  finance_software: "תוכנת כספים", finance_software_other_text: "תוכנת כספים - פירוט",
   address: "כתובת", district: "מחוז", notes: "הערות", school_phone: "טלפון בית הספר",
   education_authority: "רשות חינוך", sector: "מגזר", supervision: "פיקוח",
   grade_levels: "שכבות לימוד", study_days: "ימי לימוד", student_count: "מס' תלמידים",
@@ -46,9 +47,9 @@ export const FIELD_LABEL = {
 };
 
 export const VALUE_LABEL = {
-  // stage
-  yesodi: "יסודי", beinayim: "חטיבת ביניים", tikkon: "תיכון",
-  sheshshnati: "שש-שנתי", other: "אחר",
+  // stage ("חשבונות במערכת גפן"; ministry_stage values are already Hebrew)
+  yesodi: "חשבון אחד – יסודי", beinayim: 'חשבון אחד – חט"ב', tikkon: "חשבון אחד – עליונה",
+  sheshshnati: 'שני חשבונות – חט"ב + עליונה', other: "אחר",
   // finance_software / control_domains
   kesafim2000: "כספים 2000", payscool: "פייסקול", schoolcash: "סקולקאש",
   gefen: "גפן",
@@ -153,5 +154,7 @@ export function formatFieldValue(val, field, ctx) {
 }
 
 export function fieldLabel(field) {
+  // An update request for one year's Gefen accounts: 'gefen_accounts@<year>'.
+  if (field?.startsWith("gefen_accounts@")) return `חשבונות במערכת גפן (${field.slice("gefen_accounts@".length)})`;
   return FIELD_LABEL[field] || field;
 }

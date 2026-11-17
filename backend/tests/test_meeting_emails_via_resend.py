@@ -87,7 +87,7 @@ def harness(monkeypatch):
 
     sent = []
 
-    def fake_resend(to_email, subject, html, reply_to=None, attachments=None):
+    def fake_resend(to_email, subject, html, reply_to=None, attachments=None, **_k):
         sent.append({"to": to_email, "subject": subject, "reply_to": reply_to, "html": html})
 
     def no_smtp(*_a, **_k):

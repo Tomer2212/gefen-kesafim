@@ -117,7 +117,8 @@ export function SchoolPickerModal({ schools, onConfirm, onCancel, title = "בח�
   );
 }
 
-const STAGE_LABEL = { yesodi: "יסודי", beinayim: "חטיבת ביניים", tikkon: "תיכון", sheshshnati: "שש שנתי", other: "אחר" };
+// schools.stage ("חשבונות במערכת גפן")
+const STAGE_LABEL = { yesodi: "חשבון אחד – יסודי", beinayim: 'חשבון אחד – חט"ב', tikkon: "חשבון אחד – עליונה", sheshshnati: 'שני חשבונות – חט"ב + עליונה', other: "אחר" };
 
 function distinctValues(schools, field) {
   return [...new Set(schools.map(s => s[field]).filter(Boolean))].sort((a, b) => a.localeCompare(b, "he"));
@@ -187,10 +188,10 @@ export function SchoolMultiPickerModal({ selectedIds, onChange, onClose }) {
           className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 outline-none focus:border-blue-400 bg-white"
         />
         <div className="flex items-center gap-2 flex-wrap">
-          <label htmlFor="school-multi-picker-stage" className="sr-only">סינון לפי שלב מוסד</label>
+          <label htmlFor="school-multi-picker-stage" className="sr-only">סינון לפי חשבונות במערכת גפן</label>
           <select id="school-multi-picker-stage" value={stageFilter} onChange={e => setStageFilter(e.target.value)}
             className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white">
-            <option value="">כל שלב מוסד</option>
+            <option value="">כל סוגי החשבונות</option>
             {Object.keys(STAGE_LABEL).map(k => <option key={k} value={k}>{STAGE_LABEL[k]}</option>)}
           </select>
           <label htmlFor="school-multi-picker-city" className="sr-only">סינון לפי עיר</label>

@@ -30,7 +30,7 @@ def test_booking_request_email_resolves_reply_to_within_the_org(monkeypatch):
     sent = []
     monkeypatch.setattr(booking_logic, "get_admin_client", lambda: db)
     monkeypatch.setattr(booking_logic, "send_resend_email",
-                        lambda to, subject, html, reply_to=None: sent.append((to, reply_to)))
+                        lambda to, subject, html, reply_to=None, **_k: sent.append((to, reply_to)))
     booking_logic.send_booking_request_email("org", "adv", "school@example.com", "s", "<p/>")
     booking_logic.send_booking_request_email("org", "other", "school@example.com", "s", "<p/>")
     assert sent == [("school@example.com", "adv@example.com"), ("school@example.com", None)]

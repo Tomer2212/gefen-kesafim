@@ -57,6 +57,7 @@ _log = logging.getLogger(__name__)
 # field-conditions also need to know which table each field lives on.
 SCHOOL_FIELDS = {
     "name": "text", "symbol": "text", "city": "text", "authority": "text", "stage": "select",
+    "ministry_stage": "select", "ministry_stage_other_text": "text",
     "district": "select", "finance_software": "select", "finance_software_other_text": "text",
     "principal_name": "text", "principal_phone": "text", "principal_email": "text",
     "secretary_name": "text", "secretary_phone": "text", "secretary_email": "text",
@@ -74,6 +75,9 @@ SCHOOL_FIELDS = {
 # deliberately NOT exposed here — _eval_field_condition's eq/ne/gt/contains comparison model
 # isn't built for nested membership search inside them.
 STAGE_OPTIONS = ["yesodi", "beinayim", "tikkon", "sheshshnati", "other"]
+# schools.ministry_stage — descriptive only; the stored value IS the Hebrew string. Mirrors
+# frontend/src/constants/ministryStages.js's MINISTRY_STAGE_VALUES.
+MINISTRY_STAGE_OPTIONS = ["יסודי בלבד", 'חט"ב בלבד', "עליונה בלבד", 'יסודי וחט"ב', 'חט"ב + עליונה', "יסודי ועליונה", 'יסודי חט"ב ועליונה', "אחר"]
 FINANCE_SOFTWARE_OPTIONS = ["kesafim2000", "payscool", "schoolcash", "other"]
 MEETING_COORDINATOR_OPTIONS = ["principal", "secretary", "finance_contact"]
 # Matches SchoolPage.jsx's DISTRICT_OPTIONS — a closed list edited via <select> on the school
@@ -83,7 +87,7 @@ DISTRICT_OPTIONS = ["צפון", "דרום", "מרכז", "ירושלים", "תל-
 # Goals/control-letters are scoped per (school, division_type[, budget_name, academic_year]) —
 # not a flat per-school value — so they're separate condition types ("goal"/"control_letter"),
 # not entries in SCHOOL_FIELDS/YEAR_ADMIN_FIELDS. See module docstring.
-DIVISION_TYPE_OPTIONS = ["tikkon", "beinayim", "yesodi", "other"]
+DIVISION_TYPE_OPTIONS = ["tikkon", "beinayim", "yesodi", "combined", "other"]
 # Every raw budget_name in school_goals/check_metrics passes through
 # zihuy_core.normalize_budget_name, which maps to one of these 8 names (or leaves it unchanged
 # if nothing matches) — not a DB-enforced enum, but the practical universe of stored values.
@@ -129,7 +133,8 @@ ORDER_METHOD_OPTIONS = ["private", "authority", "district", "other"]
 # Hebrew display labels for every fixed-choice field's raw stored value, mirroring the label
 # maps already duplicated across DashboardPage.jsx/SchoolPage.jsx — centralized here so
 # field_options() can hand the frontend {value, label} pairs directly instead of raw values.
-STAGE_LABELS = {"yesodi": "יסודי", "beinayim": "חטיבת ביניים", "tikkon": "תיכון", "sheshshnati": "שש שנתי", "other": "אחר"}
+# schools.stage is shown as "חשבונות במערכת גפן" (how checks split by division).
+STAGE_LABELS = {"yesodi": "חשבון אחד – יסודי", "beinayim": 'חשבון אחד – חט"ב', "tikkon": "חשבון אחד – עליונה", "sheshshnati": 'שני חשבונות – חט"ב + עליונה', "other": "אחר"}
 FINANCE_SOFTWARE_LABELS = {"kesafim2000": "כספים 2000", "payscool": "פייסקול", "schoolcash": "סקולקאש", "other": "אחר"}
 MEETING_COORDINATOR_LABELS = {"principal": "מנהל/ת", "secretary": "מנהלנ/ית", "finance_contact": "אחראי/ת כספים"}
 SERVICE_TYPE_LABELS = {"gefen": "גפן", "current": "שוטף", "gefen_current": "גפן+שוטף", "district": "מחוז", "takuma": "תקומה"}
@@ -182,7 +187,8 @@ def opted_out_recipients(
 
 FIELD_LABELS = {
     "name": "שם בית ספר",
-    "symbol": "סמל מוסד", "city": "עיר", "authority": "בעלות", "stage": "שלב מוסד",
+    "symbol": "סמל מוסד", "city": "עיר", "authority": "בעלות", "stage": "חשבונות במערכת גפן",
+    "ministry_stage": "שלב חינוך", "ministry_stage_other_text": "שלב חינוך - טקסט חופשי (אחר)",
     "district": "מחוז", "finance_software": "תוכנת כספים",
     "finance_software_other_text": "תוכנת כספים - טקסט חופשי (אחר)",
     "principal_name": "שם מנהל/ת", "principal_phone": "טלפון מנהל/ת", "principal_email": "מייל מנהל/ת",
@@ -263,6 +269,7 @@ def field_options(org_id: str | None = None) -> dict:
     advisor_options = _fetch_org_advisor_options(org_id) if org_id else None
     school_options = {
         "stage": _labeled(STAGE_OPTIONS, STAGE_LABELS),
+        "ministry_stage": _labeled(MINISTRY_STAGE_OPTIONS, {}),
         "finance_software": _labeled(FINANCE_SOFTWARE_OPTIONS, FINANCE_SOFTWARE_LABELS),
         "meeting_coordinator": _labeled(MEETING_COORDINATOR_OPTIONS, MEETING_COORDINATOR_LABELS),
         "district": _labeled(DISTRICT_OPTIONS, {}),
@@ -336,7 +343,7 @@ def _fetch_schools_and_meetings(
             schools_query = (
                 db.table("schools")
                 .select(
-                    "id, name, symbol, city, authority, stage, district, finance_software, "
+                    "id, name, symbol, city, authority, stage, ministry_stage, ministry_stage_other_text, district, finance_software, "
                     "finance_software_other_text, "
                     "principal_name, principal_phone, principal_email, "
                     "secretary_name, secretary_phone, secretary_email, "

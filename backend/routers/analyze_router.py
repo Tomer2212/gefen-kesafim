@@ -35,6 +35,7 @@ from logic.excel_exporter import export
 from logic.pdf_exporter import export_pdf
 from logic.file_identifier import identify_file
 from plan_roster import extract_plan_roster
+import gefen_accounts
 from logic.gefen_processor import load_gefen, normalize_amount
 from logic.kesafim_processor import load_kesafim, _read_rows as _read_kesafim_rows
 from logic.payscool_processor import canonical_payscool_invoice, load_payscool
@@ -1835,6 +1836,12 @@ def _find_combo_for_budget(per_combo_results: dict, budget_name: str, division_t
     candidates = [c for c in per_combo_results.values() if c.get("budget") == budget_name]
     if not candidates:
         return None
+    if division_type == "combined" and len(candidates) > 1:
+        # One account spanning both divisions — its gaps are every stage's gaps of the budget.
+        return {
+            "in_finance_not_gefen": [r for c in candidates for r in c.get("in_finance_not_gefen", [])],
+            "in_gefen_not_finance": [r for c in candidates for r in c.get("in_gefen_not_finance", [])],
+        }
     for c in candidates:
         if _STAGE_TO_DIVISION_TYPE.get(c.get("stage")) == division_type:
             return c
@@ -1855,6 +1862,13 @@ def _compute_check_metrics_rows(school_id: str, gefen_account_id: str | None, ac
             division_results.append(("tikkon", tikkon))
         if beinayim:
             division_results.append(("beinayim", beinayim))
+        # A single-division result (a split sub-run) is saved under its own account's
+        # division_type — e.g. the non-elyona file of a יסודי + עליונה school is "yesodi".
+        if len(division_results) == 1 and db is not None and gefen_account_id:
+            acc = db.table("gefen_accounts").select("division_type").eq("id", gefen_account_id).execute().data or []
+            account_division = (acc[0] if acc else {}).get("division_type")
+            if account_division and account_division != division_results[0][0]:
+                division_results = [(account_division, division_results[0][1])]
     else:
         tikhnun = run.get("tikhnun")
         if tikhnun and isinstance(tikhnun, dict) and not tikhnun.get("error"):
@@ -1878,7 +1892,18 @@ def _compute_check_metrics_rows(school_id: str, gefen_account_id: str | None, ac
             if not division_type and school_stage != "yesodi":
                 run_division = (run.get("summary") or {}).get("division")
                 if run_division in ("tikkon", "beinayim"):
-                    division_type = run_division
+                    # With Gefen accounts the detected file division names the account it fits
+                    # (e.g. the non-elyona file of a יסודי + עליונה school is "yesodi"); when
+                    # two accounts fit it equally, the check can't be attributed — skip it.
+                    school_accs = (
+                        gefen_accounts.year_view(db, school_id, academic_year)["active"]
+                        if (db is not None and school_id) else []
+                    )
+                    if school_accs:
+                        fit = gefen_accounts.resolve_bucket_account(school_accs, run_division, None)
+                        division_type = fit["division_type"] if fit else None
+                    else:
+                        division_type = run_division
 
             # Last resort: only safe when the school has at most one real gefen_account — with
             # 2+ accounts we can't tell which division an orphaned check belongs to, so we skip
@@ -2903,32 +2928,31 @@ def _get_finance_col_map(finance_type: str) -> list:
 
 
 def _get_school_stage(gefen_account_id: str | None) -> str | None:
-    """Fetch division_type from gefen_accounts for authoritative stage resolution."""
+    """The checked account's division_type — or "yesodi" for any account whose non-elyona part
+    is יסודי alone (e.g. יסודי + עליונה), since its only effect downstream is relabeling the
+    identifier's "חטיבת ביניים" rows as יסודי."""
     if not gefen_account_id:
         return None
     try:
         from supabase_client import get_admin_client as _gac
-        acc = _gac().table("gefen_accounts").select("division_type").eq("id", gefen_account_id).single().execute()
-        return (acc.data or {}).get("division_type")
+        acc = _gac().table("gefen_accounts").select("division_type, covers").eq("id", gefen_account_id).single().execute()
+        row = acc.data or {}
+        return "yesodi" if gefen_accounts.rewrites_to_yesodi(row) else row.get("division_type")
     except Exception:
         return None
 
 
-def _is_sheshshnati_school(school_id: str | None) -> bool:
-    """True when the school's own stage is 'sheshshnati' — mirrors the frontend's
-    isSheshsSnati flag exactly, so the pre-flight division check in _collect_file_issues
-    only ever engages for the same schools where the frontend's unified
-    YearMismatchModal division selector applies, and never for the unrelated
-    StageMismatchModal flow (single-division schools), which must stay untouched."""
+def _school_accounts(school_id: str | None, academic_year: str | None) -> list[dict]:
+    """The school's active Gefen accounts of the check's academic year (with catalog ids).
+    Non-fatal — [] on failure (callers then keep the legacy, account-less behavior)."""
     if not school_id:
-        return False
+        return []
     try:
-        db = get_admin_client()
-        row = db.table("schools").select("stage").eq("id", school_id).single().execute()
-        return (row.data or {}).get("stage") == "sheshshnati"
+        view = gefen_accounts.year_view(get_admin_client(), school_id, academic_year or DEFAULT_ACADEMIC_YEAR)
+        return view["active"]
     except Exception as exc:
-        logger.warning("_is_sheshshnati_school failed for %s: %s", school_id, exc)
-        return False
+        logger.warning("_school_accounts failed for %s: %s", school_id, exc)
+        return []
 
 
 def _resolve_gefen_account_id(school_id: str | None, division_type: str) -> str | None:
@@ -4011,11 +4035,22 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
         # ── Determine requested_division (six-year/sheshshnati schools only) ──────
         # Meaningful only when the school has both תיכון and חטיבת ביניים divisions
         # AND a gefen_account_id was supplied (reflects the tab the advisor was on).
+        # Any school with 2+ Gefen accounts: the tab's account says which file division
+        # (tikkon / beinayim) it expects; a combined account accepts either.
         requested_division: str | None = None
-        if school_id and gefen_account_id and _is_sheshshnati_school(school_id):
-            _requested_stage = _get_school_stage(gefen_account_id)
-            if _requested_stage in ("tikkon", "beinayim"):
-                requested_division = _requested_stage
+        school_accounts = _school_accounts(school_id, academic_year or DEFAULT_ACADEMIC_YEAR) if school_id else []
+        # An account removed for this year is an archive tab — read-only, no new checks on it.
+        active_ids = {a["id"] for a in school_accounts if a.get("id")}
+        if gefen_account_id and active_ids and gefen_account_id not in active_ids:
+            _update_run(run_id, {
+                "status": "error",
+                "error_code": "inactive_account",
+                "error": "חשבון גפן זה אינו פעיל בשנת הלימודים שנבחרה (לשונית ארכיון) — לא ניתן לבצע בו בדיקה חדשה.",
+            })
+            return
+        tab_account = next((a for a in school_accounts if a["id"] == gefen_account_id), None)
+        if len(school_accounts) >= 2 and tab_account:
+            requested_division = gefen_accounts.requested_bucket(tab_account)
 
         # ── Verify tikhnun/gefen/finance file(s) belong to the active academic year
         #     AND (for six-year schools) the active division/tab ──────────────────
@@ -4106,6 +4141,28 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
                     "error": (
                         "לא ניתן לקבוע בבירור לאיזו חטיבה (תיכון / חטיבת ביניים) משתייך כל אחד "
                         "מהקבצים שהועלו. אנא בדוק את הקבצים ונסה שוב."
+                    ),
+                })
+                return
+
+        # Which account each of the two files belongs to. Without accounts (schools saved before
+        # every school had them) the split keeps its original account lookup by division.
+        split_accounts: dict[str, dict] = {}
+        if split_divisions is not None and school_accounts:
+            for d in split_divisions:
+                acc = gefen_accounts.resolve_bucket_account(school_accounts, d, gefen_account_id)
+                if acc:
+                    split_accounts[d] = acc
+            if len(split_accounts) == 2 and split_accounts["tikkon"]["id"] == split_accounts["beinayim"]["id"]:
+                # One combined account holds both files — a single check, not two.
+                split_divisions = None
+            elif len(split_accounts) != 2:
+                _update_run(run_id, {
+                    "status": "error",
+                    "error_code": "gefen_division_ambiguous",
+                    "error": (
+                        "לבית הספר כמה חשבונות גפן, ולא ניתן לדעת לאיזה חשבון שייך כל אחד מהקבצים. "
+                        "אנא העלו כל קובץ גפן מהלשונית של החשבון שלו."
                     ),
                 })
                 return
@@ -4209,14 +4266,19 @@ def _process(run_id: str, paths: list[Path], run_dir: Path, user_id: str = "", s
                     tikhnun_tikkon_result if division_type == "tikkon" else None,
                     tikhnun_beinayim_result if division_type == "beinayim" else None,
                     rc_t if division_type == "tikkon" else rc_b,
-                    school_stage, stage_override, stored_file_paths, tikhnun_paths, run_dir, storage_run_id,
+                    ("yesodi" if gefen_accounts.rewrites_to_yesodi(split_accounts[division_type]) else split_accounts[division_type]["division_type"])
+                    if division_type in split_accounts else school_stage,
+                    stage_override, stored_file_paths, tikhnun_paths, run_dir, storage_run_id,
                     academic_year=academic_year,
                 )
                 # Shared key (the original, un-suffixed run_id) so the frontend can find this
                 # row's sibling division from the same upload batch and switch between them
                 # when the advisor toggles the תיכון/חטיבת ביניים tab inside an open check.
                 run_data_div["summary"]["split_batch_id"] = run_id
-                resolved_account_id = _resolve_gefen_account_id(school_id, division_type) if school_id else None
+                resolved_account_id = (
+                    split_accounts[division_type]["id"] if division_type in split_accounts
+                    else (_resolve_gefen_account_id(school_id, division_type) if school_id else None)
+                )
                 run_data_div["_school_ctx"] = {
                     "user_id": user_id, "school_id": school_id,
                     "gefen_account_id": resolved_account_id,

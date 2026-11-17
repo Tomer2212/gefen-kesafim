@@ -53,6 +53,8 @@ from meeting_labels import (
     MEETING_STATUS_VALUES,
     MEETING_TYPE_VALUES,
     NORMALIZERS,
+    calendar_status_label,
+    is_cancelled_like,
     normalize_meeting_service_type,
     normalize_meeting_status,
     normalize_meeting_type,
@@ -62,6 +64,7 @@ from meeting_upload_logic import build_upload_checklist, get_or_create_upload_to
 import booking_requests
 import meeting_activity
 import school_activity
+import gefen_accounts
 import slot_policy
 from supabase_client import get_admin_client, reset_admin_client
 
@@ -138,6 +141,7 @@ DIVISION_LABELS = {
     "tikkon": "חטיבה עליונה",
     "beinayim": "חטיבת ביניים",
     "yesodi": "יסודי",
+    "combined": "חשבון משולב",
     "other": "אחר",
 }
 
@@ -205,6 +209,8 @@ class SchoolIn(BaseModel):
     city: str | None = None
     authority: str | None = None
     stage: str | None = None
+    ministry_stage: str | None = None             # descriptive only (Ministry of Education wording) — never drives logic; `stage` does
+    ministry_stage_other_text: str | None = None  # free text, only meaningful when ministry_stage = 'אחר'
     finance_software: str | None = None
     finance_software_other_text: str | None = None
     principal_name: str | None = None
@@ -319,6 +325,20 @@ class GefenAccountIn(BaseModel):
     custom_label: str | None = None
     finance_software: str | None = None
     tmura_model: bool | None = None
+
+
+class GefenAccountSpec(BaseModel):
+    id: str | None = None          # informational — accounts are matched by division_type
+    covers: list[str]              # grade layers: yesodi / chativa / elyona
+    finance_software: str | None = None
+    tmura_model: bool | None = None
+
+
+class GefenAccountsIn(BaseModel):
+    accounts: list[GefenAccountSpec]
+    # Removing an account (or changing its kind) needs a manager's explicit confirmation —
+    # its checks of the year then show as a read-only archive tab.
+    confirm_removal: bool = False
 
 
 class GoalStatusIn(BaseModel):
@@ -995,6 +1015,14 @@ def list_schools(
     if lite:
         return schools
 
+    # Each school's Gefen accounts of the requested year (dashboard rows, admin column).
+    try:
+        year_accounts = gefen_accounts.resolve_year_accounts_bulk(db, schools, academic_year)
+        for s in schools:
+            s["year_gefen_accounts"] = year_accounts.get(s["id"], [])
+    except Exception as exc:
+        logger.warning("year gefen accounts enrichment failed (non-fatal): %s", exc)
+
     # Enrich Q3 (profiles) and Q4 (meetings stats) sequentially — safer with 3s timeout
     # db is the singleton already acquired inside the retry loop above — still valid.
     all_advisor_ids = list({
@@ -1276,6 +1304,15 @@ def create_school(
             db.table("advisor_schools").upsert({"advisor_id": user["id"], "school_id": new_school_id}).execute()
         except Exception as e:
             logger.warning("Failed to auto-assign advisor to new school (non-fatal): %s", e)
+    # A caller that sends only the legacy `stage` (Excel import, meeting-import quick add) gets
+    # the accounts that stage implies; the school-card surfaces then PUT their own list.
+    if gefen_accounts.STAGE_ACCOUNTS.get(body.stage or ""):
+        try:
+            _replace_gefen_accounts(db, new_school_id, DEFAULT_ACADEMIC_YEAR, [
+                {"covers": c} for c in gefen_accounts.STAGE_ACCOUNTS[body.stage]
+            ])
+        except Exception as e:
+            logger.warning("Failed to create gefen accounts for new school (non-fatal): %s", e)
     # Notify owners (and managers when advisor creates) about the new school
     try:
         if user["role"] in ("advisor", "manager"):
@@ -1319,7 +1356,7 @@ def bulk_update_school_field(
     identity fields like symbol/name — as defense in depth beyond the frontend's own
     restrictions."""
     _require_manager(user)
-    allowed_bulk_fields = {"finance_software", "finance_software_other_text", "education_authority", "sector"}
+    allowed_bulk_fields = {"finance_software", "finance_software_other_text", "education_authority", "sector", "ministry_stage", "ministry_stage_other_text"}
     if body.field not in allowed_bulk_fields:
         raise HTTPException(status_code=400, detail="שדה לא תקין לעריכה מרובה")
     if not body.items:
@@ -1354,6 +1391,8 @@ def bulk_update_school_field(
                 if body.field == "finance_software" and value != "other":
                     # The free-text name only belongs to "other" — drop it on any other pick.
                     patch["finance_software_other_text"] = None
+                if body.field == "ministry_stage" and value != "אחר":
+                    patch["ministry_stage_other_text"] = None
                 res = (
                     db.table("schools").update(patch)
                     .eq("org_id", user["org_id"]).in_("id", ids)
@@ -1407,6 +1446,9 @@ def update_school(
     activity_before = school_activity.fetch_school(db, school_id) if old_school.data else None
 
     update_data = body.model_dump(exclude_none=True)
+    # schools.stage mirrors the Gefen accounts (PUT /{school_id}/accounts) — a tab loaded before
+    # the accounts editor existed may still send it; dropping it keeps the mirror consistent.
+    update_data.pop("stage", None)
     # Allow explicitly clearing restrict_access_to (null = כולם)
     if "restrict_access_to" in body.model_fields_set and body.restrict_access_to is None:
         update_data["restrict_access_to"] = None
@@ -1740,6 +1782,17 @@ def list_year_admin_data(
             )
     except Exception as exc:
         logger.warning("list_year_admin_data inheritance merge failed (non-fatal): %s", exc)
+
+    # "חשבונות במערכת גפן" of this year for every school of the org (inherited / fallback
+    # resolved) — the admin table's column follows its year selector. Non-fatal.
+    try:
+        org_schools = _fetch_all_rows(
+            db.table("schools").select("id, stage").eq("org_id", user["org_id"]), order_col="id",
+        ) or []
+        for sid, entries in gefen_accounts.resolve_year_accounts_bulk(db, org_schools, academic_year).items():
+            result.setdefault(sid, {"school_id": sid, "academic_year": academic_year})["resolved_gefen_accounts"] = entries
+    except Exception as exc:
+        logger.warning("list_year_admin_data gefen accounts enrichment failed (non-fatal): %s", exc)
 
     return result
 
@@ -2396,6 +2449,8 @@ def create_account(
     body: GefenAccountIn,
     user: Annotated[dict, Depends(get_current_user)],
 ):
+    """Legacy single-account add (browser tabs loaded before the accounts editor existed) —
+    adds the account to the current academic year's list."""
     if user["role"] not in ("owner", "manager", "advisor"):
         raise HTTPException(status_code=403, detail="אין הרשאה לפעולה זו")
     if body.division_type not in DIVISION_LABELS:
@@ -2410,12 +2465,18 @@ def create_account(
     school_check = db.table("schools").select("id").eq("id", school_id).eq("org_id", user["org_id"]).execute()
     if not school_check.data:
         raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
-    row = (
-        db.table("gefen_accounts")
-        .insert({"school_id": school_id, **body.model_dump(exclude_none=True)})
-        .execute()
-    )
-    return row.data[0]
+    current = gefen_accounts.resolve_year_accounts(db, school_id, DEFAULT_ACADEMIC_YEAR)
+    specs = [{"covers": a["covers"]} for a in current if a["division_type"] != body.division_type]
+    specs.append({
+        "covers": gefen_accounts.account_covers({"division_type": body.division_type}),
+        "finance_software": body.finance_software, "tmura_model": body.tmura_model,
+    })
+    try:
+        _replace_gefen_accounts(db, school_id, DEFAULT_ACADEMIC_YEAR, specs, allow_removal=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    rows = db.table("gefen_accounts").select("*").eq("school_id", school_id).eq("division_type", body.division_type).execute().data
+    return rows[0] if rows else {}
 
 
 @router.put("/{school_id}/accounts/{account_id}")
@@ -2449,13 +2510,176 @@ def delete_account(
     account_id: str,
     user: Annotated[dict, Depends(get_current_user)],
 ):
+    """Legacy single-account removal (manager+) — removes the account from the current
+    academic year's list; its catalog row (and checks) stay, as an archive."""
     _require_manager(user)
     db = get_admin_client()
     school_check = db.table("schools").select("id").eq("id", school_id).eq("org_id", user["org_id"]).execute()
     if not school_check.data:
         raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
-    db.table("gefen_accounts").delete().eq("id", account_id).eq("school_id", school_id).execute()
+    row = db.table("gefen_accounts").select("division_type").eq("id", account_id).eq("school_id", school_id).execute().data
+    if row:
+        current = gefen_accounts.resolve_year_accounts(db, school_id, DEFAULT_ACADEMIC_YEAR)
+        specs = [{"covers": a["covers"]} for a in current if a["division_type"] != row[0]["division_type"]]
+        _replace_gefen_accounts(db, school_id, DEFAULT_ACADEMIC_YEAR, specs, allow_removal=True)
     return {"ok": True}
+
+
+# Update-request key for one year's Gefen accounts, e.g. 'gefen_accounts@תשפ"ז'.
+GEFEN_ACCOUNTS_REQUEST_PREFIX = "gefen_accounts@"
+
+
+class GefenAccountsRemovalNeedsConfirmation(Exception):
+    """The new list drops (or changes the kind of) accounts the year had."""
+
+    def __init__(self, removed: list[dict]):
+        super().__init__("confirm_removal")
+        self.removed = removed
+
+
+def _year_explicit_value(db, school_id: str, academic_year: str):
+    rows = (
+        db.table("school_year_admin_data").select("year_gefen_accounts")
+        .eq("school_id", school_id).eq("academic_year", academic_year).execute()
+    ).data or []
+    return (rows[0] if rows else {}).get("year_gefen_accounts")
+
+
+def _write_year_accounts(db, school_id: str, academic_year: str, entries: list[dict]) -> None:
+    db.table("school_year_admin_data").upsert(
+        {"school_id": school_id, "academic_year": academic_year,
+         "year_gefen_accounts": [{"division_type": e["division_type"], "covers": e["covers"]} for e in entries]},
+        on_conflict="school_id,academic_year",
+    ).execute()
+
+
+def _replace_gefen_accounts(db, school_id: str, academic_year: str, specs: list[dict], allow_removal: bool = False) -> dict:
+    """Sets the school's Gefen accounts for `academic_year` to `specs` ({covers,
+    finance_software?, tmura_model?}). Dropping an account the year had (or changing its kind)
+    raises GefenAccountsRemovalNeedsConfirmation unless `allow_removal` — the caller decides
+    who may confirm. Catalog rows are created as needed and never deleted, so a removed
+    account's checks stay visible as an archive tab and re-adding it revives the tab. Later
+    years that inherit this year's list are frozen to their current value first, so a past
+    year's edit never leaks forward. Re-derives schools.stage from the current year."""
+    error = gefen_accounts.validate_covers_list([sp.get("covers") for sp in specs])
+    if error:
+        raise ValueError(error)
+    old = gefen_accounts.resolve_year_accounts(db, school_id, academic_year)
+    new = gefen_accounts.sort_accounts([
+        {"division_type": gefen_accounts.division_type_for(sp["covers"]), "covers": gefen_accounts.normalize_covers(sp["covers"]), "spec": sp}
+        for sp in specs
+    ])
+    new_types = {e["division_type"] for e in new}
+    removed = [e for e in old if e["division_type"] not in new_types]
+    if removed and not allow_removal:
+        view = gefen_accounts.year_view(db, school_id, academic_year)
+        counts = {a["division_type"]: a["checks_count"] for a in view["active"]}
+        raise GefenAccountsRemovalNeedsConfirmation([
+            {"label": gefen_accounts.covers_label(e["covers"]), "checks_count": counts.get(e["division_type"], 0)}
+            for e in removed
+        ])
+
+    for later in gefen_accounts.years_after(academic_year):
+        if _year_explicit_value(db, school_id, later) is None:
+            _write_year_accounts(db, school_id, later, gefen_accounts.resolve_year_accounts(db, school_id, later))
+    # No earlier year has a value of its own (the school's lists still come from its catalog /
+    # stage): pin the earliest year to that, or it would follow the catalog rows added below.
+    earlier = gefen_accounts._years_up_to(academic_year)[:-1]
+    if earlier and all(_year_explicit_value(db, school_id, y) is None for y in earlier):
+        _write_year_accounts(db, school_id, earlier[0], gefen_accounts.resolve_year_accounts(db, school_id, earlier[0]))
+
+    catalog = {a["division_type"]: a for a in gefen_accounts.fetch_accounts(db, school_id)}
+    for e in new:
+        sp = e["spec"]
+        row = {"covers": e["covers"], "custom_label": gefen_accounts.covers_label(e["covers"])}
+        for k in ("finance_software", "tmura_model"):
+            if sp.get(k) is not None:
+                row[k] = sp[k]
+        if e["division_type"] in catalog:
+            db.table("gefen_accounts").update(row).eq("id", catalog[e["division_type"]]["id"]).execute()
+        else:
+            db.table("gefen_accounts").insert({"school_id": school_id, "division_type": e["division_type"], **row}).execute()
+    _write_year_accounts(db, school_id, academic_year, new)
+
+    current_year = gefen_accounts.resolve_year_accounts(db, school_id, DEFAULT_ACADEMIC_YEAR)
+    db.table("schools").update({"stage": gefen_accounts.derive_stage(current_year)}).eq("id", school_id).execute()
+    return {"before": old, "after": [{"division_type": e["division_type"], "covers": e["covers"]} for e in new]}
+
+
+def _require_accounts_editor(db, user: dict, school_id: str) -> None:
+    if user["role"] in ("owner", "manager"):
+        return
+    if not (_check_permission(db, user, "can_add_school") or _check_permission(db, user, "can_edit_school_directly")):
+        raise HTTPException(status_code=403, detail="אין הרשאה לפעולה זו")
+    assigned = db.table("advisor_schools").select("school_id").eq("advisor_id", user["id"]).eq("school_id", school_id).execute()
+    if not assigned.data:
+        raise HTTPException(status_code=403, detail="אין גישה לבית ספר זה")
+
+
+@router.get("/{school_id}/gefen-accounts")
+def get_year_gefen_accounts(
+    school_id: str,
+    user: Annotated[dict, Depends(get_current_user)],
+    academic_year: str = DEFAULT_ACADEMIC_YEAR,
+):
+    """The school's Gefen accounts for one academic year: {active, archived} — archived =
+    accounts not active this year that have checks of this year (read-only tabs)."""
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            _require_school_in_org(db, user, school_id)
+            return gefen_accounts.year_view(db, school_id, academic_year)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("get_year_gefen_accounts attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("get_year_gefen_accounts failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+
+@router.put("/{school_id}/accounts")
+def replace_accounts(
+    school_id: str,
+    body: GefenAccountsIn,
+    user: Annotated[dict, Depends(get_current_user)],
+    academic_year: str = DEFAULT_ACADEMIC_YEAR,
+    x_client_surface: Annotated[str | None, Header()] = None,
+):
+    """"חשבונות במערכת גפן" of one academic year — replaces the year's whole list (0-3).
+    Removing an account: an advisor gets 403 needs_manager (the card then offers an update
+    request); a manager without confirm_removal gets 409 confirm_removal with the accounts
+    and their check counts, for the confirmation dialog."""
+    db = get_admin_client()
+    _require_accounts_editor(db, user, school_id)
+    _require_school_in_org(db, user, school_id)
+    is_manager = user["role"] in ("owner", "manager")
+    try:
+        result = _replace_gefen_accounts(
+            db, school_id, academic_year, [a.model_dump() for a in body.accounts],
+            allow_removal=is_manager and body.confirm_removal,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except GefenAccountsRemovalNeedsConfirmation as exc:
+        if not is_manager:
+            raise HTTPException(status_code=403, detail={
+                "code": "needs_manager", "removed": exc.removed,
+                "message": "הסרת חשבון גפן דורשת אישור של מנהל",
+            })
+        raise HTTPException(status_code=409, detail={"code": "confirm_removal", "removed": exc.removed})
+    school_activity.log_school_activity(
+        db, school_id=school_id, org_id=user["org_id"], actor_id=user["id"],
+        source=school_activity.client_surface(x_client_surface), action="updated",
+        academic_year=academic_year,
+        before={"gefen_accounts": [gefen_accounts.covers_label(e["covers"]) for e in result["before"]]},
+        after={"gefen_accounts": [gefen_accounts.covers_label(e["covers"]) for e in result["after"]]},
+        fields=("gefen_accounts",),
+    )
+    return gefen_accounts.year_view(db, school_id, academic_year)
 
 
 # ---------------------------------------------------------------------------
@@ -2633,7 +2857,7 @@ def set_goal_status(
 # written only when a status/note is saved.
 # ---------------------------------------------------------------------------
 
-_DIVISION_ORDER = {"general": -1, "yesodi": 0, "beinayim": 1, "tikkon": 2, "other": 3}
+_DIVISION_ORDER = {"general": -1, "yesodi": 0, "beinayim": 1, "combined": 2, "tikkon": 3, "other": 4}
 
 GEFEN_DEFAULT_BUDGET = "גפן"
 PLG_BUDGET = 'פל"ג'  # normalize_budget_name()'s name for the budget that replaces גפן in some schools
@@ -2644,11 +2868,15 @@ _STAGE_GEFEN_DIVISIONS = {
 }
 
 
-def _stage_gefen_divisions(stage: str | None) -> list[str]:
+def _stage_gefen_divisions(stage: str | None, accounts: list[dict] | None = None) -> list[str]:
+    """The school's divisions: one per Gefen account; a school with no account yet (saved
+    before accounts were kept for every school) falls back to its stage."""
+    if accounts:
+        return [a["division_type"] for a in gefen_accounts.sort_accounts(accounts)]
     return _STAGE_GEFEN_DIVISIONS.get(stage or "", [GENERAL_DIVISION])
 
 
-def _default_gefen_divisions(stage: str | None, check_combos: set) -> list[str]:
+def _default_gefen_divisions(stage: str | None, check_combos: set, accounts: list[dict] | None = None) -> list[str]:
     """Divisions that get a default "גפן" closure section — the stage's divisions, minus any
     whose checks show פל"ג instead of גפן (in that division, or anywhere in the school when
     no check of the year found גפן at all). Mirrored by defaultGefenDivisions() in
@@ -2663,7 +2891,7 @@ def _default_gefen_divisions(stage: str | None, check_combos: set) -> list[str]:
         budgets = budgets_by_division.get(division_type, set())
         return PLG_BUDGET in budgets and GEFEN_DEFAULT_BUDGET not in budgets
 
-    return [d for d in _stage_gefen_divisions(stage) if not (school_is_plg or is_plg(d))]
+    return [d for d in _stage_gefen_divisions(stage, accounts) if not (school_is_plg or is_plg(d))]
 
 
 @router.get("/{school_id}/gefen-closures")
@@ -2693,17 +2921,16 @@ def list_gefen_closures(
                 db.table("schools").select("stage").eq("id", school_id).execute().data
             ) or []
             stage = school_rows[0].get("stage") if school_rows else None
-            stage_divisions = _stage_gefen_divisions(stage)
-            default_divisions = _default_gefen_divisions(stage, check_combos)
-
-            accounts = (
-                db.table("gefen_accounts")
-                .select("division_type, custom_label")
-                .eq("school_id", school_id)
-                .execute()
-                .data
-            ) or []
-            label_by_division = {a["division_type"]: a.get("custom_label") or DIVISION_LABELS.get(a["division_type"], a["division_type"]) for a in accounts}
+            # The year's Gefen accounts decide the default sections; labels also cover accounts
+            # not active this year (a saved section of a removed account keeps its name).
+            accounts = gefen_accounts.resolve_year_accounts(db, school_id, academic_year, stage)
+            catalog = gefen_accounts.fetch_accounts(db, school_id)
+            stage_divisions = _stage_gefen_divisions(stage, accounts)
+            default_divisions = _default_gefen_divisions(stage, check_combos, accounts)
+            label_by_division = {
+                a["division_type"]: gefen_accounts.account_label(a) or DIVISION_LABELS.get(a["division_type"], a["division_type"])
+                for a in [*catalog, *accounts]
+            }
 
             closure_rows = (
                 db.table("gefen_year_closures")
@@ -3791,6 +4018,14 @@ def submit_update_request(
             snap = db.table("schools").select("*").eq("id", school_id).execute().data
             if snap:
                 original_values = {k: snap[0].get(k) for k in body.proposed_changes if k != "_action"}
+                # "gefen_accounts@<year>": the year's accounts (labels) before the request.
+                for k in body.proposed_changes:
+                    if k.startswith(GEFEN_ACCOUNTS_REQUEST_PREFIX):
+                        year = k[len(GEFEN_ACCOUNTS_REQUEST_PREFIX):]
+                        original_values[k] = [
+                            gefen_accounts.covers_label(e["covers"])
+                            for e in gefen_accounts.resolve_year_accounts(db, school_id, year, snap[0].get("stage"))
+                        ]
         except Exception as exc:
             logger.warning("update request original_values snapshot failed (non-fatal): %s", exc)
     row = db.table("school_update_requests").insert({
@@ -3952,6 +4187,20 @@ def review_update_request(
             # Partial approval: if approved_fields is specified, only apply those fields
             if body.approved_fields is not None:
                 changes = {k: v for k, v in changes.items() if k in body.approved_fields}
+            changes.pop("stage", None)  # derived from the Gefen accounts — see update_school
+            # "gefen_accounts@<year>" (a list of account labels): approving applies the year's
+            # list — the approver is a manager, so removals are confirmed by the approval itself.
+            for key in [k for k in changes if k.startswith(GEFEN_ACCOUNTS_REQUEST_PREFIX)]:
+                labels = changes.pop(key) or []
+                year = key[len(GEFEN_ACCOUNTS_REQUEST_PREFIX):]
+                try:
+                    _replace_gefen_accounts(
+                        db, req["school_id"], year,
+                        [{"covers": gefen_accounts.covers_from_label(lbl)} for lbl in labels],
+                        allow_removal=True,
+                    )
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc))
             if "add_advisor_to_school" in changes:
                 advisor_id = changes.pop("add_advisor_to_school")
                 db.table("advisor_schools").upsert({"advisor_id": advisor_id, "school_id": req["school_id"]}).execute()
@@ -5390,7 +5639,8 @@ def send_due_reminders(request: Request, school_id: str | None = None):
                         message_subject, body_html = f"בקשת קבצים לפגישה {when_bet}", html
                         tracked_html, open_token = add_open_pixel(html)
                         try:
-                            send_resend_email(email_addr, message_subject, tracked_html, reply_to=reply_to)
+                            send_resend_email(email_addr, message_subject, tracked_html, reply_to=reply_to,
+                                              org_id=school.get("org_id"), kind="upload_request")
                             sent += 1
                         except Exception as email_exc:
                             status, error = "failed", str(email_exc)
@@ -5418,7 +5668,8 @@ def send_due_reminders(request: Request, school_id: str | None = None):
                     message_subject, body_html = subject, html
                     tracked_html, open_token = add_open_pixel(html)
                     try:
-                        send_resend_email(email_addr, subject, tracked_html, reply_to=reply_to)
+                        send_resend_email(email_addr, subject, tracked_html, reply_to=reply_to,
+                                          org_id=school.get("org_id"), kind="reminder")
                         sent += 1
                     except Exception as email_exc:
                         status, error = "failed", str(email_exc)
@@ -10817,12 +11068,12 @@ def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annot
                 existing = db.table("meetings").select("calendar_sync").eq("id", meeting_id).execute()
                 previous_sync = (existing.data[0].get("calendar_sync") or {}) if existing.data else {}
                 subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"), meeting.get("meeting_service_type"))
-                is_cancelled_like = meeting.get("status") in ("cancelled", "postponed")
-                if is_cancelled_like:
-                    subject = f"[{MEETING_STATUS_LABELS.get(meeting['status'], 'בוטלה')}] {subject}"
+                cancelled_like = is_cancelled_like(meeting.get("status"))
+                if cancelled_like:
+                    subject = f"[{calendar_status_label(meeting['status'])}] {subject}"
                 sync_map = graph_client.sync_meeting_update(
                     db, user["org_id"], {**meeting, "id": meeting_id}, previous_sync, subject,
-                    show_as=("free" if is_cancelled_like else "busy"), clear_attendees=is_cancelled_like,
+                    show_as=("free" if cancelled_like else "busy"), clear_attendees=cancelled_like,
                 )
                 graph_client.persist_calendar_sync(db, meeting_id, sync_map)
                 meeting["calendar_sync"] = sync_map
@@ -10863,12 +11114,12 @@ def _apply_meeting_patch(db, org_id: str, school_id: str, meeting_id: str, patch
                 if meeting:
                     previous_sync = meeting.get("calendar_sync") or {}
                     subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"), meeting.get("meeting_service_type"))
-                    is_cancelled_like = meeting.get("status") in ("cancelled", "postponed")
-                    if is_cancelled_like:
-                        subject = f"[{MEETING_STATUS_LABELS.get(meeting['status'], 'בוטלה')}] {subject}"
+                    cancelled_like = is_cancelled_like(meeting.get("status"))
+                    if cancelled_like:
+                        subject = f"[{calendar_status_label(meeting['status'])}] {subject}"
                     sync_map = graph_client.sync_meeting_update(
                         db, org_id, meeting, previous_sync, subject,
-                        show_as=("free" if is_cancelled_like else "busy"), clear_attendees=is_cancelled_like,
+                        show_as=("free" if cancelled_like else "busy"), clear_attendees=cancelled_like,
                     )
                     graph_client.persist_calendar_sync(db, meeting_id, sync_map)
     except Exception as exc:
@@ -11945,6 +12196,64 @@ def set_meeting_automations(body: MeetingAutomationsIn, user: Annotated[dict, De
         return {"ok": True}
     db.table("organizations").update(patch).eq("id", user["org_id"]).execute()
     return {"ok": True}
+
+
+# "בדיקת ביטולי פגישות" — daily alerts on meetings still "בוטלה" (cancel_review_alerts.py).
+# Owner only, off by default; recipients are any users of the owner's own org.
+
+@router.get("/meetings/cancel-review-alerts")
+def get_cancel_review_alerts(user: Annotated[dict, Depends(get_current_user)]):
+    _require_owner(user)
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            org = db.table("organizations").select(
+                "cancel_review_alerts_enabled, cancel_review_alert_recipient_ids"
+            ).eq("id", user["org_id"]).single().execute().data or {}
+            break
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("get_cancel_review_alerts attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("get_cancel_review_alerts failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+    return {
+        "enabled": bool(org.get("cancel_review_alerts_enabled")),
+        "recipient_ids": org.get("cancel_review_alert_recipient_ids") or [],
+    }
+
+
+class CancelReviewAlertsIn(BaseModel):
+    enabled: bool | None = None
+    recipient_ids: list[str] | None = None
+
+
+@router.put("/meetings/cancel-review-alerts")
+def set_cancel_review_alerts(body: CancelReviewAlertsIn, user: Annotated[dict, Depends(get_current_user)]):
+    _require_owner(user)
+    db = get_admin_client()
+    patch: dict = {}
+    if body.recipient_ids is not None:
+        wanted = list(dict.fromkeys(str(x) for x in body.recipient_ids))
+        own = {
+            p["id"] for p in (
+                db.table("profiles").select("id").eq("org_id", user["org_id"]).in_("id", wanted).execute().data or []
+            )
+        } if wanted else set()
+        patch["cancel_review_alert_recipient_ids"] = [x for x in wanted if x in own]
+    if body.enabled is not None:
+        current = db.table("organizations").select("cancel_review_alerts_enabled") \
+            .eq("id", user["org_id"]).single().execute().data or {}
+        patch["cancel_review_alerts_enabled"] = body.enabled
+        if body.enabled and not current.get("cancel_review_alerts_enabled"):
+            # Only cancellations from now on — turning it on never floods the org with older ones.
+            patch["cancel_review_scan_after"] = datetime.now(timezone.utc).isoformat()
+    if patch:
+        db.table("organizations").update(patch).eq("id", user["org_id"]).execute()
+    return {"ok": True, **({"recipient_ids": patch["cancel_review_alert_recipient_ids"]}
+                           if "cancel_review_alert_recipient_ids" in patch else {})}
 
 
 def _require_can_edit_goal_automations(db, user: dict) -> None:

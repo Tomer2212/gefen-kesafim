@@ -2,6 +2,9 @@ export const MEETING_STATUS_OPTIONS = [
   { value: "scheduled",  label: "נקבעה",   color: "#c2410c", bg: "#fff7ed", dot: "#f97316" },
   { value: "completed",  label: "בוצעה",   color: "#15803d", bg: "#f0fdf4", dot: "#22c55e" },
   { value: "cancelled",  label: "בוטלה",   color: "#b91c1c", bg: "#fef2f2", dot: "#ef4444" },
+  // Same as "cancelled" everywhere (calendar, reminders, tasks); only tells managers the
+  // cancellation's cause was looked into. See meeting_labels.is_cancelled_like.
+  { value: "cancelled_reviewed", label: "בוטלה ונבדקה", color: "#9f1239", bg: "#fff1f2", dot: "#fb7185" },
   { value: "postponed",  label: "נדחתה",   color: "#1d4ed8", bg: "#eff6ff", dot: "#3b82f6" },
   { value: "other",      label: "אחר",     color: "#475569", bg: "#f8fafc", dot: "#94a3b8" },
 ];

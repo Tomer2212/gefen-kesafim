@@ -25,7 +25,7 @@ export const METRIC_KIND_LABELS = {
 // display — target_division_type reuses the identical division_type values (tikkon/beinayim/
 // yesodi/other), just never "sheshshnati" itself (that's the SCHOOL's stage; a six-year school
 // splits INTO tikkon+beinayim rows, it never appears as a target's own division).
-export const STAGE_LABELS = { yesodi: "יסודי", beinayim: "חטיבת ביניים", tikkon: "תיכון", other: "אחר" };
+export const STAGE_LABELS = { yesodi: "יסודי", beinayim: "חטיבת ביניים", tikkon: "תיכון", combined: "חשבון משולב", other: "אחר" };
 
 // "עדכון שדה קיים במערכת - <שדה + ערך>" for field-kind metrics — describeCondition already
 // knows how to render every condition type (field/goal/control_letter) into Hebrew text, given

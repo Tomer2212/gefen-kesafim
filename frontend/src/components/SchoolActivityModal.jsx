@@ -28,7 +28,7 @@ const SOURCE_LABELS = {
 };
 
 const INSTITUTION_FIELDS = new Set([
-  "name", "symbol", "city", "authority", "stage", "district", "address", "school_phone",
+  "name", "symbol", "city", "authority", "stage", "gefen_accounts", "ministry_stage", "ministry_stage_other_text", "district", "address", "school_phone",
   "finance_software", "finance_software_other_text", "education_authority", "sector", "supervision",
   "grade_levels", "study_days", "student_count",
 ]);

@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import axios from "axios";
 import Sidebar from "../components/Sidebar";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import PlatformUsagePanel from "../components/PlatformUsagePanel";
 
 const STATUS_LABEL = { pending: "ממתין", approved: "אושר", rejected: "נדחה" };
 const STATUS_CLASS = {
@@ -269,6 +270,8 @@ function DeleteOrgModal({ req, onClose, onDeleted }) {
 
 export default function SuperAdminPage() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tab = searchParams.get("tab") === "usage" ? "usage" : "requests";
   const [user, setUser] = useState(null);
   const [requests, setRequests] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -356,12 +359,26 @@ export default function SuperAdminPage() {
       >
         <div className="px-8 py-8 max-w-5xl w-full mx-auto">
           <h1 className="text-2xl font-bold text-slate-800 mb-1">ניהול מערכת</h1>
-          <p className="text-sm text-slate-500 mb-8">בקשות הרשמה של ארגונים חדשים</p>
+          <div role="tablist" aria-label="אזורי ניהול מערכת" className="flex gap-1 mb-8 mt-3 border-b border-slate-200">
+            {[["requests", "בקשות הרשמה"], ["usage", "שימוש ומכסות"]].map(([key, label]) => (
+              <button
+                key={key}
+                role="tab"
+                aria-selected={tab === key}
+                onClick={() => setSearchParams(key === "requests" ? {} : { tab: key }, { replace: true })}
+                className={`px-4 py-2 text-sm font-semibold -mb-px border-b-2 transition-colors ${tab === key ? "border-blue-500 text-blue-600" : "border-transparent text-slate-500 hover:text-slate-700"}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
 
           {loading ? (
             <div role="status" aria-label="טוען נתונים" className="flex items-center justify-center py-20">
               <span aria-hidden="true" className="w-8 h-8 border-3 border-blue-200 border-t-blue-500 rounded-full inline-block" style={{ animation: "spin 0.8s linear infinite", borderWidth: 3 }} />
             </div>
+          ) : tab === "usage" ? (
+            <PlatformUsagePanel />
           ) : requests.length === 0 ? (
             <div className="text-center py-20 text-slate-400 text-sm">אין בקשות הרשמה עדיין</div>
           ) : (

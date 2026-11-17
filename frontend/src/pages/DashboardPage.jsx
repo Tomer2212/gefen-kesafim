@@ -14,6 +14,8 @@ import { CONTROL_LETTER_STATUS_MAP, CONTROL_LETTER_STATUS_OPTIONS } from "../com
 import { MEETING_SERVICE_TYPE_BREAKDOWN_COL_ORDER } from "../components/meetings/constants";
 import { diagnoseConnectionError } from "../lib/connectionError";
 import { principalNames, gefenFilesResponsibleLines, meetingCoordinatorLines } from "../components/schoolContactLines";
+import { ministryStageLabel } from "../constants/ministryStages";
+import { accountLabel, schoolAccounts, schoolAccountsLabel } from "../constants/gefenAccounts";
 
 // Tags school-data writes for the school card's "תיעוד פעולות" log (backend school_activity.py).
 const SURFACE_HEADERS = { headers: { "X-Client-Surface": "dashboard" } };
@@ -52,27 +54,33 @@ const DIVISION_LABEL = {
   tikkon: "חטיבה עליונה",
   beinayim: "חטיבת ביניים",
   yesodi: "יסודי",
+  combined: "חשבון משולב",
   other: "אחר",
   sheshshnati: "שש שנתי",
   general: "ללא שלב",
 };
 
 // Default "גפן" year-closure sections — mirrors _stage_gefen_divisions() /
-// _default_gefen_divisions() in backend/routers/schools_router.py: one per division of the
-// stage (no/other stage = "general"), minus divisions whose checks show פל"ג instead of גפן.
+// _default_gefen_divisions() in backend/routers/schools_router.py: one per Gefen account (a
+// school with none falls back to its stage; no/other stage = "general"), minus divisions
+// whose checks show פל"ג instead of גפן.
 const GEFEN_DEFAULT_BUDGET = "גפן";
 const PLG_BUDGET = 'פל"ג';
 const STAGE_GEFEN_DIVISIONS = {
   yesodi: ["yesodi"], beinayim: ["beinayim"], tikkon: ["tikkon"], sheshshnati: ["beinayim", "tikkon"],
 };
-function stageGefenDivisions(stage) {
-  return STAGE_GEFEN_DIVISIONS[stage] || ["general"];
+function stageGefenDivisions(school) {
+  // The selected year's accounts (year_gefen_accounts from the school list, with the same
+  // catalog / stage fallback as the server).
+  const accounts = schoolAccounts(school);
+  if (accounts.length) return accounts.map(a => a.division_type);
+  return STAGE_GEFEN_DIVISIONS[school.stage] || ["general"];
 }
 function defaultGefenDivisions(school) {
   const metrics = school.check_metrics || [];
   const isPlg = list => list.some(m => m.budget_name === PLG_BUDGET) && !list.some(m => m.budget_name === GEFEN_DEFAULT_BUDGET);
   const schoolIsPlg = isPlg(metrics);
-  return stageGefenDivisions(school.stage).filter(d => !schoolIsPlg && !isPlg(metrics.filter(m => m.division_type === d)));
+  return stageGefenDivisions(school).filter(d => !schoolIsPlg && !isPlg(metrics.filter(m => m.division_type === d)));
 }
 // Rows of a school under a visible gefen-closure column: the default "גפן" divisions, the
 // physical divisions (gefen_accounts), and every division with a check-derived section the
@@ -80,7 +88,7 @@ function defaultGefenDivisions(school) {
 // plus every "גפן" section with a saved status — the card never hides those (saved_gefen in
 // list_gefen_closures), e.g. after the school's stage changed.
 function gefenClosureRowDivisions(school) {
-  const stageDivs = stageGefenDivisions(school.stage);
+  const stageDivs = stageGefenDivisions(school);
   const checkDivs = (school.check_metrics || [])
     .filter(m => m.budget_name !== GEFEN_DEFAULT_BUDGET || stageDivs.includes("general") || stageDivs.includes(m.division_type))
     .map(m => m.division_type);
@@ -89,19 +97,11 @@ function gefenClosureRowDivisions(school) {
     .map(c => c.division_type);
   return uniq([
     ...defaultGefenDivisions(school),
-    ...(school.gefen_accounts || []).map(acc => acc.division_type),
+    ...schoolAccounts(school).map(acc => acc.division_type),
     ...checkDivs,
     ...savedGefenDivs,
   ]).filter(Boolean);
 }
-
-const SCHOOL_STAGE_LABEL = {
-  yesodi:      "יסודי",
-  beinayim:    "חטיבת ביניים",
-  tikkon:      "תיכון",
-  sheshshnati: "שש שנתי",
-  other:       "אחר",
-};
 
 const FINANCE_SOFTWARE_LABEL = {
   kesafim2000: "כספים 2000",
@@ -317,7 +317,8 @@ const GENERAL_COLUMNS = [
   { key: "symbol",              label: "סמל מוסד" },
   { key: "city",                label: "עיר" },
   { key: "authority",           label: "בעלות" },
-  { key: "stage",               label: "שלב מוסד" },
+  { key: "ministry_stage",      label: "שלב חינוך" },
+  { key: "stage",               label: "חשבונות במערכת גפן" },
   { key: "district",            label: "מחוז" },
   { key: "education_authority", label: "רשות חינוך" },
   { key: "sector",              label: "מגזר" },
@@ -351,6 +352,7 @@ const MOVABLE_COLUMNS = [...GENERAL_COLUMNS, ...ALLOCATION_COLUMNS, ...MEETINGS_
 // back-filled into a restored colOrder/colVisible (see effect below), like the other
 // late-added column groups.
 const NEWLY_ADDED_MOVABLE_COLUMNS = [
+  { key: "ministry_stage",      label: "שלב חינוך" },
   { key: "district",            label: "מחוז" },
   { key: "finance_software",    label: "תוכנת כספים" },
   { key: "service_type",        label: "סוג שירות" },
@@ -471,7 +473,8 @@ const FILTER_COLUMN_META = [
   { key: "symbol",              label: "סמל מוסד",      fmt: "text" },
   { key: "city",                label: "עיר",           fmt: "text" },
   { key: "authority",           label: "בעלות",         fmt: "text" },
-  { key: "stage",               label: "שלב מוסד",      fmt: "text" },
+  { key: "ministry_stage",      label: "שלב חינוך", fmt: "text" },
+  { key: "stage",               label: "חשבונות במערכת גפן", fmt: "text" },
   { key: "district",            label: "מחוז",          fmt: "text" },
   { key: "finance_software",    label: "תוכנת כספים",   fmt: "text" },
   { key: "education_authority", label: "רשות חינוך",    fmt: "text" },
@@ -678,7 +681,7 @@ function getGefenClosureState(school, divisionType, budgetName) {
   const entry = (school.gefen_closures || []).find(
     c => c.division_type === divisionType && c.budget_name === budgetName
   );
-  const stageDivs = stageGefenDivisions(school.stage);
+  const stageDivs = stageGefenDivisions(school);
   const checkHidden = budgetName === GEFEN_DEFAULT_BUDGET && !stageDivs.includes("general") && !stageDivs.includes(divisionType);
   const relevant =
     (!checkHidden && (school.check_metrics || []).some(m => m.division_type === divisionType && m.budget_name === budgetName))
@@ -759,7 +762,8 @@ function computeFilterValues(school, combo, meetingsStats, activeSummaryBudget, 
   out.symbol = school.symbol || null;
   out.city = school.city || null;
   out.authority = school.authority || null;
-  out.stage = SCHOOL_STAGE_LABEL[school.stage] || school.stage || null;
+  out.stage = schoolAccountsLabel(school) || null;
+  out.ministry_stage = ministryStageLabel(school) || null;
   out.district = school.district || null;
   out.finance_software = financeSoftwareDisplay(school) || null;
   out.education_authority = school.education_authority || null;
@@ -1521,7 +1525,9 @@ function renderCell(school, key, meetingsStats = {}, combo = null, activeSummary
     case "order_amount_gefen":
       return school.order_amount_gefen == null ? "—" : fmtMoney(school.order_amount_gefen);
     case "stage":
-      return SCHOOL_STAGE_LABEL[school.stage] || school.stage || "—";
+      return schoolAccountsLabel(school) || "—";
+    case "ministry_stage":
+      return ministryStageLabel(school) || "—";
     case "meetings_completed": {
       const s = meetingsStats[school.id];
       return s ? String(s.completed) : "—";
@@ -1638,7 +1644,9 @@ function renderCellText(school, key, meetingsStats = {}, combo = null, activeSum
     case "order_amount_gefen":
       return school.order_amount_gefen == null ? "" : fmtMoney(school.order_amount_gefen);
     case "stage":
-      return SCHOOL_STAGE_LABEL[school.stage] || school.stage || "";
+      return schoolAccountsLabel(school);
+    case "ministry_stage":
+      return ministryStageLabel(school);
     case "meetings_completed": {
       const s = meetingsStats[school.id];
       return s ? String(s.completed) : "";
@@ -1925,9 +1933,12 @@ function BulkAccessModal({ schools, users, loadingUsers, onClose, onSaved }) {
 }
 
 // "סוג תקציב" cell of a split row — shared by the table and the exports.
-function comboLabel(combo) {
+function comboLabel(combo, school) {
   if (!combo) return "";
-  return `${combo.budget_name ? `${combo.budget_name} · ` : ""}${DIVISION_LABEL[combo.division_type] || combo.division_type || ""}`;
+  // The school's own account name ("יסודי + חט\"ב") when it has one for this division.
+  const account = (school?.gefen_accounts || []).find(a => a.division_type === combo.division_type);
+  const division = (account && accountLabel(account)) || DIVISION_LABEL[combo.division_type] || combo.division_type || "";
+  return `${combo.budget_name ? `${combo.budget_name} · ` : ""}${division}`;
 }
 
 // One row of the schools table. Memoized so that, with virtualization, the ~40 mounted rows
@@ -1979,7 +1990,7 @@ const DashboardSchoolRow = memo(function DashboardSchoolRow({
         <td className="px-4 py-3 border-l border-slate-100 text-slate-600">
           <div className="flex flex-col gap-0.5 text-xs">
             <span className="font-medium text-slate-700">
-              {comboLabel(combo)}
+              {comboLabel(combo, school)}
             </span>
           </div>
         </td>
@@ -2498,12 +2509,12 @@ export default function DashboardPage() {
           // per division (e.g. six-year schools running "גפן" separately for each division).
           const allCombos = (school.check_metrics && school.check_metrics.length
             ? school.check_metrics
-            : [{ division_type: school.stage, budget_name: "כללי" }]
+            : [{ division_type: schoolAccounts(school)[0]?.division_type || school.stage, budget_name: "כללי" }]
           );
           const narrowed = allCombos.filter(combo => combo.budget_name === activeSummaryBudget);
           // A school without any check for the active budget yet must still show up (with
           // "—" summary values), not disappear from the list.
-          combos = narrowed.length > 0 ? narrowed : [{ division_type: school.stage, budget_name: activeSummaryBudget }];
+          combos = narrowed.length > 0 ? narrowed : [{ division_type: schoolAccounts(school)[0]?.division_type || school.stage, budget_name: activeSummaryBudget }];
         }
         return combos.map(combo => ({
           school,
@@ -2616,7 +2627,7 @@ export default function DashboardPage() {
     ];
     const rows = selectedRows.map(({ school, combo }) => [
       school.name || "",
-      ...(advancedFilterActive ? [comboLabel(combo)] : []),
+      ...(advancedFilterActive ? [comboLabel(combo, school)] : []),
       ...visibleColOrder.map(key => renderCellText(school, key, meetingsStats, combo, activeSummaryBudget, goalColumnsByKey, gefenClosureColumnsByKey)),
     ]);
     const wsData = [colLabels, ...rows];
@@ -2638,7 +2649,7 @@ export default function DashboardPage() {
     ];
     const rows = selectedRows.map(({ school, combo }) => [
       school.name || "",
-      ...(advancedFilterActive ? [comboLabel(combo)] : []),
+      ...(advancedFilterActive ? [comboLabel(combo, school)] : []),
       ...visibleColOrder.map(key => renderCellText(school, key, meetingsStats, combo, activeSummaryBudget, goalColumnsByKey, gefenClosureColumnsByKey)),
     ]);
     try {
@@ -2666,7 +2677,7 @@ export default function DashboardPage() {
     ];
     const rows = finalDisplayRows.map(({ school, combo }) => [
       school.name || "",
-      ...(advancedFilterActive ? [comboLabel(combo)] : []),
+      ...(advancedFilterActive ? [comboLabel(combo, school)] : []),
       ...visibleColOrder.map(key => renderCellText(school, key, meetingsStats, combo, activeSummaryBudget, goalColumnsByKey, gefenClosureColumnsByKey)),
     ]);
     const wsData = [colLabels, ...rows];

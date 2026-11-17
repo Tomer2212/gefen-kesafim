@@ -23,6 +23,7 @@ from openpyxl import load_workbook, Workbook
 from pydantic import BaseModel, field_validator
 
 import booking_requests
+import cancel_review_alerts
 import meeting_rounds
 import rich_html
 import booking_token_logic
@@ -2956,7 +2957,8 @@ def _send_message_now(db, org_id: str, school_id: str, channel: str, subject: st
         elif channel == "whatsapp_twilio":
             whatsapp_twilio.send_whatsapp_message(org_id, recipient_phone, body or "", attachment_keys)
         else:  # email_resend (default)
-            send_resend_email(recipient_email, subject or "", body or "", attachments=attachments)
+            send_resend_email(recipient_email, subject or "", body or "", attachments=attachments,
+                              org_id=org_id, kind="task")
         return "sent", None
     except ResendQuotaExceeded:
         return "quota", QUOTA_PENDING_NOTE
@@ -3911,7 +3913,8 @@ def process_message_queue(request: Request):
                     content = db.storage.from_("check-files").download(a["key"])
                     attachments.append({"filename": a.get("filename") or a["key"].rsplit("/", 1)[-1], "content_b64": base64.b64encode(content).decode("ascii")})
             try:
-                send_resend_email(row.get("recipient_email"), row.get("subject") or "", row.get("body") or "", attachments=attachments)
+                send_resend_email(row.get("recipient_email"), row.get("subject") or "", row.get("body") or "", attachments=attachments,
+                                  org_id=org_id, kind="task")
                 db.table("org_task_messages").update({"status": "sent", "sent_at": "now()", "fallback_used": True}).eq("id", row["id"]).execute()
                 fell_back += 1
             except Exception as exc:
@@ -4106,6 +4109,13 @@ def recompute_tasks_progress(request: Request):
         rounds_changed = meeting_rounds.refresh_round_caches(get_admin_client())
     except Exception as exc:
         logger.warning("recompute_tasks_progress: round cache refresh failed (non-fatal): %s", exc)
+    # Daily "בוטלה — טרם נבדקה" alerts (opt-in per org; see cancel_review_alerts.py) — non-fatal.
+    try:
+        cancel_review = cancel_review_alerts.run_cancel_review_alerts(get_admin_client())
+        if cancel_review.get("sent") or cancel_review.get("resolved") or cancel_review.get("failed_orgs"):
+            logger.info("recompute_tasks_progress: cancel review alerts %s", cancel_review)
+    except Exception as exc:
+        logger.warning("recompute_tasks_progress: cancel review alerts failed (non-fatal): %s", exc)
     return {"ok": True, "orgs": len(tasks_by_org), "tasks": len(tasks), "changed": changed, "failed_orgs": failed_orgs,
             "links_reconciled": reopened_links, "rounds_changed": rounds_changed}
 

@@ -28,12 +28,13 @@ const UNRECOGNIZED_FIELD_CONFIG = {
 };
 const KEEP_RAW = "__keep__";
 
+// schools.stage, shown as "חשבונות במערכת גפן" — see SchoolPage.jsx's SCHOOL_STAGE_OPTIONS.
 const STAGE_OPTIONS = [
-  { value: "", label: "בחר שלב מוסד" },
-  { value: "yesodi", label: "יסודי" },
-  { value: "beinayim", label: "חטיבת ביניים" },
-  { value: "tikkon", label: "תיכון" },
-  { value: "sheshshnati", label: "שש שנתי" },
+  { value: "", label: "בחר חשבונות במערכת גפן" },
+  { value: "yesodi", label: "חשבון אחד – יסודי" },
+  { value: "beinayim", label: 'חשבון אחד – חט"ב' },
+  { value: "tikkon", label: "חשבון אחד – עליונה" },
+  { value: "sheshshnati", label: 'שני חשבונות – חט"ב + עליונה' },
   { value: "other", label: "אחר" },
 ];
 const DISTRICT_OPTIONS = ["צפון", "דרום", "מרכז", "ירושלים", "תל-אביב", "חיפה", "חינוך התיישבותי", "חרדי"];
@@ -202,7 +203,7 @@ function QuickAddSchoolForm({ row, orgUsers, academicYear, onCreated, onCancel }
           <input id={`qa-symbol-${row.row_index}`} value={draft.symbol} onChange={e => set({ symbol: e.target.value })} className="text-xs border border-slate-300 rounded-lg px-2 py-1.5 w-full" />
         </div>
         <div>
-          <label htmlFor={`qa-stage-${row.row_index}`} className="text-[11px] text-slate-500 block mb-0.5">שלב מוסד *</label>
+          <label htmlFor={`qa-stage-${row.row_index}`} className="text-[11px] text-slate-500 block mb-0.5">חשבונות במערכת גפן *</label>
           <select id={`qa-stage-${row.row_index}`} value={draft.stage} onChange={e => set({ stage: e.target.value })} className="text-xs border border-slate-300 rounded-lg px-2 py-1.5 w-full bg-white">
             {STAGE_OPTIONS.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
           </select>

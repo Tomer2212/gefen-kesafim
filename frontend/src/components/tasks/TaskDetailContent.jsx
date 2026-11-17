@@ -210,7 +210,8 @@ export default function TaskDetailContent({ taskId, onTaskChange }) {
   // advanced filterGroups into ONE AND'd server-side criteria via runCombinedFilter().
   const QUICK_FILTER_FIELDS = [
     { field: "authority", label: "בעלות" },
-    { field: "stage", label: "שלב מוסד" },
+    { field: "ministry_stage", label: "שלב חינוך" },
+    { field: "stage", label: "חשבונות במערכת גפן" },
     { field: "city", label: "עיר" },
     { field: "district", label: "מחוז" },
     { field: "client_status", label: "סטטוס לקוח" },

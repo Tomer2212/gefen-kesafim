@@ -176,6 +176,14 @@ city TEXT
 authority TEXT           -- בעלות (e.g. עירייה, ממלכתי)
 district TEXT            -- מחוז (e.g. תל אביב, ירושלים)
 stage TEXT               -- 'yesodi' | 'beinayim' | 'tikkon' | 'sheshshnati' | 'other'
+                         -- SERVER-MAINTAINED MIRROR of the school's gefen_accounts (gefen_accounts.derive_stage) — never written
+                         -- directly (update_school / update-request approval drop it). 'sheshshnati' = a separate elyona-only
+                         -- account + a separate non-elyona account; it still drives every six-year behavior (contacts,
+                         -- coordinators, meetings, tasks, rounds). Shown in the UI as the account list ("חשבונות במערכת גפן").
+ministry_stage TEXT      -- "שלב מוסד" as the Ministry of Education defines it — DESCRIPTIVE ONLY, never drives logic.
+                         -- Stored as the Hebrew string: יסודי בלבד | חט"ב בלבד | עליונה בלבד | יסודי וחט"ב | חט"ב + עליונה | יסודי ועליונה | יסודי חט"ב ועליונה | אחר
+                         -- (list: frontend/src/constants/ministryStages.js, mirrored in task_logic.MINISTRY_STAGE_OPTIONS)
+ministry_stage_other_text TEXT -- free text, only meaningful when ministry_stage = 'אחר'
 finance_software TEXT    -- 'kesafim2000' | 'payscool' | 'schoolcash' | 'other'
 finance_software_other_text TEXT -- free-text software name, only meaningful when finance_software = 'other'
 address TEXT
@@ -201,17 +209,26 @@ finance_contact_email TEXT
 created_at TIMESTAMPTZ
 ```
 
-### `gefen_accounts` — divisions within a school
+### `gefen_accounts` — "חשבונות במערכת גפן" (0-3 per school per ACADEMIC YEAR; the source of truth for how checks split)
 ```sql
-id UUID PRIMARY KEY
+-- gefen_accounts = the school's CATALOG: one row per division_type it ever had (never deleted
+-- for a removed account — its checks stay as an archive tab, and re-adding revives it)
+id UUID PRIMARY KEY                 -- what check_logs.gefen_account_id points to
 school_id UUID (FK → schools)
-division_type TEXT  -- 'tikkon' | 'beinayim' | 'yesodi' | 'other'
-custom_label TEXT
-finance_software TEXT
-tmura_model BOOLEAN
-created_at TIMESTAMPTZ
-UNIQUE(school_id, division_type)
+covers TEXT[]       -- grade layers: 'yesodi' | 'chativa' | 'elyona'
+division_type TEXT  -- derived from covers: elyona only → 'tikkon'; elyona + another → 'combined';
+                    -- yesodi only → 'yesodi'; else → 'beinayim'. ('other' = legacy rows only)
+custom_label TEXT, finance_software TEXT, tmura_model BOOLEAN, created_at TIMESTAMPTZ
+UNIQUE(school_id, division_type)  -- holds for every valid set of accounts (tests/test_gefen_accounts.py)
+
+-- school_year_admin_data.year_gefen_accounts JSONB  [{division_type, covers}] = the YEAR's list
+-- NULL inherits the latest earlier year with a value; [] = explicitly no accounts
 ```
+- **One module:** `backend/gefen_accounts.py` (mirrored by `frontend/src/constants/gefenAccounts.js` — keep in sync). `resolve_year_accounts[_bulk]` (fallback for a school with no year value: catalog rows, else what `stage` implies), `year_view` → `{active, archived}` (archived = catalog accounts not active that year that have checks of it).
+- **Saved only via `PUT /schools/{id}/accounts?academic_year=Y`** (`_replace_gefen_accounts`): validates; dropping or re-kinding an account needs `confirm_removal` from a manager (409 `confirm_removal` with check counts → `GefenAccountsRemovalModal`; an advisor gets 403 `needs_manager` and the card offers an update request keyed `gefen_accounts@<year>` = account labels, applied on approval). Later years that inherit Y are frozen to their value first, and with no earlier explicit year the earliest is pinned — a past year's edit never leaks. Logs a virtual `gefen_accounts` field in `school_activity`.
+- **`schools.stage` mirrors the CURRENT year's accounts** (`DEFAULT_ACADEMIC_YEAR`; never written directly — `update_school` / update-request approval drop it) and keeps driving every six-year behavior. After bumping `DEFAULT_ACADEMIC_YEAR`, re-derive it for schools whose new year differs.
+- **Per year:** "בדיקות"/"יעדים" tabs (`SchoolPage.jsx` `yearView` from `GET /schools/{id}/gefen-accounts`; archive tabs are read-only — no new check / added file; `analyze_router` rejects a check on an inactive account with `inactive_account`), year-closure sections, person-task targets (task year), dashboard rows / admin column (`year_gefen_accounts` added by `list_schools`). Control letters aren't per year: the year's accounts + any division with a letter. The field has NO year selector of its own: on the school card it shows/edits the card's academic year (the main top-left selector); the admin modal and AddSchoolPage save it for `DEFAULT_ACADEMIC_YEAR`, like their "פרטי ליווי" fields.
+- **Files → account:** report codes only tell elyona ("tikkon") from not ("beinayim"); `resolve_bucket_account` maps a file to the tab's account when it fits, else the only fitting account — two non-elyona accounts are told apart only by the tab; an unmappable two-file upload stops with `gefen_division_ambiguous`. One combined account receiving both files = one check. A combined account's dashboard gaps sum every stage's combos.
 
 ### `advisor_schools` — junction: which advisors see which schools
 ```sql
@@ -776,6 +793,11 @@ Meetings can be scheduled/edited from **three separate places** in the app, all 
 
 **Exception — field/context mismatches:** some fields or behaviors are only relevant/visible in some of the three surfaces (e.g. the advisor picker doesn't exist in אזור אישי since the advisor is always the current user; the school column doesn't exist on כרטיס בית ספר since the school is implicit). If a requested change doesn't map cleanly onto one or more of the three surfaces because of a mismatch like this, **stop and ask the user** what to do there instead of guessing or silently skipping it.
 
+### Meeting status "בוטלה ונבדקה" (`cancelled_reviewed`) = "בוטלה" in every respect
+Added 2026-11-16 so managers can mark a cancellation whose cause they looked into; only the label differs. Calendars treat it exactly like `cancelled` (free, attendees cleared, subject "[בוטלה]" — `meeting_labels.calendar_status_label`). Everything else already counts only `scheduled`/`completed`. **Any "is this meeting cancelled" check must use `meeting_labels.is_cancelled_like`, never `== "cancelled"` / `in ("cancelled", "postponed")`.** Guarded by `backend/tests/test_cancelled_reviewed_status.py`.
+
+**Daily "בוטלה — טרם נבדקה" alerts (`backend/cancel_review_alerts.py`)** — opt-in per org, owner only (`organizations.cancel_review_alerts_enabled` default false + `cancel_review_alert_recipient_ids`; `GET/PUT /schools/meetings/cancel-review-alerts`; UI `CancelReviewAlertsSettings.jsx` in the owner's notification settings). Runs inside the 5-minute `tasks-recompute-progress` cron, no job of its own. New cancellations are found **only in `meeting_activity`** (status changed to `cancelled`, or created as `cancelled`; sources `import`/`import_remap` excluded) after `organizations.cancel_review_scan_after` — set to "now" when the feature is turned on, so older cancellations never flood in. `meeting_cancel_review_alerts` (service_role only, deny-all RLS; `meeting_id` unique, **no FK on purpose** so a deleted meeting still resolves): at most one alert per meeting per Israel day (`last_alerted_on`), first vs. reminder wording by `alerts_sent`; a meeting that left `cancelled` (or was deleted) is resolved and its `meeting_cancel_review` notifications are marked read for everyone. Sent only Sun–Thu 08:00–20:00, Fri 08:00–15:00. A new path that cancels meetings is covered automatically as long as it logs to `meeting_activity` (already mandatory).
+
 ### Meeting Reminders — automations vs. the per-meeting toggle (HARD RULE)
 
 There are two org-level meeting automations (`organizations.meeting_reminders_enabled`, `organizations.secretary_upload_request_enabled`) and one per-meeting flag (`meetings.reminder_enabled`, the "תזכורת" ON/OFF toggle in `MeetingRow`). Their roles are **not symmetric**:
@@ -1262,6 +1284,33 @@ As of the most recent full audit (2026-10-24), the suite covers 128 tests across
 | Ad-hoc check after anything suspicious | **Immediately**, same session, never deferred | If the user reports anything that smells like cross-org data leakage, duplicate/unexpected notifications, or unexplained access — treat it exactly like the 2026-10-24 Outlook-leak investigation: check the live DB data (read-only first), form a concrete theory, verify or rule it out before claiming anything, and report findings honestly including what couldn't be confirmed. |
 
 **Do not rely on the user remembering to ask for any of the above on schedule.** If the project has a scheduled/cron reminder set up for this (see any `schedule`/cron entry referencing "בדיקת אבטחה" or "security check"), that is the primary trigger — treat a wake-up from it as an explicit instruction to run the monthly dependency scan (or the quarterly full review, if due) and report back, without needing further confirmation to start.
+
+---
+
+## Capacity & Quotas — "שימוש ומכסות" (MANDATORY)
+
+The owner's biggest fear is a provider shutting the system down. Superadmin screen: ניהול מערכת → "שימוש ומכסות" (`/super-admin?tab=usage`, `PlatformUsagePanel.jsx`); backend `routers/platform_usage_router.py` (`/platform`).
+
+**Current plans (update when they change):**
+- **Supabase:** Pro, billing cycle on the 4th. **Spend Cap disabled on 2026-11-16.** With it enabled, exceeding any quota can make the project unresponsive or read-only. Never suggest re-enabling it. Quotas: egress 250GB, log ingestion 20GB, DB 8GB, storage 100GB. The project ran on **Nano** (428MB RAM, memory commitment SEVERE) while billed for Micro. The compute upgrade was recommended on 2026-11-16.
+- **Render:** Hobby workspace ($0) + API service on a **Standard** instance (2GB RAM, $25/month; invoices Aug–Oct 2026 = $25–25.60), Visa on file. 5GB bandwidth included, overage $0.15/GB, billed only, never suspends (Nov 2026 ≈ 25GB → ≈ $3).
+- **Resend:** 50,000 emails/month, renews on the 12th.
+
+**Automatic (no human):**
+- pg_cron `platform-hourly-tick` → `POST /platform/hourly-tick`. At 07:00 Israel time, Sun–Thu, it runs the daily check: Resend usage and projection, Supabase DB/storage/connections, DB-server memory vs the SEVERE rule (0.9×RAM + 1GiB, from `/customer/v1/privileged/metrics`), and Render bandwidth/CPU/memory only where `RENDER_API_KEY` + `RENDER_SERVICE_IDS` are set. Requests/day appear only where `SUPABASE_PAT` exists. **Never put `SUPABASE_PAT` or `RENDER_API_KEY` on Render**: each controls the whole account (Render has no read-only keys). Both live only in the local `.env` (`RENDER_SERVICE_IDS=srv-d7l7rd9f9bms738e79b0,srv-d7mujufavr4c73fa32cg` = API + static site). In the weekly check, Claude reads requests/day and Render usage locally (`_render_section` / `GET /platform/usage` against the local backend). A Render bandwidth overage is billed only ($0.15/GB) and never suspends, so weekly is enough. The Render metrics API rejects `+00:00` timestamps (400) — use `_render_ts` (`Z` form); bandwidth points are in MB. The check is due from 07:00 until it succeeds, so a missed tick or a failed alert email is retried hourly.
+- Each alert level is emailed once per cycle (`platform_settings.alert_state`): to geffen360@gmail.com via **Gmail** (never Resend, so it arrives even when Resend's quota is gone), plus a `platform_usage_alert` bell notification to superadmins.
+
+**Every Resend send is counted:** `send_resend_email(..., org_id=..., kind=...)` writes `email_send_log` with Resend's own `x-resend-monthly-quota` header. **Any new Resend call site MUST pass `org_id` and `kind`**, or its emails are not attributed to an org. `tests/conftest.py` disables the log in tests (marker `real_record_send` to test it).
+
+**Weekly manual check ("בדיקה שבועית") — egress + log ingestion have no API:**
+- Reminders go to support@gefenai.co.il at 09:00, 12:00 and 15:00 on every work day from Sunday until the week's `platform_manual_checks` row is no longer `pending`.
+- When the user sends Supabase Usage screenshots or writes "בדיקה שבועית", Claude:
+  1. Reads egress, log ingestion and the billing-cycle dates, and reads Render (bandwidth, 7-day memory/CPU peak) locally via `_render_section`.
+  2. Projects to the end of the cycle (linear, and also from the recent daily rate) and compares with earlier weeks (`platform_manual_checks`).
+  3. If a screenshot is missing or unclear, asks for exactly what is missing, one step at a time (supabase.com → Usage icon in the left menu → "Usage Summary").
+  4. Records the result: `POST https://gefen-kesafim-api.onrender.com/platform/manual-check` with header `X-Cron-Secret: <CRON_SECRET from .env>` and body `{status: "ok"|"attention", week_start, values: {egress_gb, log_ingestion_gb, cycle_start, cycle_end, projected_*, render_bandwidth_gb, render_projected_overage_usd, render_memory_max_7d_mb}, verdict: "<Hebrew>"}`. Use `ok` **only** when every value is within quota through the end of the cycle; otherwise use `attention` and explain the issue to the user in simple Hebrew.
+  5. Reports back to the user in Hebrew.
+- **Before adding an org or a large import (e.g. thousands of schools), and once a month:** open the screen, do the weekly check, and read Render usage locally.
 
 ---
 

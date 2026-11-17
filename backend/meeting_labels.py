@@ -14,7 +14,7 @@ This is a deliberate mirror of the frontend synonym tables in
 Pattern itself follows ``zihuy_core.normalize_budget_name`` / ``BUDGET_NAME_MAP``.
 """
 
-MEETING_STATUS_VALUES = ["scheduled", "completed", "cancelled", "postponed", "other"]
+MEETING_STATUS_VALUES = ["scheduled", "completed", "cancelled", "cancelled_reviewed", "postponed", "other"]
 MEETING_TYPE_VALUES = ["physical", "remote"]
 MEETING_SERVICE_TYPE_VALUES = ["gefen", "current", "gefen_current", "district", "takuma"]
 
@@ -22,9 +22,29 @@ MEETING_STATUS_LABELS = {
     "scheduled": "נקבעה",
     "completed": "בוצעה",
     "cancelled": "בוטלה",
+    "cancelled_reviewed": "בוטלה ונבדקה",
     "postponed": "נדחתה",
     "other": "אחר",
 }
+
+# "בוטלה ונבדקה" = "בוטלה" in every respect (calendars, reminders, tasks, booking requests);
+# only the label differs — it tells managers the cancellation's cause was looked into. Any
+# check of "is this meeting cancelled" (calendar sync above all) must go through these, never
+# compare to "cancelled" alone.
+CANCELLED_LIKE_STATUSES = ("cancelled", "cancelled_reviewed", "postponed")
+
+
+def is_cancelled_like(status) -> bool:
+    """Status whose calendar event is soft-cancelled (showAs=free, attendees cleared)."""
+    return status in CANCELLED_LIKE_STATUSES
+
+
+def calendar_status_label(status) -> str:
+    """Prefix for a cancelled-like meeting's calendar subject. "בוטלה ונבדקה" shows as plain
+    "בוטלה": the review is internal tracking, so the calendar stays identical."""
+    if status == "cancelled_reviewed":
+        status = "cancelled"
+    return MEETING_STATUS_LABELS.get(status, "בוטלה")
 MEETING_TYPE_LABELS = {"physical": "פיזי", "remote": "מרחוק"}
 MEETING_SERVICE_TYPE_LABELS = {
     "gefen": "גפן",
@@ -86,6 +106,12 @@ def normalize_meeting_status(raw):
     t = (str(raw).strip() if raw is not None else "")
     if t in MEETING_STATUS_VALUES:
         return t
+    # "בוטלה ונבדקה" contains "בוטל" — checked before the table, same idea as gefen_current below.
+    d = _definalize(t.lower())
+    # "לא נבדקה" / "טרם נבדקה" = not yet reviewed -> plain "cancelled" via the table.
+    if (any(k in d for k in ("בוטל", "ביטול", "cancel")) and any(k in d for k in ("נבדק", "review"))
+            and not any(k in d for k in ("לא נבדק", "טרמ נבדק", "not review"))):
+        return "cancelled_reviewed"
     return _match(raw, _STATUS_MAP)
 
 

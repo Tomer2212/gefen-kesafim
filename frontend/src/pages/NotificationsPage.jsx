@@ -3,12 +3,13 @@ import { useNavigate } from "react-router-dom";
 import axios from "axios";
 import { supabase } from "../lib/supabase";
 import Sidebar from "../components/Sidebar";
+import CancelReviewAlertsSettings from "../components/CancelReviewAlertsSettings";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useTasks } from "../context/TasksContext";
 import { useMeetingReminders } from "../context/MeetingRemindersContext";
 import { useMeetingNotes } from "../context/MeetingNotesContext";
 import { useRowVirtualizer } from "../hooks/useRowVirtualizer";
-import { FIELD_LABEL, formatFieldValue } from "../components/schoolFieldLabels";
+import { fieldLabel, formatFieldValue } from "../components/schoolFieldLabels";
 import { DecisionCell } from "../components/SchoolActivityModal";
 import { formatUpdateDate } from "../components/SchoolNotesModal";
 
@@ -42,6 +43,7 @@ const TYPE_ICON = {
   school_deleted:           "🗑️",
   meeting_reminder:         "🗓️",
   meeting_files_arrived:    "📎",
+  meeting_cancel_review:    "🚫",
   task_send_problems:       "⚠️",
   person_task_assigned:     "📌",
   person_task_updated:      "✏️",
@@ -52,6 +54,7 @@ const TYPE_ICON = {
   call_contact_ambiguous:   "📞",
   voicenter_unknown_call:   "📞",
   voicenter_rep_unmapped:   "☎️",
+  platform_usage_alert:     "📊",
 };
 
 // Field labels / value formatting live in components/schoolFieldLabels.js (shared with the
@@ -91,7 +94,7 @@ function ProposedChangesDiff({ changes, currentValues, fieldDecisions, onDecide,
             className={`grid ${cols} text-sm px-3 py-1.5 border-b border-slate-100 last:border-0 items-center transition-colors
               ${isRejected ? (resolution ? "bg-red-50/40" : "bg-red-50/50 opacity-50") : isApproved ? "bg-green-50/50" : ""}`}
           >
-            <span className={`text-slate-500 ${isRejected ? "line-through" : ""}`}>{FIELD_LABEL[k] || k}</span>
+            <span className={`text-slate-500 ${isRejected ? "line-through" : ""}`}>{fieldLabel(k)}</span>
             {hasCurrentValues && (
               <span className="text-slate-400">{formatValue(currentValues[k], k)}</span>
             )}
@@ -147,7 +150,7 @@ function RequestResultDiff({ changes, approvedFields, status }) {
                 : isRejected
                 ? <span className="text-red-500 font-bold text-base leading-none">✕</span>
                 : null}
-              {FIELD_LABEL[k] || k}
+              {fieldLabel(k)}
             </span>
             <span className={`font-medium ${isApproved ? "text-green-800" : isRejected ? "text-red-700 line-through opacity-70" : "text-slate-800"}`}>
               {formatValue(v, k)}
@@ -358,6 +361,8 @@ function SettingsModal({ onClose, role }) {
               />
             ))}
           </div>
+
+          {role === "owner" && <CancelReviewAlertsSettings />}
         </div>
 
         {/* Footer */}

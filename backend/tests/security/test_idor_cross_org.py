@@ -36,6 +36,33 @@ def test_list_accounts_same_org_still_works(org_a_client):
     assert resp.status_code == 200, resp.text
 
 
+# PUT /schools/{school_id}/accounts replaces the whole list. Both tests send an INVALID list
+# (one layer in two accounts), so nothing is ever written: a foreign org must be stopped by
+# the org check (403/404) before validation; the own org must get past it to validation (400).
+_OVERLAPPING_ACCOUNTS = {"accounts": [{"covers": ["yesodi"]}, {"covers": ["yesodi", "chativa"]}]}
+
+
+def test_replace_accounts_cross_org_rejected(org_b_client):
+    resp = org_b_client.put(f"/schools/{ORG_A_SCHOOL_ID}/accounts", json=_OVERLAPPING_ACCOUNTS)
+    assert resp.status_code in (403, 404), resp.text
+
+
+def test_year_gefen_accounts_cross_org_rejected(org_b_client):
+    resp = org_b_client.get(f"/schools/{ORG_A_SCHOOL_ID}/gefen-accounts")
+    assert resp.status_code in (403, 404), resp.text
+
+
+def test_year_gefen_accounts_same_org_still_works(org_a_client):
+    resp = org_a_client.get(f"/schools/{ORG_A_SCHOOL_ID}/gefen-accounts")
+    assert resp.status_code == 200, resp.text
+    assert set(resp.json()) >= {"active", "archived"}
+
+
+def test_replace_accounts_same_org_passes_org_check(org_a_client):
+    resp = org_a_client.put(f"/schools/{ORG_A_SCHOOL_ID}/accounts", json=_OVERLAPPING_ACCOUNTS)
+    assert resp.status_code == 400, resp.text
+
+
 # ---------------------------------------------------------------------------
 # 2. Goals — GET /schools/{school_id}/goals
 #

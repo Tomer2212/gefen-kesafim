@@ -972,7 +972,8 @@ def request_missing_files(meeting_id: str, user: Annotated[dict, Depends(get_cur
         status, error = "sent", None
         tracked_html, open_token = add_open_pixel(html)
         try:
-            send_resend_email(email_addr, subject, tracked_html, reply_to=reply_to)
+            send_resend_email(email_addr, subject, tracked_html, reply_to=reply_to,
+                              org_id=school.get("org_id"), kind="upload_followup")
             sent += 1
         except Exception as exc:
             status, error = "failed", str(exc)

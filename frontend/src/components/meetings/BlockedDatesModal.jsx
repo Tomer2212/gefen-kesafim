@@ -11,9 +11,9 @@ import DirectStyleDateInput from "../tasks/DirectStyleDateInput";
 const SCOPE_FIELDS = [
   { value: "sector", label: "מגזר", options: ["יהודי", "ערבי", "צ'רקסי", "בדואי", "דרוזי"] },
   { value: "district", label: "מחוז", options: ["צפון", "דרום", "מרכז", "ירושלים", "תל-אביב", "חיפה", "חינוך התיישבותי", "חרדי"] },
-  { value: "stage", label: "שלב חינוכי", options: [
-    { value: "yesodi", label: "יסודי" }, { value: "beinayim", label: "חטיבת ביניים" },
-    { value: "tikkon", label: "תיכון" }, { value: "sheshshnati", label: "שש שנתי" }, { value: "other", label: "אחר" },
+  { value: "stage", label: "חשבונות במערכת גפן", options: [
+    { value: "yesodi", label: "חשבון אחד – יסודי" }, { value: "beinayim", label: 'חשבון אחד – חט"ב' },
+    { value: "tikkon", label: "חשבון אחד – עליונה" }, { value: "sheshshnati", label: 'שני חשבונות – חט"ב + עליונה' }, { value: "other", label: "אחר" },
   ] },
   { value: "supervision", label: "פיקוח", options: ["ממלכתי", "ממלכתי דתי", "חרדי"] },
   { value: "authority", label: "בעלות", freeText: true },

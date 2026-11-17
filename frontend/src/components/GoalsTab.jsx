@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import GoalAutomationsModal from "./GoalAutomationsModal";
+import { logAccountDivision } from "../constants/gefenAccounts";
 
 function formatGoalDate(iso) {
   if (!iso) return "";
@@ -14,25 +15,17 @@ function fmtPct(v, decimals = 2) {
 }
 
 export function GoalsTab({ accounts, schoolId, schoolStage, activeSubTab, academicYear, logs, canEditAutomations = false }) {
-  const isSheshsSnati = schoolStage === "sheshshnati";
-  const division = isSheshsSnati ? activeSubTab : schoolStage;
+  // An archive tab (account removed for this year, still holding its checks) is view-only.
+  const readOnly = accounts.length >= 2 && !!accounts.find(a => a.division_type === activeSubTab)?.archived;
+  // accounts = the school's Gefen accounts (one tab each); activeSubTab = the active one's division_type.
+  const hasAccountTabs = accounts.length >= 2;
+  const division = hasAccountTabs ? activeSubTab : (accounts[0]?.division_type || schoolStage);
 
-  // Same division-filtering logic as ChecksTab, so the budget list here matches what "בדיקות" shows.
+  // Same account-filtering logic as ChecksTab, so the budget list here matches what "בדיקות" shows.
   const filteredLogs = useMemo(() => {
-    if (!isSheshsSnati) return logs || [];
-    return (logs || []).filter(log => {
-      if (!log.gefen_account_id) {
-        const div = log.summary?.division;
-        if (div === "tikkon") return activeSubTab === "tikkon";
-        if (div === "beinayim") return activeSubTab === "beinayim";
-        return activeSubTab === "tikkon";
-      }
-      const acc = accounts.find(a => a.id === log.gefen_account_id);
-      return activeSubTab === "tikkon"
-        ? acc?.division_type === "tikkon"
-        : acc?.division_type === "beinayim";
-    });
-  }, [logs, accounts, isSheshsSnati, activeSubTab]);
+    if (!hasAccountTabs) return logs || [];
+    return (logs || []).filter(log => logAccountDivision(log, accounts) === activeSubTab);
+  }, [logs, accounts, hasAccountTabs, activeSubTab]);
 
   const budgets = useMemo(() => {
     const seen = new Set();
@@ -124,7 +117,10 @@ export function GoalsTab({ accounts, schoolId, schoolStage, activeSubTab, academ
   }
 
   return (
-    <div dir="rtl" className="flex flex-col">
+    <fieldset dir="rtl" className="flex flex-col min-w-0" disabled={readOnly}>
+      {readOnly && (
+        <p className="text-xs text-slate-500 mb-2" role="note">לשונית ארכיון — חשבון זה אינו פעיל בשנת לימודים זו. היעדים מוצגים לצפייה בלבד.</p>
+      )}
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-lg font-bold text-slate-900">יעדים</h2>
         {canEditAutomations && (
@@ -274,6 +270,6 @@ export function GoalsTab({ accounts, schoolId, schoolStage, activeSubTab, academ
           </div>
         </>
       )}
-    </div>
+    </fieldset>
   );
 }

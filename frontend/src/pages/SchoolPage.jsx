@@ -53,6 +53,10 @@ import { StageScopeModal } from "../components/meetings/StageScopeModal";
 import { TimeInput } from "../components/meetings/TimeInput";
 import { AcademicYearSelector } from "../components/AcademicYearSelector";
 import { ACADEMIC_YEARS, DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
+import { MINISTRY_STAGE_OPTIONS, MINISTRY_STAGE_OTHER, ministryStageLabel } from "../constants/ministryStages";
+import { ACCOUNTS_REQUEST_PREFIX, accountLabel, accountsDraftEqual, accountsDraftFromView, accountsPayload, deriveStage, draftLabels, logAccountDivision, removedAccounts, schoolAccounts, validateCoversList, viewTabAccounts } from "../constants/gefenAccounts";
+import { GefenAccountsEditor } from "../components/GefenAccountsEditor";
+import { GefenAccountsRemovalModal } from "../components/GefenAccountsRemovalModal";
 import { SLOT_LABELS, slotsForSchool } from "../components/meetings/meetingCoordinatorSlots";
 import { GEFEN_FILES_SLOT_LABELS, gefenFilesSlotsForSchool, resolveGefenFilesResponsibleForSlot } from "../components/meetings/gefenFilesResponsibleSlots";
 import { QuestionTooltip } from "../components/QuestionTooltip";
@@ -153,12 +157,15 @@ const FINANCE_SOFTWARE_OPTIONS = [
   { value: "other", label: "אחר" },
 ];
 
+// schools.stage — drives how checks split by division (and every six-year behavior); shown
+// as "חשבונות במערכת גפן". The Ministry-of-Education stage is the separate, descriptive
+// schools.ministry_stage (constants/ministryStages.js).
 const SCHOOL_STAGE_OPTIONS = [
-  { value: "",            label: "בחר שלב מוסד" },
-  { value: "yesodi",      label: "יסודי" },
-  { value: "beinayim",    label: "חטיבת ביניים" },
-  { value: "tikkon",      label: "תיכון" },
-  { value: "sheshshnati", label: "שש שנתי" },
+  { value: "",            label: "בחר חשבונות במערכת גפן" },
+  { value: "yesodi",      label: "חשבון אחד – יסודי" },
+  { value: "beinayim",    label: 'חשבון אחד – חט"ב' },
+  { value: "tikkon",      label: "חשבון אחד – עליונה" },
+  { value: "sheshshnati", label: 'שני חשבונות – חט"ב + עליונה' },
   { value: "other",       label: "אחר" },
 ];
 
@@ -218,7 +225,9 @@ const FIELD_LABELS = {
   symbol: "סמל מוסד",
   city: "עיר",
   authority: "בעלות",
-  stage: "שלב מוסד",
+  stage: "חשבונות במערכת גפן",
+  ministry_stage: "שלב חינוך",
+  ministry_stage_other_text: "שלב חינוך - פירוט",
   finance_software: "תוכנת כספים",
   finance_software_other_text: "תוכנת כספים - פירוט",
   school_phone: "טלפון בית הספר",
@@ -236,6 +245,12 @@ const FIELD_LABELS = {
   finance_contact_email: "מייל אחראי/ת כספים",
 };
 
+// Label of a field in an update request — incl. one year's Gefen accounts ('gefen_accounts@<year>').
+function requestFieldLabel(field) {
+  if (field.startsWith(ACCOUNTS_REQUEST_PREFIX)) return `חשבונות במערכת גפן (${field.slice(ACCOUNTS_REQUEST_PREFIX.length)})`;
+  return FIELD_LABELS[field];
+}
+
 function formatFieldValue(field, value) {
   if (value === null || value === undefined || value === "") return "—";
   if (field === "stage") return SCHOOL_STAGE_LABEL[value] || value;
@@ -246,7 +261,7 @@ function formatFieldValue(field, value) {
 
 function UpdateRequestSuccessModal({ changes, originalValues, onClose }) {
   const { ref, handleKeyDown } = useFocusTrap(onClose);
-  const rows = Object.entries(changes).filter(([f]) => f !== "_action" && FIELD_LABELS[f]);
+  const rows = Object.entries(changes).filter(([f]) => f !== "_action" && requestFieldLabel(f));
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(15,23,42,0.55)" }}
       onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
@@ -273,7 +288,7 @@ function UpdateRequestSuccessModal({ changes, originalValues, onClose }) {
               <tbody className="divide-y divide-slate-100">
                 {rows.map(([field, newVal]) => (
                   <tr key={field}>
-                    <td className="px-4 py-2.5 text-slate-600 font-medium whitespace-nowrap">{FIELD_LABELS[field]}</td>
+                    <td className="px-4 py-2.5 text-slate-600 font-medium whitespace-nowrap">{requestFieldLabel(field)}</td>
                     <td className="px-4 py-2.5 text-slate-400">{formatFieldValue(field, originalValues?.[field])}</td>
                     <td className="px-4 py-2.5 text-slate-800 font-semibold">{formatFieldValue(field, newVal)}</td>
                   </tr>
@@ -628,8 +643,6 @@ const COL_GROUPS = [
 const COL_GROUP_MAP = Object.fromEntries(
   COL_GROUPS.flatMap(g => g.keys.map(k => [k, g]))
 );
-
-const DIV_ABBR = { tikkon: 'חט"ע', beinayim: 'חט"ב' };
 
 function formatNum(val) {
   if (val == null || val === "") return "—";
@@ -1631,7 +1644,7 @@ function StageMismatchModal({ detectedDivision, schoolStage, onConfirm, onCancel
         <p className="text-sm text-slate-600">
           הקבצים שהעלית שייכים לבית ספר{" "}
           <strong>{DIV_HEB[detectedDivision] || detectedDivision}</strong>{" "}
-          בזמן ששלב מוסד זה הינו{" "}
+          בזמן שבכרטיס בית הספר מוגדר חשבון גפן של{" "}
           <strong>{STAGE_HEB[schoolStage] || schoolStage}</strong>.{" "}
           האם לבצע את הבדיקה בכל זאת?
         </p>
@@ -1711,11 +1724,15 @@ function pollRun(runId, { onFinal, onReconnecting, onGiveUp }) {
 const RUN_INTERRUPTED_MSG = "הבדיקה נקטעה בגלל עדכון מערכת — אפשר להריץ אותה שוב";
 
 function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsError, logsLoading, onReloadLogs, activeSubTab, setActiveSubTab, academicYear, setAcademicYear, resumeRunId, onResumeRunHandled }) {
-  const isSheshsSnati = schoolStage === "sheshshnati";
-  // Only worth naming the division in "missing file" messages when the school
-  // actually has more than one (שש-שנתי) — a single-division school's checks
-  // tab is unambiguous without it.
-  const stageLabel = isSheshsSnati ? DIV_ABBR[activeSubTab] : null;
+  // One tab per Gefen account (accounts = the school's accounts, sorted); activeSubTab is the
+  // active account's division_type, which is unique per school.
+  const hasAccountTabs = accounts.length >= 2;
+  // Only worth naming the account in "missing file" messages when the school actually has
+  // more than one — a single-account school's checks tab is unambiguous without it.
+  const stageLabel = hasAccountTabs ? (accountLabel(accounts.find(a => a.division_type === activeSubTab)) || null) : null;
+  // An archive tab (an account removed for this year that still has checks of it) is
+  // view-only: no new check, no added file — deleting a check stays per its permission.
+  const readOnly = hasAccountTabs && !!accounts.find(a => a.division_type === activeSubTab)?.archived;
   const [view, setView] = useState("table");
   const [activeResult, setActiveResult] = useState(null);
   const { openCompare, patchCompare } = useCompareChecks();
@@ -1850,21 +1867,9 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
 
   useEffect(() => { setSelectedHistBudget(null); }, [activeSubTab]);
 
-  const filteredLogs = useMemo(() => (isSheshsSnati
-    ? logs.filter(log => {
-        if (!log.gefen_account_id) {
-          // Use detected division from doch summary to route to the correct sub-tab
-          const div = log.summary?.division;
-          if (div === "tikkon") return activeSubTab === "tikkon";
-          if (div === "beinayim") return activeSubTab === "beinayim";
-          return activeSubTab === "tikkon"; // default: tikkon
-        }
-        const acc = accounts.find(a => a.id === log.gefen_account_id);
-        return activeSubTab === "tikkon"
-          ? acc?.division_type === "tikkon"
-          : acc?.division_type === "beinayim";
-      })
-    : logs), [isSheshsSnati, logs, activeSubTab, accounts]);
+  const filteredLogs = useMemo(() => (hasAccountTabs
+    ? logs.filter(log => logAccountDivision(log, accounts) === activeSubTab)
+    : logs), [hasAccountTabs, logs, activeSubTab, accounts]);
 
   // Keep an open check's detail view in sync with the תיכון/חטיבת ביניים tab: when the
   // advisor switches tabs while viewing a specific check, jump to that same upload batch's
@@ -1873,16 +1878,13 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
   // data on screen. If this check has no sibling for the other division, there's nothing to
   // show there — fall back to the history list (now filtered on the newly selected tab).
   useEffect(() => {
-    if (!isSheshsSnati || view !== "result" || !activeResult) return;
-    const currentDivision = activeResult.result?.summary?.division;
+    if (!hasAccountTabs || view !== "result" || !activeResult) return;
+    const openLog = logs.find(l => (l.summary?.run_id || l.id) === activeResult.runId);
+    const currentDivision = openLog ? logAccountDivision(openLog, accounts) : null;
     if (!currentDivision || currentDivision === activeSubTab) return;
     const batchId = activeResult.result?.summary?.split_batch_id;
     const sibling = batchId
-      ? logs.find(l => {
-          if (l.summary?.split_batch_id !== batchId) return false;
-          const acc = accounts.find(a => a.id === l.gefen_account_id);
-          return acc?.division_type === activeSubTab;
-        })
+      ? logs.find(l => l.summary?.split_batch_id === batchId && logAccountDivision(l, accounts) === activeSubTab)
       : null;
     if (sibling) {
       handleLogClick(sibling);
@@ -1940,15 +1942,12 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
   }, [filteredLogs, pendingRun?.runId, pendingRun?.status]);
 
   function getModalAccounts() {
-    if (!isSheshsSnati) {
-      // Non-sheshshnati schools never need division selection — return exactly one account
-      const matching = accounts.filter(a => a.division_type === schoolStage);
-      if (matching.length > 0) return [matching[0]];
-      return accounts.length > 0 ? [accounts[0]] : [];
-    }
-    const dt = activeSubTab === "tikkon" ? "tikkon" : "beinayim";
-    const matching = accounts.filter(a => a.division_type === dt);
-    return matching.length > 0 ? matching : accounts;
+    // Accounts implied only by a legacy stage (no saved row yet) have no id — such a school's
+    // check runs without an account, exactly as before accounts existed.
+    const saved = accounts.filter(a => a.id && !a.archived);
+    if (!hasAccountTabs) return saved.slice(0, 1);
+    const matching = saved.filter(a => a.division_type === activeSubTab);
+    return matching.length > 0 ? matching : saved;
   }
 
   function handleColDrop(toIdx) {
@@ -1994,7 +1993,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
               return;
             }
             // Stage mismatch only relevant for tikkon/beinayim — yesodi codes overlap with beinayim range
-            if (!isSheshsSnati && (schoolStage === "tikkon" || schoolStage === "beinayim")) {
+            if (!hasAccountTabs && (schoolStage === "tikkon" || schoolStage === "beinayim")) {
               const detected = r.summary?.division;
               const expected = STAGE_DIV_MAP[schoolStage];
               if (detected && detected !== "both" && expected && detected !== expected) {
@@ -2025,7 +2024,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
                   severity: iss.severity ?? "block",
                 })),
                 initialYear: r.expected_academic_year,
-                initialDivision: r.expected_division ?? null,
+                initialDivision: hasAccountTabs ? activeSubTab : null,
                 files,
                 selectedAccountId,
               });
@@ -2093,7 +2092,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
                   severity: iss.severity ?? "block",
                 })),
                 initialYear: r.expected_academic_year,
-                initialDivision: r.expected_division ?? null,
+                initialDivision: hasAccountTabs ? activeSubTab : null,
                 files,
                 addFile: { targetLog, hasStoredFiles },
               });
@@ -2267,11 +2266,13 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
         <ResultsView
           result={activeResult.result}
           runId={activeResult.runId}
-          onNewRun={() => { setView("table"); setActiveResult(null); setShowNewCheckModal(true); }}
+          onNewRun={() => { setView("table"); setActiveResult(null); if (!readOnly) setShowNewCheckModal(true); }}
           schoolId={schoolId}
           currentUser={meUser}
           academicYear={academicYear}
-          schoolStage={schoolStage}
+          // ResultsView reads this as the check's single division ("sheshshnati" = dual, as
+          // before); any other school passes its account's division_type.
+          schoolStage={schoolStage === "sheshshnati" ? schoolStage : (hasAccountTabs ? activeSubTab : (accounts[0]?.division_type || schoolStage))}
         />
       </div>
     );
@@ -2307,7 +2308,12 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
 
         {/* Action buttons */}
         <div className="flex items-center gap-2 pb-2">
-          <button
+          {readOnly && (
+            <span className="text-xs text-slate-500 px-2" role="note">
+              לשונית ארכיון — חשבון זה אינו פעיל בשנת לימודים זו. ניתן לצפות בבדיקות בלבד.
+            </span>
+          )}
+          {!readOnly && <button
             type="button"
             onClick={() => setShowNewCheckModal(true)}
             className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-xl transition-all font-medium btn-ghost"
@@ -2317,7 +2323,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
               <line x1="5" y1="12" x2="19" y2="12"/>
             </svg>
             בדיקה חדשה
-          </button>
+          </button>}
 
           <button
             type="button"
@@ -2625,7 +2631,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
                             state={fileState(key)}
                             notCheckedReason={fileNotCheckedReason(key)}
                             title={title}
-                            onAddFile={() => setAddFileModal({ log })}
+                            onAddFile={readOnly ? undefined : () => setAddFileModal({ log })}
                           />
                         </td>
                       ))}
@@ -2634,7 +2640,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
                         <td key={key}
                           className="px-4 py-3 text-slate-600 whitespace-nowrap"
                           style={colBorderStyle(key)}>
-                          {renderCheckLogCellForBudget(log, key, selectedHistBudget, () => setAddFileModal({ log }), stageLabel)}
+                          {renderCheckLogCellForBudget(log, key, selectedHistBudget, readOnly ? undefined : () => setAddFileModal({ log }), stageLabel)}
                         </td>
                       ))}
 
@@ -2866,7 +2872,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
           issues={yearMismatch.issues}
           files={yearMismatch.files}
           initialYear={yearMismatch.initialYear}
-          isSheshsSnati={isSheshsSnati}
+          hasAccountTabs={hasAccountTabs}
           // "Add file" is updating one specific, already-existing check — its year and
           // division are fixed by that check, not something to retarget here. Hide both
           // selectors (accounts=[] hides the division one; allowYearOverride=false hides
@@ -2889,7 +2895,7 @@ function ChecksTab({ accounts, schoolId, schoolName, schoolStage, logs, logsErro
             // resolve and use THAT division's gefen_account_id instead of the
             // originally requested one.
             let finalAccountId = selectedAccountId;
-            if (isSheshsSnati && selectedDivision) {
+            if (hasAccountTabs && selectedDivision) {
               const match = accounts.find(a => a.division_type === selectedDivision);
               if (match) finalAccountId = match.id;
               // Keep the visible תיכון/חטיבת ביניים tab in sync with whichever division the
@@ -2937,6 +2943,35 @@ export default function SchoolPage() {
   const [loading, setLoading] = useState(!location.state?.school);
   const [activeTab, setActiveTab] = useState("info");
   const [activeSubTab, setActiveSubTab] = useState("tikkon");
+  // One "בדיקות"/"יעדים" tab per Gefen account (legacy stage-implied accounts for a school with
+  // none saved yet); activeSubTab is the active account's division_type.
+  // The selected year's accounts (GET /gefen-accounts) — active tabs + read-only archive tabs.
+  const [yearView, setYearView] = useState(null);
+  const loadYearView = year => axios.get(`/schools/${schoolId}/gefen-accounts`, { params: { academic_year: year } }).then(r => r.data);
+  useEffect(() => {
+    let cancelled = false;
+    setYearView(null);
+    loadYearView(academicYear).then(v => { if (!cancelled) setYearView(v); }).catch(() => {});
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [schoolId, academicYear]);
+  const tabAccounts = useMemo(
+    () => (yearView ? viewTabAccounts(yearView) : schoolAccounts({ gefen_accounts: accounts, stage: school?.stage })),
+    [yearView, accounts, school?.stage],
+  );
+  // "חשבונות במערכת גפן" always shows / edits the card's academic year (top-left selector).
+  const [removalPrompt, setRemovalPrompt] = useState(null); // {mode, removed}
+  const [removalBusy, setRemovalBusy] = useState(false);
+  useEffect(() => {
+    // Switching the card's year mid-edit: the field now edits that year's list.
+    if (isEditing) loadAccountsDraft(academicYear);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [academicYear]);
+  useEffect(() => {
+    if (tabAccounts.length && !tabAccounts.some(a => a.division_type === activeSubTab)) {
+      setActiveSubTab(tabAccounts[0].division_type);
+    }
+  }, [tabAccounts, activeSubTab]);
   const [uploadComparisonMeetingId, setUploadComparisonMeetingId] = useState(null);
 
   // "מחיר כולל מע"מ" — synced with the same admin-table field on AdminPage's schools table
@@ -3163,9 +3198,30 @@ export default function SchoolPage() {
   const [deletingSchool, setDeletingSchool] = useState(false);
   const [recycleInfoSchoolName, setRecycleInfoSchoolName] = useState(null);
   const [pendingStageScopeChoice, setPendingStageScopeChoice] = useState(false);
+  // "חשבונות במערכת גפן" while editing — saved with PUT /schools/{id}/accounts, which also
+  // re-derives schools.stage; editForm.stage follows the draft so the six-year contact rows
+  // react live.
+  const [accountsDraft, setAccountsDraft] = useState([]);
+  const [originalAccountsDraft, setOriginalAccountsDraft] = useState([]);
+  function changeAccountsDraft(next) {
+    setAccountsDraft(next);
+    // Only the current year's accounts drive the six-year contact rows (schools.stage mirror).
+    if (academicYear === DEFAULT_ACADEMIC_YEAR) setEditForm(p => ({ ...p, stage: deriveStage(next) }));
+  }
+  // Draft of one year's saved list (the server falls back to the catalog / stage for a school
+  // without a saved year yet, so that first save materializes it).
+  function loadAccountsDraft(year) {
+    return loadYearView(year).then(v => {
+      const draft = accountsDraftFromView(v);
+      setOriginalAccountsDraft(draft);
+      setAccountsDraft(draft);
+    }).catch(() => {});
+  }
   const [editForm, setEditForm] = useState({
     name: "", symbol: "", city: "", authority: "",
     stage: "",
+    ministry_stage: "",
+    ministry_stage_other_text: "",
     finance_software: "",
     finance_software_other_text: "",
     principal_name: "", principal_phone: "", principal_email: "",
@@ -3673,6 +3729,8 @@ export default function SchoolPage() {
       city: school.city || "",
       authority: school.authority || "",
       stage: school.stage || "",
+      ministry_stage: school.ministry_stage || "",
+      ministry_stage_other_text: school.ministry_stage_other_text || "",
       finance_software: school.finance_software || "",
       finance_software_other_text: school.finance_software_other_text || "",
       principal_name: school.principal_name || "",
@@ -3719,6 +3777,7 @@ export default function SchoolPage() {
     };
     setEditForm(formData);
     setOriginalForm(formData);
+    loadAccountsDraft(academicYear);
     setTriedSave(false);
     setAccessLinkedToAdvisors(false);
     if (role === "owner" || role === "manager") {
@@ -3753,10 +3812,19 @@ export default function SchoolPage() {
   async function submitFullRequest() {
     const changes = {};
     Object.keys(editForm).forEach(f => {
+      if (f === "stage") return; // derived from the Gefen accounts — never requested directly
       if (JSON.stringify(editForm[f]) !== JSON.stringify(originalForm?.[f])) {
         changes[f] = editForm[f];
       }
     });
+    if (!accountsDraftEqual(accountsDraft, originalAccountsDraft)) {
+      const accountsError = validateCoversList(accountsDraft.map(d => d.covers));
+      if (accountsError) {
+        setSaveError(`חשבונות במערכת גפן: ${accountsError}`);
+        return;
+      }
+      changes[`${ACCOUNTS_REQUEST_PREFIX}${academicYear}`] = draftLabels(accountsDraft);
+    }
     if (Object.keys(changes).length === 0) {
       setSaveError("לא בוצע שינוי כלשהו");
       return;
@@ -3793,7 +3861,7 @@ export default function SchoolPage() {
     }
   }
 
-  async function saveEdit() {
+  async function saveEdit(opts = {}) {
     setSaveError("");
     setTriedSave(true);
     const schoolPhoneErr = validateSchoolPhone(editForm.school_phone);
@@ -3822,8 +3890,31 @@ export default function SchoolPage() {
       setSaveError("יש לבחור לפחות יועץ מלווה אחד עבור כל סוג שירות פעיל (גפן/שוטף/מחוז).");
       return false;
     }
+    const accountsChanged = !opts.skipAccounts && !accountsDraftEqual(accountsDraft, originalAccountsDraft);
+    const accountsError = accountsChanged && validateCoversList(accountsDraft.map(d => d.covers));
+    if (accountsError) {
+      setSaveError(`חשבונות במערכת גפן: ${accountsError}`);
+      return false;
+    }
+    // Removing an account (or changing its kind): a manager confirms; an advisor may only ask.
+    const removed = accountsChanged ? removedAccounts(originalAccountsDraft, accountsDraft) : [];
+    if (removed.length && !opts.confirmRemoval) {
+      setRemovalPrompt({ mode: managingAdvisors ? "confirm" : "request", removed });
+      return false;
+    }
     setSaving(true);
     try {
+      // Accounts first: a refused change stops the save before anything else is written.
+      if (accountsChanged) {
+        const accRes = await axios.put(`/schools/${schoolId}/accounts`,
+          { ...accountsPayload(accountsDraft), confirm_removal: !!opts.confirmRemoval },
+          { params: { academic_year: academicYear }, ...SCHOOL_CARD_SURFACE });
+        const savedDraft = accountsDraftFromView(accRes.data);
+        setAccountsDraft(savedDraft);
+        setOriginalAccountsDraft(savedDraft);
+        setYearView(accRes.data);
+        axios.get(`/schools/${schoolId}/accounts`).then(r => setAccounts(r.data || [])).catch(() => {});
+      }
       // Apply only the net advisor changes per type (adds before removes, so the backend's
       // "last advisor" guard never sees a false zero-advisor state) — this is what keeps
       // notifications limited to real, saved changes instead of every click. Each typed
@@ -3913,7 +4004,13 @@ export default function SchoolPage() {
       setSaveError("");
       return true;
     } catch (err) {
-      const msg = err?.response?.data?.detail || "שגיאה בשמירת הנתונים. אנא נסה שוב.";
+      const detail = err?.response?.data?.detail;
+      // The server found a removal the card didn't (the year's list changed meanwhile) — ask now.
+      if (detail?.code === "confirm_removal" || detail?.code === "needs_manager") {
+        setRemovalPrompt({ mode: detail.code === "confirm_removal" ? "confirm" : "request", removed: detail.removed || [] });
+        return false;
+      }
+      const msg = typeof detail === "string" ? detail : "שגיאה בשמירת הנתונים. אנא נסה שוב.";
       setSaveError(msg);
       console.error("saveEdit error:", err?.response?.status, err?.response?.data);
       return false;
@@ -4258,6 +4355,40 @@ export default function SchoolPage() {
         />
       )}
 
+      {removalPrompt && (
+        <GefenAccountsRemovalModal
+          mode={removalPrompt.mode}
+          academicYear={academicYear}
+          removed={removalPrompt.removed}
+          busy={removalBusy}
+          onCancel={() => setRemovalPrompt(null)}
+          onConfirm={async () => {
+            if (removalPrompt.mode === "confirm") {
+              setRemovalPrompt(null);
+              await saveEdit({ confirmRemoval: true });
+              return;
+            }
+            // Advisor: the accounts change goes to a manager as an update request; the rest
+            // of the form is saved directly as usual.
+            setRemovalBusy(true);
+            try {
+              await axios.post(`/schools/${schoolId}/update-requests`, {
+                proposed_changes: { [`${ACCOUNTS_REQUEST_PREFIX}${academicYear}`]: draftLabels(accountsDraft) },
+              });
+              setRemovalPrompt(null);
+              setAccountsDraft(originalAccountsDraft);
+              const ok = await saveEdit({ skipAccounts: true });
+              if (ok) window.alert("הבקשה לשינוי חשבונות הגפן נשלחה לאישור מנהל.");
+            } catch (err) {
+              setRemovalPrompt(null);
+              setSaveError(typeof err?.response?.data?.detail === "string" ? err.response.data.detail : "שליחת הבקשה נכשלה. אנא נסה שוב.");
+            } finally {
+              setRemovalBusy(false);
+            }
+          }}
+        />
+      )}
+
       {requestSuccessData && (
         <UpdateRequestSuccessModal
           changes={requestSuccessData.changes}
@@ -4308,11 +4439,11 @@ export default function SchoolPage() {
                 {t.label}
               </button>
             ))}
-            {/* Division tabs — shown when checks/goals tab is active for שש-שנתי schools */}
-            {(activeTab === "checks" || activeTab === "goals") && school?.stage === "sheshshnati" && (
+            {/* Account tabs — shown when checks/goals tab is active for a school with 2+ Gefen accounts */}
+            {(activeTab === "checks" || activeTab === "goals") && tabAccounts.length > 1 && (
               <>
                 <div className="flex-1" />
-                {[{ id: "tikkon", label: "תיכון" }, { id: "beinayim", label: "חטיבת ביניים" }].map(t => (
+                {tabAccounts.map(a => ({ id: a.division_type, label: a.archived ? `${accountLabel(a)} (ארכיון)` : accountLabel(a) })).map(t => (
                   <button
                     key={t.id}
                     onClick={() => setActiveSubTab(t.id)}
@@ -4328,7 +4459,7 @@ export default function SchoolPage() {
               </>
             )}
             {/* Academic year selector — far left; scopes פגישות/יעדים/בדיקות */}
-            {!((activeTab === "checks" || activeTab === "goals") && school?.stage === "sheshshnati") && <div className="flex-1" />}
+            {!((activeTab === "checks" || activeTab === "goals") && tabAccounts.length > 1) && <div className="flex-1" />}
             {activeTab === "info" && !isEditing && (
               <div className="pb-1.5 flex items-center gap-2">
                 {(role === "owner" || role === "manager" || (role === "advisor" && canEditDirectly)) && (
@@ -4482,11 +4613,33 @@ export default function SchoolPage() {
                     </div>
 
                     <div className={tileCls}>
-                      <label htmlFor="edit-stage" className={`${tileLabelCls} block`}>שלב מוסד</label>
-                      <select id="edit-stage" className={editFieldCls(false, !editForm.stage)} value={editForm.stage}
-                        onChange={e => setEditForm(p => ({ ...p, stage: e.target.value }))}>
-                        {SCHOOL_STAGE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                      <label htmlFor="edit-ministry-stage" className={`${tileLabelCls} block`}>שלב חינוך</label>
+                      <select id="edit-ministry-stage" className={editFieldCls(false, !editForm.ministry_stage)} value={editForm.ministry_stage}
+                        onChange={e => {
+                          const v = e.target.value;
+                          // Free text only belongs to "אחר" ("" not null — update_school drops None).
+                          setEditForm(p => ({ ...p, ministry_stage: v, ...(v !== MINISTRY_STAGE_OTHER && { ministry_stage_other_text: "" }) }));
+                        }}>
+                        <option value="">בחר שלב חינוך</option>
+                        {MINISTRY_STAGE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                       </select>
+                      {editForm.ministry_stage === MINISTRY_STAGE_OTHER && (
+                        <input
+                          type="text"
+                          aria-label="שלב חינוך - אחר, פירוט"
+                          placeholder="פירוט (לא חובה)"
+                          value={editForm.ministry_stage_other_text}
+                          onChange={e => setEditForm(p => ({ ...p, ministry_stage_other_text: e.target.value }))}
+                          className={`${editFieldCls(false, false)} mt-1`}
+                          autoComplete="off"
+                        />
+                      )}
+                    </div>
+
+                    <div className={tileCls}>
+                      <span className={`${tileLabelCls} block`}>חשבונות במערכת גפן</span>
+                      <GefenAccountsEditor value={accountsDraft} onChange={changeAccountsDraft}
+                        idPrefix="edit-gefen-account" selectClassName={editFieldCls(false, false)} showErrors={triedSave} />
                     </div>
 
                     <div className={tileCls}>
@@ -5022,8 +5175,14 @@ export default function SchoolPage() {
                       <p className={tileValueCls} dir={school?.school_phone ? "ltr" : undefined}>{school?.school_phone || "—"}</p>
                     </div>
                     <div className={tileCls}>
-                      <p className={tileLabelCls}>שלב מוסד</p>
-                      <p className={tileValueCls}>{SCHOOL_STAGE_LABEL[school?.stage] || school?.stage || "—"}</p>
+                      <p className={tileLabelCls}>שלב חינוך</p>
+                      <p className={tileValueCls}>{ministryStageLabel(school) || "—"}</p>
+                    </div>
+                    <div className={tileCls}>
+                      <p className={tileLabelCls}>חשבונות במערכת גפן</p>
+                      <p className={tileValueCls}>
+                        {(yearView?.active || tabAccounts.filter(a => !a.archived)).map(accountLabel).join("; ") || "—"}
+                      </p>
                     </div>
                     <div className={tileCls}>
                       <p className={tileLabelCls}>מחוז</p>
@@ -5552,7 +5711,7 @@ export default function SchoolPage() {
           {/* ─── TAB: יעדים ─── */}
           {activeTab === "goals" && (
             <GoalsTab
-              accounts={accounts}
+              accounts={tabAccounts}
               schoolId={schoolId}
               schoolStage={school?.stage}
               activeSubTab={activeSubTab}
@@ -5597,7 +5756,7 @@ export default function SchoolPage() {
 
           {activeTab === "checks" && (
             <ChecksTab
-              accounts={accounts}
+              accounts={tabAccounts}
               schoolId={schoolId}
               schoolName={school?.name}
               schoolStage={school?.stage}
@@ -5636,7 +5795,7 @@ export default function SchoolPage() {
           )}
 
           {activeTab === "control_letter" && (
-            <ControlLetterTab schoolId={schoolId} schoolStage={school?.stage} />
+            <ControlLetterTab schoolId={schoolId} schoolStage={school?.stage} accounts={tabAccounts} />
           )}
         </div>
       </div>

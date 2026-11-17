@@ -26,6 +26,7 @@ from routers.rounds_router import router as rounds_router
 from routers.schools_router import router as schools_router
 from routers.sessions_router import router as sessions_router
 from routers.signup_router import router as signup_router
+from routers.platform_usage_router import router as platform_usage_router
 from routers.tasks_router import router as tasks_router
 from routers.calls_router import router as calls_router
 from routers.training_videos_router import router as training_videos_router
@@ -181,6 +182,7 @@ app.include_router(schools_router, prefix="/schools")
 app.include_router(advisor_finder_router, prefix="/schools")
 app.include_router(sessions_router, prefix="/sessions")
 app.include_router(signup_router, prefix="/signup")
+app.include_router(platform_usage_router, prefix="/platform")
 app.include_router(tasks_router, prefix="/tasks")
 app.include_router(calls_router, prefix="/calls")
 app.include_router(training_videos_router, prefix="/training-videos")

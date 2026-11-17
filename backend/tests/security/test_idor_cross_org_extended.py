@@ -1842,3 +1842,24 @@ def test_direct_coordination_cross_org_rejected(org_a_client):
 def test_direct_coordination_same_org_passes_org_check(org_b_client):
     resp = org_b_client.post(f"/schools/{ORG_B_SCHOOL_ID}/meetings/direct-coordination", json=_DIRECT_COORDINATION_BODY)
     assert resp.status_code == 400 and "סוג פגישה" in resp.text, resp.text
+
+
+# ===========================================================================
+# בדיקת ביטולי פגישות — GET/PUT /schools/meetings/cancel-review-alerts (owner only)
+# ===========================================================================
+# No resource id: scoped to the caller's own org. The writes target Org B (sandbox) only, and
+# never turn the alerts on.
+
+def test_cancel_review_alerts_manager_rejected(org_b_manager_client):
+    assert org_b_manager_client.get("/schools/meetings/cancel-review-alerts").status_code == 403
+    resp = org_b_manager_client.put("/schools/meetings/cancel-review-alerts", json={"recipient_ids": [ORG_B_MANAGER_ID]})
+    assert resp.status_code == 403, resp.text
+
+
+def test_cancel_review_alerts_foreign_recipient_dropped(org_b_client):
+    resp = org_b_client.put("/schools/meetings/cancel-review-alerts",
+                            json={"recipient_ids": [ORG_B_MANAGER_ID, ORG_A_MANAGER_ID]})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["recipient_ids"] == [ORG_B_MANAGER_ID]
+    got = org_b_client.get("/schools/meetings/cancel-review-alerts")
+    assert got.status_code == 200 and ORG_A_MANAGER_ID not in got.json()["recipient_ids"]

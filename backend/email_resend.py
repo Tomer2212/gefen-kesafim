@@ -17,10 +17,26 @@ class ResendQuotaExceeded(RuntimeError):
     until the quota renews — queue callers keep the message pending instead of marking it failed."""
 
 
+def _record_send(org_id: str | None, kind: str | None, resp) -> None:
+    """Counts the email for the superadmin usage screen (platform_usage_router). Resend returns
+    the account's used monthly quota in x-resend-monthly-quota on every send. Never fatal."""
+    try:
+        used_raw = resp.headers.get("x-resend-monthly-quota")
+        used = int(used_raw) if used_raw and used_raw.strip().isdigit() else None
+        from supabase_client import get_admin_client
+        get_admin_client().table("email_send_log").insert({
+            "org_id": org_id, "kind": kind, "provider": "resend", "resend_monthly_used": used,
+        }).execute()
+    except Exception as exc:
+        logger.warning("email_send_log insert failed (non-fatal): %s", exc)
+
+
 def send_resend_email(to_email: str, subject: str, html: str, reply_to: str | None = None,
-                       attachments: list[dict] | None = None):
+                       attachments: list[dict] | None = None,
+                       org_id: str | None = None, kind: str | None = None):
     """attachments: [{"filename": str, "content_b64": str}] — Resend expects base64 content
-    under the "content" key; see https://resend.com/docs/api-reference/emails/send-email."""
+    under the "content" key; see https://resend.com/docs/api-reference/emails/send-email.
+    org_id / kind: who the email is counted for in email_send_log — always pass them."""
     if not RESEND_API_KEY:
         raise RuntimeError("Resend not configured")
     payload = {"from": RESEND_FROM, "to": [to_email], "subject": subject, "html": html}
@@ -51,3 +67,4 @@ def send_resend_email(to_email: str, subject: str, html: str, reply_to: str | No
         if attempt < RATE_LIMIT_RETRIES:
             time.sleep(1 + attempt)  # per-second rate limit — the next second is free again
     resp.raise_for_status()
+    _record_send(org_id, kind, resp)

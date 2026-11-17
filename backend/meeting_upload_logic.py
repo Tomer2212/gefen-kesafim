@@ -47,6 +47,7 @@ DIVISION_LABELS = {
     "tikkon": "חטיבה עליונה",
     "beinayim": "חטיבת ביניים",
     "yesodi": "יסודי",
+    "combined": "חשבון משולב",
     "other": "אחר",
 }
 BOTH_DIVISIONS_LABEL = "שתי החטיבות"

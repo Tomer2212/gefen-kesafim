@@ -18,7 +18,7 @@ _CONTACT_SUFFIXES = ("name", "phone", "email", "day_off")
 # `schools` columns shown in the "פרטי בית הספר" tab. `notes` has its own signed thread and
 # the deprecated single `meeting_coordinator` mirror is derived — both deliberately excluded.
 TRACKED_SCHOOL_FIELDS = (
-    "name", "symbol", "city", "authority", "stage", "district", "address", "school_phone",
+    "name", "symbol", "city", "authority", "stage", "ministry_stage", "ministry_stage_other_text", "district", "address", "school_phone",
     "finance_software", "finance_software_other_text",
     "education_authority", "sector", "supervision", "grade_levels", "study_days", "student_count",
     *[f"{r}_{s}" for r in _CONTACT_ROLES for s in _CONTACT_SUFFIXES],

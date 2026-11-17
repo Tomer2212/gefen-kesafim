@@ -306,4 +306,4 @@ def send_booking_request_email(org_id: str, advisor_id: str, to_email: str, subj
     db = get_admin_client()
     # org_id scopes the lookup: an advisor of another org never becomes the Reply-To address.
     advisor_email = graph_client._resolve_advisor_email(db, org_id, advisor_id)
-    send_resend_email(to_email, subject, html, reply_to=advisor_email)
+    send_resend_email(to_email, subject, html, reply_to=advisor_email, org_id=org_id, kind="booking")

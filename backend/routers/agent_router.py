@@ -14,6 +14,7 @@ import booking_token_logic
 import task_logic
 from academic_years import DEFAULT_ACADEMIC_YEAR
 from auth import get_current_user
+from meeting_labels import MEETING_STATUS_LABELS
 from org_task_draft_state import _create_draft, _get_draft, _update_draft
 from routers import tasks_router as _tasks_router
 from supabase_client import get_admin_client, reset_admin_client
@@ -37,13 +38,13 @@ ADMIN_CONTACT_COLUMN_LABELS = {
     "principal_phone": "טלפון מנהל/ת", "secretary_phone": "טלפון מנהלנ/ית", "finance_contact_phone": "טלפון אחראי/ת כספים",
     "meeting_coordinator_slots": "מתאם פגישות", "gefen_files_responsible_slots": "אחראי/ת קבצי גפן",
 }
-ADMIN_TEXT_COLUMNS = ["symbol", "city", "authority", "education_authority", "contract_file", *ADMIN_CONTACT_COLUMN_LABELS]
+ADMIN_TEXT_COLUMNS = ["symbol", "city", "authority", "stage", "education_authority", "contract_file", *ADMIN_CONTACT_COLUMN_LABELS]
 ADMIN_NUMBER_COLUMNS = [
     "meetings_completed", "meetings_hours", "order_amount_gefen",
     "hours_ordered", "rate", "payment_received", "payment_requests_sent", "receipts_sent",
 ]
 ADMIN_SELECT_COLUMNS = {
-    "stage": ["yesodi", "beinayim", "tikkon", "sheshshnati", "other"],
+    "ministry_stage": task_logic.MINISTRY_STAGE_OPTIONS,
     "service_type": ["gefen", "current", "gefen_current", "district", "takuma"],
     "sector": ["יהודי", "ערבי", "צ'רקסי", "בדואי", "דרוזי"],
     "client_status": ["active", "inactive", "in_progress", "former"],
@@ -58,13 +59,13 @@ ADMIN_COLUMN_LABELS = {
     "order_amount_gefen": 'מחיר כולל מע"מ',
     "hours_ordered": "מספר שעות שהוזמנו", "rate": "תעריף", "payment_received": "תשלום שהתקבל",
     "payment_requests_sent": "דרישות תשלום שנשלחו", "receipts_sent": "אסמכתאות שנשלחו",
-    "stage": "שלב מוסד", "service_type": "סוג שירות", "order_method": "אמצעי הזמנה",
+    "stage": "חשבונות במערכת גפן", "ministry_stage": "שלב חינוך", "service_type": "סוג שירות", "order_method": "אמצעי הזמנה",
     "contract_sent": "חוזה נשלח", "contract_received": "חוזה התקבל",
     "education_authority": "רשות חינוך", "sector": "מגזר", "client_status": "סטטוס לקוח",
     **ADMIN_CONTACT_COLUMN_LABELS,
 }
 NUMBER_OPS = {"eq", "ne", "gt", "gte", "lt", "lte"}
-MEETING_STATUSES = ["scheduled", "completed", "cancelled", "postponed", "other"]
+MEETING_STATUSES = ["scheduled", "completed", "cancelled", "cancelled_reviewed", "postponed", "other"]
 
 # Every field usable in a find_schools_by_criteria "field" condition — sourced live from the
 # existing Tasks-engine's own field registry (task_logic.py) so the two never drift apart.
@@ -227,7 +228,7 @@ SYSTEM_PROMPT = f"""אתה "סוכן ניהול" — עוזר AI בתוך אזו
 - מספר: {", ".join(f"{k} ({ADMIN_COLUMN_LABELS[k]})" for k in ADMIN_NUMBER_COLUMNS)}
 - בחירה מרשימה סגורה: {", ".join(f"{k} ({ADMIN_COLUMN_LABELS[k]}: {', '.join(v)})" for k, v in ADMIN_SELECT_COLUMNS.items())}
 
-טבלת פגישות: status (אחד מ-{", ".join(MEETING_STATUSES)}), date_from/date_to (YYYY-MM-DD), advisor_name (שם חופשי של יועץ — ייפתר ל-ID), search (טקסט חופשי לשם/סמל/עיר בית ספר).
+טבלת פגישות: status (אחד מ-{", ".join(f"{s} ({MEETING_STATUS_LABELS.get(s, s)})" for s in MEETING_STATUSES)}), date_from/date_to (YYYY-MM-DD), advisor_name (שם חופשי של יועץ — ייפתר ל-ID), search (טקסט חופשי לשם/סמל/עיר בית ספר).
 
 ## 2. איתור בתי ספר, שליחת הודעות, ומעקב משימות
 זרימה כללית: `find_schools_by_criteria` / `find_schools_by_contact_name` / `start_task_for_schools` (איתור בתי הספר) → `set_task_message` (מה לשלוח, למי, באיזה ערוץ) → אם ההודעה מכילה {{booking_link}}: `resolve_task_advisor`/`set_task_scheduling_window` (רק אז נדרש) → `create_and_send_task` (שליחה בפועל, רק אחרי אישור מפורש). מעקב אחר משימות שכבר נוצרו: `get_task_status`.

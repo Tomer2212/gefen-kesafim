@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { ACADEMIC_YEARS } from "../constants/academicYears";
+import { accountLabel, divisionBucket } from "../constants/gefenAccounts";
 
 const FILE_ROLE_LABEL = {
   tikhnun: "קובץ תכנון",
@@ -63,7 +64,7 @@ function divisionNote(row, selectedDivision) {
     return { text: "לא ניתן לקבוע בבירור את החטיבה של קובץ זה", color: "text-amber-700" };
   }
   const label = DIVISION_WORD[row.detectedDivision] || row.detectedDivision;
-  const matches = row.divisionExempt || row.detectedDivision === selectedDivision;
+  const matches = row.divisionExempt || !selectedDivision || row.detectedDivision === selectedDivision;
   return {
     text: `זוהתה חטיבה: ${label}`,
     color: matches ? "text-green-600" : "text-red-600",
@@ -170,10 +171,14 @@ export function YearMismatchModal({
 }) {
   const { ref, handleKeyDown } = useFocusTrap(onCancel);
   const [selectedYear, setSelectedYear] = useState(initialYear);
-  const divisionAccounts = accounts.filter(a => a.division_type === "tikkon" || a.division_type === "beinayim");
+  // selectedDivision = the target account's division_type; files are compared against the
+  // file division that account expects (null = a combined account, which accepts either).
+  const divisionAccounts = accounts.filter(a => a.id && !a.archived); // never an archive tab
   const [selectedDivision, setSelectedDivision] = useState(
     initialDivision || divisionAccounts[0]?.division_type || "tikkon"
   );
+  const selectedBucket = divisionBucket(divisionAccounts.find(a => a.division_type === selectedDivision)
+    || { division_type: selectedDivision });
   const [rows, setRows] = useState(() => issues.map(iss => ({
     fileRole: iss.fileRole,
     originalFilenames: iss.filenames,
@@ -206,7 +211,7 @@ export function YearMismatchModal({
 
   const canRun = rows.every(r => r.removed || (
     !rowBlocked(r)
-    && (!isSheshsSnati || r.divisionExempt || !r.detectedDivision || r.detectedDivision === "both" || r.detectedDivision === selectedDivision)
+    && (!isSheshsSnati || r.divisionExempt || !r.detectedDivision || r.detectedDivision === "both" || !selectedBucket || r.detectedDivision === selectedBucket)
   ));
   const rowsWithIndex = rows.map((row, index) => ({ row, index })).filter(({ row }) => !row.removed);
   const yearIssueRows = rowsWithIndex.filter(({ row }) => !INVALID_FILE_STATUSES.has(row.status));
@@ -285,7 +290,7 @@ export function YearMismatchModal({
         {yearIssueRows.length > 0 && (
           <ul className="flex flex-col gap-2">
             {yearIssueRows.map(({ row, index }) => (
-              <RowItem key={index} row={row} index={index} selectedYear={selectedYear} selectedDivision={selectedDivision} isSheshsSnati={isSheshsSnati} onSwap={handleSwap} onRemove={handleRemove} onAcknowledge={handleAcknowledge} />
+              <RowItem key={index} row={row} index={index} selectedYear={selectedYear} selectedDivision={selectedBucket} isSheshsSnati={isSheshsSnati} onSwap={handleSwap} onRemove={handleRemove} onAcknowledge={handleAcknowledge} />
             ))}
           </ul>
         )}
@@ -295,7 +300,7 @@ export function YearMismatchModal({
             <h3 className="text-base font-bold text-slate-800">קובץ לא תקין</h3>
             <ul className="flex flex-col gap-2">
               {budgetIssueRows.map(({ row, index }) => (
-                <RowItem key={index} row={row} index={index} selectedYear={selectedYear} selectedDivision={selectedDivision} isSheshsSnati={isSheshsSnati} onSwap={handleSwap} onRemove={handleRemove} onAcknowledge={handleAcknowledge} />
+                <RowItem key={index} row={row} index={index} selectedYear={selectedYear} selectedDivision={selectedBucket} isSheshsSnati={isSheshsSnati} onSwap={handleSwap} onRemove={handleRemove} onAcknowledge={handleAcknowledge} />
               ))}
             </ul>
           </>
@@ -330,7 +335,7 @@ export function YearMismatchModal({
             >
               {divisionAccounts.map(acc => (
                 <option key={acc.id} value={acc.division_type}>
-                  {acc.custom_label || DIVISION_WORD[acc.division_type] || acc.division_type}
+                  {accountLabel(acc) || DIVISION_WORD[acc.division_type] || acc.division_type}
                 </option>
               ))}
             </select>

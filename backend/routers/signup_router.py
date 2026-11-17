@@ -40,7 +40,9 @@ def _strip_header_injection(value: str) -> str:
     return (value or "").replace("\r", "").replace("\n", "")
 
 
-def _send_simple_email(to: str, subject: str, html: str):
+def _send_simple_email(to: str, subject: str, html: str, raise_errors: bool = False):
+    """raise_errors: re-raise a send failure instead of only logging it (capacity alerts must know
+    whether the email really went out, or they would be marked sent and never retried)."""
     try:
         msg = MIMEMultipart()
         msg["From"] = f"גפן AI <{GMAIL_USER}>"
@@ -54,6 +56,8 @@ def _send_simple_email(to: str, subject: str, html: str):
             server.send_message(msg)
     except Exception as exc:
         logger.error("Failed to send email to %s: %s", to, exc)
+        if raise_errors:
+            raise
 
 
 def _make_unsub_token(email: str) -> str:

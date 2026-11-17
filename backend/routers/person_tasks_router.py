@@ -27,6 +27,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
 
+import gefen_accounts
 import task_logic
 from academic_years import DEFAULT_ACADEMIC_YEAR, resolve_inherited_year_admin
 from auth import get_current_user
@@ -252,9 +253,24 @@ def _divisions_for_school_stage(stage: str | None) -> list[str]:
     return _STAGE_TO_DIVISIONS.get(stage, ["other"])
 
 
+def _account_divisions_by_school(db, schools_map: dict, school_ids: list[str], academic_year: str) -> dict[str, list[str]]:
+    """{school_id: [division_type, ...]} from the schools' Gefen accounts of the task's year —
+    one target per account. Non-fatal: {} on failure, so every school falls back to its stage."""
+    if not school_ids:
+        return {}
+    try:
+        resolved = gefen_accounts.resolve_year_accounts_bulk(
+            db, [{"id": sid, "stage": (schools_map.get(sid) or {}).get("stage")} for sid in school_ids], academic_year,
+        )
+    except Exception as exc:
+        logger.warning("account divisions lookup failed (non-fatal): %s", exc)
+        return {}
+    return {sid: [e["division_type"] for e in entries] for sid, entries in resolved.items() if entries}
+
+
 def _build_school_targets(db, task_id: str, org_id: str, matched_school_ids: list[str], schools_map: dict,
                            divisions_by_school: dict, candidates_by_school: dict,
-                           resolved_school_assignees: dict) -> list[dict]:
+                           resolved_school_assignees: dict, academic_year: str = DEFAULT_ACADEMIC_YEAR) -> list[dict]:
     """Builds org_person_task_targets rows for assignment_mode='schools' — one row per school,
     UNLESS the school is six-year (stage='sheshshnati'), in which case it splits into one target
     per stage (תיכון + חטיבת ביניים), each with the same resolved advisor assignee_ids (advisor
@@ -263,6 +279,7 @@ def _build_school_targets(db, task_id: str, org_id: str, matched_school_ids: lis
     split, except here it's automatic (not a creator choice) since the underlying work always
     needs doing once per stage."""
     resolved = resolved_school_assignees or {}
+    account_divisions = _account_divisions_by_school(db, schools_map, matched_school_ids, academic_year)
     targets = []
     for school_id in matched_school_ids:
         assignee_ids: set[str] = set()
@@ -278,7 +295,7 @@ def _build_school_targets(db, task_id: str, org_id: str, matched_school_ids: lis
             continue
 
         stage = (schools_map.get(school_id) or {}).get("stage")
-        for dt in _divisions_for_school_stage(stage):
+        for dt in account_divisions.get(school_id) or _divisions_for_school_stage(stage):
             targets.append({"task_id": task_id, "school_id": school_id, "assignee_ids": sorted(assignee_ids), "target_division_type": dt})
 
     return targets
@@ -382,7 +399,7 @@ def create_person_task(body: PersonTaskCreateIn, user: Annotated[dict, Depends(g
     else:
         targets = _build_school_targets(
             db, task_id, user["org_id"], matched_school_ids, schools_map, divisions_by_school, candidates_by_school,
-            body.resolved_school_assignees,
+            body.resolved_school_assignees, academic_year,
         )
 
     if targets:
@@ -450,6 +467,7 @@ def _try_activate_scheduled_person_task(db, task: dict) -> dict:
 
     targets = _build_school_targets(
         db, task["id"], org_id, matched_school_ids, schools_map, divisions_by_school, candidates_by_school, None,
+        academic_year,
     )
     if targets:
         db.table("org_person_task_targets").insert(targets).execute()

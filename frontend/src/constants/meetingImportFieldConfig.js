@@ -29,7 +29,7 @@ export const MEETING_IMPORT_FIELD_CONFIG = [
   { key: "participant_phone",     label: "טלפון איש קשר משתתף",       required: false },
   { key: "participant_email",     label: "מייל איש קשר משתתף",        required: false, hint: "בפגישות עתידיות ישמש גם כנמען להזמנת Outlook" },
   { key: "notes",                 label: "הערות",                     required: false },
-  { key: "status",                label: "סטטוס",                     required: true, hint: "נקבעה / בוצעה / בוטלה / נדחתה / אחר" },
+  { key: "status",                label: "סטטוס",                     required: true, hint: "נקבעה / בוצעה / בוטלה / בוטלה ונבדקה / נדחתה / אחר" },
 ];
 
 export function normalizeImportStageScope(raw) {
@@ -97,7 +97,12 @@ export function normalizeImportServiceType(raw) {
 
 export function normalizeImportStatus(raw) {
   const t = String(raw || "").trim();
-  if (["scheduled", "completed", "cancelled", "postponed", "other"].includes(t)) return t;
+  if (["scheduled", "completed", "cancelled", "cancelled_reviewed", "postponed", "other"].includes(t)) return t;
+  // "בוטלה ונבדקה" contains "בוטל" — checked before the table (mirrors normalize_meeting_status).
+  const d = definalize(t.toLowerCase());
+  // "לא נבדקה" / "טרם נבדקה" = not yet reviewed -> plain "cancelled" via the table.
+  if (["בוטל", "ביטול", "cancel"].some(k => d.includes(k)) && ["נבדק", "review"].some(k => d.includes(k))
+      && !["לא נבדק", "טרמ נבדק", "not review"].some(k => d.includes(k))) return "cancelled_reviewed";
   return matchSynonyms(raw, _STATUS_SYNONYMS);
 }
 

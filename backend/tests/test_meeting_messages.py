@@ -164,7 +164,7 @@ def harness(monkeypatch):
     })
     monkeypatch.setattr(router, "get_or_create_upload_token", lambda *_a, **_k: "tok")
     monkeypatch.setattr(router, "_opted_out_recipients", lambda *_a: set())
-    monkeypatch.setattr(router, "send_resend_email", lambda to, subject, html, reply_to=None: sent.append((to, html)))
+    monkeypatch.setattr(router, "send_resend_email", lambda to, subject, html, reply_to=None, **_k: sent.append((to, html)))
     return db, sent, meeting, monkeypatch
 
 

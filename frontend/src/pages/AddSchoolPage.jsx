@@ -11,6 +11,9 @@ import { useFocusTrap } from "../hooks/useFocusTrap";
 import { SLOT_LABELS, slotsForSchool } from "../components/meetings/meetingCoordinatorSlots";
 import { GEFEN_FILES_SLOT_LABELS, gefenFilesSlotsForSchool, resolveGefenFilesResponsibleForSlot } from "../components/meetings/gefenFilesResponsibleSlots";
 import { QuestionTooltip } from "../components/QuestionTooltip";
+import { MINISTRY_STAGE_OPTIONS, MINISTRY_STAGE_OTHER, stageSuggestionForMinistryStage } from "../constants/ministryStages";
+import { accountsDraftFromStage, accountsPayload, deriveStage, validateCoversList } from "../constants/gefenAccounts";
+import { GefenAccountsEditor } from "../components/GefenAccountsEditor";
 
 // Tags school-data writes for the school card's "תיעוד פעולות" log (backend school_activity.py).
 const SURFACE_HEADERS = { headers: { "X-Client-Surface": "add_school" } };
@@ -33,27 +36,6 @@ const TILE_LABEL_CLS = "text-[13px] font-medium text-gray-500 mb-1 block";
 const OUTLINE_BTN_CLS = "border border-slate-300 hover:border-slate-400 text-slate-700 bg-white text-xs font-semibold px-3.5 py-2 rounded-lg transition-all";
 
 // ---- constants (mirrored from AdminPage) ----
-
-const DIVISION_OPTIONS = [
-  { value: "tikkon",   label: "חטיבה עליונה" },
-  { value: "beinayim", label: "חטיבת ביניים" },
-  { value: "yesodi",   label: "יסודי" },
-  { value: "other",    label: "אחר" },
-];
-
-const SCHOOL_STAGE_OPTIONS = [
-  { value: "",            label: "בחר שלב מוסד", divisionType: null },
-  { value: "yesodi",      label: "יסודי",          divisionType: "yesodi" },
-  { value: "beinayim",    label: "חטיבת ביניים",   divisionType: "beinayim" },
-  { value: "tikkon",      label: "תיכון",           divisionType: "tikkon" },
-  { value: "sheshshnati", label: "שש שנתי",         divisionType: null },
-  { value: "other",       label: "אחר",             divisionType: null },
-];
-
-const DEFAULT_CUSTOM_DIVISIONS = [
-  { id: 1, division_type: "tikkon" },
-  { id: 2, division_type: "beinayim" },
-];
 
 const FINANCE_SOFTWARE_OPTIONS = [
   { value: "",           label: "בחר" },
@@ -167,7 +149,7 @@ function parseAmount(raw) {
 }
 
 const EMPTY_FORM = {
-  name: "", symbol: "", city: "", authority: "", stage: "",
+  name: "", symbol: "", city: "", authority: "", stage: "", ministry_stage: "", ministry_stage_other_text: "",
   finance_software: "", finance_software_other_text: "", principal_name: "", principal_phone: "",
   principal_email: "", secretary_name: "", secretary_phone: "",
   secretary_email: "", finance_contact_name: "", finance_contact_phone: "",
@@ -345,8 +327,12 @@ export default function AddSchoolPage() {
 
   // Form
   const [schoolForm, setSchoolForm]           = useState(EMPTY_FORM);
-  const [schoolStage, setSchoolStage]         = useState("");
-  const [customDivisions, setCustomDivisions] = useState(DEFAULT_CUSTOM_DIVISIONS);
+  // "חשבונות במערכת גפן" — saved with PUT /schools/{id}/accounts right after creation; the
+  // stage it implies drives the six-year contact rows live.
+  const [accountsDraft, setAccountsDraft] = useState([]);
+  // Accounts are per academic year; a new school's list is saved for the current year (like
+  // its "פרטי ליווי" fields).
+  const schoolStage = deriveStage(accountsDraft);
   const [typedAdvisorIds, setTypedAdvisorIds] = useState({ gefen: [], current: [], district: [] });
   const [yearAdminForm, setYearAdminForm] = useState({
     client_status: null, service_type: null, order_method: [], order_method_other_text: null, order_amount_gefen: null,
@@ -370,7 +356,7 @@ export default function AddSchoolPage() {
   const symbolError      = validateSymbol(schoolForm.symbol);
   const schoolPhoneError = validateSchoolPhone(schoolForm.school_phone);
 
-  const isDirty = !!(schoolForm.name || schoolForm.symbol || schoolStage || draftLinkedAdvisorIds.length > 0);
+  const isDirty = !!(schoolForm.name || schoolForm.symbol || accountsDraft.length > 0 || draftLinkedAdvisorIds.length > 0);
   const blocker = useBlocker(isDirty && !savingSchool);
 
   // Keep restrict_access_to in sync when "היועצים המלווים" is selected
@@ -445,7 +431,6 @@ export default function AddSchoolPage() {
     setSchoolConflict(null);
     if (!schoolForm.name || validateSymbol(schoolForm.symbol)) return;
     if (existingSymbols.includes(schoolForm.symbol)) return;
-    if (!schoolStage) return;
     if (canSeeAllUsers) {
       const requiredTypes = activeServiceTypes(yearAdminForm.service_type);
       if (yearAdminForm.client_status === "active" && requiredTypes.some(t => typedAdvisorIds[t].length === 0)) {
@@ -453,7 +438,7 @@ export default function AddSchoolPage() {
         return;
       }
     }
-    if ((schoolStage === "sheshshnati" || schoolStage === "other") && customDivisions.length === 0) return;
+    if (validateCoversList(accountsDraft.map(d => d.covers))) return;
     if (schoolForm.principal_phone    && validateSecretaryPhone(schoolForm.principal_phone))    return;
     if (schoolForm.secretary_phone    && validateSecretaryPhone(schoolForm.secretary_phone))    return;
     if (schoolForm.finance_contact_phone && validateSecretaryPhone(schoolForm.finance_contact_phone)) return;
@@ -506,7 +491,7 @@ export default function AddSchoolPage() {
         : parseInt(schoolForm.student_count, 10);
       let res;
       try {
-        res = await axios.post("/schools/", { ...schoolForm, ...chativaSync, ...legacyCoordinatorSync, stage: schoolStage, student_count: studentCountValue }, SURFACE_HEADERS);
+        res = await axios.post("/schools/", { ...schoolForm, ...chativaSync, ...legacyCoordinatorSync, stage: null, student_count: studentCountValue }, SURFACE_HEADERS);
       } catch (err) {
         const detail = err?.response?.data?.detail;
         if (err?.response?.status === 409 && detail?.code === "duplicate_symbol") {
@@ -516,14 +501,8 @@ export default function AddSchoolPage() {
         throw err;
       }
       const newId  = res.data.id;
-      const option = SCHOOL_STAGE_OPTIONS.find(s => s.value === schoolStage);
-
-      if (option?.divisionType) {
-        await axios.post(`/schools/${newId}/accounts`, { division_type: option.divisionType });
-      } else {
-        for (const div of customDivisions) {
-          if (div.division_type) await axios.post(`/schools/${newId}/accounts`, { division_type: div.division_type });
-        }
+      if (accountsDraft.length > 0) {
+        await axios.put(`/schools/${newId}/accounts`, accountsPayload(accountsDraft), { params: { academic_year: DEFAULT_ACADEMIC_YEAR }, ...SURFACE_HEADERS });
       }
 
       // Advisors are auto-assigned by the backend for the advisor role; managers/owners assign
@@ -665,17 +644,36 @@ export default function AddSchoolPage() {
               </div>
 
               <div className={TILE_CLS}>
-                <label htmlFor="school-stage" className={TILE_LABEL_CLS}>שלב מוסד</label>
-                <select id="school-stage"
-                  className={`input-field text-sm ${triedSave && !schoolStage ? "border-red-400" : ""}`}
-                  value={schoolStage}
+                <label htmlFor="school-ministry-stage" className={TILE_LABEL_CLS}>שלב חינוך</label>
+                <select id="school-ministry-stage" className="input-field text-sm"
+                  value={schoolForm.ministry_stage}
                   onChange={e => {
-                    setSchoolStage(e.target.value);
-                    if (e.target.value === "sheshshnati" || e.target.value === "other") setCustomDivisions(DEFAULT_CUSTOM_DIVISIONS);
+                    const v = e.target.value;
+                    setSchoolForm(p => ({ ...p, ministry_stage: v, ...(v !== MINISTRY_STAGE_OTHER && { ministry_stage_other_text: "" }) }));
+                    // A one-level Ministry stage says how checks split — pre-fill it only while unset.
+                    const suggested = stageSuggestionForMinistryStage(v);
+                    if (suggested && accountsDraft.length === 0) setAccountsDraft(accountsDraftFromStage(suggested));
                   }}>
-                  {SCHOOL_STAGE_OPTIONS.map(s => <option key={s.value} value={s.value} disabled={s.value === ""}>{s.label}</option>)}
+                  <option value="">בחר שלב חינוך</option>
+                  {MINISTRY_STAGE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                 </select>
-                {triedSave && !schoolStage && <span className="text-xs text-red-500 block mt-0.5" role="alert">שדה חובה</span>}
+                {schoolForm.ministry_stage === MINISTRY_STAGE_OTHER && (
+                  <input
+                    type="text"
+                    aria-label="שלב חינוך - אחר, פירוט"
+                    placeholder="פירוט (לא חובה)"
+                    value={schoolForm.ministry_stage_other_text}
+                    onChange={e => setSchoolForm(p => ({ ...p, ministry_stage_other_text: e.target.value }))}
+                    className="input-field text-sm mt-1"
+                    autoComplete="off"
+                  />
+                )}
+              </div>
+
+              <div className={TILE_CLS}>
+                <span className={`${TILE_LABEL_CLS} block`}>חשבונות במערכת גפן</span>
+                <GefenAccountsEditor value={accountsDraft} onChange={setAccountsDraft}
+                  idPrefix="school-gefen-account" showErrors={triedSave} />
               </div>
 
               <div className={TILE_CLS}>
@@ -739,35 +737,6 @@ export default function AddSchoolPage() {
                   inputMode="numeric" />
               </div>
             </div>
-
-            {/* Custom divisions for שש שנתי / אחר */}
-            {(schoolStage === "sheshshnati" || schoolStage === "other") && (
-              <div className="mt-4 pt-4 border-t border-slate-100">
-                <p className="text-xs text-slate-800 font-medium mb-2">חטיבות</p>
-                <div className="flex flex-col gap-2 mb-2">
-                  {customDivisions.map((div, idx) => (
-                    <div key={div.id} className="flex gap-2 items-center">
-                      <label htmlFor={`custom-div-${div.id}`} className="sr-only">סוג חטיבה</label>
-                      <select id={`custom-div-${div.id}`} className="input-field text-sm flex-1"
-                        value={div.division_type}
-                        onChange={e => setCustomDivisions(prev => prev.map((d, i) => i === idx ? { ...d, division_type: e.target.value } : d))}>
-                        {DIVISION_OPTIONS.map(d => <option key={d.value} value={d.value}>{d.label}</option>)}
-                      </select>
-                      <button type="button"
-                        onClick={() => setCustomDivisions(prev => prev.filter((_, i) => i !== idx))}
-                        className="text-red-400 hover:text-red-600 text-xl leading-none w-7 flex-shrink-0"
-                        aria-label="הסר חטיבה">×</button>
-                    </div>
-                  ))}
-                </div>
-                <button type="button"
-                  onClick={() => setCustomDivisions(prev => [...prev, { id: Date.now(), division_type: "tikkon" }])}
-                  className={OUTLINE_BTN_CLS}>+ הוסף שורה</button>
-                {triedSave && customDivisions.length === 0 && (
-                  <p className="text-xs text-red-500 mt-1" role="alert">יש להוסיף לפחות חטיבה אחת</p>
-                )}
-              </div>
-            )}
 
             {/* Contact table */}
             <div className="mt-10 mb-2 pt-6 border-t border-slate-200/60">

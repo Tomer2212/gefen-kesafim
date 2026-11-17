@@ -442,7 +442,7 @@ def test_recipient_is_asked_only_for_their_own_missing_files_and_one_failure_spa
     monkeypatch.setattr(router, "resolve_requested_upload_years", lambda _m: ['תשפ"ז'])
     monkeypatch.setattr(router, "_opted_out_recipients", lambda *_a: set())
     monkeypatch.setattr(router, "get_or_create_upload_token", fake_token)
-    monkeypatch.setattr(router, "send_resend_email", lambda to, _subject, html, reply_to=None: sent.update({to: html}))
+    monkeypatch.setattr(router, "send_resend_email", lambda to, _subject, html, reply_to=None, **_k: sent.update({to: html}))
 
     result = router.request_missing_files("m1", {"id": "u1", "email": ""})
 

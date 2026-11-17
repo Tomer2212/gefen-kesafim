@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import axios from "axios";
 import { DatePickerPopover } from "./meetings/DatePickerPopover";
 import { CONTROL_LETTER_STATUS_OPTIONS } from "./controlLetter/constants";
+import { accountLabel } from "../constants/gefenAccounts";
 
 const DIVISION_LABEL = { tikkon: "תיכון", beinayim: "חטיבת ביניים", yesodi: "יסודי", other: "אחר" };
 
@@ -32,7 +33,7 @@ function divisionsForStage(stage) {
   return ["other"];
 }
 
-export function ControlLetterTab({ schoolId, schoolStage }) {
+export function ControlLetterTab({ schoolId, schoolStage, accounts = [] }) {
   const [rowsByDivision, setRowsByDivision] = useState({});
   const [loading, setLoading] = useState(true);
 
@@ -64,7 +65,11 @@ export function ControlLetterTab({ schoolId, schoolStage }) {
     setRowsByDivision(prev => ({ ...prev, [divisionType]: { ...(prev[divisionType] || {}), ...data } }));
   }
 
-  const divisions = divisionsForStage(schoolStage);
+  // One section per Gefen account of the selected year (a school with none falls back to its
+  // stage). Letters aren't per year, so a division that already has one always stays.
+  const baseDivisions = accounts.length ? accounts.map(a => a.division_type) : divisionsForStage(schoolStage);
+  const divisions = [...baseDivisions, ...Object.keys(rowsByDivision).filter(dt => !baseDivisions.includes(dt))];
+  const divisionLabel = dt => accountLabel(accounts.find(a => a.division_type === dt)) || DIVISION_LABEL[dt] || "חטיבה";
 
   if (loading) {
     return (
@@ -80,7 +85,7 @@ export function ControlLetterTab({ schoolId, schoolStage }) {
         <div key={divisionType} className={i === divisions.length - 1 ? "" : "mb-12"}>
           {divisions.length > 1 && (
             <h2 className="text-lg font-bold text-slate-900 mb-3">
-              {DIVISION_LABEL[divisionType] || "חטיבה"}
+              {divisionLabel(divisionType)}
             </h2>
           )}
           <ControlLetterTable

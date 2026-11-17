@@ -24,12 +24,18 @@ import { useAiSummaryEnabled } from "../hooks/useAiSummaryEnabled";
 import { mergeMeetingsSilently, recentDateBounds, visibleDateBounds } from "../components/meetings/mergeMeetings";
 import { useMeetingNotes } from "../context/MeetingNotesContext";
 
-const TODAY = new Date().toISOString().slice(0, 10);
-// date_from defaults to the start of a given academic year (not a fixed value) so the list
-// doesn't silently hide that year's meetings the moment they're dated in the future relative
-// to today — see the dynamic-date-from plan. date_to intentionally stays "today" always.
-function buildDefaultFilters(academicYear) {
-  return { status: "scheduled", date_from: getAcademicYearStartDate(academicYear), date_to: TODAY, advisor_id: null, school_id: null };
+// Local (Asia/Jerusalem) date, computed on each call — toISOString() is UTC and would show
+// yesterday between midnight and 02:00/03:00, and a module-level constant goes stale overnight.
+function todayLocal() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+// The date range defaults to today only (both ends). A range the user picked is kept for the
+// rest of the day; on the first entry of a new day it is reset to today (other restored
+// filters, e.g. status, are kept) — see `savedOn` in the saved state.
+function buildDefaultFilters() {
+  const today = todayLocal();
+  return { status: "scheduled", date_from: today, date_to: today, advisor_id: null, school_id: null };
 }
 const SS_KEY = "admin_meetings_ui_state";
 
@@ -62,7 +68,12 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [academicYear, setAcademicYear] = useState(DEFAULT_ACADEMIC_YEAR);
-  const [filters, setFilters] = useState(saved?.filters ?? buildDefaultFilters(DEFAULT_ACADEMIC_YEAR));
+  const [filters, setFilters] = useState(() => {
+    const defaults = buildDefaultFilters();
+    if (!saved?.filters) return defaults;
+    if (saved.savedOn === defaults.date_from) return saved.filters;
+    return { ...saved.filters, date_from: defaults.date_from, date_to: defaults.date_to };
+  });
   const [showAdvanced, setShowAdvanced] = useState(saved?.showAdvanced ?? false);
   const [search] = useState("");
 
@@ -142,7 +153,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
     // filter UI use) and updates the client-side text filters.
     applyAgentFilters: (filterObj) => {
       const next = {
-        ...buildDefaultFilters(academicYear),
+        ...buildDefaultFilters(),
         ...filters,
         ...(filterObj?.status !== undefined ? { status: filterObj.status } : {}),
         ...(filterObj?.date_from !== undefined ? { date_from: filterObj.date_from } : {}),
@@ -264,8 +275,33 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
 
   // Persist all filter/search state to sessionStorage on every change
   useEffect(() => {
-    saveState({ filters, showAdvanced, nameFilter, symbolFilter, cityFilter, districtFilter });
+    saveState({ savedOn: todayLocal(), filters, showAdvanced, nameFilter, symbolFilter, cityFilter, districtFilter });
   }, [filters, showAdvanced, nameFilter, symbolFilter, cityFilter, districtFilter]);
+
+  // The daily date-range reset also has to happen while the page stays open overnight (the
+  // initial-state check above only runs on entry): checked every minute and whenever the tab
+  // becomes visible / focused again.
+  const datesDayRef = useRef(todayLocal());
+  useEffect(() => {
+    function resetDatesOnNewDay() {
+      const today = todayLocal();
+      if (datesDayRef.current === today) return;
+      datesDayRef.current = today;
+      const next = { ...filters, date_from: today, date_to: today };
+      setFilters(next);
+      loadAllMeetings(next, academicYear);
+    }
+    function onVisible() { if (document.visibilityState === "visible") resetDatesOnNewDay(); }
+    const id = setInterval(resetDatesOnNewDay, 60_000);
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", resetDatesOnNewDay);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", resetDatesOnNewDay);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filters, academicYear]);
 
   useEffect(() => {
     loadAllMeetings(filters);
@@ -287,7 +323,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
   }
 
   function clearFilters() {
-    const reset = buildDefaultFilters(academicYear);
+    const reset = buildDefaultFilters();
     setFilters(reset);
     setNameFilter("");
     setSymbolFilter("");
@@ -602,7 +638,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
     const eligible = displayedMeetings.filter(m =>
       selectedIds[m.id] &&
       m.status === "scheduled" &&
-      m.meeting_date <= TODAY &&
+      m.meeting_date <= todayLocal() &&
       m.end_time &&
       new Date(`${m.meeting_date}T${m.end_time}:00`) <= new Date()
     );
@@ -755,13 +791,13 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
   const advisors = (users || []).filter(u => u.role === "advisor" || u.role === "manager" || u.role === "owner");
 
   // Several base filters carry non-obvious "hidden" defaults (status defaults to "נקבעה" not
-  // "הכל"; date_to defaults to today, not empty) — a user can easily leave one of these set
+  // "הכל"; the date range defaults to today, not empty) — a user can easily leave one of these set
   // without realizing the list is filtered. Each field highlights (blue label+dot+ring) the
   // moment its value diverges from that default, so the active filter is always visible at a
   // glance without needing to open/inspect the field.
   const activeBaseFilters = {
-    date_from: (filters.date_from || "") !== getAcademicYearStartDate(academicYear),
-    date_to: (filters.date_to || "") !== TODAY,
+    date_from: (filters.date_from || "") !== todayLocal(),
+    date_to: (filters.date_to || "") !== todayLocal(),
     status: (filters.status || "") !== "scheduled",
     advisor_id: !!filters.advisor_id,
     school_name: !!nameFilter,
