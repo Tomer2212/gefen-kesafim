@@ -1222,7 +1222,12 @@ def test_year_closure_note_lifecycle_author_only(org_b_client, org_b_manager_cli
         # Cross-org, via both the attacker's own school id and the real one.
         assert org_a_client.patch(f"/schools/{ORG_A_SCHOOL_ID}/year-closure-notes/{note_id}", json={"content": "x"}).status_code in (403, 404)
         assert org_a_client.delete(url).status_code in (403, 404)
-        assert org_b_client.patch(url, json={"content": "security test — edited"}).status_code == 200
+        # Rich-text body is stored sanitized (a script never survives), like meeting notes.
+        resp = org_b_client.patch(url, json={"content": "security test — edited",
+                                             "content_html": "<p><strong>edited</strong></p><script>alert(1)</script>"})
+        assert resp.status_code == 200, resp.text
+        stored = admin_db.table("year_closure_notes").select("content_html").eq("id", note_id).execute().data[0]["content_html"]
+        assert "<strong>edited</strong>" in stored and "<script" not in stored
         assert org_b_client.delete(url).status_code == 200
     finally:
         admin_db.table("year_closure_notes").delete().eq("id", note_id).execute()
@@ -1863,3 +1868,118 @@ def test_cancel_review_alerts_foreign_recipient_dropped(org_b_client):
     assert resp.json()["recipient_ids"] == [ORG_B_MANAGER_ID]
     got = org_b_client.get("/schools/meetings/cancel-review-alerts")
     assert got.status_code == 200 and ORG_A_MANAGER_ID not in got.json()["recipient_ids"]
+
+
+# ===========================================================================
+# פגישות שהתאריך שלהן עבר — /schools/meetings/overdue-status/* + the automation settings
+# ===========================================================================
+# The writes target Org B (sandbox) only; the automation itself is never turned on.
+
+def test_overdue_status_update_cross_org_isolation(org_b_client, org_a_client):
+    from datetime import date, timedelta
+    from academic_years import DEFAULT_ACADEMIC_YEAR
+    meeting_id = None
+    try:
+        create_resp = org_b_client.post(
+            f"/schools/{ORG_B_SCHOOL_ID}/meetings",
+            json={"meeting_type": "remote", "status": "scheduled", "academic_year": DEFAULT_ACADEMIC_YEAR,
+                  "meeting_date": (date.today() - timedelta(days=2)).isoformat()},
+        )
+        assert create_resp.status_code == 200, create_resp.text
+        meeting_id = create_resp.json()["id"]
+
+        attack = org_a_client.patch(f"/schools/meetings/overdue-status/{meeting_id}", json={"status": "completed"})
+        assert attack.status_code in (403, 404), attack.text
+
+        ok = org_b_client.patch(f"/schools/meetings/overdue-status/{meeting_id}", json={"status": "completed"})
+        assert ok.status_code == 200, ok.text
+    finally:
+        if meeting_id:
+            cleanup_resp = org_b_client.delete(f"/schools/{ORG_B_SCHOOL_ID}/meetings/{meeting_id}")
+            assert cleanup_resp.status_code == 200, (
+                f"Cleanup failed — test meeting {meeting_id} under Org B's school "
+                f"{ORG_B_SCHOOL_ID} may still exist. Response: {cleanup_resp.text}"
+            )
+
+
+def test_overdue_summary_lists_only_own_org(org_a_client, org_b_client):
+    a = org_a_client.get("/schools/meetings/overdue-status/by-user")
+    assert a.status_code == 200, a.text
+    assert {ORG_B_OWNER_ID, ORG_B_MANAGER_ID}.isdisjoint(u["user_id"] for u in a.json()["users"])
+    b = org_b_client.get("/schools/meetings/overdue-status/by-user")
+    assert b.status_code == 200, b.text
+    assert ORG_A_MANAGER_ID not in [u["user_id"] for u in b.json()["users"]]
+
+
+def test_overdue_summary_foreign_recipient_dropped(org_b_client):
+    resp = org_b_client.put("/schools/meetings/automations",
+                            json={"overdue_summary_recipient_ids": [ORG_B_MANAGER_ID, ORG_A_MANAGER_ID]})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["overdue_summary_recipient_ids"] == [ORG_B_MANAGER_ID]
+
+
+# ===========================================================================
+# ניהול → "הגדרות" — /org-settings (org details + office phones)
+# ===========================================================================
+# Writes target Org B (sandbox) only. A manager has no org-settings permission by default,
+# so the cross-org tests grant the attacker full access (monkeypatched _access) to make sure
+# the phone-id org check itself rejects — not just the missing permission.
+
+def _grant_org_settings_access(monkeypatch):
+    from routers import org_settings_router
+    monkeypatch.setattr(org_settings_router, "_access", lambda db, user: (True, True))
+
+
+def test_org_settings_get_only_own_org(org_b_client, org_b_manager_client):
+    resp = org_b_client.get("/org-settings")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["permissions"] == {"is_owner": True, "can_edit": True}
+    assert ORG_A_MANAGER_ID not in [u["id"] for u in body["users"]]
+    # Manager without the permission (default off) — no access at all.
+    assert org_b_manager_client.get("/org-settings").status_code == 403
+
+
+def test_org_settings_owner_only_fields_refused_for_manager(org_b_manager_client, monkeypatch):
+    _grant_org_settings_access(monkeypatch)
+    resp = org_b_manager_client.put("/org-settings/details", json={"name": f"attack-{uuid.uuid4().hex[:6]}"})
+    assert resp.status_code == 403, resp.text
+
+
+def test_org_settings_details_noop_same_org(org_b_client):
+    current = org_b_client.get("/org-settings").json()["org"]
+    resp = org_b_client.put("/org-settings/details", json={"name": current["name"]})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["changed"] == []
+
+
+def test_org_settings_permissions_owner_only_grant(org_b_manager_client):
+    resp = org_b_manager_client.put("/schools/permissions/defaults",
+                                    json={"role": "advisor", "permission": "can_view_org_settings", "allowed": True})
+    assert resp.status_code == 403, resp.text
+
+
+def test_org_phone_cross_org_isolation(org_b_client, org_a_client, monkeypatch):
+    phone_id = None
+    try:
+        created = org_b_client.post("/org-settings/phones", json={
+            "label": "בדיקת אבטחה", "phone": "035550000", "handler_ids": [ORG_B_MANAGER_ID, ORG_A_MANAGER_ID],
+        })
+        assert created.status_code == 200, created.text
+        phone_id = created.json()["id"]
+        # A foreign user id is silently dropped from the handlers.
+        assert created.json()["handler_ids"] == [ORG_B_MANAGER_ID]
+
+        _grant_org_settings_access(monkeypatch)
+        assert org_a_client.put(f"/org-settings/phones/{phone_id}", json={"label": "x"}).status_code == 404
+        assert org_a_client.put(f"/org-settings/phones/{phone_id}/lines", json={"agent_keys": []}).status_code == 404
+        assert org_a_client.delete(f"/org-settings/phones/{phone_id}").status_code == 404
+        assert phone_id not in [p["id"] for p in org_a_client.get("/org-settings").json()["phones"]]
+
+        ok = org_b_client.put(f"/org-settings/phones/{phone_id}", json={"label": "בדיקת אבטחה 2"})
+        assert ok.status_code == 200, ok.text
+        assert ok.json()["label"] == "בדיקת אבטחה 2"
+    finally:
+        if phone_id:
+            cleanup = org_b_client.delete(f"/org-settings/phones/{phone_id}")
+            assert cleanup.status_code == 200, f"Cleanup failed — org_phones {phone_id} may remain: {cleanup.text}"

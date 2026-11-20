@@ -22,6 +22,9 @@ router = APIRouter()
 GMAIL_USER = os.getenv("GMAIL_USER", "")
 GMAIL_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
 SUPPORT_EMAIL = os.getenv("SUPPORT_EMAIL", "")
+
+# organizations.business_type: עוסק פטור / עוסק מורשה / חברה בע"מ
+BUSINESS_TYPES = ("osek_patur", "osek_murshe", "company")
 APP_URL = os.getenv("APP_URL", "http://localhost:5173")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 
@@ -177,6 +180,8 @@ class SignupApplyIn(BaseModel):
     owner_name: str
     owner_email: EmailStr
     owner_phone: str
+    # Optional: a signup tab opened before this field existed doesn't send it.
+    business_type: str | None = None
     consent_contact: bool
     consent_contact_at: str
     consent_marketing: bool
@@ -213,6 +218,8 @@ def apply_signup(body: SignupApplyIn, request: Request):
         raise HTTPException(status_code=400, detail="נדרש אישור לפנייה לצורך השלמת ההרשמה")
 
     email = body.owner_email.strip().lower()
+    if body.business_type and body.business_type not in BUSINESS_TYPES:
+        raise HTTPException(status_code=400, detail="סוג עוסק לא תקין")
 
     x_forwarded = request.headers.get("x-forwarded-for")
     applicant_ip = x_forwarded.split(",")[0].strip() if x_forwarded else (request.client.host if request.client else "unknown")
@@ -230,6 +237,7 @@ def apply_signup(body: SignupApplyIn, request: Request):
                 "owner_name": body.owner_name.strip(),
                 "owner_email": email,
                 "owner_phone": body.owner_phone.strip(),
+                "business_type": body.business_type or None,
                 "status": "pending",
                 "consent_contact": body.consent_contact,
                 "consent_contact_at": body.consent_contact_at,
@@ -288,12 +296,24 @@ def list_requests(user: Annotated[dict, Depends(get_current_user)]):
         org_ids = [r["org_id"] for r in data if r.get("org_id")]
         if org_ids:
             db = get_admin_client()
-            orgs = db.table("organizations").select("id, subscription_status, trial_ends_at").in_("id", org_ids).execute()
+            orgs = db.table("organizations").select(
+                "id, subscription_status, trial_ends_at, name, business_number, business_type, owner_name, owner_phone, org_email"
+            ).in_("id", org_ids).execute()
             orgs_map = {o["id"]: o for o in (orgs.data or [])}
             for row in data:
-                org = orgs_map.get(row.get("org_id"), {})
+                org = orgs_map.get(row.get("org_id"))
+                if not org:
+                    continue
                 row["org_subscription_status"] = org.get("subscription_status")
                 row["org_trial_ends_at"] = org.get("trial_ends_at")
+                # The org may have updated its details (ניהול → הגדרות) — show the current ones.
+                # owner_email stays the signup (login) email; org_email is the record-only one.
+                row["org_name"] = org.get("name") or row.get("org_name")
+                row["business_number"] = org.get("business_number") or row.get("business_number")
+                row["business_type"] = org.get("business_type") or row.get("business_type")
+                row["owner_name"] = org.get("owner_name") or row.get("owner_name")
+                row["owner_phone"] = org.get("owner_phone") or row.get("owner_phone")
+                row["org_email"] = org.get("org_email")
     except Exception as exc:
         logger.warning("list_requests org enrichment failed (non-fatal): %s", exc)
 
@@ -368,6 +388,7 @@ def approve_request(
                 "owner_name": req["owner_name"],
                 "owner_email": req["owner_email"],
                 "owner_phone": req["owner_phone"],
+                "business_type": req.get("business_type"),
                 "subscription_status": "trial",
                 "trial_started_at": now_utc.isoformat(),
                 "trial_ends_at": trial_ends.isoformat(),

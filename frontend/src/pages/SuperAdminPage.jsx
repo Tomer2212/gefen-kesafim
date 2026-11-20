@@ -7,6 +7,7 @@ import PlatformUsagePanel from "../components/PlatformUsagePanel";
 import DirectoryAdminPanel from "../components/DirectoryAdminPanel";
 
 const STATUS_LABEL = { pending: "ממתין", approved: "אושר", rejected: "נדחה" };
+const BUSINESS_TYPE_LABEL = { osek_patur: "עוסק פטור", osek_murshe: "עוסק מורשה", company: 'חברה בע"מ' };
 const STATUS_CLASS = {
   pending: "bg-amber-50 text-amber-700 border border-amber-200",
   approved: "bg-green-50 text-green-700 border border-green-200",
@@ -399,7 +400,11 @@ export default function SuperAdminPage() {
                       <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-sm text-slate-600">
                         <span><span className="font-medium text-slate-500">שם בעלים:</span> {req.owner_name}</span>
                         <span><span className="font-medium text-slate-500">מספר עוסק:</span> {req.business_number}</span>
+                        <span><span className="font-medium text-slate-500">סוג עוסק:</span> {BUSINESS_TYPE_LABEL[req.business_type] || "—"}</span>
                         <span><span className="font-medium text-slate-500">מייל:</span> {req.owner_email}</span>
+                        {req.org_email && req.org_email !== req.owner_email && (
+                          <span><span className="font-medium text-slate-500">מייל הארגון:</span> {req.org_email}</span>
+                        )}
                         <span><span className="font-medium text-slate-500">טלפון:</span> {req.owner_phone || "—"}</span>
                       </div>
                       <p className="text-xs text-slate-400 mt-2">

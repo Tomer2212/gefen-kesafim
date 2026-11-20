@@ -22,6 +22,7 @@ from routers.directory_router import router as directory_router
 from routers.meeting_booking_router import router as meeting_booking_router
 from routers.meeting_summary_router import router as meeting_summary_router
 from routers.meeting_upload_router import router as meeting_upload_router
+from routers.org_settings_router import router as org_settings_router
 from routers.performance_router import router as performance_router
 from routers.person_tasks_router import router as person_tasks_router
 from routers.rounds_router import router as rounds_router
@@ -179,6 +180,7 @@ app.include_router(directory_router, prefix="/directory")
 app.include_router(meeting_booking_router)
 app.include_router(meeting_summary_router)
 app.include_router(meeting_upload_router)
+app.include_router(org_settings_router, prefix="/org-settings")
 app.include_router(performance_router, prefix="/performance")
 app.include_router(person_tasks_router, prefix="/person-tasks")
 app.include_router(rounds_router, prefix="/rounds")

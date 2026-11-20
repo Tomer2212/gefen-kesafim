@@ -7,6 +7,7 @@ import sidebarLogoImg from "../assets/logo-sidebar.png";
 import NotificationToastContainer from "./NotificationToast";
 import { useMeetingReminders } from "../context/MeetingRemindersContext";
 import Avatar from "./Avatar";
+import OverdueMeetingsPopup from "./meetings/OverdueMeetingsPopup";
 
 function readCachedAvatar() {
   try { return localStorage.getItem("avatar_url") || ""; } catch { return ""; }
@@ -303,6 +304,8 @@ export default function Sidebar({ dark = false }) {
   const [isSuperAdmin, setIsSuperAdmin] = useState(false);
   const [notifCount, setNotifCount] = useState(0);
   const [toasts, setToasts] = useState([]);
+  // "פגישות שהתאריך שלהן עבר" popups, in order (personal first, then the manager summary).
+  const [overduePopups, setOverduePopups] = useState([]);
   const { addMeetingReminder, addStatusReminder, addTaskReminder, addCallAttribReminder, addAmbiguousCallReminder, addGoalUpdateReminder, addReconciliationCompletedReminder, setUserName: setCtxUserName } = useMeetingReminders();
   const prevCountRef = useRef(0);
   const lastPollTimeRef = useRef(Date.now());
@@ -567,11 +570,32 @@ export default function Sidebar({ dark = false }) {
       }
     }
 
+    // Meetings past their date and still "נקבעה" (opt-in org automation) — the server says when
+    // a window's alert is due; marking it shown first keeps it to one popup, on any device.
+    async function checkOverdueMeetings() {
+      if (wakeRefreshRef.current) await wakeRefreshRef.current;
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!sessionIsValid(session)) return;
+      try {
+        const res = await axios.get("/schools/meetings/overdue-status/popup-due");
+        const due = [];
+        if (res.data?.popup_due) due.push("personal");
+        if (res.data?.summary_popup_due) due.push("summary");
+        for (const kind of due) {
+          await axios.post("/schools/meetings/overdue-status/popup-shown", { kind });
+        }
+        if (due.length) setOverduePopups(prev => [...prev, ...due.filter(k => !prev.includes(k))]);
+      } catch {
+        // silent — must never block other polling
+      }
+    }
+
     fetchCount();
     checkMeetingReminders();
     checkUnknownCallPrompts();
     checkAmbiguousCallPrompts();
-    const t = setInterval(() => { fetchCount(); checkMeetingReminders(); checkUnknownCallPrompts(); checkAmbiguousCallPrompts(); }, 60000);
+    checkOverdueMeetings();
+    const t = setInterval(() => { fetchCount(); checkMeetingReminders(); checkUnknownCallPrompts(); checkAmbiguousCallPrompts(); checkOverdueMeetings(); }, 60000);
     return () => clearInterval(t);
   }, []);
 
@@ -731,6 +755,11 @@ export default function Sidebar({ dark = false }) {
       </aside>
 
       <NotificationToastContainer toasts={toasts} onDismiss={dismissToast} />
+
+      {overduePopups.length > 0 && (
+        <OverdueMeetingsPopup key={overduePopups[0]} mode={overduePopups[0]}
+          onClose={() => setOverduePopups(prev => prev.slice(1))} />
+      )}
 
       {/* Collapse/expand toggle — floats on the sidebar's left border, vertically centered */}
       <button

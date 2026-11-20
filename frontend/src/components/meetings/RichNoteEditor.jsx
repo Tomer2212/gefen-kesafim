@@ -30,6 +30,8 @@ import {
 // @-tag (a school can't be notified), `extraExtensions` adds its placeholder tags,
 // `contentClassName` its email-sized text, and `resizable` a drag grip under the box that
 // grows it downwards (starting at `height`, never below `minHeight`).
+// A user in `users` with `no_access: true` is listed with a warning under the name (no access to
+// the note's school — see withSchoolAccess in mentionAccess.js).
 
 const POPOVER_Z = 80;
 const MENTION_LIST_MAX = 260;
@@ -386,7 +388,11 @@ export function RichNoteEditor({
                   <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 text-xs flex items-center justify-center flex-shrink-0" aria-hidden="true">
                     {(u.full_name || u.email || "?")[0].toUpperCase()}
                   </span>
-                  {u.full_name || u.email}
+                  <span className="flex flex-col min-w-0 leading-tight">
+                    <span>{u.full_name || u.email}</span>
+                    {/* Tagging still works — they'll be notified, but can't open this school's note. */}
+                    {u.no_access && <span className="text-[11px] text-amber-700">אין גישה לבית הספר — לא יוכל/תוכל לצפות בהערה</span>}
+                  </span>
                 </button>
               ))}
             </div>

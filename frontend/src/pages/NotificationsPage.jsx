@@ -12,6 +12,8 @@ import { useRowVirtualizer } from "../hooks/useRowVirtualizer";
 import { fieldLabel, formatFieldValue } from "../components/schoolFieldLabels";
 import { DecisionCell } from "../components/SchoolActivityModal";
 import { formatUpdateDate } from "../components/SchoolNotesModal";
+import OverdueMeetingsPanel from "../components/meetings/OverdueMeetingsPanel";
+import NotePreview from "../components/NotePreview";
 
 const NOTIF_PAGE_SIZE = 25;
 const NOTIF_SCROLL_THRESHOLD = 300;
@@ -38,12 +40,15 @@ const TYPE_ICON = {
   update_request_result:    "📋",
   school_created:           "➕",
   mention:                  "💬",
+  closure_mention:          "💬",
   advisor_assigned:         "🏫",
   advisor_removed:          "🚪",
   school_deleted:           "🗑️",
   meeting_reminder:         "🗓️",
   meeting_files_arrived:    "📎",
   meeting_cancel_review:    "🚫",
+  meeting_overdue_status:   "⏰",
+  meeting_overdue_summary:  "📋",
   task_send_problems:       "⚠️",
   person_task_assigned:     "📌",
   person_task_updated:      "✏️",
@@ -241,6 +246,7 @@ function SettingsModal({ onClose, role }) {
         { label: "בית ספר נמחק על ידי מנהל או יועץ",      prefKey: "notify_school_deleted" },
         { label: "תפקיד של משתמש בצוות שונה",              prefKey: "notify_role_changed" },
         { label: "תויגתי בהערת פגישה",                     prefKey: "notify_mention" },
+        { label: "תויגתי בהערת סגירת שנה",                 prefKey: "notify_closure_mention" },
         { label: "שיחה עם איש קשר ששייך למספר בתי ספר וממתינה לשיוך", prefKey: "notify_call_contact_ambiguous" },
         { label: "שיחה ממספר לא מוכר שלי הממתינה לשיוך לבית ספר", prefKey: "notify_voicenter_unknown_call" },
         { label: "שיחה ממספר ארגוני שאינו משויך לאף משתמש", prefKey: "notify_voicenter_rep_unmapped" },
@@ -251,6 +257,7 @@ function SettingsModal({ onClose, role }) {
         { label: "יועץ הוסיף בית ספר חדש",              prefKey: "notify_school_created" },
         { label: "תפקיד של משתמש בצוות שונה",           prefKey: "notify_role_changed" },
         { label: "תויגתי בהערת פגישה",                   prefKey: "notify_mention" },
+        { label: "תויגתי בהערת סגירת שנה",                 prefKey: "notify_closure_mention" },
         { label: "שיחה עם איש קשר ששייך למספר בתי ספר וממתינה לשיוך", prefKey: "notify_call_contact_ambiguous" },
         { label: "שיחה ממספר לא מוכר שלי הממתינה לשיוך לבית ספר", prefKey: "notify_voicenter_unknown_call" },
         { label: "שיחה ממספר ארגוני שאינו משויך לאף משתמש", prefKey: "notify_voicenter_rep_unmapped" },
@@ -259,6 +266,7 @@ function SettingsModal({ onClose, role }) {
         { label: "הבקשה שלי לעדכון פרטים אושרה או נדחתה", prefKey: "notify_update_request_reviewed" },
         { label: "שויכתי לבית ספר חדש או הוסרתי",          prefKey: "notify_advisor_assignment" },
         { label: "תויגתי בהערת פגישה",                      prefKey: "notify_mention" },
+        { label: "תויגתי בהערת סגירת שנה",                 prefKey: "notify_closure_mention" },
         { label: "שיחה ממספר לא מוכר שלי הממתינה לשיוך לבית ספר", prefKey: "notify_voicenter_unknown_call" },
       ];
 
@@ -556,6 +564,8 @@ function NotificationRow({ notif, isExpanded, onToggle, onRead, onReload, onDele
   ) && !!data.proposed_changes;
   const isFilesArrived = notif.type === "meeting_files_arrived" && !!notif.ref_id;
   const isCallResolvable = notif.type === "call_contact_ambiguous" && !!data.call_id;
+  // "פגישות שהתאריך שלהן עבר" — expands to the live list; marked read by the server once it empties.
+  const isOverdue = notif.type === "meeting_overdue_status" || notif.type === "meeting_overdue_summary";
 
   const [reviewNote, setReviewNote] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -580,7 +590,7 @@ function NotificationRow({ notif, isExpanded, onToggle, onRead, onReload, onDele
   async function handleNavigate() {
     // Actionable notifications (approve/reject) only get marked read after the review action,
     // not on simple expand — otherwise the buttons disappear before the user can act.
-    if (isUnread && !isActionable && !isCallResolvable) onRead(notif.id);
+    if (isUnread && !isActionable && !isCallResolvable && !isOverdue) onRead(notif.id);
     if (notif.type === "task_send_problems" && data.task_id) {
       // Tasks aren't a routed page — they open as a floating TaskPanel via TasksContext, not
       // navigate(). TaskPanel itself auto-opens the 'בעיות' screen (meeting tasks only — see
@@ -624,7 +634,7 @@ function NotificationRow({ notif, isExpanded, onToggle, onRead, onReload, onDele
         schoolSymbol: data.school_symbol,
         highlightNoteId: data.note_id,
       });
-    } else if (isActionable || isResultExpandable || isFilesArrived || isCallResolvable) {
+    } else if (isActionable || isResultExpandable || isFilesArrived || isCallResolvable || isOverdue) {
       onToggle(notif.id);
     } else if (data.deeplink) {
       navigate(data.deeplink);
@@ -699,13 +709,14 @@ function NotificationRow({ notif, isExpanded, onToggle, onRead, onReload, onDele
 
         <span className="text-xl flex-shrink-0" aria-hidden="true">{icon}</span>
 
-        <span className={`flex-1 text-sm leading-snug text-right ${isUnread ? "font-semibold text-slate-900" : "font-normal text-slate-600"}`}>
+        <span className={`flex-1 min-w-0 text-sm leading-snug text-right ${isUnread ? "font-semibold text-slate-900" : "font-normal text-slate-600"}`}>
           {title}
+          <NotePreview notif={notif} className="block mt-1 text-xs font-normal text-slate-500 line-clamp-2" />
         </span>
 
         <span className="text-xs text-slate-400 flex-shrink-0 whitespace-nowrap">{timeAgo(notif.created_at)}</span>
 
-        {(isActionable || isResultExpandable || isFilesArrived || isCallResolvable) && (
+        {(isActionable || isResultExpandable || isFilesArrived || isCallResolvable || isOverdue) && (
           <span aria-hidden="true" className={`text-slate-400 transition-transform ${isExpanded ? "rotate-90" : ""}`}>›</span>
         )}
       </button>
@@ -736,6 +747,13 @@ function NotificationRow({ notif, isExpanded, onToggle, onRead, onReload, onDele
           {callResolveError && (
             <p role="alert" className="text-sm text-red-600 mt-2">{callResolveError}</p>
           )}
+        </div>
+      )}
+
+      {/* Expanded: meetings past their date still "נקבעה" — update their status in place */}
+      {isExpanded && isOverdue && (
+        <div className="px-4 pb-4 pt-3 border-t border-slate-100">
+          <OverdueMeetingsPanel mode={notif.type === "meeting_overdue_summary" ? "summary" : "personal"} />
         </div>
       )}
 
@@ -1030,7 +1048,7 @@ export default function NotificationsPage() {
     <div dir="rtl" className="bg-scene min-h-screen">
       <Sidebar dark />
       <div style={{ marginRight: "var(--sidebar-w, 240px)", transition: "margin-right 0.25s cubic-bezier(0.4,0,0.2,1)" }}>
-        <div className="max-w-2xl mx-auto px-6 py-10">
+        <div className="max-w-[84rem] mx-auto px-6 py-10">
 
           {/* Header */}
           <div ref={headerRef} className="relative flex items-center justify-between mb-8 gap-3">

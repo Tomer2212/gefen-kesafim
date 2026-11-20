@@ -10,6 +10,7 @@ export default function RegisterPage() {
     owner_email: "",
     owner_phone: "",
     business_number: "",
+    business_type: "",
     consent_contact: false,
     consent_contact_at: null,
     consent_marketing: true,
@@ -180,6 +181,25 @@ export default function RegisterPage() {
                     title="מספר עוסק / ח.פ. חייב להכיל עד 11 ספרות"
                     inputMode="numeric"
                   />
+                </div>
+
+                <div className="flex flex-col gap-1">
+                  <label htmlFor="reg-business-type" className="text-xs text-right" style={{ fontWeight: 600, color: "#000" }}>
+                    סוג עוסק
+                  </label>
+                  <select
+                    id="reg-business-type"
+                    name="business_type"
+                    className="input-field"
+                    value={form.business_type}
+                    onChange={handleChange}
+                    required
+                  >
+                    <option value="" disabled>בחר/י סוג עוסק</option>
+                    <option value="osek_patur">עוסק פטור</option>
+                    <option value="osek_murshe">עוסק מורשה</option>
+                    <option value="company">חברה בע"מ</option>
+                  </select>
                 </div>
 
                 <div className="flex flex-col gap-2 mt-1 border border-slate-200 rounded-xl px-4 py-3 bg-slate-50">

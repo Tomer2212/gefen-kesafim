@@ -85,6 +85,7 @@ function actionLabel(ev, profiles, tasks) {
       if (ev.source === "auto_complete") return "סגירה אוטומטית (לפי שיחות / עבודה אופליין)";
       if (ev.source === "calls_sync") return "עדכון זמני שיחות";
       if (ev.source === "status_popup") return "עדכון סטטוס מחלונית תזכורת";
+      if (ev.source === "overdue_alert") return "עדכון סטטוס מהתראת פגישות שלא עודכנו";
       if (ev.source === "user_transfer") return "העברת פגישות בין יועצים";
       if (ev.source === "import_remap") return "מיפוי ערכי ייבוא";
       return surface ? `עדכון — ${surface}` : "עדכון";

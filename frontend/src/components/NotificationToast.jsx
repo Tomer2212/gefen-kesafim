@@ -1,11 +1,13 @@
 import { useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
+import NotePreview from "./NotePreview";
 
 const TYPE_ICONS = {
   update_request_submitted: "✏️",
   update_request_approved:  "✅",
   update_request_rejected:  "❌",
   mention:                  "💬",
+  closure_mention:          "💬",
   advisor_assigned:         "🏫",
   advisor_removed:          "🚪",
   school_deleted:           "🗑️",
@@ -43,6 +45,7 @@ function Toast({ notif, onDismiss }) {
       <div className="flex-1 min-w-0">
         <p className="text-sm font-semibold text-slate-800 leading-tight line-clamp-2">{title}</p>
         {school && <p className="text-xs text-slate-500 mt-0.5 truncate">{school}</p>}
+        <NotePreview notif={notif} className="block text-xs text-slate-600 mt-1 line-clamp-2" />
       </div>
       <button
         aria-label="סגור התראה"

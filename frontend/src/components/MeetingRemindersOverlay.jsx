@@ -43,7 +43,7 @@ function ReminderHeaderOnly({ reminder, onClick }) {
 }
 
 export default function MeetingRemindersOverlay() {
-  const { reminders, activeKey, setActiveKey, dismiss, userName } = useMeetingReminders();
+  const { reminders, activeKey, setActiveKey, dismiss } = useMeetingReminders();
   const [successToasts, setSuccessToasts] = useState([]);
 
   const showSuccess = useCallback((msg) => {
@@ -99,7 +99,7 @@ export default function MeetingRemindersOverlay() {
         }
         return r._type === "reminder"
           ? <MeetingReminderPopup key={r._key} reminder={r} onDismiss={onDismiss} onSuccess={showSuccess} />
-          : <MeetingStatusUpdatePopup key={r._key} reminder={r} onDismiss={onDismiss} userName={userName} onSuccess={showSuccess} />;
+          : <MeetingStatusUpdatePopup key={r._key} reminder={r} onDismiss={onDismiss} onSuccess={showSuccess} />;
       })}
     </div>
   );

@@ -1,10 +1,11 @@
-import { Component, lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import axios from "axios";
 import { useMeetingNotes } from "../../context/MeetingNotesContext";
 import { formatUpdateDate, buildAuthorColorMap } from "../SchoolNotesModal";
 import { RichNoteView, plainTextToHtml } from "./RichNoteView";
 import { draftKey, writeDraft, removeDraft, findDrafts } from "./meetingNoteDrafts";
-import { useFocusTrap } from "../../hooks/useFocusTrap";
+import { useMentionUsers } from "./mentionAccess";
+import { EditorBoundary, EditorFooter, UnsavedChangesDialog, DeleteConfirmDialog, formatTime } from "./noteDialogs";
 
 const MIN_WIDTH = 420;
 const MIN_HEIGHT = 340;
@@ -45,28 +46,6 @@ function EditorFallback({ height }) {
   );
 }
 
-// This window is mounted app-wide, so an editor failure (e.g. a stale tab requesting a lazy chunk
-// that a newer deploy replaced) must stay inside the editor slot instead of unmounting the app.
-class EditorBoundary extends Component {
-  state = { failed: false };
-  static getDerivedStateFromError() { return { failed: true }; }
-  componentDidCatch(err) { console.error("RichNoteEditor failed:", err); }
-  render() {
-    if (this.state.failed) {
-      return (
-        <div role="alert" className="flex items-center justify-between gap-2 text-xs text-red-600 border border-red-200 bg-red-50 rounded-lg px-3 py-2">
-          <span>טעינת עורך ההערות נכשלה — רענון הדף יטען אותו מחדש (טיוטה שהקלדת שמורה)</span>
-          <button type="button" onClick={() => window.location.reload()}
-                  className="shrink-0 rounded-md bg-red-600 text-white font-semibold px-2 py-1 hover:bg-red-700">
-            רענן
-          </button>
-        </div>
-      );
-    }
-    return this.props.children;
-  }
-}
-
 // Meeting notes are strictly self-edit/self-delete — unlike SchoolNotesModal's
 // canEditSegment/canDeleteSegment (which let a higher role edit/delete another user's note),
 // every user here can only touch their own note; everyone else's is view-only to them.
@@ -86,10 +65,6 @@ function windowTitle(w) {
   const parts = [w.schoolName, w.schoolAuthority].filter(Boolean).join(", ");
   const symbol = w.schoolSymbol ? ` - ${w.schoolSymbol}` : "";
   return `הערות פגישה${parts ? " - " + parts : ""}${symbol}`;
-}
-
-function formatTime(d) {
-  return d.toLocaleTimeString("he-IL", { hour: "2-digit", minute: "2-digit" });
 }
 
 function formatDraftDate(ms) {
@@ -126,10 +101,11 @@ function MeetingNotesWindowItem({ win, minimizedOrder }) {
   const [pos, setPos] = useState(null);
   const [size, setSize] = useState(defaultSize);
   const [currentUser, setCurrentUser] = useState(null);
-  const [mentionUsers, setMentionUsers] = useState([]);
+  const mentionUsers = useMentionUsers(schoolId);
   const [groups, setGroups] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
+  const [accessDenied, setAccessDenied] = useState(false);
   const [editing, setEditing] = useState(null);
   const [unsavedPrompt, setUnsavedPrompt] = useState(null); // { action } — the leave action waiting on the answer
   const [drafts, setDrafts] = useState([]);
@@ -153,7 +129,6 @@ function MeetingNotesWindowItem({ win, minimizedOrder }) {
   useEffect(() => {
     let cancelled = false;
     axios.get("/schools/users/me").then(({ data }) => { if (!cancelled) setCurrentUser(data); }).catch(() => {});
-    axios.get("/schools/users/mentionable").then(({ data }) => { if (!cancelled) setMentionUsers(data || []); }).catch(() => {});
     return () => { cancelled = true; };
   }, []);
 
@@ -165,9 +140,16 @@ function MeetingNotesWindowItem({ win, minimizedOrder }) {
       setGroups(data.groups || []);
       setMeetingDate(data.meeting_date || null);
       setLoading(false);
-    }).catch(() => {
+    }).catch(err => {
       if (cancelled) return;
-      setLoadError("טעינת ההערות נכשלה");
+      // Opened from a tag in a note of a school this user isn't assigned to — say why, not "failed".
+      const status = err?.response?.status;
+      if (status === 403) setAccessDenied(true);
+      setLoadError(
+        status === 403 ? "זו אינה תקלה — בית הספר הזה אינו משויך אליך, ולכן אי אפשר לצפות בהערות הפגישה שלו (גם לא בהערה שבה תויגת). כדי לקבל גישה, יש לפנות למנהל או לבעלים של הארגון שישייכו אותך לבית הספר."
+        : status === 404 ? "הפגישה או בית הספר לא נמצאו — ייתכן שנמחקו."
+        : "טעינת ההערות נכשלה",
+      );
       setLoading(false);
     });
     return () => { cancelled = true; };
@@ -613,9 +595,11 @@ function MeetingNotesWindowItem({ win, minimizedOrder }) {
         </div>
 
         <div className="flex-1 min-h-0 flex flex-col px-4 py-3 gap-3">
-          <button type="button" onClick={startNewNote} className="btn-blue text-sm px-4 py-2 self-start flex-shrink-0">
-            + הוספת הערה
-          </button>
+          {!accessDenied && (
+            <button type="button" onClick={startNewNote} className="btn-blue text-sm px-4 py-2 self-start flex-shrink-0">
+              + הוספת הערה
+            </button>
+          )}
 
           {drafts[0] && (
             <div role="alert" className="flex-shrink-0 flex flex-wrap items-center gap-2 text-xs bg-amber-50 border border-amber-200 text-amber-900 rounded-lg px-3 py-2">
@@ -630,13 +614,18 @@ function MeetingNotesWindowItem({ win, minimizedOrder }) {
           )}
 
           {error && <div role="alert" className="text-xs text-red-600 flex-shrink-0">{error}</div>}
-          {loadError && <div role="alert" className="text-xs text-red-600 flex-shrink-0">{loadError}</div>}
+          {loadError && (accessDenied ? (
+            <div role="alert" className="flex-shrink-0 text-sm text-amber-900 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 leading-relaxed">
+              <strong className="block mb-1">אין לך גישה לבית הספר הזה</strong>
+              {loadError}
+            </div>
+          ) : <div role="alert" className="text-xs text-red-600 flex-shrink-0">{loadError}</div>)}
           {loading && <div role="status" aria-label="טוען הערות" className="text-xs text-slate-400 text-center py-4 flex-shrink-0">טוען…</div>}
 
           {/* Rendered as an ARIA grid rather than a literal <table>, so rows can be laid out with
               flexbox inside one scroll area; the note being edited is sized from that area's
               height (EDITOR_HEIGHT_RATIO) and the other notes scroll below it. */}
-          {!loading && (
+          {!loading && !accessDenied && (
             <div role="table" aria-label="הערות פגישה" dir="rtl" className="flex-1 min-h-0 flex flex-col">
               <div role="row" className="grid text-xs font-700 text-slate-500 px-2 py-2 border-b border-slate-200 flex-shrink-0" style={{ gridTemplateColumns: NOTE_COLS }}>
                 <span role="columnheader">תאריך</span>
@@ -750,65 +739,6 @@ function MeetingNotesWindowItem({ win, minimizedOrder }) {
   );
 }
 
-function EditorFooter({ editing, onSave, onCancel }) {
-  const { saving, dirty, savedAt, error } = editing;
-  let status = null;
-  if (error) {
-    status = <span role="alert" className="text-red-600">{error}</span>;
-  } else if (saving) {
-    status = <span className="text-slate-500">שומר…</span>;
-  } else if (dirty) {
-    status = (
-      <span className="text-amber-700 flex items-center gap-1.5">
-        <span aria-hidden="true" className="w-1.5 h-1.5 rounded-full bg-amber-500" />יש שינויים שלא נשמרו
-      </span>
-    );
-  } else if (savedAt) {
-    status = <span className="text-emerald-700">✓ נשמר ב-{formatTime(savedAt)}</span>;
-  }
-  return (
-    <div className="flex items-center gap-2 flex-wrap">
-      <button type="button" onClick={onSave} disabled={saving} className="btn-blue text-xs px-4 py-1.5 disabled:opacity-60">
-        {saving ? "שומר…" : "שמור"}
-      </button>
-      <button type="button" onClick={onCancel}
-        className="text-xs px-3 py-1.5 rounded-full border border-slate-300 hover:border-slate-400 text-slate-600 font-semibold transition-colors">
-        {dirty ? "ביטול" : "סגירה"}
-      </button>
-      <div className="text-[11px] min-w-0 flex-1" aria-live="polite">{status}</div>
-    </div>
-  );
-}
-
-// Word/Excel-style "save changes?" prompt — Esc / backdrop = back to editing (nothing is lost).
-function UnsavedChangesDialog({ onSave, onDiscard, onCancel }) {
-  const { ref, handleKeyDown } = useFocusTrap(onCancel);
-  return (
-    <div className="fixed inset-0 flex items-center justify-center bg-black/30 backdrop-blur-sm" style={{ zIndex: 70 }} dir="rtl"
-      onClick={e => { if (e.target === e.currentTarget) onCancel(); }}>
-      <div ref={ref} role="alertdialog" aria-modal="true" aria-labelledby="unsaved-note-title" aria-describedby="unsaved-note-desc"
-        onKeyDown={handleKeyDown}
-        className="glass-card rounded-2xl p-6 w-[380px] flex flex-col gap-4">
-        <h2 id="unsaved-note-title" className="text-base font-bold text-slate-800 text-center">לשמור את השינויים?</h2>
-        <p id="unsaved-note-desc" className="text-sm text-slate-600 text-center leading-relaxed">
-          בהערה יש שינויים שעדיין לא נשמרו. אם לא תשמור — הם יימחקו.
-        </p>
-        <div className="flex gap-2 justify-center mt-1 flex-wrap">
-          <button type="button" onClick={onSave} className="btn-blue text-sm px-5 py-2">שמור</button>
-          <button type="button" onClick={onDiscard}
-            className="px-4 py-2 rounded-full border border-red-300 hover:bg-red-50 text-red-600 text-sm font-semibold transition-colors">
-            אל תשמור
-          </button>
-          <button type="button" onClick={onCancel}
-            className="px-4 py-2 rounded-full border border-slate-300 hover:border-slate-400 text-slate-600 text-sm font-semibold transition-colors">
-            חזרה לעריכה
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // "YYYY-MM-DD" → "DD/MM/YYYY" without going through Date (no timezone shift).
 function formatMeetingDate(iso) {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso || "");
@@ -817,37 +747,4 @@ function formatMeetingDate(iso) {
 
 function deleteDialogTitle(schoolName, meetingDate) {
   return ["מחיקת הערת פגישה", schoolName, formatMeetingDate(meetingDate)].filter(Boolean).join(" - ");
-}
-
-// A separate component (not inline JSX) so useFocusTrap's mount-time auto-focus effect fires
-// fresh every time this specific confirmation opens — it wouldn't if the hook were called at
-// the top of MeetingNotesWindowItem, which stays mounted the whole time the window is open.
-// Focus starts on "לא" (useFocusTrap focuses the first button), so Enter / Esc / a backdrop click
-// all keep the note.
-function DeleteConfirmDialog({ title, authorName, onCancel, onConfirm }) {
-  const { ref, handleKeyDown } = useFocusTrap(onCancel);
-  return (
-    <div className="fixed inset-0 flex items-center justify-center bg-black/30 backdrop-blur-sm" style={{ zIndex: 70 }} dir="rtl"
-      onClick={e => { if (e.target === e.currentTarget) onCancel(); }}>
-      <div ref={ref} role="alertdialog" aria-modal="true" aria-labelledby="delete-note-confirm-title" aria-describedby="delete-note-confirm-desc"
-        onKeyDown={handleKeyDown}
-        className="glass-card rounded-2xl p-6 w-[380px] max-w-[calc(100vw-32px)] flex flex-col gap-4">
-        <h2 id="delete-note-confirm-title" className="text-base font-bold text-slate-800 text-center">{title}</h2>
-        <p id="delete-note-confirm-desc" className="text-sm text-slate-600 text-center leading-relaxed">
-          {authorName && <>זו הערה של <strong>{authorName}</strong>.<br /></>}
-          האם למחוק את ההערה באופן סופי?
-        </p>
-        <div className="flex gap-3 justify-center mt-1">
-          <button type="button" onClick={onCancel}
-            className="px-6 py-2 rounded-full border border-slate-300 hover:border-slate-400 text-slate-600 text-sm font-semibold transition-colors">
-            לא
-          </button>
-          <button type="button" onClick={onConfirm}
-            className="px-6 py-2 rounded-full bg-red-600 hover:bg-red-700 text-white text-sm font-semibold transition-colors">
-            כן
-          </button>
-        </div>
-      </div>
-    </div>
-  );
 }

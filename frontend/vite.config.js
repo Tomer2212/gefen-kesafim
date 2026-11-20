@@ -36,6 +36,7 @@ export default defineConfig({
       "/person-tasks": { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/platform": { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/directory": { target: "http://127.0.0.1:8000", changeOrigin: true },
+      "/org-settings": { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/public": { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/rounds": { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/schools": { target: "http://127.0.0.1:8000", changeOrigin: true },

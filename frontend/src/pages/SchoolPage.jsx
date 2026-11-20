@@ -3011,6 +3011,7 @@ export default function SchoolPage() {
   // card — prevents a flash of stale content); false = blocked → no-access screen;
   // true = allowed. Resolved from /users/me and, authoritatively, from GET /schools/{id}.
   const [canViewSchoolCard, setCanViewSchoolCard] = useState(null);
+  const [noSchoolAccess, setNoSchoolAccess] = useState(null); // { schoolName } when blocked for lack of access to THIS school
   const [notesData, setNotesData] = useState(null); // { general: [...], quarterly: {1:[...],2:[...],3:[...],4:[...]} }
   const [filesData, setFilesData] = useState(null); // flat array of school_files rows
 
@@ -3261,7 +3262,22 @@ export default function SchoolPage() {
   );
   const hasIncompleteMeetings = incompleteSessionMeetings.length > 0;
 
-  const blocker = useBlocker(isDirty || hasIncompleteMeetings);
+  // The "סגירת שנה" tab registers its unsaved-note guard here. It joins this blocker (a router
+  // uses only one blocker at a time) and is read from the ref at navigation time, so a leave
+  // action run right after "שמור" / "אל תשמור" in the tab's prompt isn't blocked again.
+  const closureGuardRef = useRef(null);
+  const blocker = useBlocker(() => isDirty || hasIncompleteMeetings || !!closureGuardRef.current?.hasUnsaved());
+  const blockedByClosure = blocker.state === "blocked" && !isDirty && !hasIncompleteMeetings;
+
+  // A navigation (year selector, sidebar, a notification link…) blocked by an unsaved closure
+  // note: the tab asks "לשמור את השינויים?" and then lets it through or cancels it.
+  useEffect(() => {
+    if (!blockedByClosure) return;
+    const guard = closureGuardRef.current;
+    if (guard) guard.requestLeave(() => blocker.proceed(), () => blocker.reset());
+    else blocker.proceed();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [blockedByClosure]);
 
   function updateActiveTab(id) {
     setActiveTab(id);
@@ -3275,6 +3291,11 @@ export default function SchoolPage() {
   function handleTabClick(id) {
     if (activeTab === "meetings" && id !== "meetings" && hasIncompleteMeetings) {
       setPendingTabSwitch(id);
+      return;
+    }
+    // Asked here, before the tab unmounts — updateActiveTab switches the tab before its URL update.
+    if (activeTab === "closure" && id !== "closure" && closureGuardRef.current?.hasUnsaved()) {
+      closureGuardRef.current.requestLeave(() => updateActiveTab(id));
       return;
     }
     updateActiveTab(id);
@@ -3352,8 +3373,11 @@ export default function SchoolPage() {
         setCanViewSchoolCard(true); // authoritative: the card endpoint let us through
       } catch (err) {
         if (err?.response?.status === 403) {
-          // "צפייה בכרטיס בית ספר" permission is off for this account type — hard block,
-          // regardless of any advisor assignment / access grant.
+          // Either the "צפייה בכרטיס בית ספר" permission is off for this account type (hard
+          // block, regardless of any assignment), or — code "no_school_access" — this advisor
+          // simply isn't assigned to this school (e.g. arrived via a tag in someone's note).
+          const detail = err.response.data?.detail;
+          setNoSchoolAccess(detail?.code === "no_school_access" ? { schoolName: detail.school_name || "" } : null);
           setCanViewSchoolCard(false);
         } else if (!meFetchOk) {
           // Transient failure and /users/me also failed — don't lock out a legitimate
@@ -4220,12 +4244,27 @@ export default function SchoolPage() {
                 <rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
               </svg>
             </div>
-            <h2 className="text-lg font-bold text-slate-800 mb-2">אין הרשאות לצפייה בכרטיס בית הספר</h2>
-            <p className="text-sm text-slate-500 leading-relaxed mb-6">
-              זו אינה תקלה — ההרשאה "צפייה בכרטיס בית ספר" כבויה עבור סוג המשתמש שלך.<br />
-              אם הגעת לכאן בטעות וצריך גישה, יש לפנות למנהל או לבעלים של הארגון
-              כדי שיפעילו עבורך את ההרשאה (ניהול → הרשאות → "צפייה בכרטיס בית ספר").
-            </p>
+            {noSchoolAccess ? (
+              <>
+                <h2 className="text-lg font-bold text-slate-800 mb-2">
+                  אין לך גישה לבית הספר{noSchoolAccess.schoolName ? ` "${noSchoolAccess.schoolName}"` : " הזה"}
+                </h2>
+                <p className="text-sm text-slate-500 leading-relaxed mb-6">
+                  זו אינה תקלה — בית הספר הזה אינו משויך אליך, ולכן אי אפשר לצפות בכרטיס שלו
+                  {searchParams.get("note") ? " ובהערה שבה תויגת" : ""}.<br />
+                  כדי לקבל גישה, יש לפנות למנהל או לבעלים של הארגון שישייכו אותך לבית הספר.
+                </p>
+              </>
+            ) : (
+              <>
+                <h2 className="text-lg font-bold text-slate-800 mb-2">אין הרשאות לצפייה בכרטיס בית הספר</h2>
+                <p className="text-sm text-slate-500 leading-relaxed mb-6">
+                  זו אינה תקלה — ההרשאה "צפייה בכרטיס בית ספר" כבויה עבור סוג המשתמש שלך.<br />
+                  אם הגעת לכאן בטעות וצריך גישה, יש לפנות למנהל או לבעלים של הארגון
+                  כדי שיפעילו עבורך את ההרשאה (ניהול → הרשאות → "צפייה בכרטיס בית ספר").
+                </p>
+              </>
+            )}
             <div className="flex gap-3 justify-center">
               <button
                 onClick={() => navigate("/")}
@@ -4304,7 +4343,7 @@ export default function SchoolPage() {
         />
       )}
 
-      {blocker.state === "blocked" && !hasIncompleteMeetings && (
+      {blocker.state === "blocked" && !hasIncompleteMeetings && !blockedByClosure && (
         <UnsavedChangesModal
           saving={saving}
           onSave={async () => {
@@ -5812,6 +5851,8 @@ export default function SchoolPage() {
               academicYear={academicYear}
               schoolId={schoolId}
               currentUser={currentUser}
+              highlightNoteId={searchParams.get("note")}
+              leaveGuardRef={closureGuardRef}
             />
           )}
 

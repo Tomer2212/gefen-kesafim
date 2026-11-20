@@ -127,14 +127,34 @@ def _build_contact_map(org_id: str) -> dict:
     return contact_map
 
 
+def _org_phone_display(label: str | None, org_name: str | None) -> str:
+    """How an office phone (org_phones) is named in call tables: "{label} – {org name}"."""
+    label = (label or "").strip() or "טלפון משרד"
+    return f"{label} – {org_name}" if org_name else label
+
+
+def _load_org_phones(org_id: str) -> tuple[dict, str | None]:
+    """(org_phones rows by id, org name) — non-fatal, ({}, None) on failure."""
+    try:
+        db = get_admin_client()
+        rows = db.table("org_phones").select("id, label, phone, handler_ids").eq("org_id", org_id).execute().data or []
+        org_rows = db.table("organizations").select("name").eq("id", org_id).limit(1).execute().data or []
+        return {r["id"]: r for r in rows}, (org_rows[0].get("name") if org_rows else None)
+    except Exception as exc:
+        logger.warning("calls: org phones lookup failed (non-fatal) for org=%s: %s", org_id, exc)
+        return {}, None
+
+
 def _build_profile_phone_map(org_id: str) -> dict:
     """Fallback phone map for calls with no school-contact match: resolves the
     counterpart phone to one of OUR OWN users (profiles), via either their assigned
     calls line (calls_agent_mappings.agent_key — meaningful mainly for EXM, where
-    agent_key IS the line's phone number) or their work_phone. Returns
-    dict[phone_suffix] -> {"name": full_name}. agent_key takes priority over
-    work_phone on the rare case both resolve the same number to different users."""
+    agent_key IS the line's phone number) or their work_phone, or to one of the org's
+    office phones (org_phones.phone, or a phone-shaped line assigned to one). Returns
+    dict[phone_suffix] -> {"name", "kind": "user" | "org_phone"}. Priority (later wins):
+    work_phone < user's line < office phone."""
     phone_map: dict = {}
+    office_lines: list = []
     try:
         db = get_admin_client()
         p_rows = (
@@ -149,11 +169,11 @@ def _build_profile_phone_map(org_id: str) -> dict:
         for p in p_rows:
             suffix = _phone_suffix(p.get("work_phone"))
             if suffix and p.get("full_name"):
-                phone_map[suffix] = {"name": p["full_name"]}
+                phone_map[suffix] = {"name": p["full_name"], "kind": "user"}
 
         m_rows = (
             db.table("calls_agent_mappings")
-            .select("agent_key, advisor_id")
+            .select("agent_key, advisor_id, org_phone_id")
             .eq("org_id", org_id)
             .execute()
         ).data or []
@@ -163,11 +183,24 @@ def _build_profile_phone_map(org_id: str) -> dict:
             if len(digits) < 9:
                 continue  # not phone-shaped (e.g. a Voicenter rep code) — skip
             suffix = _phone_suffix(raw_key)
+            if m.get("org_phone_id"):
+                office_lines.append((suffix, m["org_phone_id"]))
+                continue
             advisor = profiles_by_id.get(m.get("advisor_id"))
             if suffix and advisor and advisor.get("full_name"):
-                phone_map[suffix] = {"name": advisor["full_name"]}
+                phone_map[suffix] = {"name": advisor["full_name"], "kind": "user"}
     except Exception as exc:
         logger.warning("calls: profile phone map enrichment failed (non-fatal): %s", exc)
+
+    org_phones, org_name = _load_org_phones(org_id)
+    for op in org_phones.values():
+        suffix = _phone_suffix(op.get("phone"))
+        if suffix:
+            phone_map[suffix] = {"name": _org_phone_display(op.get("label"), org_name), "kind": "org_phone"}
+    for suffix, op_id in office_lines:
+        op = org_phones.get(op_id)
+        if suffix and op:
+            phone_map[suffix] = {"name": _org_phone_display(op.get("label"), org_name), "kind": "org_phone"}
     return phone_map
 
 
@@ -248,6 +281,8 @@ def _resolve_contact_for_call(contact_map: dict, profile_phone_map: dict, resolu
         if not m:
             profile_match = profile_phone_map.get(_phone_suffix(counterpart))
             if profile_match:
+                # One of our own numbers (a colleague or an office phone) — never an
+                # "unknown number" to prompt about.
                 return {
                     "contact_name": profile_match["name"],
                     "contact_role": None,
@@ -255,6 +290,8 @@ def _resolve_contact_for_call(contact_map: dict, profile_phone_map: dict, resolu
                     "school_name": None,
                     "pending_school_resolution": False,
                     "candidate_schools": None,
+                    "internal_counterpart": True,
+                    "counterpart_kind": profile_match.get("kind") or "user",
                 }
         return {
             "contact_name": m["name"] if m else None,
@@ -733,19 +770,28 @@ def _enrich_raw_calls(org_id: str, provider: str, raw_calls: list[dict]) -> list
     # (EXM's call log has no per-call "agent" field — only which line the call went through).
     agent_keys = list({c["agent_key"] for c in raw_calls if c.get("agent_key")})
     mapping_by_key: dict = {}
+    office_phone_by_key: dict = {}  # agent_key -> org_phones row (a line assigned to an office phone)
     profiles_map: dict = {}
     if agent_keys:
         try:
             db = get_admin_client()
             m_rows = (
                 db.table("calls_agent_mappings")
-                .select("agent_key, advisor_id")
+                .select("agent_key, advisor_id, org_phone_id")
                 .eq("org_id", org_id)
                 .eq("provider", provider)
                 .in_("agent_key", agent_keys)
                 .execute()
             ).data or []
-            mapping_by_key = {m["agent_key"]: m["advisor_id"] for m in m_rows}
+            mapping_by_key = {m["agent_key"]: m["advisor_id"] for m in m_rows if m.get("advisor_id")}
+            if any(m.get("org_phone_id") for m in m_rows):
+                org_phones, org_name = _load_org_phones(org_id)
+                for m in m_rows:
+                    op = org_phones.get(m.get("org_phone_id"))
+                    if op:
+                        office_phone_by_key[m["agent_key"]] = {
+                            **op, "display": _org_phone_display(op.get("label"), org_name),
+                        }
             advisor_ids = list(set(mapping_by_key.values()))
             if advisor_ids:
                 p_rows = db.table("profiles").select("id, full_name, email").in_("id", advisor_ids).execute()
@@ -783,6 +829,7 @@ def _enrich_raw_calls(org_id: str, provider: str, raw_calls: list[dict]) -> list
         call_id = c.get("call_id")
         agent_key = c.get("agent_key")
         mapped_advisor_id = mapping_by_key.get(agent_key)
+        office_phone = office_phone_by_key.get(agent_key)
         counterpart = c.get("counterpart_phone")
         ai_row = ai_by_call_id.get(call_id)
         contact = _resolve_contact_for_call(contact_map, profile_phone_map, resolutions_by_call_id, call_id, counterpart)
@@ -804,6 +851,13 @@ def _enrich_raw_calls(org_id: str, provider: str, raw_calls: list[dict]) -> list
             "representative_name": c.get("agent_label"),
             "advisor_id": mapped_advisor_id,
             "advisor_profile": profiles_map.get(mapped_advisor_id),
+            # Line assigned to an office phone (org_phones) instead of a user.
+            "org_phone_id": office_phone["id"] if office_phone else None,
+            "org_phone_label": office_phone["display"] if office_phone else None,
+            "handler_ids": list(office_phone.get("handler_ids") or []) if office_phone else [],
+            # Counterpart is one of our own numbers (colleague / office phone).
+            "internal_counterpart": bool(contact.get("internal_counterpart")),
+            "counterpart_kind": contact.get("counterpart_kind"),
             "start_time": c.get("start_time"),
             "duration_seconds": c.get("duration_seconds") or 0,
             "status": c.get("status"),
@@ -978,7 +1032,10 @@ def list_my_calls(
         if exc.status_code == 400:
             return {"calls": [], "calls_enabled": False}
         raise
-    calls = [c for c in result["calls"] if c["advisor_id"] == user["id"]]
+    calls = [
+        c for c in result["calls"]
+        if c["advisor_id"] == user["id"] or user["id"] in (c.get("handler_ids") or [])
+    ]
     return {"calls": calls, "calls_enabled": True}
 
 
@@ -1180,9 +1237,8 @@ def resolve_call_contact_school(
             # Mark the notification tied to this call as read only for the recipient who
             # actually resolved it — other owners/managers notified as a fallback (unmapped
             # line) still see their own copy until they open and act on it themselves.
-            db.table("notifications").update({"read_at": now_iso}).eq(
-                "recipient_id", user["id"]
-            ).contains("data", {"call_id": call_id}).execute()
+            # An office line's handlers share one question, so all their copies close.
+            _mark_call_notifications_read(db, call_id, _resolution_readers(resolution, user["id"]), now_iso)
             break
         except HTTPException:
             raise
@@ -1252,7 +1308,7 @@ def list_my_unknown_call_prompts(user: Annotated[dict, Depends(get_current_user)
                 .select("call_id, call_time, call_direction, call_duration_seconds, counterpart_phone")
                 .eq("org_id", user["org_id"])
                 .eq("kind", "unknown")
-                .eq("caller_advisor_id", user["id"])
+                .or_(_my_prompt_filter(user["id"]))
                 .is_("resolved_school_id", "null")
                 .is_("dismissed_at", "null")
                 .order("call_time", desc=True)
@@ -1277,6 +1333,44 @@ def list_my_unknown_call_prompts(user: Annotated[dict, Depends(get_current_user)
     } for r in rows]}
 
 
+def _needs_unknown_prompt(c: dict) -> bool:
+    """Track B: should this (enriched) call raise "שיחה עם מספר לא מוכר"? Asked: the line's
+    user, or the handlers of the office phone the line is assigned to. Never for one of our
+    own numbers (a colleague / an office phone — internal_counterpart)."""
+    return bool(
+        (c.get("advisor_id") or (c.get("org_phone_id") and c.get("handler_ids")))
+        and not c.get("school_id")
+        and not c.get("pending_school_resolution")
+        and not c.get("linked_school_ids")
+        and not c.get("internal_counterpart")
+        and c.get("direction") != "internal"
+        and (c.get("duration_seconds") or 0) >= UNKNOWN_CALL_MIN_SECONDS
+    )
+
+
+def _my_prompt_filter(user_id: str) -> str:
+    """PostgREST .or_() for prompts addressed to a user: calls on their own line, or calls on
+    an office line they handle (org_phone_id set + listed in notified_recipient_ids). Owners/
+    managers notified only as a fallback (no org_phone_id) are deliberately not matched."""
+    return (
+        f"caller_advisor_id.eq.{user_id},"
+        f'and(org_phone_id.not.is.null,notified_recipient_ids.cs.["{user_id}"])'
+    )
+
+
+def _resolution_readers(resolution: dict, user_id: str) -> list[str]:
+    """Whose notifications for the call get marked read when user_id answers it."""
+    if resolution.get("org_phone_id"):
+        return list({user_id, *(resolution.get("notified_recipient_ids") or [])})
+    return [user_id]
+
+
+def _mark_call_notifications_read(db, call_id: str, recipient_ids: list[str], now_iso: str) -> None:
+    db.table("notifications").update({"read_at": now_iso}).in_(
+        "recipient_id", recipient_ids
+    ).contains("data", {"call_id": call_id}).execute()
+
+
 # Older open ambiguous calls stay in the notifications bell only — a popup about a call
 # from days ago is noise (the advisor no longer remembers it either way).
 AMBIGUOUS_PROMPT_MAX_AGE = timedelta(hours=48)
@@ -1297,7 +1391,7 @@ def list_my_ambiguous_call_prompts(user: Annotated[dict, Depends(get_current_use
                 .select("call_id, call_time, call_direction, call_duration_seconds, counterpart_phone, contact_name, candidate_schools")
                 .eq("org_id", user["org_id"])
                 .eq("kind", "ambiguous")
-                .eq("caller_advisor_id", user["id"])
+                .or_(_my_prompt_filter(user["id"]))
                 .is_("resolved_school_id", "null")
                 .gte("call_time", since)
                 .order("call_time", desc=True)
@@ -1349,7 +1443,8 @@ def dismiss_unknown_call(call_id: str, user: Annotated[dict, Depends(get_current
     if not rows:
         raise HTTPException(status_code=404, detail="לא נמצאה שיחה הממתינה לשיוך")
     resolution = rows[0]
-    if resolution.get("caller_advisor_id") != user["id"] and user["role"] not in _MANAGER_ROLES:
+    is_handler = bool(resolution.get("org_phone_id")) and user["id"] in (resolution.get("notified_recipient_ids") or [])
+    if resolution.get("caller_advisor_id") != user["id"] and not is_handler and user["role"] not in _MANAGER_ROLES:
         raise HTTPException(status_code=403, detail="אין הרשאה לפעולה זו")
 
     suffix = resolution.get("contact_phone_suffix") or _phone_suffix(resolution.get("counterpart_phone"))
@@ -1368,9 +1463,7 @@ def dismiss_unknown_call(call_id: str, user: Annotated[dict, Depends(get_current
                 "last_dismissed_at": now_iso,
                 "updated_at": now_iso,
             }, on_conflict="org_id,advisor_id,phone_suffix").execute()
-        db.table("notifications").update({"read_at": now_iso}).eq(
-            "recipient_id", user["id"]
-        ).contains("data", {"call_id": call_id}).execute()
+        _mark_call_notifications_read(db, call_id, _resolution_readers(resolution, user["id"]), now_iso)
     except Exception as exc:
         logger.error("dismiss_unknown_call: write failed for call=%s: %s", call_id, exc, exc_info=True)
         raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
@@ -1588,6 +1681,33 @@ class RepMappingIn(BaseModel):
     advisor_id: str
 
 
+def clear_unmapped_agent_alerts(org_id: str, provider: str, agent_keys: list[str]) -> None:
+    """A line just got an owner (a user or an office phone): clear its "unmapped" alert marker
+    (so a future gap re-alerts) and close open "agent unmapped" notifications for it. Non-fatal."""
+    if not agent_keys:
+        return
+    try:
+        db = get_admin_client()
+        db.table("calls_known_agents").update({"unmapped_alert_sent_at": None}).eq(
+            "org_id", org_id
+        ).eq("provider", provider).in_("agent_key", agent_keys).execute()
+        # Scoped to this org's recipients — representative codes are provider-local and can
+        # repeat across orgs, so filtering by code alone would mark another org's alerts read.
+        org_profile_ids = [
+            p["id"] for p in (db.table("profiles").select("id").eq("org_id", org_id).execute().data or [])
+        ]
+        if org_profile_ids:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            for key in agent_keys:
+                db.table("notifications").update({"read_at": now_iso}).eq(
+                    "type", "voicenter_rep_unmapped"
+                ).contains("data", {"representative_code": key}).is_(
+                    "read_at", "null"
+                ).in_("recipient_id", org_profile_ids).execute()
+    except Exception as exc:
+        logger.warning("clear_unmapped_agent_alerts failed (non-fatal): %s", exc)
+
+
 @router.get("/mappings")
 def list_mappings(user: Annotated[dict, Depends(get_current_user)]):
     _require_manager(user)
@@ -1632,6 +1752,7 @@ def list_mappings(user: Annotated[dict, Depends(get_current_user)]):
         "representative_name": r.get("agent_label"),
         "advisor_id": r.get("advisor_id"),
         "advisor_profile": profiles_map.get(r.get("advisor_id")),
+        "org_phone_id": r.get("org_phone_id"),
     } for r in rows]
 
 
@@ -1643,6 +1764,20 @@ def upsert_mapping(user: Annotated[dict, Depends(get_current_user)], body: RepMa
     if not cfg:
         raise HTTPException(status_code=400, detail="אין אינטגרציית שיחות מחוברת")
     provider = cfg["provider"]
+
+    # A line belongs to a user OR to an office phone (ניהול → הגדרות), never both.
+    try:
+        db = get_admin_client()
+        existing = (
+            db.table("calls_agent_mappings").select("org_phone_id")
+            .eq("org_id", user["org_id"]).eq("provider", provider)
+            .eq("agent_key", body.representative_code).limit(1).execute()
+        ).data or []
+    except Exception as exc:
+        logger.error("calls upsert_mapping: existing-mapping lookup failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+    if existing and existing[0].get("org_phone_id"):
+        raise HTTPException(status_code=409, detail="הקו משויך לטלפון משרד באזור 'הגדרות' — יש להסיר אותו משם תחילה")
 
     row = {
         "org_id": user["org_id"],
@@ -1672,24 +1807,7 @@ def upsert_mapping(user: Annotated[dict, Depends(get_current_user)], body: RepMa
 
     # This agent now has an advisor — clear the "unmapped" alert marker (so a future gap
     # re-alerts) and close any open "agent unmapped" notifications for it.
-    try:
-        db = get_admin_client()
-        db.table("calls_known_agents").update({"unmapped_alert_sent_at": None}).eq(
-            "org_id", user["org_id"]
-        ).eq("provider", provider).eq("agent_key", body.representative_code).execute()
-        # Scoped to this org's recipients — representative codes are provider-local and can
-        # repeat across orgs, so filtering by code alone would mark another org's alerts read.
-        org_profile_ids = [
-            p["id"] for p in (db.table("profiles").select("id").eq("org_id", user["org_id"]).execute().data or [])
-        ]
-        if org_profile_ids:
-            db.table("notifications").update({"read_at": datetime.now(timezone.utc).isoformat()}).eq(
-                "type", "voicenter_rep_unmapped"
-            ).contains("data", {"representative_code": body.representative_code}).is_(
-                "read_at", "null"
-            ).in_("recipient_id", org_profile_ids).execute()
-    except Exception as exc:
-        logger.warning("upsert_mapping: clearing unmapped-agent alert failed (non-fatal): %s", exc)
+    clear_unmapped_agent_alerts(user["org_id"], provider, [body.representative_code])
 
     saved = result.data[0] if result.data else row
     return {
@@ -1973,7 +2091,14 @@ def _process_org_new_calls(db, org: dict, now: datetime) -> dict | None:
         for c in ambiguous_calls:
             if c["call_id"] in already_tracked:
                 continue
-            recipient_ids = [c["advisor_id"]] if c.get("advisor_id") else managers_and_owners
+            # A user's line → that user; an office line → its handlers; else owners/managers.
+            office_handlers = list(c.get("handler_ids") or []) if c.get("org_phone_id") else []
+            if c.get("advisor_id"):
+                recipient_ids = [c["advisor_id"]]
+            elif office_handlers:
+                recipient_ids = office_handlers
+            else:
+                recipient_ids = managers_and_owners
             if not recipient_ids:
                 continue
 
@@ -1989,6 +2114,8 @@ def _process_org_new_calls(db, org: dict, now: datetime) -> dict | None:
                     "candidate_schools": c["candidate_schools"],
                     "caller_advisor_id": c.get("advisor_id"),
                     "notified_recipient_ids": recipient_ids,
+                    # Set only when the handlers were asked — feeds their popups (_my_prompt_filter).
+                    "org_phone_id": c.get("org_phone_id") if not c.get("advisor_id") and office_handlers else None,
                     "call_direction": c.get("direction"),
                     "call_duration_seconds": c.get("duration_seconds") or 0,
                     "counterpart_phone": c.get("counterpart_phone"),
@@ -2064,7 +2191,7 @@ def _process_org_new_calls(db, org: dict, now: datetime) -> dict | None:
                         "call_time": c.get("start_time"),
                         "counterpart_phone": c.get("counterpart_phone"),
                         "direction": c.get("direction"),
-                        "text": f"נציג {c.get('representative_name') or code} אינו משויך למשתמש. יש לשייך אותו באזור 'משתמשים'.",
+                        "text": f"נציג {c.get('representative_name') or code} אינו משויך למשתמש. יש לשייך אותו למשתמש באזור 'משתמשים', או לטלפון משרד באזור 'הגדרות'.",
                         "deeplink": "/admin?tab=users",
                     },
                 } for rid in owners_managers]
@@ -2077,53 +2204,54 @@ def _process_org_new_calls(db, org: dict, now: datetime) -> dict | None:
         logger.warning("process_new_calls: Track A (agent unmapped) failed for org=%s: %s", org_id, exc)
 
     # --- Track B: counterpart number matches no school — prompt the advisor ---
-    unknown_calls = [
-        c for c in new_calls
-        if c.get("advisor_id") and not c.get("school_id")
-        and not c.get("pending_school_resolution")
-        and not c.get("linked_school_ids")
-        and c.get("direction") != "internal"
-        and (c.get("duration_seconds") or 0) >= UNKNOWN_CALL_MIN_SECONDS
-    ]
+    unknown_calls = [c for c in new_calls if _needs_unknown_prompt(c)]
     unknown_tracked = set(_get_call_resolutions(org_id, [c["call_id"] for c in unknown_calls]).keys())
     for c in unknown_calls:
-        advisor_id = c["advisor_id"]
+        advisor_id = c.get("advisor_id")
+        office_phone_id = None if advisor_id else c.get("org_phone_id")
+        recipients = [advisor_id] if advisor_id else list(c.get("handler_ids") or [])
         suffix = _phone_suffix(c.get("counterpart_phone"))
         if not suffix or c["call_id"] in unknown_tracked:
             continue
         try:
-            open_row = (
+            open_q = (
                 db.table("calls_call_contact_resolutions")
                 .select("id, missed_calls_since_prompt")
-                .eq("org_id", org_id).eq("kind", "unknown")
-                .eq("caller_advisor_id", advisor_id).eq("contact_phone_suffix", suffix)
+                .eq("org_id", org_id).eq("kind", "unknown").eq("contact_phone_suffix", suffix)
                 .is_("resolved_school_id", "null").is_("dismissed_at", "null")
-                .limit(1).execute()
-            ).data
+            )
+            open_q = open_q.eq("caller_advisor_id", advisor_id) if advisor_id else open_q.eq("org_phone_id", office_phone_id)
+            open_row = open_q.limit(1).execute().data
             if open_row:
                 db.table("calls_call_contact_resolutions").update({
                     "missed_calls_since_prompt": (open_row[0].get("missed_calls_since_prompt") or 0) + 1,
                 }).eq("id", open_row[0]["id"]).execute()
                 continue
 
-            state = (
+            # Mute state is per person: an office line counts as muted while any of its
+            # handlers muted this number (whoever answered "not a school" for the team).
+            states = (
                 db.table("calls_unknown_number_state").select("*")
-                .eq("org_id", org_id).eq("advisor_id", advisor_id).eq("phone_suffix", suffix)
-                .limit(1).execute()
-            ).data
-            state = state[0] if state else None
-            if state and state.get("muted") and (state.get("calls_since_prompt") or 0) < UNKNOWN_CALL_REPROMPT_AFTER:
-                db.table("calls_unknown_number_state").update({
-                    "calls_since_prompt": (state.get("calls_since_prompt") or 0) + 1,
-                    "updated_at": now.isoformat(),
-                }).eq("id", state["id"]).execute()
+                .eq("org_id", org_id).in_("advisor_id", recipients).eq("phone_suffix", suffix)
+                .execute()
+            ).data or []
+            muted = [
+                st for st in states
+                if st.get("muted") and (st.get("calls_since_prompt") or 0) < UNKNOWN_CALL_REPROMPT_AFTER
+            ]
+            if muted:
+                for st in muted:
+                    db.table("calls_unknown_number_state").update({
+                        "calls_since_prompt": (st.get("calls_since_prompt") or 0) + 1,
+                        "updated_at": now.isoformat(),
+                    }).eq("id", st["id"]).execute()
                 continue
 
-            db.table("calls_unknown_number_state").upsert({
-                "org_id": org_id, "advisor_id": advisor_id, "phone_suffix": suffix,
+            db.table("calls_unknown_number_state").upsert([{
+                "org_id": org_id, "advisor_id": rid, "phone_suffix": suffix,
                 "muted": False, "calls_since_prompt": 0,
                 "last_prompt_at": now.isoformat(), "updated_at": now.isoformat(),
-            }, on_conflict="org_id,advisor_id,phone_suffix").execute()
+            } for rid in recipients], on_conflict="org_id,advisor_id,phone_suffix").execute()
 
             db.table("calls_call_contact_resolutions").insert({
                 "org_id": org_id,
@@ -2136,20 +2264,22 @@ def _process_org_new_calls(db, org: dict, now: datetime) -> dict | None:
                 "call_duration_seconds": c.get("duration_seconds") or 0,
                 "candidate_schools": None,
                 "caller_advisor_id": advisor_id,
-                "notified_recipient_ids": [advisor_id],
+                "notified_recipient_ids": recipients,
+                "org_phone_id": office_phone_id,
             }).execute()
 
+            line_note = f" (בקו {c.get('org_phone_label')})" if office_phone_id and c.get("org_phone_label") else ""
             _create_notifications(db, [{
-                "recipient_id": advisor_id,
+                "recipient_id": rid,
                 "type": "voicenter_unknown_call",
                 "data": {
                     "title": "שיחה עם מספר לא מוכר — האם לשייך לבית ספר?",
                     "call_id": c["call_id"],
                     "counterpart_phone": c.get("counterpart_phone"),
                     "call_time": c.get("start_time"),
-                    "text": "זיהינו שיחה עם מספר שאינו מופיע באנשי הקשר של אף בית ספר. ניתן לשייך אותה לבית ספר.",
+                    "text": f"זיהינו שיחה{line_note} עם מספר שאינו מופיע באנשי הקשר של אף בית ספר. ניתן לשייך אותה לבית ספר.",
                 },
-            }], pref_key="notify_voicenter_unknown_call")
+            } for rid in recipients], pref_key="notify_voicenter_unknown_call")
             counts["new_unknown_calls"] += 1
         except Exception as exc:
             logger.warning("process_new_calls: Track B (unknown call) failed for call=%s: %s", c.get("call_id"), exc)

@@ -98,7 +98,8 @@ function CallRowBase({ call, onDelete, hideSchoolColumn, hideAdvisorColumn, canM
   const [linkSchools, setLinkSchools] = useState(null);
   const status = STATUS_LABELS[call.status] || DEFAULT_STATUS;
   const endIso = computeEndTimeIso(call.start_time, call.duration_seconds);
-  const advisorLabel = call.advisor_profile?.full_name || call.advisor_profile?.email || call.representative_name || "—";
+  // A line assigned to an office phone (ניהול → הגדרות) is named after it: "{label} – {org name}".
+  const advisorLabel = call.advisor_profile?.full_name || call.advisor_profile?.email || call.org_phone_label || call.representative_name || "—";
   const windowTitle = buildWindowTitle(call, advisorLabel);
   const counterpart = counterpartLabels(call, call.counterpart_phone);
 

@@ -25,6 +25,7 @@ from pydantic import BaseModel, field_validator
 import booking_requests
 import cancel_review_alerts
 import meeting_rounds
+import overdue_status_alerts
 import rich_html
 import booking_token_logic
 import graph_client
@@ -4116,6 +4117,13 @@ def recompute_tasks_progress(request: Request):
             logger.info("recompute_tasks_progress: cancel review alerts %s", cancel_review)
     except Exception as exc:
         logger.warning("recompute_tasks_progress: cancel review alerts failed (non-fatal): %s", exc)
+    # "פגישות שהתאריך שלהן עבר ועדיין נקבעה" alerts (opt-in per org; see overdue_status_alerts.py) — non-fatal.
+    try:
+        overdue = overdue_status_alerts.run_overdue_status_alerts(get_admin_client())
+        if overdue.get("sent") or overdue.get("summaries") or overdue.get("failed_orgs"):
+            logger.info("recompute_tasks_progress: overdue status alerts %s", overdue)
+    except Exception as exc:
+        logger.warning("recompute_tasks_progress: overdue status alerts failed (non-fatal): %s", exc)
     return {"ok": True, "orgs": len(tasks_by_org), "tasks": len(tasks), "changed": changed, "failed_orgs": failed_orgs,
             "links_reconciled": reopened_links, "rounds_changed": rounds_changed}
 

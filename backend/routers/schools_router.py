@@ -64,6 +64,7 @@ from meeting_upload_logic import build_upload_checklist, get_or_create_upload_to
 import booking_requests
 import client_entities
 import meeting_activity
+import overdue_status_alerts
 import school_activity
 import school_directory
 import gefen_accounts
@@ -365,10 +366,12 @@ class YearClosureNoteCreateIn(BaseModel):
     division_type: str | None = None
     budget_name: str | None = None
     content: str
+    content_html: str | None = None
 
 
 class YearClosureNoteEditIn(BaseModel):
     content: str
+    content_html: str | None = None
 
 
 class IncentiveModelIn(BaseModel):
@@ -619,6 +622,7 @@ class NotificationPreferencesIn(BaseModel):
     notify_advisor_assignment: bool | None = None
     notify_role_changed: bool | None = None
     notify_mention: bool | None = None
+    notify_closure_mention: bool | None = None
     notify_task_assigned: bool | None = None
     notify_call_contact_ambiguous: bool | None = None
     notify_voicenter_unknown_call: bool | None = None
@@ -3152,6 +3156,7 @@ def create_year_closure_note(
         raise HTTPException(status_code=400, detail="חסרים חטיבה ותקציב")
     division_type = body.division_type if is_gefen else None
     budget_name = body.budget_name if is_gefen else None
+    content_html = _sanitize_note_html(body.content_html)
 
     db = get_admin_client()
     _require_school_in_org(db, user, school_id)
@@ -3163,10 +3168,62 @@ def create_year_closure_note(
         "budget_name": budget_name,
         "author_id": user["id"],
         "content": content,
+        "content_html": content_html,
     }).execute().data[0]
     _sync_closure_notes_summary(db, school_id, body.academic_year, body.scope, division_type, budget_name)
+    _notify_closure_note_mentions(db, user, school_id, note, content)
     note["author_name"] = user.get("full_name")
     return note
+
+
+def _closure_note_area_label(note: dict) -> str:
+    if note.get("scope") == "parents":
+        return "חשבון הורים"
+    if note.get("scope") == "authority":
+        return "חשבון רשות"
+    division_type = note.get("division_type")
+    division = "" if division_type == GENERAL_DIVISION else DIVISION_LABELS.get(division_type, division_type or "")
+    return f'{note.get("budget_name") or "גפן"} — {division}' if division else (note.get("budget_name") or "גפן")
+
+
+def _notify_closure_note_mentions(db, user: dict, school_id: str, note: dict, content: str,
+                                  previous_content: str = "") -> None:
+    """The "סגירת שנה" twin of _notify_note_mentions: notifies every org user newly tagged
+    (@Full Name) in a closure note, so repeated saves notify each person once. Non-fatal."""
+    try:
+        profiles = db.table("profiles").select("id, full_name").eq("org_id", user["org_id"]).execute().data or []
+        mentioned_ids = [
+            p["id"] for p in profiles
+            if p.get("full_name") and f'@{p["full_name"]}' in content
+            and f'@{p["full_name"]}' not in (previous_content or "") and p["id"] != user["id"]
+        ]
+        if mentioned_ids:
+            school_row = db.table("schools").select("name, authority, symbol").eq("id", school_id).execute()
+            school = school_row.data[0] if school_row.data else {}
+            school_name = school.get("name") or "בית ספר"
+            academic_year = note.get("academic_year")
+            notif_rows = [{
+                "recipient_id": uid,
+                "type": "closure_mention",
+                "ref_id": note["id"],
+                "school_id": school_id,
+                "data": {
+                    "title": f'{user.get("full_name", "משתמש")} תייג אותך בהערת סגירת שנה ב-{school_name}',
+                    "school_name": school_name,
+                    "school_authority": school.get("authority"),
+                    "school_symbol": school.get("symbol"),
+                    "sender_name": user.get("full_name", ""),
+                    "note_preview": content[:100],
+                    "note_id": note["id"],
+                    "academic_year": academic_year,
+                    "scope": note.get("scope"),
+                    "area_label": _closure_note_area_label(note),
+                    "deeplink": f"/school/{school_id}?tab=closure&year={academic_year}&note={note['id']}",
+                },
+            } for uid in mentioned_ids]
+            _create_notifications(db, notif_rows, pref_key="notify_closure_mention")
+    except Exception as exc:
+        logger.warning("year closure note mention notify failed (non-fatal): %s", exc)
 
 
 @router.patch("/{school_id}/year-closure-notes/{note_id}")
@@ -3179,6 +3236,7 @@ def edit_year_closure_note(
     content = body.content.strip()
     if not content:
         raise HTTPException(status_code=400, detail="לא ניתן לשמור הערה ריקה")
+    content_html = _sanitize_note_html(body.content_html)
     db = get_admin_client()
     _require_school_in_org(db, user, school_id)
     note = _get_year_closure_note(db, school_id, note_id)
@@ -3186,10 +3244,12 @@ def edit_year_closure_note(
         raise HTTPException(status_code=403, detail="ניתן לערוך רק הערות שכתבת בעצמך")
     db.table("year_closure_notes").update({
         "content": content,
+        "content_html": content_html,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }).eq("id", note_id).eq("school_id", school_id).execute()
     _sync_closure_notes_summary(db, school_id, note["academic_year"], note["scope"], note.get("division_type"), note.get("budget_name"))
-    return {"ok": True}
+    _notify_closure_note_mentions(db, user, school_id, note, content, note.get("content") or "")
+    return {"ok": True, "content_html": content_html}
 
 
 @router.delete("/{school_id}/year-closure-notes/{note_id}")
@@ -6184,7 +6244,14 @@ def get_school(
                 .execute()
             )
             if not assigned.data:
-                raise HTTPException(status_code=403, detail="אין הרשאה לצפות בבית ספר זה")
+                # Structured, so the card can say WHY (not assigned to this school) rather than
+                # the "card permission is off" screen — e.g. an advisor tagged in a note of a
+                # school they don't accompany. The name is safe to share: same org (checked above).
+                raise HTTPException(status_code=403, detail={
+                    "code": "no_school_access",
+                    "message": "אין הרשאה לצפות בבית ספר זה",
+                    "school_name": school_data.get("name"),
+                })
 
     # Enrich advisor_schools + restrict_access_to with profile data in a single query (non-fatal)
     advisor_ids = [r["advisor_id"] for r in (school_data.get("advisor_schools") or []) if r.get("advisor_id")]
@@ -6299,6 +6366,12 @@ def get_me(user: Annotated[dict, Depends(get_current_user)]):
         result["can_manage_user_permissions"] = _check_permission(db, user, "can_manage_user_permissions")
         result["can_manage_manager_permissions"] = _check_permission(db, user, "can_manage_manager_permissions")
         result["can_remove_call_from_school"] = _check_permission(db, user, "can_remove_call_from_school")
+        # Org settings are for owner/managers only — an advisor override can never open them.
+        _is_staff = user.get("role") in ("owner", "manager")
+        result["can_edit_org_settings"] = _is_staff and _check_permission(db, user, "can_edit_org_settings")
+        result["can_view_org_settings"] = _is_staff and (
+            result["can_edit_org_settings"] or _check_permission(db, user, "can_view_org_settings")
+        )
         # Advisors only: manager/owner always edit their own profile directly.
         result["can_edit_own_work_phone"] = (
             user.get("role") != "advisor" or _check_permission(db, user, "can_edit_own_work_phone")
@@ -6323,6 +6396,8 @@ def get_me(user: Annotated[dict, Depends(get_current_user)]):
         result["can_manage_user_permissions"] = user.get("role") == "owner"
         result["can_manage_manager_permissions"] = user.get("role") == "owner"
         result["can_remove_call_from_school"] = user.get("role") in ("owner", "manager")
+        result["can_view_org_settings"] = user.get("role") == "owner"
+        result["can_edit_org_settings"] = user.get("role") == "owner"
         result["can_edit_own_work_phone"] = user.get("role") != "advisor"
         result["can_edit_own_knowledge_areas"] = user.get("role") != "advisor"
 
@@ -10150,6 +10225,27 @@ def validate_meeting_import(body: MeetingImportValidateIn, user: Annotated[dict,
     return {"rows": results, "ok_count": ok_count, "problem_count": problem_count, "schools_contacts": schools_contacts}
 
 
+def _import_meeting_notes(db, notes: list[dict], user: dict, import_batch_id: str) -> list[dict]:
+    """Adds each imported row's "הערות" as a note in the meeting's notes window (meeting_notes) —
+    meetings.notes, still written for the Excel export, is shown nowhere. No author: the text came
+    from the org's file, not from a user (same as the 2026-09-10 backfill). Non-fatal: on failure
+    the text is still in meetings.notes. Returns the note_added activity events to log."""
+    events: list[dict] = []
+    for i in range(0, len(notes), 500):
+        chunk = [{**n, "group_id": str(uuid4()), "author_id": None} for n in notes[i:i + 500]]
+        try:
+            rows = db.table("meeting_notes").insert(chunk).execute().data or []
+        except Exception as exc:
+            logger.warning("meeting import: adding %d notes to the notes window failed (non-fatal): %s", len(chunk), exc)
+            continue
+        events.extend(dict(
+            meeting_id=r["meeting_id"], school_id=r["school_id"], org_id=user["org_id"],
+            actor_id=user["id"], actor_type="user", source="import", action="note_added",
+            meta={"content": r["content"], "note_id": r["id"], "import_batch_id": import_batch_id},
+        ) for r in rows)
+    return events
+
+
 @router.post("/meetings/import/commit")
 def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Depends(get_current_user)]):
     _require_manager(user)
@@ -10200,6 +10296,8 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
     imported, past_count, future_count, future_unqueued = 0, 0, 0, 0
     errors: list[str] = []
     activity_events: list[dict] = []
+    # The file's "הערות" column — shown in the meeting's notes window (📝), see _import_meeting_notes.
+    import_notes: list[dict] = []
 
     for row, val in zip(active_rows, revalidated):
         data_ctx = val["data"]
@@ -10287,6 +10385,9 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
                 if resolved_start_time: insert_data["start_time"] = resolved_start_time
                 if resolved_end_time: insert_data["end_time"] = resolved_end_time
                 past_res = db.table("meetings").insert(insert_data).execute()
+                if past_res.data and (row.notes or "").strip():
+                    import_notes.append({"meeting_id": past_res.data[0]["id"], "school_id": school_id,
+                                         "content": row.notes.strip()})
                 if past_res.data:
                     activity_events.append(dict(
                         meeting_id=past_res.data[0]["id"], school_id=school_id, org_id=user["org_id"],
@@ -10331,6 +10432,9 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
 
                 res = db.table("meetings").insert(insert_data).execute()
                 meeting = res.data[0]
+                if (row.notes or "").strip():
+                    import_notes.append({"meeting_id": meeting["id"], "school_id": school_id,
+                                         "content": row.notes.strip()})
                 activity_events.append(dict(
                     meeting_id=meeting["id"], school_id=school_id, org_id=user["org_id"],
                     actor_id=user["id"], actor_type="user", source="import", action="created",
@@ -10366,6 +10470,7 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
             logger.warning("meeting import row %s failed: %s", row.row_index, exc)
             errors.append(f"שורה {row.row_index}: {str(exc)}")
 
+    activity_events.extend(_import_meeting_notes(db, import_notes, user, import_batch_id))
     meeting_activity.log_meeting_activity_bulk(db, activity_events)
     return {
         "imported": imported, "past": past_count, "future": future_count, "errors": errors,
@@ -12051,7 +12156,15 @@ PERMISSION_DEFAULTS: dict[str, dict[str, bool]] = {
     # OFF routes the change through the approval flow (profile_update_requests).
     "can_edit_own_work_phone":       {"manager": True,  "advisor": True},
     "can_edit_own_knowledge_areas":  {"manager": True,  "advisor": True},
+    # ניהול → "הגדרות" (org details + office phones). Managers only; granted by the owner only.
+    "can_view_org_settings":         {"manager": False, "advisor": False},
+    "can_edit_org_settings":         {"manager": False, "advisor": False},
 }
+
+# Permission keys only the owner may grant or revoke (role default or per-user override) —
+# a manager holding can_manage_*_permissions must not be able to grant them to themselves
+# through another manager or the role default.
+OWNER_ONLY_GRANT_PERMISSIONS = {"can_view_org_settings", "can_edit_org_settings"}
 
 # Permission keys that are not applicable to managers (manager/owner always edit their
 # own profile directly, so these gates only ever apply to advisors).
@@ -12077,6 +12190,8 @@ PERMISSION_LABELS: dict[str, str] = {
     "can_remove_call_from_school":  "להסיר שיחה מטאב 'שיחות' בכרטיס בית ספר",
     "can_edit_own_work_phone":      "לערוך ישירות מספר טלפון עבודה",
     "can_edit_own_knowledge_areas": "לערוך ישירות תחומי ידע",
+    "can_view_org_settings":        "לצפות באזור 'הגדרות' של הארגון (פרטי הארגון וטלפוני משרד)",
+    "can_edit_org_settings":        "לערוך את אזור 'הגדרות' (טלפון הבעלים וטלפוני משרד)",
 }
 
 
@@ -12182,6 +12297,8 @@ def set_permission_default(body: PermissionSettingIn, user: Annotated[dict, Depe
 
     if body.permission not in PERMISSION_DEFAULTS:
         raise HTTPException(status_code=400, detail="הרשאה לא מוכרת")
+    if body.permission in OWNER_ONLY_GRANT_PERMISSIONS and user["role"] != "owner":
+        raise HTTPException(status_code=403, detail="רק הבעלים יכול לשנות הרשאה זו")
     if body.role not in ("manager", "advisor"):
         raise HTTPException(status_code=400, detail="תפקיד לא תקין")
 
@@ -12217,7 +12334,8 @@ def get_meeting_automations(user: Annotated[dict, Depends(get_current_user)]):
     db = get_admin_client()
     _require_can_edit_automations(db, user)
     org = db.table("organizations").select(
-        "meeting_reminders_enabled, secretary_upload_request_enabled, auto_complete_meetings_from_activity_enabled"
+        "meeting_reminders_enabled, secretary_upload_request_enabled, auto_complete_meetings_from_activity_enabled, "
+        + _OVERDUE_SETTINGS_COLS
     ).eq("id", user["org_id"]).single().execute().data or {}
     return {
         "meeting_reminders_enabled": org.get("meeting_reminders_enabled", True),
@@ -12225,13 +12343,38 @@ def get_meeting_automations(user: Annotated[dict, Depends(get_current_user)]):
         # Defaults to False, unlike the other automations above — higher-impact (auto-changes
         # meeting status), must stay opt-in until an owner/manager explicitly turns it on.
         "auto_complete_meetings_from_activity_enabled": org.get("auto_complete_meetings_from_activity_enabled", False),
+        "overdue_status_alerts_enabled": bool(org.get("overdue_status_alerts_enabled")),
+        "overdue_status_alert_days": overdue_status_alerts.clean_days(org.get("overdue_status_alert_days"))
+            or overdue_status_alerts.DEFAULT_DAYS,
+        "overdue_status_alert_hours": overdue_status_alerts.clean_hours(org.get("overdue_status_alert_hours"))
+            or overdue_status_alerts.DEFAULT_HOURS,
+        "overdue_summary_enabled": bool(org.get("overdue_summary_enabled")),
+        "overdue_summary_recipient_ids": [str(x) for x in (org.get("overdue_summary_recipient_ids") or [])],
+        "overdue_summary_frequency": org.get("overdue_summary_frequency") or "weekly",
+        "overdue_summary_weekday": org.get("overdue_summary_weekday") if org.get("overdue_summary_weekday") is not None else 0,
+        "overdue_summary_hour": org.get("overdue_summary_hour") if org.get("overdue_summary_hour") is not None else 8,
     }
+
+
+_OVERDUE_SETTINGS_COLS = (
+    "overdue_status_alerts_enabled, overdue_status_alert_days, overdue_status_alert_hours, "
+    "overdue_summary_enabled, overdue_summary_recipient_ids, overdue_summary_frequency, "
+    "overdue_summary_weekday, overdue_summary_hour"
+)
 
 
 class MeetingAutomationsIn(BaseModel):
     meeting_reminders_enabled: bool | None = None
     secretary_upload_request_enabled: bool | None = None
     auto_complete_meetings_from_activity_enabled: bool | None = None
+    overdue_status_alerts_enabled: bool | None = None
+    overdue_status_alert_days: list[int] | None = None
+    overdue_status_alert_hours: list[int] | None = None
+    overdue_summary_enabled: bool | None = None
+    overdue_summary_recipient_ids: list[str] | None = None
+    overdue_summary_frequency: str | None = None
+    overdue_summary_weekday: int | None = None
+    overdue_summary_hour: int | None = None
 
 
 @router.put("/meetings/automations")
@@ -12239,10 +12382,172 @@ def set_meeting_automations(body: MeetingAutomationsIn, user: Annotated[dict, De
     db = get_admin_client()
     _require_can_edit_automations(db, user)
     patch = {k: v for k, v in body.model_dump().items() if v is not None}
+    if "overdue_status_alert_days" in patch:
+        patch["overdue_status_alert_days"] = overdue_status_alerts.clean_days(patch["overdue_status_alert_days"])
+        if not patch["overdue_status_alert_days"]:
+            raise HTTPException(status_code=400, detail="יש לבחור לפחות יום אחד")
+    if "overdue_status_alert_hours" in patch:
+        patch["overdue_status_alert_hours"] = overdue_status_alerts.clean_hours(patch["overdue_status_alert_hours"])
+        if not patch["overdue_status_alert_hours"]:
+            raise HTTPException(status_code=400, detail="יש לבחור לפחות שעה אחת")
+    if "overdue_summary_frequency" in patch and patch["overdue_summary_frequency"] not in overdue_status_alerts.SUMMARY_FREQUENCIES:
+        raise HTTPException(status_code=400, detail="תדירות לא תקינה")
+    if "overdue_summary_weekday" in patch and not 0 <= patch["overdue_summary_weekday"] <= 6:
+        raise HTTPException(status_code=400, detail="יום לא תקין")
+    if "overdue_summary_hour" in patch and patch["overdue_summary_hour"] not in overdue_status_alerts.ALERT_HOURS:
+        raise HTTPException(status_code=400, detail="שעה לא תקינה")
+    if "overdue_summary_recipient_ids" in patch:
+        # Owners/managers of the caller's own org only.
+        wanted = list(dict.fromkeys(str(x) for x in patch["overdue_summary_recipient_ids"]))
+        own = {
+            p["id"] for p in (
+                db.table("profiles").select("id").eq("org_id", user["org_id"]).in_("role", ["owner", "manager"])
+                .in_("id", wanted).execute().data or []
+            )
+        } if wanted else set()
+        patch["overdue_summary_recipient_ids"] = [x for x in wanted if x in own]
     if not patch:
         return {"ok": True}
     db.table("organizations").update(patch).eq("id", user["org_id"]).execute()
+    closed = ((overdue_status_alerts.KIND_PERSONAL, overdue_status_alerts.KIND_SUMMARY)
+              if patch.get("overdue_status_alerts_enabled") is False
+              else (overdue_status_alerts.KIND_SUMMARY,) if patch.get("overdue_summary_enabled") is False else ())
+    if closed:
+        try:
+            overdue_status_alerts.close_pending(db, user["org_id"], closed)
+        except Exception as exc:
+            logger.warning("set_meeting_automations: closing pending overdue alerts failed (non-fatal): %s", exc)
+    return {"ok": True, **({"overdue_summary_recipient_ids": patch["overdue_summary_recipient_ids"]}
+                           if "overdue_summary_recipient_ids" in patch else {})}
+
+
+# "תזכורת לעדכון סטטוס פגישות שהתאריך שלהן עבר" (overdue_status_alerts.py) — the live lists behind the
+# bell notifications / popups, and the status update from them.
+
+@router.get("/meetings/overdue-status/popup-due")
+def get_overdue_popup_due(user: Annotated[dict, Depends(get_current_user)]):
+    """Polled every minute by the sidebar — one small query, never raises (§9)."""
+    for attempt in range(2):
+        try:
+            due = overdue_status_alerts.popups_due(get_admin_client(), user["org_id"], user["id"],
+                                                   overdue_status_alerts.il_now())
+            return {"popup_due": overdue_status_alerts.KIND_PERSONAL in due,
+                    "summary_popup_due": user["role"] in ("owner", "manager") and overdue_status_alerts.KIND_SUMMARY in due}
+        except Exception as exc:
+            if attempt == 0:
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.warning("get_overdue_popup_due failed after 2 attempts: %s", exc)
+    return {"popup_due": False, "summary_popup_due": False}
+
+
+@router.get("/meetings/overdue-status/my")
+def get_my_overdue_meetings(user: Annotated[dict, Depends(get_current_user)]):
+    """The caller's own list (popup / bell row)."""
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            org_id = user["org_id"]
+            profiles = overdue_status_alerts.fetch_org_profiles(db, org_id)
+            by_user = overdue_status_alerts.group_by_user(
+                overdue_status_alerts.fetch_overdue_meetings(db, org_id, overdue_status_alerts.il_now().date()), profiles)
+            return {"meetings": [overdue_status_alerts.serialize_meeting(m, profiles) for m in by_user.get(user["id"], [])]}
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("get_my_overdue_meetings attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("get_my_overdue_meetings failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+
+@router.get("/meetings/overdue-status/by-user")
+def get_overdue_meetings_summary(user: Annotated[dict, Depends(get_current_user)]):
+    _require_manager(user)
+    for attempt in range(2):
+        try:
+            db = get_admin_client()
+            org_id = user["org_id"]
+            profiles = overdue_status_alerts.fetch_org_profiles(db, org_id)
+            by_user = overdue_status_alerts.group_by_user(
+                overdue_status_alerts.fetch_overdue_meetings(db, org_id, overdue_status_alerts.il_now().date()), profiles)
+            return {"users": overdue_status_alerts.summary_rows(by_user, profiles)}
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("get_overdue_meetings_summary attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+                time.sleep(0.1)
+            else:
+                logger.error("get_overdue_meetings_summary failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+
+class OverduePopupShownIn(BaseModel):
+    kind: str = "personal"
+
+
+@router.post("/meetings/overdue-status/popup-shown")
+def mark_overdue_popup_shown(body: OverduePopupShownIn, user: Annotated[dict, Depends(get_current_user)]):
+    if body.kind not in (overdue_status_alerts.KIND_PERSONAL, overdue_status_alerts.KIND_SUMMARY):
+        raise HTTPException(status_code=400, detail="סוג לא תקין")
+    try:
+        overdue_status_alerts.mark_popup_shown(get_admin_client(), user["org_id"], user["id"], body.kind)
+    except Exception as exc:
+        logger.warning("mark_overdue_popup_shown failed (non-fatal): %s", exc)
     return {"ok": True}
+
+
+class OverdueStatusUpdateIn(BaseModel):
+    status: str
+    note: str | None = None
+
+
+@router.patch("/meetings/overdue-status/{meeting_id}")
+def update_overdue_meeting_status(meeting_id: str, body: OverdueStatusUpdateIn,
+                                  user: Annotated[dict, Depends(get_current_user)]):
+    """Status update from the alert table. Allowed for the meeting's own recipients (incl. the creator
+    of a meeting with no advisor, whom the regular PATCH refuses) and for owners/managers."""
+    if body.status not in overdue_status_alerts.ALLOWED_NEW_STATUSES:
+        raise HTTPException(status_code=400, detail="סטטוס לא תקין")
+    db = get_admin_client()
+    org_id = user["org_id"]
+    rows = (db.table("meetings").select(overdue_status_alerts.MEETING_COLS + ", status")
+            .eq("id", meeting_id).eq("schools.org_id", org_id).execute().data or [])
+    if not rows:
+        raise HTTPException(status_code=404, detail="פגישה לא נמצאה")
+    meeting = rows[0]
+    if user["role"] not in ("owner", "manager"):
+        profiles = overdue_status_alerts.fetch_org_profiles(db, org_id)
+        if user["id"] not in overdue_status_alerts.recipients_for(meeting, profiles):
+            raise HTTPException(status_code=403, detail="אין לך הרשאה לעדכן פגישה זו")
+    if meeting.get("status") != "scheduled":
+        raise HTTPException(status_code=409, detail={"code": "already_updated", "status": meeting.get("status")})
+    data: dict = {"status": body.status}
+    school_id = meeting["school_id"]
+    _apply_auto_complete_block(db, school_id, meeting_id, data)
+    result = _apply_meeting_patch(db, org_id, school_id, meeting_id, data,
+                                  actor_id=user["id"], actor_type="user", source="overdue_alert")
+    # The note goes where meeting notes live (the 📝 window) — meetings.notes is no longer shown.
+    note = (body.note or "").strip()
+    note_saved = None
+    if note:
+        try:
+            row = db.table("meeting_notes").insert({
+                "meeting_id": meeting_id, "school_id": school_id, "group_id": str(uuid4()),
+                "author_id": user["id"], "content": note, "content_html": None,
+            }).execute().data[0]
+            meeting_activity.log_meeting_activity(
+                db, meeting_id=meeting_id, school_id=school_id, org_id=org_id,
+                actor_id=user["id"], actor_type="user", source="overdue_alert", action="note_added",
+                meta={"content": note, "note_id": row["id"]},
+            )
+            note_saved = True
+        except Exception as exc:
+            logger.warning("update_overdue_meeting_status: note insert failed (status saved): %s", exc)
+            note_saved = False
+    return {**(result if isinstance(result, dict) else {}), "note_saved": note_saved}
 
 
 # "בדיקת ביטולי פגישות" — daily alerts on meetings still "בוטלה" (cancel_review_alerts.py).
@@ -12423,6 +12728,8 @@ def set_user_override(user_id: str, body: UserPermissionOverrideIn, user: Annota
             raise HTTPException(status_code=403, detail="מנהל יכול לערוך הרשאות של יועצים ומנהלים אחרים בלבד")
     if body.permission not in PERMISSION_DEFAULTS:
         raise HTTPException(status_code=400, detail="הרשאה לא מוכרת")
+    if body.permission in OWNER_ONLY_GRANT_PERMISSIONS and user["role"] != "owner":
+        raise HTTPException(status_code=403, detail="רק הבעלים יכול לשנות הרשאה זו")
 
     for attempt in range(2):
         try:

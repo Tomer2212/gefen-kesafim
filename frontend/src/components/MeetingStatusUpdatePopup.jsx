@@ -9,23 +9,7 @@ const STATUS_OPTIONS_NO = [
 
 const STATUS_LABEL = { postponed: "נדחתה", cancelled: "בוטלה", other: "אחר" };
 
-function buildTimestamp(userName) {
-  const now = new Date();
-  const dd = String(now.getDate()).padStart(2, "0");
-  const mm = String(now.getMonth() + 1).padStart(2, "0");
-  const yy = String(now.getFullYear()).slice(-2);
-  const HH = String(now.getHours()).padStart(2, "0");
-  const MM = String(now.getMinutes()).padStart(2, "0");
-  return `${dd}.${mm}.${yy} - ${HH}:${MM}${userName ? ` - ${userName}` : ""}`;
-}
-
-function appendNote(existingNotes, newText, userName) {
-  const header = buildTimestamp(userName);
-  const entry = `${header}\n${newText}`;
-  return existingNotes ? `${existingNotes}\n\n\n${entry}` : entry;
-}
-
-export default function MeetingStatusUpdatePopup({ reminder, onDismiss, userName, onSuccess }) {
+export default function MeetingStatusUpdatePopup({ reminder, onDismiss, onSuccess }) {
   const [view, setView] = useState("main"); // "main" | "no" | "time"
   const [selectedStatus, setSelectedStatus] = useState(null);
   const [noteText, setNoteText] = useState("");
@@ -33,6 +17,9 @@ export default function MeetingStatusUpdatePopup({ reminder, onDismiss, userName
   const [newEndTime, setNewEndTime] = useState(reminder.end_time || "");
   const [updating, setUpdating] = useState(false);
   const [error, setError] = useState(false);
+  // "לא" path: the status is saved first, then the note; if only the note fails, a retry sends just the note.
+  const [statusSaved, setStatusSaved] = useState(false);
+  const [noteFailed, setNoteFailed] = useState(false);
 
   async function handleYes() {
     setUpdating(true);
@@ -54,14 +41,28 @@ export default function MeetingStatusUpdatePopup({ reminder, onDismiss, userName
     setUpdating(true);
     setError(false);
     try {
-      await axios.patch(`/schools/${reminder.school_id}/meetings/${reminder.id}`, {
-        status: selectedStatus,
-        notes: appendNote(reminder.notes || "", noteText.trim(), userName),
-      }, { headers: { "X-Client-Surface": "status_popup" } });
+      // On a retry after a failed note, the status is already saved — only the note is re-sent.
+      if (!statusSaved) {
+        await axios.patch(`/schools/${reminder.school_id}/meetings/${reminder.id}`, {
+          status: selectedStatus,
+        }, { headers: { "X-Client-Surface": "status_popup" } });
+        setStatusSaved(true);
+      }
+    } catch {
+      setError(true);
+      setUpdating(false);
+      return;
+    }
+    try {
+      // The explanation is added as one more note in the meeting's notes window (📝) — the server
+      // records the author and time, and existing notes are never touched.
+      await axios.post(`/schools/${reminder.school_id}/meetings/${reminder.id}/notes`, {
+        content: noteText.trim(),
+      });
       onSuccess?.(`סטטוס הפגישה עודכן בהצלחה ל${STATUS_LABEL[selectedStatus] || selectedStatus}!`);
       onDismiss(reminder.id);
     } catch {
-      setError(true);
+      setNoteFailed(true);
       setUpdating(false);
     }
   }
@@ -162,8 +163,9 @@ export default function MeetingStatusUpdatePopup({ reminder, onDismiss, userName
               {STATUS_OPTIONS_NO.map(opt => (
                 <button
                   key={opt.value}
+                  disabled={statusSaved}
                   onClick={() => setSelectedStatus(opt.value)}
-                  className="flex-1 text-xs font-medium px-2 py-1.5 rounded-lg border transition-colors"
+                  className="flex-1 text-xs font-medium px-2 py-1.5 rounded-lg border transition-colors disabled:cursor-not-allowed"
                   style={{
                     backgroundColor: selectedStatus === opt.value ? opt.bg : "white",
                     color: selectedStatus === opt.value ? opt.color : "#64748b",
@@ -193,19 +195,24 @@ export default function MeetingStatusUpdatePopup({ reminder, onDismiss, userName
             {error && (
               <p role="alert" className="text-xs text-red-500 mt-1">שגיאה בעדכון — נסה שוב</p>
             )}
+            {noteFailed && (
+              <p role="alert" className="text-xs text-red-500 mt-1">הסטטוס עודכן, אבל ההערה לא נשמרה — לחץ "שמור הערה" כדי לנסות שוב</p>
+            )}
             <div className="flex items-center justify-between mt-2">
-              <button
-                onClick={() => setView("main")}
-                className="text-xs text-slate-400 hover:text-slate-600"
-              >
-                ← חזרה
-              </button>
+              {statusSaved ? <span /> : (
+                <button
+                  onClick={() => setView("main")}
+                  className="text-xs text-slate-400 hover:text-slate-600"
+                >
+                  ← חזרה
+                </button>
+              )}
               <button
                 disabled={!canSubmitNo || updating}
                 onClick={handleUpdateNo}
                 className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40 transition-colors"
               >
-                עדכן סטטוס
+                {statusSaved ? "שמור הערה" : "עדכן סטטוס"}
               </button>
             </div>
           </>

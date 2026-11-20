@@ -36,6 +36,7 @@ import AdminPerformanceTab from "./AdminPerformanceTab";
 import AdminIntegrationsTab from "./AdminIntegrationsTab";
 import AdminMeetingsTab from "./AdminMeetingsTab";
 import AdminConnectionsTab from "./AdminConnectionsTab";
+import OrgSettingsTab from "./OrgSettingsTab";
 import AdminAttendanceTab from "./AdminAttendanceTab";
 import AgentChatWidget from "../components/AgentChatWidget";
 import UserMeetingsConflictModal from "./UserMeetingsConflictModal";
@@ -1506,7 +1507,7 @@ const OVERRIDE_STATE_LABEL = {
   null:  "ברירת מחדל",
 };
 
-function UserPermissionsModal({ user, permDefaults, overrides, loading, saving, onSave, onClose }) {
+function UserPermissionsModal({ user, permDefaults, overrides, loading, saving, onSave, onClose, viewerIsOwner }) {
   const { ref, handleKeyDown } = useFocusTrap(onClose);
   const roleLabel = { manager: "מנהל", advisor: "יועץ" }[user.role] ?? user.role;
 
@@ -1534,12 +1535,18 @@ function UserPermissionsModal({ user, permDefaults, overrides, loading, saving, 
 
   function setLocalPerm(perm, value) {
     setLocalOverrides(prev => {
-      if (value === null) {
-        const next = { ...prev };
-        delete next[perm];
-        return next;
+      const next = { ...prev };
+      if (value === null) delete next[perm];
+      else next[perm] = value;
+      // Editing org settings implies viewing them, and no view means no edit.
+      const effective = (p) => (p in next ? next[p] : permDefaults[p]?.[user.role]);
+      if (perm === "can_edit_org_settings" && effective("can_edit_org_settings") === true && effective("can_view_org_settings") !== true) {
+        next.can_view_org_settings = true;
       }
-      return { ...prev, [perm]: value };
+      if (perm === "can_view_org_settings" && effective("can_view_org_settings") === false && effective("can_edit_org_settings") === true) {
+        next.can_edit_org_settings = false;
+      }
+      return next;
     });
   }
 
@@ -1595,6 +1602,7 @@ function UserPermissionsModal({ user, permDefaults, overrides, loading, saving, 
                 {Object.entries(permDefaults)
                   .filter(([perm]) => !(user.role === "advisor" && ADVISOR_NA_PERMS.has(perm)))
                   .filter(([perm]) => !(user.role === "manager" && MANAGER_NA_PERMS.has(perm)))
+                  .filter(([perm]) => viewerIsOwner || !OWNER_GRANT_PERMS.has(perm))
                   .map(([perm, data]) => {
                     const currentOverride = localOverrides[perm]; // true | false | undefined
                     const isCustom = currentOverride !== undefined;
@@ -1688,6 +1696,12 @@ const PERM_GROUPS = [
     advisorNA: new Set(),
   },
   {
+    label: "הגדרות ארגון",
+    perms: ["can_view_org_settings", "can_edit_org_settings"],
+    advisorNA: new Set(["can_view_org_settings", "can_edit_org_settings"]),
+    ownerOnly: true,
+  },
+  {
     label: "פרטים אישיים",
     perms: ["can_edit_own_work_phone", "can_edit_own_knowledge_areas"],
     advisorNA: new Set(),
@@ -1697,6 +1711,8 @@ const PERM_GROUPS = [
 ];
 const ADVISOR_NA_PERMS = new Set(PERM_GROUPS.flatMap(g => [...(g.advisorNA || [])]));
 const MANAGER_NA_PERMS = new Set(PERM_GROUPS.flatMap(g => [...(g.managerNA || [])]));
+// Only the owner may grant these (role default or per-user) — the backend refuses anyone else.
+const OWNER_GRANT_PERMS = new Set(["can_view_org_settings", "can_edit_org_settings"]);
 
 const ADMIN_NUMBER_FILTER_OPS = [
   { value: "eq", label: "שווה ל" },
@@ -2534,6 +2550,8 @@ export default function AdminPage() {
 
   // Permissions state
   const [permDefaults, setPermDefaults] = useState(null);   // { [key]: { label, manager, advisor } }
+  // Effective (incl. personal override) — from /schools/users/me
+  const [canViewOrgSettings, setCanViewOrgSettings] = useState(false);
   const [permLoading, setPermLoading] = useState(false);
   const [permSaving, setPermSaving] = useState({});          // { [roleKey]: true }
   const [permError, setPermError] = useState("");
@@ -2564,9 +2582,13 @@ export default function AdminPage() {
     const key = `${role}_${permission}`;
     setPermSaving(s => ({ ...s, [key]: true }));
     // enabling can_manage_billing must also enable can_view_billing
-    const alsoEnable = (permission === "can_manage_billing" && allowed) ? "can_view_billing" : null;
+    // enabling can_edit_org_settings must also enable can_view_org_settings
+    const alsoEnable = (permission === "can_manage_billing" && allowed) ? "can_view_billing"
+      : (permission === "can_edit_org_settings" && allowed) ? "can_view_org_settings" : null;
     // disabling can_edit_school_directly must also disable can_delete_schools
-    const alsoDisable = (permission === "can_edit_school_directly" && !allowed) ? "can_delete_schools" : null;
+    // disabling can_view_org_settings must also disable can_edit_org_settings
+    const alsoDisable = (permission === "can_edit_school_directly" && !allowed) ? "can_delete_schools"
+      : (permission === "can_view_org_settings" && !allowed) ? "can_edit_org_settings" : null;
     // enabling can_edit_school_directly must also enable can_request_school_update (it becomes irrelevant but keep value consistent)
     // no cascade needed — the toggle just grays out; value stays for when direct edit is turned off again
     try {
@@ -2639,6 +2661,7 @@ export default function AdminPage() {
         setCanManagePermissions(!!res.data?.can_manage_user_permissions);
         setCanManageManagerPermissions(!!res.data?.can_manage_manager_permissions);
         setCanDeleteMeetings(!!res.data?.can_delete_own_meetings);
+        setCanViewOrgSettings(!!res.data?.can_view_org_settings);
       }).catch(() => {});
     });
   }, []);
@@ -4388,6 +4411,7 @@ export default function AdminPage() {
     : (billingMonths[0]?.key ?? null);
 
   const showBillingTab = myRole === "owner" || (myRole === "manager" && permDefaults?.can_view_billing?.manager === true);
+  const showSettingsTab = myRole === "owner" || (myRole === "manager" && canViewOrgSettings);
   const showIntegrationsTab = myRole === "owner" || myRole === "manager";
   const showAttendanceTab = myRole === "owner" || myRole === "manager";
   const showCallsTab = myRole === "owner" || myRole === "manager";
@@ -4600,6 +4624,7 @@ export default function AdminPage() {
     { id: "permissions", label: "הרשאות" },
     ...(showIntegrationsTab ? [{ id: "integrations", label: "אינטגרציות" }] : []),
     ...(showBillingTab ? [{ id: "billing", label: "חיובים" }] : []),
+    ...(showSettingsTab ? [{ id: "settings", label: "הגדרות" }] : []),
   ];
 
   // Keeps the "פאנל ניהול" title's right edge exactly above the first (rightmost) tab,
@@ -6186,6 +6211,8 @@ export default function AdminPage() {
             </div>
           )}
 
+          {activeTab === "settings" && showSettingsTab && <OrgSettingsTab />}
+
           {/* Tasks Tab */}
           {activeTab === "connections" && (
             <AdminConnectionsTab users={users} loadingUsers={loadingUsers} loadUsers={loadUsers} />
@@ -6466,6 +6493,7 @@ export default function AdminPage() {
           saving={overrideSaving}
           onSave={saveOverride}
           onClose={() => setOverrideUser(null)}
+          viewerIsOwner={myRole === "owner"}
         />
       )}
 
