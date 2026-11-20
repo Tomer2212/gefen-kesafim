@@ -16,7 +16,7 @@ const CHANGED_BG = "#FED7AA";
 const STAGE_LABELS = { tichon: "תיכון", chativa: "חט\"ב", both: "שניהם" };
 const TYPE_LABELS = Object.fromEntries(MEETING_TYPE_OPTIONS.map(o => [o.value, o.label]));
 const SERVICE_LABELS = Object.fromEntries(MEETING_SERVICE_TYPE_OPTIONS.map(o => [o.value, o.label]));
-const SURFACE_LABELS = { school_card: "כרטיס בית ספר", personal: "אזור אישי", admin: "ניהול פגישות" };
+const SURFACE_LABELS = { school_card: "כרטיס בית ספר", personal: "אזור אישי", admin: "ניהול פגישות", client_card: "כרטיס מחוז / בעלות" };
 
 function formatSeconds(seconds) {
   if (!seconds) return "0:00";

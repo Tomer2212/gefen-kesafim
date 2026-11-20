@@ -62,6 +62,7 @@ import { GEFEN_FILES_SLOT_LABELS, gefenFilesSlotsForSchool, resolveGefenFilesRes
 import { QuestionTooltip } from "../components/QuestionTooltip";
 import { PartialAmount, partialBalance } from "../components/PartialBalanceWarning";
 import SchoolDirectoryBanner from "../components/SchoolDirectoryBanner";
+import { DISTRICT_OPTIONS, isEntityClientType } from "../constants/clientEntities";
 
 const DIVISION_LABEL = {
   tikkon: "חטיבה עליונה",
@@ -174,7 +175,6 @@ const SCHOOL_STAGE_LABEL = Object.fromEntries(
   SCHOOL_STAGE_OPTIONS.filter(o => o.value).map(o => [o.value, o.label])
 );
 
-const DISTRICT_OPTIONS = ["צפון", "דרום", "מרכז", "ירושלים", "תל-אביב", "חיפה", "חינוך התיישבותי", "חרדי"];
 
 // "ליווי" section fields backed by school_year_admin_data — same field shown/edited on
 // AdminPage's ניהול → בתי ספר table (service_type, order_method). Options duplicated locally
@@ -3334,6 +3334,11 @@ export default function SchoolPage() {
       // seed above (instant paint, no blank flash) — this fetch just corrects it moments later.
       try {
         const schoolRes = await axios.get(`/schools/${schoolId}`);
+        // A district/ownership card (e.g. a notification deeplink) has its own page.
+        if (isEntityClientType(schoolRes.data?.client_type)) {
+          navigate(`/client/${schoolId}`, { replace: true });
+          return;
+        }
         setSchool(schoolRes.data);
         setAccounts(schoolRes.data?.gefen_accounts || []);
         setSchoolAdvisors(

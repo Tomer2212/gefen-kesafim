@@ -492,6 +492,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
         ...res.data,
         advisor_profiles: defaultAdvisorProfiles,
         school_name: school.name, school_symbol: school.symbol, school_city: school.city,
+        school_client_type: school.client_type || "school",
       };
       setMeetings(prev => [newMeeting, ...prev]);
       sessionCreatedMeetingIdsRef.current.add(newMeeting.id);
@@ -551,6 +552,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
         ...res.data,
         advisor_profiles: [{ id: advisorId, full_name: advisorFullName }],
         school_name: school.name, school_symbol: school.symbol, school_city: school.city,
+        school_client_type: school.client_type || "school",
       };
       setMeetings(prev => [newMeeting, ...prev]);
       sessionCreatedMeetingIdsRef.current.add(newMeeting.id);
@@ -874,7 +876,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
       )}
 
       {schoolPickerFor === "new" && (
-        <SchoolPickerModal schools={schools} onConfirm={createMeetingForSchool} onCancel={() => setSchoolPickerFor(null)} />
+        <SchoolPickerModal schools={schools} onConfirm={createMeetingForSchool} onCancel={() => setSchoolPickerFor(null)} includeClientEntities />
       )}
 
       {pendingScopeSchool && (

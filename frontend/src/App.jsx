@@ -26,6 +26,7 @@ import { getTrustedDeviceToken } from "./lib/trustedDevice";
 import LoginPage from "./pages/LoginPage";
 import DashboardPage from "./pages/DashboardPage";
 import SchoolPage from "./pages/SchoolPage";
+import ClientPage from "./pages/ClientPage";
 import AdminPage from "./pages/AdminPage";
 import TermsPage from "./pages/TermsPage";
 import PrivacyPage from "./pages/PrivacyPage";
@@ -111,6 +112,7 @@ const router = createBrowserRouter([
       { path: "/accessibility", element: <AccessibilityStatementPage /> },
       { path: "/", element: <PrivateRoute><DashboardPage /></PrivateRoute> },
       { path: "/school/:schoolId", element: <PrivateRoute><SchoolPage /></PrivateRoute> },
+      { path: "/client/:clientId", element: <PrivateRoute><ClientPage /></PrivateRoute> },
       { path: "/admin", element: <AdminRoute><AdminPage /></AdminRoute> },
       { path: "/school/new", element: <AdminRoute><AddSchoolPage /></AdminRoute> },
       { path: "/notifications", element: <PrivateRoute><NotificationsPage /></PrivateRoute> },

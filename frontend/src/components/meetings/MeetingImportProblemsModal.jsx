@@ -15,6 +15,7 @@ import {
   MEETING_TYPE_OPTIONS,
   MEETING_SERVICE_TYPE_OPTIONS,
 } from "./constants";
+import { DISTRICT_OPTIONS } from "../../constants/clientEntities";
 
 // Tags school-data writes for the school card's "תיעוד פעולות" log (backend school_activity.py).
 const SURFACE_HEADERS = { headers: { "X-Client-Surface": "import" } };
@@ -37,7 +38,6 @@ const STAGE_OPTIONS = [
   { value: "sheshshnati", label: 'שני חשבונות – חט"ב + עליונה' },
   { value: "other", label: "אחר" },
 ];
-const DISTRICT_OPTIONS = ["צפון", "דרום", "מרכז", "ירושלים", "תל-אביב", "חיפה", "חינוך התיישבותי", "חרדי"];
 const STAGE_SCOPE_OPTIONS = [
   { value: "tichon", label: "תיכון" },
   { value: "chativa", label: 'חט"ב' },

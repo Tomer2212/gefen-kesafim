@@ -5,12 +5,13 @@ import { useFocusTrap } from "../../hooks/useFocusTrap";
 import { useRowVirtualizer } from "../../hooks/useRowVirtualizer";
 import DirectStyleDateInput from "../tasks/DirectStyleDateInput";
 
+import { DISTRICT_OPTIONS } from "../../constants/clientEntities";
 // Same option values used on the school card (AdminPage.jsx / SchoolPage.jsx) for these
 // fields — kept as local constants here (rather than importing across pages) since they're
 // just static Hebrew label lists, already duplicated per-surface in the codebase.
 const SCOPE_FIELDS = [
   { value: "sector", label: "מגזר", options: ["יהודי", "ערבי", "צ'רקסי", "בדואי", "דרוזי"] },
-  { value: "district", label: "מחוז", options: ["צפון", "דרום", "מרכז", "ירושלים", "תל-אביב", "חיפה", "חינוך התיישבותי", "חרדי"] },
+  { value: "district", label: "מחוז", options: DISTRICT_OPTIONS },
   { value: "stage", label: "חשבונות במערכת גפן", options: [
     { value: "yesodi", label: "חשבון אחד – יסודי" }, { value: "beinayim", label: 'חשבון אחד – חט"ב' },
     { value: "tikkon", label: "חשבון אחד – עליונה" }, { value: "sheshshnati", label: 'שני חשבונות – חט"ב + עליונה' }, { value: "other", label: "אחר" },

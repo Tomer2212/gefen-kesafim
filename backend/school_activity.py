@@ -25,6 +25,7 @@ TRACKED_SCHOOL_FIELDS = (
     *[f"{r}_chativa_{s}" for r in _CONTACT_ROLES for s in _CONTACT_SUFFIXES],
     "principal_same_person", "secretary_same_person", "finance_same_person",
     "extra_contacts", "meeting_coordinators", "gefen_files_responsible", "restrict_access_to",
+    "is_client",  # district/ownership client cards only (client_entities)
 )
 TRACKED_SCHOOL_SELECT = "id, org_id, " + ", ".join(TRACKED_SCHOOL_FIELDS)
 
@@ -51,7 +52,7 @@ _SAME_PERSON_FLAG = {"principal": "principal_same_person", "secretary": "secreta
 # Screens allowed in the X-Client-Surface header (anything else is stored as None).
 CLIENT_SURFACES = {
     "school_card", "add_school", "admin_modal", "admin_grid", "admin_bulk", "admin_undo",
-    "import", "dashboard", "task_resolution", "collection",
+    "import", "dashboard", "task_resolution", "collection", "client_card",
 }
 
 

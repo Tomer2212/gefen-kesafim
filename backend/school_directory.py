@@ -48,12 +48,16 @@ COPY_FIELDS = {
     "sector": "sector",
     "grade_levels": "grade_levels",
     "ownership_name": "authority",
+    "district": "district",
 }
 
 DIRECTORY_SELECT = (
     "id, symbol, name, ministry_stage, address, city, education_authority, phone, phone_valid, "
-    "principal_name, supervision, sector, grade_levels, grades_raw, ownership_code, ownership_name, missing_since"
+    "principal_name, supervision, sector, grade_levels, grades_raw, ownership_code, ownership_name, district, missing_since"
 )
+
+# The org copy's columns a directory row shows (its values win over the directory's — _merge_item).
+COPY_SELECT = "id, name, symbol, city, address, school_phone, principal_name, district, status"
 
 GRADE_ORDER = ["א", "ב", "ג", "ד", "ה", "ו", "ז", "ח", "ט", "י", "יא", "יב"]
 _BEYOND_GRADES = ["יג", "יד"]  # technological colleges — the app's grade levels end at יב
@@ -445,6 +449,10 @@ def _insert_link(db, org_id: str, school_id: str, entry: dict, via: str, actor_i
         return False
 
 
+# The "ללא מחוז" filter value (the directory's district comes from a separate, older file, so
+# some entries have none).
+NO_DISTRICT = "__none__"
+
 _SEARCH_STRIP = re.compile(r"[,()*\\%]")
 _QUOTE_CHARS = re.compile(r"[\"'׳״`]")
 
@@ -474,6 +482,11 @@ def search_directory(db, org_id: str, q: str | None, filters: dict, page: int, p
         value = (filters.get(key) or "").strip()
         if value:
             query = query.eq(key, value)
+    district = (filters.get("district") or "").strip()
+    if district == NO_DISTRICT:
+        query = query.is_("district", "null")
+    elif district:
+        query = query.eq("district", district)
     offset = max(page, 0) * page_size
     try:
         res = query.order("name").order("symbol").range(offset, offset + page_size - 1).execute()
@@ -495,7 +508,7 @@ def search_directory(db, org_id: str, q: str | None, filters: dict, page: int, p
     copies = {}
     if links:
         copy_rows = (
-            db.table("schools").select("id, name, symbol, city, address, school_phone, principal_name, status")
+            db.table("schools").select(COPY_SELECT)
             .eq("org_id", org_id).in_("id", list(links.values())).execute().data or []
         )
         copies = {r["id"]: r for r in copy_rows}
@@ -538,6 +551,7 @@ def _merge_item(entry: dict, copy: dict | None, met: bool = False) -> dict:
         "phone": shown.get("school_phone") or entry.get("phone"),
         "principal_name": shown.get("principal_name") or entry.get("principal_name"),
         "ministry_stage": entry.get("ministry_stage"),
+        "district": shown.get("district") or entry.get("district"),
         "supervision": entry.get("supervision"),
         "sector": entry.get("sector"),
         "education_authority": entry.get("education_authority"),

@@ -45,6 +45,7 @@ from academic_years import (
     merge_inherited_year_admin,
     resolve_inherited_year_admin,
 )
+import client_entities
 from routers.schools_router import GOAL_DEFINITIONS, DIVISION_LABELS
 from supabase_client import get_admin_client, reset_admin_client
 
@@ -80,9 +81,9 @@ STAGE_OPTIONS = ["yesodi", "beinayim", "tikkon", "sheshshnati", "other"]
 MINISTRY_STAGE_OPTIONS = ["יסודי בלבד", 'חט"ב בלבד', "עליונה בלבד", 'יסודי וחט"ב', 'חט"ב + עליונה', "יסודי ועליונה", 'יסודי חט"ב ועליונה', "אחר"]
 FINANCE_SOFTWARE_OPTIONS = ["kesafim2000", "payscool", "schoolcash", "other"]
 MEETING_COORDINATOR_OPTIONS = ["principal", "secretary", "finance_contact"]
-# Matches SchoolPage.jsx's DISTRICT_OPTIONS — a closed list edited via <select> on the school
-# card, not free text (the raw stored value IS the Hebrew display string, no separate code).
-DISTRICT_OPTIONS = ["צפון", "דרום", "מרכז", "ירושלים", "תל-אביב", "חיפה", "חינוך התיישבותי", "חרדי"]
+# The school card's "מחוז" — a closed list edited via <select>, not free text (the raw stored
+# value IS the Hebrew display string, no separate code). Single source: client_entities.DISTRICTS.
+DISTRICT_OPTIONS = client_entities.DISTRICTS
 
 # Goals/control-letters are scoped per (school, division_type[, budget_name, academic_year]) —
 # not a flat per-school value — so they're separate condition types ("goal"/"control_letter"),

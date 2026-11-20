@@ -6,13 +6,16 @@ import { useFocusTrap } from "../hooks/useFocusTrap";
 import { MINISTRY_STAGE_VALUES, MINISTRY_STAGE_OTHER } from "../constants/ministryStages";
 import { adoptDirectorySchool, DIRECTORY_TAG_LABELS, DIRECTORY_TAG_CLASSES } from "../lib/directory";
 import DirectoryOrgImportModal from "../components/DirectoryOrgImportModal";
+import { DISTRICT_OPTIONS } from "../constants/clientEntities";
 
 // "מאגר בתי ספר" — the national school directory. The server returns 50 rows per page
 // (search and filters run there), so the browser never holds the whole country's list.
 const SUPERVISION_OPTIONS = ["ממלכתי", "ממלכתי דתי", "חרדי"];
 const SECTOR_OPTIONS = ["יהודי", "ערבי", "בדואי", "דרוזי", "צ'רקסי"];
 const STAGE_OPTIONS = MINISTRY_STAGE_VALUES.filter(v => v !== MINISTRY_STAGE_OTHER);
-const EMPTY_FILTERS = { q: "", city: "", ministry_stage: "", supervision: "", sector: "" };
+// Mirrors school_directory.NO_DISTRICT — entries the (older) district file didn't cover.
+const NO_DISTRICT = "__none__";
+const EMPTY_FILTERS = { q: "", city: "", ministry_stage: "", district: "", supervision: "", sector: "" };
 
 function TagBadge({ tag }) {
   if (!DIRECTORY_TAG_LABELS[tag]) return null;
@@ -48,6 +51,7 @@ function DirectoryPreviewModal({ item, onClose }) {
     ["טלפון", item.phone],
     ["שם מנהל/ת", item.principal_name],
     ["שלב חינוך", item.ministry_stage],
+    ["מחוז", item.district],
     ["שכבות", item.grades_raw],
     ["פיקוח", item.supervision],
     ["מגזר", item.sector],
@@ -168,7 +172,7 @@ export default function DirectoryPage() {
             כל בתי הספר בארץ, לפי הקובץ הרשמי של משרד החינוך. בתי ספר שהארגון עבד איתם מוצגים לפי הפרטים שלכם.
           </p>
 
-          <div className="bg-white rounded-2xl border border-slate-200 p-4 mb-4 grid grid-cols-1 md:grid-cols-5 gap-3">
+          <div className="bg-white rounded-2xl border border-slate-200 p-4 mb-4 grid grid-cols-1 md:grid-cols-6 gap-3">
             <div className="md:col-span-2">
               <label htmlFor="dir-q" className="block text-xs text-slate-500 mb-1">חיפוש</label>
               <input id="dir-q" type="search" value={filters.q} onChange={setFilter("q")}
@@ -185,6 +189,14 @@ export default function DirectoryPage() {
               <select id="dir-stage" value={filters.ministry_stage} onChange={setFilter("ministry_stage")} className={`w-full ${selectCls}`}>
                 <option value="">הכל</option>
                 {STAGE_OPTIONS.map(v => <option key={v} value={v}>{v}</option>)}
+              </select>
+            </div>
+            <div>
+              <label htmlFor="dir-district" className="block text-xs text-slate-500 mb-1">מחוז</label>
+              <select id="dir-district" value={filters.district} onChange={setFilter("district")} className={`w-full ${selectCls}`}>
+                <option value="">הכל</option>
+                {DISTRICT_OPTIONS.map(v => <option key={v} value={v}>{v}</option>)}
+                <option value={NO_DISTRICT}>ללא מחוז</option>
               </select>
             </div>
             <div className="grid grid-cols-2 gap-2">
@@ -207,7 +219,7 @@ export default function DirectoryPage() {
 
           <div className="flex items-center justify-between mb-2 text-sm text-slate-500">
             <span aria-live="polite">{loading && page === 0 ? "" : `${total.toLocaleString("he-IL")} בתי ספר`}</span>
-            {(filters.q || filters.city || filters.ministry_stage || filters.supervision || filters.sector) && (
+            {(filters.q || filters.city || filters.ministry_stage || filters.district || filters.supervision || filters.sector) && (
               <button type="button" onClick={() => setFilters(EMPTY_FILTERS)} className="text-blue-600 hover:underline">נקה סינון</button>
             )}
           </div>
@@ -222,6 +234,7 @@ export default function DirectoryPage() {
                   <th scope="col" className="text-right font-medium px-4 py-2.5">סמל</th>
                   <th scope="col" className="text-right font-medium px-4 py-2.5">יישוב</th>
                   <th scope="col" className="text-right font-medium px-4 py-2.5">שלב חינוך</th>
+                  <th scope="col" className="text-right font-medium px-4 py-2.5">מחוז</th>
                   <th scope="col" className="text-right font-medium px-4 py-2.5">מנהל/ת</th>
                   <th scope="col" className="text-right font-medium px-4 py-2.5">טלפון</th>
                   <th scope="col" className="text-right font-medium px-4 py-2.5"><span className="sr-only">סטטוס בארגון</span></th>
@@ -238,13 +251,14 @@ export default function DirectoryPage() {
                     <td className="px-4 py-2.5 text-slate-600">{item.symbol}</td>
                     <td className="px-4 py-2.5 text-slate-600">{item.city}</td>
                     <td className="px-4 py-2.5 text-slate-600">{item.ministry_stage}</td>
+                    <td className="px-4 py-2.5 text-slate-600">{item.district}</td>
                     <td className="px-4 py-2.5 text-slate-600">{item.principal_name}</td>
                     <td className="px-4 py-2.5 text-slate-600" dir="ltr">{item.phone}</td>
                     <td className="px-4 py-2.5"><TagBadge tag={item.tag} /></td>
                   </tr>
                 ))}
                 {!loading && items.length === 0 && !error && (
-                  <tr><td colSpan={7} className="px-4 py-10 text-center text-slate-500">לא נמצאו בתי ספר</td></tr>
+                  <tr><td colSpan={8} className="px-4 py-10 text-center text-slate-500">לא נמצאו בתי ספר</td></tr>
                 )}
               </tbody>
             </table>

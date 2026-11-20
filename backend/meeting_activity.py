@@ -32,7 +32,7 @@ TRACKED_SELECT = "id, " + ", ".join(TRACKED_FIELDS) + ", advisor_id"
 FIELD_CHANGE_ACTIONS = {"updated", "moved_year", "reassigned_school", "advisor_joined"}
 
 # Client surfaces allowed in the X-Client-Surface header (anything else is stored as None).
-CLIENT_SURFACES = {"school_card", "personal", "admin", "status_popup"}
+CLIENT_SURFACES = {"school_card", "personal", "admin", "status_popup", "client_card"}
 
 
 def client_surface(value: str | None) -> str | None:

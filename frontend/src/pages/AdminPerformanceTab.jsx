@@ -186,6 +186,12 @@ export default function AdminPerformanceTab({ users, loadingUsers, loadUsers }) 
           id: `call-${call.call_id}`,
           startHM, endHM, kind: "call",
           subject: call.contact_name || call.school_name || "שיחה",
+          call: {
+            contactName: call.contact_name,
+            contactRole: call.contact_role,
+            schoolName: call.school_name || (call.candidate_schools || []).map(s => s.name).filter(Boolean).join(" / "),
+            durationSeconds: call.duration_seconds || 0,
+          },
         });
       }
       for (const entry of (offlineRes?.data?.entries || [])) {

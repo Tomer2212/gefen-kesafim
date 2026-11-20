@@ -7,6 +7,7 @@ import { DatePickerPopover } from "./DatePickerPopover";
 import { DayScheduleBlocks } from "./DayScheduleBlocks";
 import { MeetingTypeSelect } from "./MeetingTypeSelect";
 import { MeetingServiceTypeSelect } from "./MeetingServiceTypeSelect";
+import { ENTITY_MEETING_SERVICE_TYPES } from "../../constants/clientEntities";
 import { NoParticipantsModal } from "./NoParticipantsModal";
 import { ParticipantsSelector } from "./ParticipantsSelector";
 import { TimeInput, normalizeTimeValue } from "./TimeInput";
@@ -297,6 +298,7 @@ function MeetingRowImpl({
   expanded, onToggleExpand, colSpanTotal,
   currentUserRole, currentUserId, onPermissionDenied,
   aiSummaryEnabled = true,
+  hideReminderColumn = false, isEntityClient = false,
   clientSurface, onRequestActivity,
 }) {
   const navigate = useNavigate();
@@ -832,7 +834,7 @@ function MeetingRowImpl({
           <td className="py-2.5 px-2">
             {meeting.school_id ? (
               <button type="button"
-                onClick={() => navigate(`/school/${meeting.school_id}`)}
+                onClick={() => navigate(isEntityClient ? `/client/${meeting.school_id}` : `/school/${meeting.school_id}`)}
                 className="w-full text-right text-sm px-1.5 py-0.5 rounded hover:bg-blue-50 hover:text-blue-700 transition-all cursor-pointer text-slate-700 whitespace-nowrap">
                 {schoolLabel || <span className="text-slate-400 text-lg font-light leading-none">+</span>}
               </button>
@@ -970,6 +972,7 @@ function MeetingRowImpl({
           <MeetingServiceTypeSelect
             value={draft.meeting_service_type || ""}
             hasError={!draft.meeting_service_type}
+            allowedValues={isEntityClient ? ENTITY_MEETING_SERVICE_TYPES : undefined}
             onChange={v => {
               const oldType = draft.meeting_service_type;
               const nd = { ...draft, meeting_service_type: v };
@@ -1010,7 +1013,10 @@ function MeetingRowImpl({
             {meeting.notes_count > 0 ? "📝" : <span className="text-slate-400 text-lg font-light">+</span>}
           </button>
         </td>
-        {/* תזכורת */}
+        {/* תזכורת — never for a district/ownership meeting (the server keeps it off too) */}
+        {!hideReminderColumn && (isEntityClient ? (
+          <td className="py-2.5 px-2 text-center text-sm text-slate-300">—</td>
+        ) : (
         <td className="py-2.5 px-2 text-center">
           <div className="relative inline-block">
             <button type="button" onClick={() => {
@@ -1040,6 +1046,7 @@ function MeetingRowImpl({
             )}
           </div>
         </td>
+        ))}
         {/* יומן */}
         {showCalendarColumn && (
           <td className="py-2.5 px-2 text-center whitespace-nowrap" style={{ width: "95px" }}>

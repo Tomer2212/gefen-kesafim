@@ -6,6 +6,7 @@ import { MoveMeetingYearModal } from "./MoveMeetingYearModal";
 import { MeetingActivityModal } from "./MeetingActivityModal";
 import { MeetingRow } from "./MeetingRow";
 import { MEETING_SERVICE_TYPE_BREAKDOWN, formatMeetingMinutes } from "./constants";
+import { isEntityClientType } from "../../constants/clientEntities";
 import {
   MeetingColumnMenu,
   computeMeetingFilterValues,
@@ -107,6 +108,7 @@ export function MeetingsTable({
   schoolStage, schoolStageFor,
   currentUserRole, currentUserId,
   aiSummaryEnabled = true,
+  hideReminderColumn = false, entityMode = false,
   clientSurface,
 }) {
   // Excel-style per-column filter + stacked multi-column sort (see meetingColumnMenu.jsx).
@@ -156,7 +158,7 @@ export function MeetingsTable({
     1 /* מיקום */ +
     1 /* סוג */ +
     1 /* הערות */ +
-    1 /* תזכורת */ +
+    (hideReminderColumn ? 0 : 1) /* תזכורת */ +
     (showCalendarColumn ? 1 : 0) +
     4 /* בפועל */ +
     (aiSummaryEnabled ? 1 : 0) /* סיכום פגישה */ +
@@ -304,9 +306,11 @@ export function MeetingsTable({
                   <span className="inline-flex items-center gap-1">סוג<MeetingColumnMenu {...colMenuProps} colKey="service_type" label="סוג" type="text" /></span>
                 </th>
                 <th scope="col" rowSpan={2} className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap">הערות</th>
-                <th scope="col" rowSpan={2} className="py-3 px-2 text-xs font-semibold text-slate-500">
-                  <span className="inline-flex items-center gap-1"><ReminderHeaderTooltip /><MeetingColumnMenu {...colMenuProps} colKey="reminder" label="תזכורת" type="ordinal" /></span>
-                </th>
+                {!hideReminderColumn && (
+                  <th scope="col" rowSpan={2} className="py-3 px-2 text-xs font-semibold text-slate-500">
+                    <span className="inline-flex items-center gap-1"><ReminderHeaderTooltip /><MeetingColumnMenu {...colMenuProps} colKey="reminder" label="תזכורת" type="ordinal" /></span>
+                  </th>
+                )}
                 {showCalendarColumn && (
                   <th scope="col" rowSpan={2} className="py-3 px-2 text-xs font-semibold text-slate-500 whitespace-nowrap" style={{ width: "95px" }}>יומן</th>
                 )}
@@ -357,6 +361,8 @@ export function MeetingsTable({
                           showCalendarColumn={showCalendarColumn}
                           onOpenSummary={onOpenSummary}
                           aiSummaryEnabled={aiSummaryEnabled}
+                          hideReminderColumn={hideReminderColumn}
+                          isEntityClient={entityMode || isEntityClientType(m.school_client_type)}
                           clientSurface={clientSurface}
                           onRequestActivity={setActivityTarget}
                           typedAdvisors={typedAdvisorsFor ? typedAdvisorsFor(m) : null}

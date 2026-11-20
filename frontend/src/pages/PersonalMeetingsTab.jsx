@@ -259,7 +259,7 @@ export default function PersonalMeetingsTab({ userId, role, canDeleteMeetings, u
     };
     try {
       const res = await axios.post(`/schools/${school.id}/meetings`, payload, { headers: { "X-Client-Surface": "personal" } });
-      const newMeeting = { ...res.data, advisor_profiles: [], school_name: school.name, school_symbol: school.symbol, school_city: school.city, school_district: school.district };
+      const newMeeting = { ...res.data, advisor_profiles: [], school_name: school.name, school_symbol: school.symbol, school_city: school.city, school_district: school.district, school_client_type: school.client_type || "school" };
       setMeetings(prev => [newMeeting, ...prev]);
       sessionCreatedMeetingIdsRef.current.add(newMeeting.id);
     } catch { /* silent */ }
@@ -513,7 +513,7 @@ export default function PersonalMeetingsTab({ userId, role, canDeleteMeetings, u
         />
       )}
       {schoolPickerFor === "new" && (
-        <SchoolPickerModal schools={schools} onConfirm={createMeetingForSchool} onCancel={() => setSchoolPickerFor(null)} />
+        <SchoolPickerModal schools={schools} onConfirm={createMeetingForSchool} onCancel={() => setSchoolPickerFor(null)} includeClientEntities />
       )}
       {pendingScopeSchool && (
         <StageScopeModal schoolName={pendingScopeSchool.name}

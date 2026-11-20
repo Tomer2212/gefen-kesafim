@@ -26,6 +26,7 @@ const SOURCE_LABELS = {
   collection: "ניהול — גבייה",
   update_request: "בקשת עדכון",
   directory: "מאגר בתי ספר",
+  client_card: "כרטיס מחוז / בעלות",
 };
 
 const INSTITUTION_FIELDS = new Set([

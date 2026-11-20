@@ -14,6 +14,7 @@ import { QuestionTooltip } from "../components/QuestionTooltip";
 import { MINISTRY_STAGE_OPTIONS, MINISTRY_STAGE_OTHER, stageSuggestionForMinistryStage } from "../constants/ministryStages";
 import { accountsDraftFromStage, accountsPayload, deriveStage, validateCoversList } from "../constants/gefenAccounts";
 import { GefenAccountsEditor } from "../components/GefenAccountsEditor";
+import { DISTRICT_OPTIONS } from "../constants/clientEntities";
 
 // Tags school-data writes for the school card's "תיעוד פעולות" log (backend school_activity.py).
 const SURFACE_HEADERS = { headers: { "X-Client-Surface": "add_school" } };
@@ -94,7 +95,6 @@ const ROLE_LABELS    = { owner: "בעלים", manager: "מנהל", advisor: "י�
 const ROLE_SORT_ORDER = { owner: 0, manager: 1, advisor: 2 };
 function sortByRole(arr) { return [...arr].sort((a, b) => (ROLE_SORT_ORDER[a.role] ?? 3) - (ROLE_SORT_ORDER[b.role] ?? 3)); }
 
-const DISTRICT_OPTIONS = ["צפון", "דרום", "מרכז", "ירושלים", "תל-אביב", "חיפה", "חינוך התיישבותי", "חרדי"];
 
 // "ליווי" section fields — mirrored from SchoolPage.jsx (same project convention: no shared
 // constants source for these label maps, duplicated per page like everything else here).

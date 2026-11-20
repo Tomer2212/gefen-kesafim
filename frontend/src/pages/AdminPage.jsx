@@ -1,6 +1,6 @@
 ﻿import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { useBlocker, useLocation, useNavigate } from "react-router-dom";
+import { Link, useBlocker, useLocation, useNavigate } from "react-router-dom";
 import axios from "axios";
 import * as XLSX from "xlsx";
 import { principalNames, gefenFilesResponsibleLines, meetingCoordinatorLines } from "../components/schoolContactLines";
@@ -61,6 +61,7 @@ import { accountLabel, accountsDraftEqual, accountsDraftFromStage, accountsDraft
 import { GefenAccountsEditor } from "../components/GefenAccountsEditor";
 import { GefenAccountsRemovalModal } from "../components/GefenAccountsRemovalModal";
 import { MINISTRY_STAGE_OPTIONS, MINISTRY_STAGE_OTHER, ministryStageLabel, matchMinistryStage, stageSuggestionForMinistryStage } from "../constants/ministryStages";
+import { DISTRICT_OPTIONS } from "../constants/clientEntities";
 
 // Tags school-data writes with the screen they came from, for the school card's "תיעוד פעולות"
 // log (backend school_activity.py).
@@ -772,7 +773,6 @@ const GRADE_LEVEL_OPTIONS = ["א", "ב", "ג", "ד", "ה", "ו", "ז", "ח", "ט
 const ROLE_SORT_ORDER = { owner: 0, manager: 1, advisor: 2 };
 function sortByRole(arr) { return [...arr].sort((a, b) => (ROLE_SORT_ORDER[a.role] ?? 3) - (ROLE_SORT_ORDER[b.role] ?? 3)); }
 
-const DISTRICT_OPTIONS = ["צפון", "דרום", "מרכז", "ירושלים", "תל-אביב", "חיפה", "חינוך התיישבותי", "חרדי"];
 
 const HEBREW_MONTHS = ["ינואר", "פברואר", "מרץ", "אפריל", "מאי", "יוני", "יולי", "אוגוסט", "ספטמבר", "אוקטובר", "נובמבר", "דצמבר"];
 
@@ -1932,7 +1932,9 @@ const SchoolRow = memo(function SchoolRow({
     <tr className="group border-b border-slate-100 hover:bg-slate-50 transition-colors">
       <td className="px-5 py-3 border-l border-slate-100 bg-white group-hover:bg-slate-50 whitespace-nowrap"
         style={STICKY_ROW_FIRST_CELL_STYLE}>
-        <span className="font-semibold text-slate-900">{school.name}</span>
+        <Link to={`/school/${school.id}`} state={{ school }} className="font-semibold text-slate-900">
+          {school.name}
+        </Link>
       </td>
       {visibleAdminColOrder.map((key, i) => {
         const isLast = i === visibleAdminColOrder.length - 1;

@@ -16,6 +16,7 @@ from routers.analyze_router import router as analyze_router
 from routers.attendance_router import router as attendance_router
 from routers.calendar_router import router as calendar_router
 from routers.chatbot_router import router as chatbot_router
+from routers.clients_router import router as clients_router
 from routers.contact_router import router as contact_router
 from routers.directory_router import router as directory_router
 from routers.meeting_booking_router import router as meeting_booking_router
@@ -172,6 +173,7 @@ app.include_router(analyze_router, prefix="/analyze")
 app.include_router(attendance_router, prefix="/attendance")
 app.include_router(calendar_router, prefix="/calendar")
 app.include_router(chatbot_router, prefix="/chatbot")
+app.include_router(clients_router, prefix="/clients")
 app.include_router(contact_router, prefix="/contact")
 app.include_router(directory_router, prefix="/directory")
 app.include_router(meeting_booking_router)

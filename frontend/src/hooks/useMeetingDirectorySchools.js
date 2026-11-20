@@ -3,7 +3,7 @@ import axios from "axios";
 
 // The meetings screens read contacts / stage / advisors from their loaded `schools` list,
 // which holds clients only. A meeting with a national-directory school (status "directory",
-// never listed) would show no contacts — so fetch just the schools of the meetings on screen
+// never listed) or a district/ownership card (status "entity") would show no contacts — so fetch just the schools of the meetings on screen
 // that are missing from the list (GET /schools/?ids=…) and append them. Each id is asked once.
 export function useMeetingDirectorySchools(meetings, schools, setSchools, schoolsLoaded) {
   const requestedRef = useRef(new Set());
@@ -19,7 +19,7 @@ export function useMeetingDirectorySchools(meetings, schools, setSchools, school
     for (let i = 0; i < missing.length; i += 100) {
       axios.get("/schools/", { params: { ids: missing.slice(i, i + 100).join(",") } })
         .then(res => {
-          const extra = (res.data || []).filter(s => s.status === "directory");
+          const extra = (res.data || []).filter(s => s.status === "directory" || s.status === "entity");
           if (extra.length === 0) return;
           setSchools(prev => {
             const have = new Set(prev.map(s => s.id));

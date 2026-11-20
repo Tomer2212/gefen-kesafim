@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { toMinutes, fromMinutes } from "../meetings/dayScheduleUtils";
 
@@ -117,9 +117,70 @@ function OfflineHoverCard({ rect, timeRangeText, notes }) {
   );
 }
 
+// Exact call length from the provider's seconds (block minutes are clipped/rounded to the ruler),
+// in words: "X שניות" under a minute, "X דקות" under an hour, else "X שעות" (+ "ו-Y דקות" when Y > 0).
+function formatCallDuration(totalSeconds) {
+  const s = Math.max(0, Math.round(totalSeconds || 0));
+  const unit = (n, one, many) => (n === 1 ? one : `${n} ${many}`);
+  if (s < 60) return unit(s, "שנייה", "שניות");
+  const m = Math.floor((s % 3600) / 60);
+  if (s < 3600) return unit(m, "דקה", "דקות");
+  const hoursText = unit(Math.floor(s / 3600), "שעה", "שעות");
+  if (m === 0) return hoursText;
+  return m === 1 ? `${hoursText} ודקה` : `${hoursText} ו-${m} דקות`;
+}
+
+const CALL_CARD_WIDTH_PX = 260;
+
+// Call blocks get a two-column label/value card (contact, role, school, times) — the block
+// itself only has room for the contact's name. Portal + fixed position for the same
+// clipping reason as OfflineHoverCard; kept inside the viewport horizontally and flipped
+// above the block when it would run off the bottom.
+function CallHoverCard({ rect, call, startHM, endHM }) {
+  const left = Math.max(8, Math.min(rect.left, window.innerWidth - CALL_CARD_WIDTH_PX - 8));
+  const flip = rect.bottom + 170 > window.innerHeight;
+  const pos = flip ? { bottom: window.innerHeight - rect.top + 4 } : { top: rect.bottom + 4 };
+  const rows = [
+    ["איש קשר", call.contactName || "לא מזוהה"],
+    ["תפקיד", call.contactRole || "—"],
+    ["מוסד", call.schoolName || "—"],
+  ];
+  return createPortal(
+    <div
+      dir="rtl"
+      role="tooltip"
+      className="fixed z-[9999] bg-white rounded-lg shadow-lg border border-slate-200 p-2 text-xs"
+      style={{ ...pos, left, width: CALL_CARD_WIDTH_PX }}
+    >
+      <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+        {rows.map(([label, value]) => (
+          <div key={label} className="contents">
+            <span className="text-slate-500">{label}:</span>
+            <span className="text-black break-words">{value}</span>
+          </div>
+        ))}
+        <span className="text-slate-500">שעות:</span>
+        <span className="text-black"><span dir="ltr">{startHM}–{endHM}</span></span>
+        <span className="text-slate-500">זמן כולל:</span>
+        <span className="text-black font-semibold">{formatCallDuration(call.durationSeconds)}</span>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 function TimeColumn({ items, isPlanned }) {
   const laidOut = layoutBlocks(items);
-  const [hover, setHover] = useState(null); // { id, rect, timeRangeText, notes }
+  const [hover, setHover] = useState(null); // { id, rect, timeRangeText, notes } | { id, rect, call, startHM, endHM }
+
+  // The card is placed from the block's rect at hover time — any scroll (the day card's grid,
+  // the week strip, the page) would leave it floating away from its block, so hide it instead.
+  useEffect(() => {
+    if (!hover) return;
+    const hide = () => setHover(null);
+    window.addEventListener("scroll", hide, true);
+    return () => window.removeEventListener("scroll", hide, true);
+  }, [hover]);
 
   return (
     <div className="relative flex-1 min-w-0" style={{ height: TOTAL_HEIGHT_PX, backgroundImage: GRID_BG, backgroundSize: `100% ${SLOT_PX}px`, backgroundPosition: GRID_BG_POSITION }}>
@@ -127,13 +188,21 @@ function TimeColumn({ items, isPlanned }) {
         const meta = kindMeta(it.kind);
         const timeRangeText = `משעה ${fromMinutes(it.s)} עד שעה ${fromMinutes(it.e)}, סה"כ ${formatDurationHM(it.e - it.s)}`;
         const isOffline = it.kind === "offline";
+        const isCall = it.kind === "call" && !!it.call;
+        const hasCard = isOffline || isCall;
         const titleText = isPlanned ? `${it.subject || meta.fallback} - ${timeRangeText}` : timeRangeText;
+        const showCard = (e) => {
+          const rect = e.currentTarget.getBoundingClientRect();
+          setHover(isCall
+            ? { id: it.id, rect, call: it.call, startHM: it.startHM, endHM: it.endHM }
+            : { id: it.id, rect, timeRangeText, notes: it.subject || meta.fallback });
+        };
         return (
           <div
             key={it.id}
-            title={isOffline ? undefined : titleText}
-            onMouseEnter={isOffline ? (e) => setHover({ id: it.id, rect: e.currentTarget.getBoundingClientRect(), timeRangeText, notes: it.subject || meta.fallback }) : undefined}
-            onMouseLeave={isOffline ? () => setHover(null) : undefined}
+            title={hasCard ? undefined : titleText}
+            onMouseEnter={hasCard ? showCard : undefined}
+            onMouseLeave={hasCard ? () => setHover(null) : undefined}
             className={`absolute flex items-center rounded px-1 overflow-hidden border ${meta.bg} ${meta.border}`}
             style={{ top: TOP_PAD_PX + it.topPx, height: Math.max(it.heightPx - 1, MIN_BLOCK_PX), left: `${it.leftPct}%`, width: `calc(${it.widthPct}% - 2px)` }}
           >
@@ -141,7 +210,9 @@ function TimeColumn({ items, isPlanned }) {
           </div>
         );
       })}
-      {hover && <OfflineHoverCard rect={hover.rect} timeRangeText={hover.timeRangeText} notes={hover.notes} />}
+      {hover && (hover.call
+        ? <CallHoverCard rect={hover.rect} call={hover.call} startHM={hover.startHM} endHM={hover.endHM} />
+        : <OfflineHoverCard rect={hover.rect} timeRangeText={hover.timeRangeText} notes={hover.notes} />)}
     </div>
   );
 }

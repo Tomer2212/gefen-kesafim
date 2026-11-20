@@ -143,3 +143,29 @@ def test_org_import_updates_only_directory_copies():
     copy = next(s for s in db.tables["schools"] if s["symbol"] == "110023")
     assert copy["status"] == "directory" and copy["principal_name"] == "רינה"
     assert next(s for s in db.tables["schools"] if s["id"] == "c-1")["principal_name"] == "שלנו"  # client untouched
+
+
+# District comes from a separate (older) file, not the Ministry's — it must survive a publish
+# and reach new copies, while an org's own value still wins in the directory views.
+def test_adopt_copies_district():
+    db = _db()
+    db.tables["school_directory"][0]["district"] = "חרדי"
+    sd.adopt(db, ORG, "dir-1", "user-1")
+    assert db.tables["schools"][0]["district"] == "חרדי"
+    assert db.tables["school_directory_links"][0]["base"]["district"] == "חרדי"
+
+
+def test_publish_keeps_district():
+    db = _db()
+    db.tables["school_directory"][0]["district"] = "חרדי"
+    records, _ = sd.parse_ministry_rows([HEADER, _row()])
+    sd.publish(db, records, "test")
+    assert db.tables["school_directory"][0]["district"] == "חרדי"
+
+
+def test_merge_item_prefers_org_district():
+    entry = {**ENTRY, "district": "חיפה"}
+    copy = {"id": "s-1", "status": "active", "district": "צפון"}
+    assert sd._merge_item(entry, copy)["district"] == "צפון"
+    assert sd._merge_item(entry, {**copy, "district": ""})["district"] == "חיפה"
+    assert sd._merge_item(entry, None)["district"] == "חיפה"

@@ -14,6 +14,7 @@ export const FIELD_LABEL = {
   education_authority: "רשות חינוך", sector: "מגזר", supervision: "פיקוח",
   grade_levels: "שכבות לימוד", study_days: "ימי לימוד", student_count: "מס' תלמידים",
   restrict_access_to: "הרשאת גישה",
+  is_client: "לקוח של הארגון",  // district/ownership client cards
   // principal
   principal_name: "שם מנהל/ת", principal_phone: "טלפון מנהל/ת", principal_email: "מייל מנהל/ת",
   principal_day_off: "יום חופשי (מנהל/ת)", principal_same_person: "אותו מנהל/ת לשתי החטיבות",
@@ -120,6 +121,7 @@ const FIELD_FORMATTERS = {
   grade_levels: (val) => (Array.isArray(val) && val.length ? val.join(", ") : "—"),
   principal_same_person: formatBool, secretary_same_person: formatBool, finance_same_person: formatBool,
   restrict_access_to: (val) => (val == null ? "כולם" : `${val.length} יועצים נבחרו`),
+  is_client: (val) => (val ? "כן" : "לא"),
   extra_contacts: (val) => {
     if (!Array.isArray(val) || val.length === 0) return "—";
     return val.map(ec => `${ec?.role || "איש קשר נוסף"}: ${ec?.name || "—"}`).join("; ");

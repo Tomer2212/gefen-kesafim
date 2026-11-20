@@ -62,6 +62,7 @@ from meeting_labels import (
 )
 from meeting_upload_logic import build_upload_checklist, get_or_create_upload_token, recipient_division_scope
 import booking_requests
+import client_entities
 import meeting_activity
 import school_activity
 import school_directory
@@ -942,14 +943,15 @@ def list_schools(
     id_filter = [i.strip() for i in (ids or "").split(",") if i.strip()][:500]
     if ids is not None and not id_filter:
         return []
-    statuses = ["active", "directory"] if id_filter else ["active"]
+    # District/ownership client cards (status 'entity') are returned only by id, like directory copies.
+    statuses = ["active", "directory", "entity"] if id_filter else ["active"]
 
     def _scoped(builder):
         if id_filter:
             builder = builder.in_("id", id_filter)
             return builder if include_deleted else builder.in_("status", statuses)
-        # include_deleted (admin tab, recycle bin) still never lists directory copies.
-        return builder.neq("status", "directory") if include_deleted else builder.in_("status", statuses)
+        # include_deleted (admin tab, recycle bin) still never lists directory copies or client cards.
+        return builder.not_.in_("status", ["directory", "entity"]) if include_deleted else builder.in_("status", statuses)
 
     for attempt in range(2):
         try:
@@ -4737,7 +4739,7 @@ def list_all_meetings(
             # must stay visible here even though the school itself is off the active roster.
             q = (
                 db.table("meetings")
-                .select("*, schools!inner(id, name, symbol, city, authority, district, org_id)")
+                .select("*, schools!inner(id, name, symbol, city, authority, district, org_id, client_type)")
                 .eq("schools.org_id", user["org_id"])
             )
             if school_id:
@@ -4770,6 +4772,7 @@ def list_all_meetings(
 
     for m in meetings:
         sc = m.pop("schools", None) or {}
+        m["school_client_type"] = sc.get("client_type") or "school"
         m["school_name"] = sc.get("name", "")
         m["school_symbol"] = sc.get("symbol", "")
         m["school_city"] = sc.get("city", "")
@@ -4829,7 +4832,7 @@ def list_my_meetings(
             # school status — a soft-deleted school's meeting history must stay visible here too.
             q = (
                 db.table("meetings")
-                .select("*, schools!inner(id, name, symbol, city, authority, district, org_id)")
+                .select("*, schools!inner(id, name, symbol, city, authority, district, org_id, client_type)")
                 .eq("schools.org_id", user["org_id"])
                 .filter("advisor_ids", "cs", json.dumps([user["id"]]))
             )
@@ -4855,6 +4858,7 @@ def list_my_meetings(
 
     for m in meetings:
         sc = m.pop("schools", None) or {}
+        m["school_client_type"] = sc.get("client_type") or "school"
         m["school_name"] = sc.get("name", "")
         m["school_symbol"] = sc.get("symbol", "")
         m["school_city"] = sc.get("city", "")
@@ -5214,9 +5218,12 @@ def check_blocked_date(school_id: str, date: str, user: Annotated[dict, Depends(
 def _org_reminders_default_on(db, school_id: str) -> bool:
     """Automation 1 (organizations.meeting_reminders_enabled) is used ONLY to decide the
     default state of a new meeting's reminder toggle at creation time — it is NOT consulted
-    at send time (send_due_reminders). Fails OPEN (True) on any lookup failure."""
+    at send time (send_due_reminders). Fails OPEN (True) on any lookup failure.
+    A district/ownership client card (client_entities) never gets reminders: always False."""
     try:
-        s = db.table("schools").select("org_id").eq("id", school_id).single().execute().data or {}
+        s = db.table("schools").select("org_id, client_type").eq("id", school_id).single().execute().data or {}
+        if client_entities.is_entity(s):
+            return False
         oid = s.get("org_id")
         if not oid:
             return True
@@ -5440,11 +5447,13 @@ def send_due_reminders(request: Request, school_id: str | None = None):
             "secretary_chativa_name, secretary_chativa_phone, secretary_chativa_email, "
             "finance_contact_name, finance_contact_phone, finance_contact_email, "
             "finance_contact_chativa_name, finance_contact_chativa_phone, finance_contact_chativa_email, "
-            "extra_contacts, gefen_files_responsible"
+            "extra_contacts, gefen_files_responsible, client_type"
         ).in_("id", school_ids).execute()
         schools_map = {s["id"]: s for s in (s_res.data or [])}
     except Exception as exc:
         logger.warning("send_due_reminders: school name lookup failed (non-fatal): %s", exc)
+    # A district/ownership client card's meetings never get a reminder or a file request.
+    meetings = [m for m in meetings if not client_entities.is_entity(schools_map.get(m["school_id"]))]
 
     # Per-org automation toggle for the secretary/finance file-upload-request email
     # (organizations.secretary_upload_request_enabled). This is an INDEPENDENT send-time
@@ -8993,7 +9002,7 @@ def _resync_school_meetings_after_contact_change(org_id: str, school_id: str) ->
 
 
 def _require_school_access_for_meeting_activity(db, user: dict, school_id: str) -> dict:
-    school_row = db.table("schools").select("id, restrict_access_to").eq("id", school_id).eq("org_id", user["org_id"]).execute()
+    school_row = db.table("schools").select("id, restrict_access_to, client_type").eq("id", school_id).eq("org_id", user["org_id"]).execute()
     if not school_row.data:
         raise HTTPException(status_code=404, detail="בית ספר לא נמצא")
     if user["role"] not in ("owner", "manager") and not _advisor_has_access_to_school_row(db, user["id"], school_row.data[0]):
@@ -9510,7 +9519,10 @@ def create_meeting(school_id: str, body: MeetingIn, user: Annotated[dict, Depend
     db = get_admin_client()
     # Was missing entirely (no role or org check at all) — any authenticated user, including
     # a cross-org advisor, could create a meeting under any school_id.
-    _require_school_access_for_meeting_activity(db, user, school_id)
+    school_row = _require_school_access_for_meeting_activity(db, user, school_id)
+    is_entity = client_entities.is_entity(school_row)
+    if is_entity:
+        client_entities.check_meeting_service_type(body.meeting_service_type)
     data = {
         "school_id": school_id,
         "created_by": user["id"],
@@ -9547,7 +9559,9 @@ def create_meeting(school_id: str, body: MeetingIn, user: Annotated[dict, Depend
     # Reminder toggle: honour an explicit value (meeting_booking_router sends True); otherwise
     # default it from automation 1 — ON only for a future-dated meeting that already has a
     # participant. update_meeting flips it on later if the meeting becomes eligible.
-    if body.reminder_enabled is not None:
+    if is_entity:
+        data["reminder_enabled"] = False
+    elif body.reminder_enabled is not None:
         data["reminder_enabled"] = body.reminder_enabled
     else:
         org_on = _org_reminders_default_on(db, school_id)
@@ -11003,9 +11017,11 @@ def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annot
     # Org check — the advisor branch below already validated ownership of the meeting
     # itself, but the owner/manager branch previously skipped any org check entirely,
     # letting a manager from org A update org B's meeting by school_id/meeting_id.
-    school_check = db.table("schools").select("id").eq("id", school_id).eq("org_id", user["org_id"]).execute()
+    school_check = db.table("schools").select("id, client_type").eq("id", school_id).eq("org_id", user["org_id"]).execute()
     if not school_check.data:
         raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
+    if client_entities.is_entity(school_check.data[0]) and "meeting_service_type" in body.model_fields_set:
+        client_entities.check_meeting_service_type(body.meeting_service_type)
     if user["role"] not in ("owner", "manager"):
         # NOT .single() — that raises PGRST116 on zero matches (e.g. a nonexistent or
         # cross-school meeting_id, which is the normal/expected case here, not an error),
@@ -11195,9 +11211,11 @@ def patch_meeting(school_id: str, meeting_id: str, body: MeetingStatusPatchIn, u
                   x_client_surface: Annotated[str | None, Header()] = None):
     """Partial update — only updates the fields provided. Does not touch advisor_ids, participants, etc."""
     db = get_admin_client()
-    school_check = db.table("schools").select("id").eq("id", school_id).eq("org_id", user["org_id"]).execute()
+    school_check = db.table("schools").select("id, client_type").eq("id", school_id).eq("org_id", user["org_id"]).execute()
     if not school_check.data:
         raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
+    if client_entities.is_entity(school_check.data[0]) and "meeting_service_type" in body.model_fields_set:
+        client_entities.check_meeting_service_type(body.meeting_service_type)
     if user["role"] not in ("owner", "manager"):
         # NOT .single() — that raises PGRST116 on zero matches (e.g. a nonexistent or
         # cross-school meeting_id, which is the normal/expected case here, not an error),
@@ -11382,18 +11400,21 @@ def reassign_meeting_school(meeting_id: str, body: MeetingReassignSchoolIn, user
     for attempt in range(2):
         try:
             db = get_admin_client()
-            sch = db.table("schools").select("id").eq("id", body.new_school_id).eq("org_id", user["org_id"]).execute()
+            sch = db.table("schools").select("id, client_type").eq("id", body.new_school_id).eq("org_id", user["org_id"]).execute()
             if not sch.data:
                 raise HTTPException(status_code=404, detail="בית ספר לא נמצא")
             # The NEW school's org was already validated above, but the meeting_id itself was
             # never checked — without this, a manager could reassign another org's meeting
             # (by guessing/enumerating meeting_id) into one of their OWN org's schools.
             m_check = (
-                db.table("meetings").select("id, schools!inner(org_id)")
+                db.table("meetings").select("id, schools!inner(org_id, client_type)")
                 .eq("id", meeting_id).eq("schools.org_id", user["org_id"]).execute()
             )
             if not m_check.data:
                 raise HTTPException(status_code=404, detail="פגישה לא נמצאה")
+            # A district/ownership meeting stays with a district/ownership (and a school's with a school).
+            if client_entities.is_entity(sch.data[0]) or client_entities.is_entity(m_check.data[0].get("schools")):
+                raise HTTPException(status_code=400, detail="אי אפשר להעביר פגישה בין בית ספר לבין מחוז או בעלות")
             activity_before = meeting_activity.fetch_tracked(db, meeting_id)
             res = db.table("meetings").update({
                 "school_id": body.new_school_id,

@@ -2,9 +2,46 @@ import { useEffect, useRef, useState } from "react";
 import axios from "axios";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
 import { adoptDirectorySchool } from "../../lib/directory";
+import { ENTITY_TYPE_LABELS, clientLabel } from "../../constants/clientEntities";
 
 function schoolLabel(s) {
-  return `${s.name || ""} - ${s.symbol || ""} - ${s.city || ""}`;
+  // A district/ownership has no symbol/city — skip empty parts instead of "name -  - ".
+  return [s.name, s.symbol, s.city].filter(Boolean).join(" - ");
+}
+
+// "מחוזות" / "בעלויות" tabs (includeClientEntities): the catalog with the org's clients first,
+// fetched once per type per page load.
+const entityCatalogPromises = {};
+function useEntityCatalog(type, active) {
+  const [state, setState] = useState({ items: [], loading: false });
+  useEffect(() => {
+    if (!active || !type) return;
+    let cancelled = false;
+    setState(s => ({ ...s, loading: true }));
+    if (!entityCatalogPromises[type]) {
+      entityCatalogPromises[type] = axios.get("/clients/", { params: { type, scope: "all" } })
+        .then(r => r.data || [])
+        .catch(err => { delete entityCatalogPromises[type]; throw err; });
+    }
+    entityCatalogPromises[type]
+      .then(items => {
+        if (cancelled) return;
+        const sorted = [...items].sort((a, b) => (b.is_client - a.is_client) || a.label.localeCompare(b.label, "he"));
+        setState({ items: sorted, loading: false });
+      })
+      .catch(() => { if (!cancelled) setState({ items: [], loading: false }); });
+    return () => { cancelled = true; };
+  }, [type, active]);
+  return state;
+}
+
+// An entity choice -> the school-shaped row callers expect (created on first use).
+async function resolveEntityChoice(type, item) {
+  let id = item.id;
+  if (!id) id = (await axios.post("/clients/adopt", { type, key: item.key })).data.id;
+  const res = await axios.get("/schools/", { params: { ids: id } });
+  const row = (res.data || [])[0] || { id, name: item.name, client_type: type, status: "entity", extra_contacts: [] };
+  return { ...row, name: clientLabel(row) };
 }
 
 // Whether the org has the national school directory ("מאגר בתי ספר") — asked once per page load.
@@ -51,7 +88,7 @@ async function resolveDirectoryChoice(choice) {
   return (res.data || [])[0] || { id: schoolId, name: choice.name, symbol: choice.symbol, city: choice.city, status: "directory" };
 }
 
-export function SchoolResultsList({ schools, query, setQuery, pendingId, setPendingId, onConfirm, onCancel, submittingLabel = "יוצר..." }) {
+export function SchoolResultsList({ schools, query, setQuery, pendingId, setPendingId, onConfirm, onCancel, submittingLabel = "יוצר...", includeClientEntities = false }) {
   // onConfirm (e.g. createMeetingForSchool) is async and does real work (a school-
   // advisors lookup, then a POST) before the modal closes — with no per-click feedback,
   // a user who doesn't see anything happen right away tends to click again, and again;
@@ -63,8 +100,9 @@ export function SchoolResultsList({ schools, query, setQuery, pendingId, setPend
   const [dirChoice, setDirChoice] = useState(null);
   const [dirError, setDirError] = useState("");
   // Directory copies a screen loaded for its meetings are not clients — they show under "מהמאגר".
+  // District/ownership cards the screen loaded for its meetings show under their own tabs.
   const filtered = schools.filter(s => {
-    if (s.status === "directory") return false;
+    if (s.status === "directory" || s.status === "entity") return false;
     if (!query.trim()) return true;
     const q = query.trim().toLowerCase();
     return (s.name || "").toLowerCase().includes(q)
@@ -74,6 +112,28 @@ export function SchoolResultsList({ schools, query, setQuery, pendingId, setPend
       || (s.district || "").toLowerCase().includes(q);
   });
   const onDirectoryTab = directoryEnabled && tab === "directory";
+  const entityTab = includeClientEntities && (tab === "district" || tab === "ownership") ? tab : null;
+  const entityCatalog = useEntityCatalog(entityTab, !!entityTab);
+  const [entityChoice, setEntityChoice] = useState(null);
+  const entityQuery = query.trim();
+  const entityOptions = entityTab
+    ? entityCatalog.items.filter(i => !entityQuery || i.label.includes(entityQuery)
+        || (i.contacts || []).some(c => (c.name || "").includes(entityQuery)))
+    : [];
+
+  async function confirmEntity() {
+    const item = entityOptions.find(i => i.key === entityChoice);
+    if (!item || submitting) return;
+    setDirError("");
+    setSubmitting(true);
+    try {
+      await onConfirm(await resolveEntityChoice(entityTab, item));
+    } catch (err) {
+      setDirError(err.message || "הפעולה נכשלה. נסו שוב.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
   // On the clients tab, directory matches are counted only when nothing matched ("לא מצאת?").
   const wantsHint = directoryEnabled && tab === "clients" && filtered.length === 0 && query.trim().length >= 2;
   const directory = useDirectoryResults(query, onDirectoryTab || wantsHint);
@@ -103,10 +163,18 @@ export function SchoolResultsList({ schools, query, setQuery, pendingId, setPend
 
   return (
     <div className="flex flex-col gap-2" style={{ minWidth: 280 }}>
-      {directoryEnabled && (
+      {(directoryEnabled || includeClientEntities) && (
         <div className="flex border-b border-slate-200" role="tablist" aria-label="מקור בתי הספר">
           <button type="button" role="tab" aria-selected={tab === "clients"} className={tabCls(tab === "clients")} onClick={() => setTab("clients")}>הלקוחות שלנו</button>
-          <button type="button" role="tab" aria-selected={tab === "directory"} className={tabCls(tab === "directory")} onClick={() => setTab("directory")}>מהמאגר</button>
+          {directoryEnabled && (
+            <button type="button" role="tab" aria-selected={tab === "directory"} className={tabCls(tab === "directory")} onClick={() => setTab("directory")}>מהמאגר</button>
+          )}
+          {includeClientEntities && ["district", "ownership"].map(t => (
+            <button key={t} type="button" role="tab" aria-selected={tab === t} className={tabCls(tab === t)}
+              onClick={() => { setTab(t); setEntityChoice(null); }}>
+              {ENTITY_TYPE_LABELS[t].plural}
+            </button>
+          ))}
         </div>
       )}
       <label htmlFor="school-picker-search" className="sr-only">חיפוש בית ספר</label>
@@ -116,7 +184,8 @@ export function SchoolResultsList({ schools, query, setQuery, pendingId, setPend
         autoFocus
         value={query}
         onChange={e => setQuery(e.target.value)}
-        placeholder={onDirectoryTab ? "חיפוש במאגר לפי שם, סמל, יישוב או מנהל/ת..." : "חיפוש לפי שם מוסד, סמל מוסד, עיר, בעלות או מחוז..."}
+        placeholder={entityTab ? `חיפוש ${ENTITY_TYPE_LABELS[entityTab].singular} לפי שם או איש קשר...`
+          : onDirectoryTab ? "חיפוש במאגר לפי שם, סמל, יישוב או מנהל/ת..." : "חיפוש לפי שם מוסד, סמל מוסד, עיר, בעלות או מחוז..."}
         className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 outline-none focus:border-blue-400 bg-white"
         aria-label="חיפוש בית ספר"
       />
@@ -151,7 +220,37 @@ export function SchoolResultsList({ schools, query, setQuery, pendingId, setPend
           </div>
         </>
       )}
-      {!onDirectoryTab && (
+      {entityTab && (
+        <>
+          <div className="max-h-56 overflow-y-auto border border-slate-100 rounded-lg" role="listbox" aria-label={`תוצאות חיפוש ${ENTITY_TYPE_LABELS[entityTab].plural}`}>
+            {entityCatalog.loading ? (
+              <p role="status" className="text-xs text-slate-400 px-3 py-3 text-center">טוען…</p>
+            ) : entityOptions.length === 0 ? (
+              <p className="text-xs text-slate-400 px-3 py-3 text-center">לא נמצאו {ENTITY_TYPE_LABELS[entityTab].plural}</p>
+            ) : entityOptions.map(i => (
+              <label key={i.key} className="flex items-center gap-2.5 px-3 py-2 hover:bg-slate-50 cursor-pointer border-b border-slate-50 last:border-0">
+                <input
+                  type="checkbox"
+                  checked={entityChoice === i.key}
+                  onChange={() => setEntityChoice(entityChoice === i.key ? null : i.key)}
+                  className="w-3.5 h-3.5 rounded accent-blue-600 flex-shrink-0"
+                />
+                <span className="text-sm text-slate-700">{i.label}</span>
+                {i.is_client && <span className="text-[11px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-1.5">לקוח</span>}
+              </label>
+            ))}
+          </div>
+          {dirError && <p role="alert" className="text-xs text-red-600">{dirError}</p>}
+          <div className="flex items-center gap-2 justify-end mt-1">
+            <button type="button" onClick={onCancel} disabled={submitting} className="btn-ghost text-sm px-4 py-1.5 disabled:opacity-40">ביטול</button>
+            <button type="button" disabled={!entityChoice || submitting} onClick={confirmEntity}
+              className="btn-blue text-sm px-4 py-1.5 disabled:opacity-40 disabled:cursor-not-allowed">
+              {submitting ? submittingLabel : "אישור"}
+            </button>
+          </div>
+        </>
+      )}
+      {!onDirectoryTab && !entityTab && (
       <>
       <div className="max-h-56 overflow-y-auto border border-slate-100 rounded-lg" role="listbox" aria-label="תוצאות חיפוש בתי ספר">
         {filtered.length === 0 ? (
@@ -221,7 +320,7 @@ export function SchoolPickerPopover({ schools, currentSchoolId, onConfirm, onClo
 }
 
 /** Modal variant — used when creating a new meeting; blocks creation until a school is chosen. */
-export function SchoolPickerModal({ schools, onConfirm, onCancel, title = "בחירת בית ספר לפגישה", submittingLabel }) {
+export function SchoolPickerModal({ schools, onConfirm, onCancel, title = "בחירת בית ספר לפגישה", submittingLabel, includeClientEntities = false }) {
   const [query, setQuery] = useState("");
   const [pendingId, setPendingId] = useState(null);
   const { ref, handleKeyDown } = useFocusTrap(onCancel);
@@ -237,6 +336,7 @@ export function SchoolPickerModal({ schools, onConfirm, onCancel, title = "בח�
           pendingId={pendingId} setPendingId={setPendingId}
           onConfirm={onConfirm}
           onCancel={onCancel}
+          includeClientEntities={includeClientEntities}
           {...(submittingLabel ? { submittingLabel } : {})} />
       </div>
     </div>

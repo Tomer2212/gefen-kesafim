@@ -89,12 +89,13 @@ def search_directory_schools(
     ministry_stage: str | None = None,
     supervision: str | None = None,
     sector: str | None = None,
+    district: str | None = None,
     page: int = 0,
 ):
     def run(db):
         _require_enabled(db, user)
         filters = {"city": city, "education_authority": education_authority, "ministry_stage": ministry_stage,
-                   "supervision": supervision, "sector": sector}
+                   "supervision": supervision, "sector": sector, "district": district}
         return school_directory.search_directory(db, user["org_id"], q, filters, page)
     return _with_retry("search_directory_schools", run)
 
@@ -127,7 +128,7 @@ def get_directory_school(directory_id: str, user: Annotated[dict, Depends(get_cu
         copy = None
         if link:
             copies = (
-                db.table("schools").select("id, name, symbol, city, address, school_phone, principal_name, status")
+                db.table("schools").select(school_directory.COPY_SELECT)
                 .eq("id", link[0]["school_id"]).eq("org_id", user["org_id"]).execute().data or []
             )
             copy = copies[0] if copies else None

@@ -4,7 +4,8 @@ import { MEETING_SERVICE_TYPE_OPTIONS } from "./constants";
 // Structurally mirrors MeetingTypeSelect.jsx (the "מיקום" column) — same dropdown mechanics.
 // `hasError`: shows a red border/ring when no value is selected, same visual language as the
 // start/end time conflict indicator in TimeInput.jsx.
-export function MeetingServiceTypeSelect({ value, onChange, hasError }) {
+// `allowedValues`: limits the offered options (a district/ownership meeting: גפן / שוטף only).
+export function MeetingServiceTypeSelect({ value, onChange, hasError, allowedValues }) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef(null);
 
@@ -14,6 +15,7 @@ export function MeetingServiceTypeSelect({ value, onChange, hasError }) {
     return () => document.removeEventListener("mousedown", h);
   }, []);
 
+  const options = allowedValues ? MEETING_SERVICE_TYPE_OPTIONS.filter(o => allowedValues.includes(o.value)) : MEETING_SERVICE_TYPE_OPTIONS;
   const selected = MEETING_SERVICE_TYPE_OPTIONS.find(o => o.value === value);
   // Past-mode meeting imports copy this field as free text verbatim from the org's Excel file
   // (see ImportMeetingsModal.jsx's buildRowsFromSheet) rather than forcing it onto one of the 4
@@ -42,7 +44,7 @@ export function MeetingServiceTypeSelect({ value, onChange, hasError }) {
             className="w-full text-right px-3 py-1.5 text-sm text-slate-400 hover:bg-slate-50">
             בחר
           </button>
-          {MEETING_SERVICE_TYPE_OPTIONS.map(o => (
+          {options.map(o => (
             <button key={o.value} type="button"
               onMouseDown={e => { e.preventDefault(); onChange(o.value); setOpen(false); }}
               className={`w-full text-right px-3 py-2 text-sm hover:bg-blue-50 transition-colors ${value === o.value ? "text-blue-600 font-semibold" : "text-slate-700"}`}>
