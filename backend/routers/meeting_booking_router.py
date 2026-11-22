@@ -10,6 +10,7 @@ import booking_lock
 import booking_requests
 import graph_client
 import meeting_activity
+import meeting_rounds
 import slot_policy
 import task_logic
 from academic_years import DEFAULT_ACADEMIC_YEAR
@@ -346,10 +347,39 @@ def _same_task_booked_meeting(db, token_row: dict, range_row: dict) -> dict | No
     return {k: m.get(k) for k in ("meeting_date", "start_time", "end_time")} if m else None
 
 
+def _round_plan_block(db, token_row: dict, range_row: dict, cache: dict | None = None) -> dict | None:
+    """A request of a round "לפי תוכנית" (one of several of the same type, each with its own dates)
+    stays open while the school still needs a meeting of its type in the round — counted live, so
+    a meeting booked by phone, another link or another task closes it too, and an older reminder
+    link can never book more than the school needs. Returns the school's latest such meeting once
+    nothing is needed (shown as "already booked"). Non-fatal: on failure nothing blocks."""
+    key = (range_row.get("round_id"), range_row.get("service_type"))
+    if cache is not None and key in cache:
+        return cache[key]
+    blocking = None
+    try:
+        rows = (
+            db.table("meeting_rounds").select("*").eq("id", range_row.get("round_id"))
+            .eq("org_id", token_row["org_id"]).execute().data or []
+        ) if range_row.get("round_id") else []
+        if rows:
+            left, latest = meeting_rounds.remaining_need(db, rows[0], token_row["school_id"], range_row["service_type"])
+            if left <= 0:
+                blocking = {k: (latest or {}).get(k) for k in ("meeting_date", "start_time", "end_time")}
+    except Exception as exc:
+        logger.warning("round-plan need lookup failed for token %s (non-fatal): %s", token_row.get("id"), exc)
+    if cache is not None:
+        cache[key] = blocking
+    return blocking
+
+
 def _range_blocking_meeting(db, token_row: dict, range_row: dict) -> dict | None:
     """The meeting that already fills this range, so it can't be booked again: any existing one
     of the school (_range_existing_meeting), or — for "בקש לקבוע פגישה נוספת" — only one booked
-    through this same task (_same_task_booked_meeting)."""
+    through this same task (_same_task_booked_meeting), or — for a round-plan request — none
+    while the school still needs a meeting of its type in the round (_round_plan_block)."""
+    if range_row.get("round_plan_request"):
+        return _round_plan_block(db, token_row, range_row)
     if range_row.get("require_additional_meeting"):
         return _same_task_booked_meeting(db, token_row, range_row)
     return _range_existing_meeting(db, token_row, range_row)
@@ -482,11 +512,14 @@ def get_booking_info(token: str):
         advisor_names = list(advisor_names_by_id.values())
         booked = set(token_row.get("booked_ranges") or [])
         ranges = []
+        plan_cache: dict = {}  # one live need lookup per round + type for the whole page
         for r in (token_row.get("date_ranges") or []):
             is_booked = r["key"] in booked
             existing = None
             existing_fyi = None
-            if not is_booked:
+            if not is_booked and r.get("round_plan_request"):
+                existing = _round_plan_block(db, token_row, r, plan_cache)
+            elif not is_booked:
                 found = _range_existing_meeting(db, token_row, r)
                 # "בקש לקבוע פגישה נוספת" — a pre-existing meeting must not block offering a
                 # NEW slot for this range; surfaced as a non-blocking FYI instead (the frontend

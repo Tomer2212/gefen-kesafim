@@ -129,7 +129,9 @@ def requests_already_filled(db, rows: list[dict], exclude_meeting_id: str | None
     for r in rows:
         key = (str(r["token_id"]), r["range_key"])
         rng = r["range_row"]
-        if key in filled or rng.get("require_additional_meeting"):
+        # A round-plan request (one of several of a type) is never filled by "a meeting of its type in
+        # its dates" — only by its own booking or a "replaces" answer (meeting_booking_router._round_plan_block).
+        if key in filled or rng.get("require_additional_meeting") or rng.get("round_plan_request"):
             continue
         scope = rng.get("stage_scope")
         counted_scopes = (scope, "both") if rng.get("explicit_stage_scope_only") else (scope, "both", None)

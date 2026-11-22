@@ -265,6 +265,26 @@ def _get_manual_school_overrides(org_id: str, call_ids: list[str]) -> tuple[dict
         return {}, {}
 
 
+def _linked_card_names(org_id: str, school_ids: set) -> dict:
+    """school_id -> {id, name, client_type} for manually linked cards (schools, directory copies,
+    districts/ownerships). Deleted cards are left out. Non-fatal enrichment."""
+    if not school_ids:
+        return {}
+    try:
+        db = get_admin_client()
+        rows = (
+            db.table("schools").select("id, name, client_type, status")
+            .eq("org_id", org_id).in_("id", list(school_ids)).execute()
+        ).data or []
+        return {
+            r["id"]: {"id": r["id"], "name": r.get("name"), "client_type": r.get("client_type") or "school"}
+            for r in rows if r.get("status") not in ("deleted", "pending_deletion")
+        }
+    except Exception as exc:
+        logger.warning("calls: linked card names lookup failed (non-fatal): %s", exc)
+        return {}
+
+
 def _resolve_contact_for_call(contact_map: dict, profile_phone_map: dict, resolutions_by_call_id: dict, call_id: str, counterpart: str) -> dict:
     """Resolves a single call's contact/school given the org-wide contact_map and any
     persisted resolutions. Returns a dict with contact_name/contact_role/school_id/
@@ -823,6 +843,7 @@ def _enrich_raw_calls(org_id: str, provider: str, raw_calls: list[dict]) -> list
     profile_phone_map = _build_profile_phone_map(org_id)
     resolutions_by_call_id = _get_call_resolutions(org_id, call_ids)
     manual_links_by_call_id, manual_exclusions_by_call_id = _get_manual_school_overrides(org_id, call_ids)
+    linked_card_by_id = _linked_card_names(org_id, {sid for ids in manual_links_by_call_id.values() for sid in ids})
 
     calls = []
     for c in raw_calls:
@@ -844,6 +865,8 @@ def _enrich_raw_calls(org_id: str, provider: str, raw_calls: list[dict]) -> list
             "pending_school_resolution": contact["pending_school_resolution"],
             "candidate_schools": contact["candidate_schools"],
             "linked_school_ids": manual_links_by_call_id.get(call_id, []),
+            # Names of the manually linked cards, for the "שם מוסד" column.
+            "linked_schools": [linked_card_by_id[sid] for sid in manual_links_by_call_id.get(call_id, []) if sid in linked_card_by_id],
             "excluded_school_ids": manual_exclusions_by_call_id.get(call_id, []),
             # Kept as representative_code/representative_name in the response (rather than
             # agent_key/agent_label) so the existing frontend keeps working unmodified.
@@ -1041,6 +1064,51 @@ def list_my_calls(
 
 class LinkCallSchoolIn(BaseModel):
     school_id: str
+    # The call's start_time — required from a non-manager (to verify the call is theirs);
+    # optional for owners/managers, where it only enables the same-day meeting recompute.
+    call_time: str | None = None
+
+
+def _is_own_call(call: dict, user_id: str) -> bool:
+    """Same rule as /my-calls: the user's own line, or an office line they handle."""
+    return call.get("advisor_id") == user_id or user_id in (call.get("handler_ids") or [])
+
+
+def _find_call_on_day(org_id: str, call_id: str, call_time_iso: str) -> tuple[dict | None, list[dict]]:
+    """The call with this id among the org's calls of its Israel-local day, plus that day's calls."""
+    date_str = _call_date_il(call_time_iso)
+    if not date_str:
+        raise HTTPException(status_code=400, detail="מועד השיחה אינו תקין")
+    day_calls = _pull_org_calls(org_id, f"{date_str}T00:00:00", f"{date_str}T23:59:59")["calls"]
+    return next((c for c in day_calls if c.get("call_id") == call_id), None), day_calls
+
+
+def _close_prompt_answered_by_link(db, org_id: str, call_id: str, school_id: str, user_id: str) -> None:
+    """A manual link that answers the call's open "which school?" question closes it, so its
+    popup/bell stop asking: any school answers an 'unknown' one, a candidate an 'ambiguous' one.
+    Non-fatal — the link itself is already saved."""
+    try:
+        rows = (
+            db.table("calls_call_contact_resolutions").select("*")
+            .eq("org_id", org_id).eq("call_id", call_id).is_("resolved_school_id", "null")
+            .limit(1).execute()
+        ).data or []
+        if not rows:
+            return
+        resolution = rows[0]
+        if (resolution.get("kind") or "ambiguous") != "unknown":
+            if school_id not in [s.get("id") for s in (resolution.get("candidate_schools") or [])]:
+                return
+        now_iso = datetime.now(timezone.utc).isoformat()
+        updated = (
+            db.table("calls_call_contact_resolutions")
+            .update({"resolved_school_id": school_id, "resolved_by": user_id, "resolved_at": now_iso})
+            .eq("id", resolution["id"]).is_("resolved_school_id", "null").execute()
+        ).data
+        if updated:
+            _mark_call_notifications_read(db, call_id, _resolution_readers(resolution, user_id), now_iso)
+    except Exception as exc:
+        logger.warning("link_call_school: closing the open prompt failed (non-fatal): %s", exc)
 
 
 @router.post("/calls/{call_id}/link-school")
@@ -1048,11 +1116,16 @@ def link_call_school(
     call_id: str,
     body: LinkCallSchoolIn,
     user: Annotated[dict, Depends(get_current_user)],
+    background_tasks: BackgroundTasks,
 ):
     """Manually attaches a call to a school's שיחות tab — independent of (and in addition
     to) any auto-detected contact match. A call can be linked to any number of schools;
-    linking to one never removes it from another."""
-    _require_manager(user)
+    linking to one never removes it from another. The target may be any card of the org
+    (school, directory copy, district/ownership). Owners/managers may link any call; anyone
+    else only their own calls (personal area) — verified here against the provider's data."""
+    is_manager = user["role"] in _MANAGER_ROLES
+    if not is_manager and not body.call_time:
+        raise HTTPException(status_code=400, detail="חסר מועד השיחה")
 
     db = get_admin_client()
     school_row = db.table("schools").select("id").eq("id", body.school_id).eq("org_id", user["org_id"]).execute()
@@ -1067,6 +1140,15 @@ def link_call_school(
     hijack_check = db.table("calls_call_school_links").select("org_id").eq("call_id", call_id).neq("org_id", user["org_id"]).limit(1).execute()
     if hijack_check.data:
         raise HTTPException(status_code=403, detail="אין הרשאה לפעולה זו")
+
+    # A non-manager may link only a call of their own — checked against the provider's data
+    # of the call's day, never trusted from the client. A manager's day is pulled only after
+    # the write (for the meeting recompute), so their link never waits on the provider.
+    day_calls = None
+    if not is_manager:
+        call, day_calls = _find_call_on_day(user["org_id"], call_id, body.call_time)
+        if not call or not _is_own_call(call, user["id"]):
+            raise HTTPException(status_code=404, detail="השיחה לא נמצאה ברשימת השיחות שלך")
 
     for attempt in range(2):
         try:
@@ -1086,6 +1168,17 @@ def link_call_school(
             else:
                 logger.error("link_call_school failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    _close_prompt_answered_by_link(get_admin_client(), user["org_id"], call_id, body.school_id, user["id"])
+
+    if body.call_time:
+        if day_calls is not None:
+            # Reflect the link just written instead of pulling the day again.
+            for c in day_calls:
+                if c.get("call_id") == call_id and body.school_id not in (c.get("linked_school_ids") or []):
+                    c["linked_school_ids"] = [*(c.get("linked_school_ids") or []), body.school_id]
+        # After the response: a manager's link would otherwise wait on the provider pull.
+        background_tasks.add_task(_after_manual_school_attribution, user["org_id"], body.school_id, body.call_time, day_calls)
 
     return {"ok": True}
 
@@ -1250,36 +1343,49 @@ def resolve_call_contact_school(
                 logger.error("resolve_call_contact_school: update failed for call=%s: %s", call_id, exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
-    # Immediately attribute the newly-resolved call to a same-day meeting + run the opt-in
-    # auto-completion check, so the effect is visible now — the scan already handled this call
-    # while its school was still unresolved, and the recompute cron only covers today/yesterday.
-    # Non-fatal: the resolution write above already succeeded.
+    _after_manual_school_attribution(user["org_id"], body.school_id, resolution.get("call_time"))
+
+    return {"ok": True}
+
+
+def _call_date_il(call_time_iso) -> str | None:
+    """A call's start time (UTC ISO) -> its Israel-local date 'YYYY-MM-DD' (None if unparsable)."""
+    try:
+        dt = datetime.fromisoformat(str(call_time_iso or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(_IL_TZ).date().isoformat()
+
+
+def _after_manual_school_attribution(org_id: str, school_id: str, call_time_iso, calls_for_day: list[dict] | None = None) -> None:
+    """Immediately attributes a call just tied to a school (by hand) to a same-day meeting +
+    runs the opt-in auto-completion check, so the effect is visible now — the scan already
+    handled this call without that school, and the recompute cron only covers today/yesterday.
+    `calls_for_day` = that day's enriched calls when the caller already has them — they must
+    already reflect the new attribution. Non-fatal: the attribution itself is already saved."""
+    date_str = _call_date_il(call_time_iso)
+    if not date_str:
+        return
     try:
         from routers.schools_router import (
             _maybe_auto_complete_meeting,
             _recompute_meeting_call_activity,
         )
-        call_time_iso = resolution.get("call_time")
-        if call_time_iso:
-            dt = datetime.fromisoformat(str(call_time_iso).replace("Z", "+00:00"))
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            from zoneinfo import ZoneInfo
-            date_str = dt.astimezone(ZoneInfo("Asia/Jerusalem")).date().isoformat()
-            result = _pull_org_calls(user["org_id"], f"{date_str}T00:00:00", f"{date_str}T23:59:59")
-            calls_for_school = [
-                c for c in result["calls"]
-                if body.school_id not in (c.get("excluded_school_ids") or [])
-                and (c.get("school_id") == body.school_id or body.school_id in (c.get("linked_school_ids") or []))
-            ]
-            db = get_admin_client()
-            affected = _recompute_meeting_call_activity(db, user["org_id"], body.school_id, date_str, calls_for_school)
-            for mid in affected:
-                _maybe_auto_complete_meeting(db, user["org_id"], mid)
+        if calls_for_day is None:
+            calls_for_day = _pull_org_calls(org_id, f"{date_str}T00:00:00", f"{date_str}T23:59:59")["calls"]
+        calls_for_school = [
+            c for c in calls_for_day
+            if school_id not in (c.get("excluded_school_ids") or [])
+            and (c.get("school_id") == school_id or school_id in (c.get("linked_school_ids") or []))
+        ]
+        db = get_admin_client()
+        affected = _recompute_meeting_call_activity(db, org_id, school_id, date_str, calls_for_school)
+        for mid in affected:
+            _maybe_auto_complete_meeting(db, org_id, mid)
     except Exception as exc:
-        logger.warning("resolve_call_contact_school: inline meeting recompute failed (non-fatal): %s", exc)
-
-    return {"ok": True}
+        logger.warning("manual school attribution: inline meeting recompute failed (non-fatal): %s", exc)
 
 
 # ---------------------------------------------------------------------------

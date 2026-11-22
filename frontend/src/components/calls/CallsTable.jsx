@@ -34,7 +34,10 @@ export function sortCalls(calls, { field, dir }) {
 }
 
 // `sort` + `onSortChange` are optional: pass them when the parent needs the current order.
-export function CallsTable({ calls, hideSchoolColumn, hideAdvisorColumn, canManage = true, schoolId, sort, onSortChange }) {
+// cardNoun: what the card is called in row texts ("בית הספר" / "המחוז" / "הבעלות").
+// canLink: offer "שייך שיחה" in the row menu (defaults to canManage — see CallRow).
+// onLinked(callId, card): optional — lets the parent keep its own list in step after a link.
+export function CallsTable({ calls, hideSchoolColumn, hideAdvisorColumn, canManage = true, canLink = canManage, schoolId, cardNoun = "בית הספר", sort, onSortChange, onLinked }) {
   const [ownSort, setOwnSort] = useState(DEFAULT_CALLS_SORT);
   const { field: sortField, dir: sortDir } = sort || ownSort;
   const setSort = onSortChange || setOwnSort;
@@ -108,7 +111,7 @@ export function CallsTable({ calls, hideSchoolColumn, hideAdvisorColumn, canMana
           >
             {row => (
               <CallRow call={row.call} hideSchoolColumn={hideSchoolColumn} hideAdvisorColumn={hideAdvisorColumn}
-                canManage={canManage} schoolId={schoolId} onDelete={handleRowDelete} />
+                canManage={canManage} canLink={canLink} onLinked={onLinked} schoolId={schoolId} cardNoun={cardNoun} onDelete={handleRowDelete} />
             )}
           </VirtualRows>
         </table>

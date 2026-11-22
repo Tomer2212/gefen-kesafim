@@ -15,6 +15,8 @@ import { MINISTRY_STAGE_OPTIONS, MINISTRY_STAGE_OTHER, stageSuggestionForMinistr
 import { accountsDraftFromStage, accountsPayload, deriveStage, validateCoversList } from "../constants/gefenAccounts";
 import { GefenAccountsEditor } from "../components/GefenAccountsEditor";
 import { DISTRICT_OPTIONS } from "../constants/clientEntities";
+import MeetingPlanModal from "../components/meetingPlan/MeetingPlanModal";
+import { PLAN_TYPE_LABELS, planTypeSummary } from "../constants/meetingPlan";
 
 // Tags school-data writes for the school card's "תיעוד פעולות" log (backend school_activity.py).
 const SURFACE_HEADERS = { headers: { "X-Client-Surface": "add_school" } };
@@ -338,7 +340,10 @@ export default function AddSchoolPage() {
     client_status: null, service_type: null, order_method: [], order_method_other_text: null, order_amount_gefen: null,
     meeting_allocation_gefen: null, meeting_allocation_current: null, meeting_allocation_district: null,
     meeting_duration_gefen: null, meeting_duration_current: null, meeting_duration_district: null,
+    meeting_plan: null,
   });
+  // "תוכנית פגישות" editor open for this service type, or null.
+  const [planType, setPlanType] = useState(null);
   const [accessLinkedToAdvisors, setAccessLinked]   = useState(false);
   const [triedSave, setTriedSave]   = useState(false);
   const [savingSchool, setSaving]   = useState(false);
@@ -1147,6 +1152,16 @@ export default function AddSchoolPage() {
                               }} />
                           </div>
 
+                          <span className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">תוכנית פגישות:</span>
+                          <div className="py-0.5 flex items-center gap-2 min-w-0">
+                            <span className="text-sm text-slate-700 truncate" title={planTypeSummary(yearAdminForm.meeting_plan, key) || undefined}>
+                              {planTypeSummary(yearAdminForm.meeting_plan, key) || "—"}
+                            </span>
+                            <button type="button" onClick={() => setPlanType(key)}
+                              className="shrink-0 text-xs px-2.5 py-1 rounded-lg border border-slate-300 hover:bg-white"
+                              aria-label={`עריכת תוכנית פגישות ${label}`}>עריכה</button>
+                          </div>
+
                           <span className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">זמן לפגישה:</span>
                           <div className="py-0.5">
                             <HourMinuteInput idPrefix={`ys-duration-${key}`} label={`זמן לפגישה [${label}]`}
@@ -1161,6 +1176,18 @@ export default function AddSchoolPage() {
                 </div>
               )}
             </div>
+
+            {planType && (
+              <MeetingPlanModal
+                types={[planType]}
+                plan={yearAdminForm.meeting_plan}
+                allocations={{ [planType]: yearAdminForm[`meeting_allocation_${planType}`] }}
+                title={`תוכנית פגישות — ${PLAN_TYPE_LABELS[planType]}`}
+                academicYear={DEFAULT_ACADEMIC_YEAR}
+                onSave={plan => { setYearAdminForm(p => ({ ...p, meeting_plan: plan })); setPlanType(null); }}
+                onClose={() => setPlanType(null)}
+              />
+            )}
 
             {/* Actions */}
             <div className="flex items-center gap-3 mt-5">

@@ -11,9 +11,11 @@ export const ROUND_STATUS_META = {
   untouched: { label: "טרם טופל", chip: "bg-slate-100 text-slate-700", bar: "bg-slate-300" },
   // Every meeting of the school belongs to advisors who book it themselves ("יועצים שקובעים לעצמם").
   self_scheduled: { label: "היועץ קובע בעצמו", chip: "bg-violet-50 text-violet-700", bar: "bg-violet-300" },
+  // A round "לפי תוכנית": the school's plan asks nothing in this round (or it is ahead of its plan).
+  not_needed: { label: "לא נדרשת בסבב", chip: "bg-slate-50 text-slate-500", bar: "bg-slate-200" },
   excluded: { label: "הוחרג מהסבב", chip: "bg-slate-50 text-slate-400", bar: "bg-slate-200" },
 };
-export const ROUND_STATUS_ORDER = ["done", "booked", "partial", "opened", "requested", "problem", "untouched", "self_scheduled"];
+export const ROUND_STATUS_ORDER = ["done", "booked", "partial", "opened", "requested", "problem", "untouched", "self_scheduled", "not_needed"];
 
 export const ROUND_PROBLEM_LABELS = {
   missing_service_type: "לא הוגדר סוג שירות בכרטיס",
@@ -21,7 +23,11 @@ export const ROUND_PROBLEM_LABELS = {
   missing_contact: "חסר איש קשר",
   incomplete_meeting_config: "חסר יועץ או משך פגישה בכרטיס",
   opted_out: "הוסר/ה מרשימת התפוצה",
+  missing_plan: "חסרה תוכנית פגישות — יש למלא כמה פגישות",
 };
+
+// A round "לפי תוכנית" — the parts a school's need is made of (backend/meeting_plan.py PART_LABELS).
+export const PLAN_PART_LABELS = { gefen: "גפן", current: "שוטף", district: "מחוז", takuma: "תקומה" };
 
 // "Opened/received but did nothing" for this many days → suggested reminder.
 export const STALE_REQUEST_DAYS = 7;
@@ -58,12 +64,13 @@ export function meetingKindLabel(kind, requirement) {
   }
 }
 
-export function requirementLabel(req) {
+export function requirementLabel(req, planMode = null) {
   if (!req) return "";
   const type = req.meeting_service_type === "by_service"
     ? `לפי סוג השירות בכרטיס${req.gefen_current_split === "separate" ? " (גפן+שוטף עם יועצים שונים: נפרדות)" : req.gefen_current_split === "combined" ? " (גפן+שוטף עם יועצים שונים: פגישה אחת)" : ""}`
     : `פגישת ${MEETING_SERVICE_TYPE_LABELS[req.meeting_service_type] || req.meeting_service_type}`;
-  const count = (req.count_per_school || 1) > 1 ? ` · ${req.count_per_school} פגישות לכל בית ספר` : "";
+  const count = planMode === "plan" ? " · כמות לפי תוכנית הפגישות של כל בית ספר"
+    : (req.count_per_school || 1) > 1 ? ` · ${req.count_per_school} פגישות לכל בית ספר` : "";
   return `${type}${count}`;
 }
 

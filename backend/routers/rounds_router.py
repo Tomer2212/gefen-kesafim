@@ -9,6 +9,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+import meeting_plan
 import meeting_rounds
 import task_logic
 from academic_years import DEFAULT_ACADEMIC_YEAR, resolve_inherited_year_admin
@@ -35,6 +36,14 @@ class RequirementIn(BaseModel):
     stage_scope: str | None = None
 
 
+class PlanPartIn(BaseModel):
+    """The manager's answer for one school + part in the "מי צריך כמה" table. planned_in = the
+    meetings asked inside the round (None = what the card's plan says; required when the card has
+    no plan for the part); offer = ask now the meetings missing from before the round."""
+    planned_in: int | None = None
+    offer: bool = True
+
+
 class RoundCreateIn(BaseModel):
     name: str
     academic_year: str = DEFAULT_ACADEMIC_YEAR
@@ -50,6 +59,27 @@ class RoundCreateIn(BaseModel):
     # "יועצים שקובעים לעצמם" — {advisor_id: ["all"] | [part, ...]} (task_logic.apply_advisor_exclusions);
     # every task of the round starts with it.
     advisor_exclusions: dict | None = None  # None = the org's default list
+    # "לפי תוכנית הפגישות": each school's own number of meetings from its card plan
+    # (meeting_plan.py); None = the old fixed count_per_school for everyone.
+    plan_mode: str | None = None
+    school_plan: dict[str, dict[str, PlanPartIn]] | None = None
+    # Schools left out at creation (e.g. already covered by an overlapping round).
+    excluded_school_ids: list[str] = []
+
+
+class PlanPreviewIn(BaseModel):
+    academic_year: str = DEFAULT_ACADEMIC_YEAR
+    start_date: str
+    end_date: str
+    criteria: dict | None = None
+    manual_school_ids: list[str] | None = None
+    requirement: RequirementIn
+    advisor_exclusions: dict | None = None
+    round_id: str | None = None  # editing a round: its own answers are shown, and it isn't an overlap
+
+
+class PlanRefreshIn(BaseModel):
+    school_ids: list[str]
 
 
 class PhysicalCheckIn(BaseModel):
@@ -76,6 +106,8 @@ class RoundPatchIn(BaseModel):
     manual_school_ids: list[str] | None = None
     physical_visitors: dict[str, list[str]] | None = None
     advisor_exclusions: dict | None = None
+    # A round "לפי תוכנית": the manager's answers from the "מי צריך כמה" table (replaces them).
+    school_plan: dict[str, dict[str, PlanPartIn]] | None = None
 
 
 class AudienceApplyIn(BaseModel):
@@ -139,6 +171,97 @@ def _clean_exclusions(db, org_id: str, raw: dict | None) -> dict:
     return task_logic.clean_advisor_exclusions(raw, allowed)
 
 
+def _plan_inputs(org_id: str, rnd: dict, school_ids: list[str]):
+    """(schools, meetings by school, year rows, the round's condition) for the plan numbers."""
+    schools, meetings, year_map, _goals, _cl = task_logic._fetch_schools_and_meetings(
+        org_id, rnd["academic_year"], only_school_ids=school_ids,
+    )
+    by_school: dict[str, list[dict]] = {}
+    for m in meetings:
+        by_school.setdefault(m["school_id"], []).append(m)
+    return schools, by_school, year_map, meeting_rounds.round_condition(rnd)
+
+
+def _school_parts(cond: dict, school: dict, year_row: dict | None) -> list[str]:
+    expanded, _self = task_logic.expand_for_school_detail(cond, school, year_row)
+    return meeting_plan.parts_for_types([c["meeting_service_type"] for c in expanded])
+
+
+def _build_school_plan(org_id: str, rnd: dict, school_ids: list[str], client: dict | None,
+                       previous: dict | None, keep_previous_numbers: bool) -> tuple[dict, list[dict]]:
+    """The round's school_plan for its schools (meeting_plan.py), and the schools still missing a
+    number. Per school + part: the card's plan for the round's dates, then the manager's answer
+    from the table (client) or — for a rebuild with no answers (e.g. new schools, a card refresh) —
+    the earlier answer: its offer/defer always, its numbers only when keep_previous_numbers (same
+    dates and parts). A part the card has no plan for needs a number typed in by the manager."""
+    start, end = date.fromisoformat(rnd["start_date"]), date.fromisoformat(rnd["end_date"])
+    schools, _meetings, year_map, cond = _plan_inputs(org_id, rnd, school_ids)
+    out: dict = {}
+    missing: list[dict] = []
+    for school in schools:
+        sid = school["id"]
+        card = (year_map.get(sid) or {}).get("meeting_plan")
+        answers = (client or {}).get(sid) or {}
+        before = (previous or {}).get(sid) or {}
+        entry: dict = {}
+        missing_parts: list[str] = []
+        for part in _school_parts(cond, school, year_map.get(sid)):
+            ans = answers.get(part)
+            prev = before.get(part) if isinstance(before.get(part), dict) else None
+            snap = meeting_plan.snapshot_part(card, part, rnd["academic_year"], start, end)
+            planned = ans.planned_in if ans is not None else (
+                prev.get("planned_in") if prev and (keep_previous_numbers or prev.get("manual")) else None)
+            if snap is None:
+                if planned is None:
+                    missing_parts.append(part)
+                    continue
+                snap = {"planned_before": 0, "offer": True, "manual": True,
+                        "source": meeting_plan.plan_source(card, part)}
+            if planned is not None:
+                snap["planned_in"] = max(0, min(int(planned), meeting_plan.MAX_PER_ROUND))
+            snap["offer"] = ans.offer if ans is not None else (prev.get("offer", True) if prev else True)
+            entry[part] = snap
+        if entry:
+            out[sid] = entry
+        if missing_parts:
+            missing.append({"school_id": sid, "school_name": school.get("name"), "parts": missing_parts})
+    return out, missing
+
+
+def _round_parts(meeting_service_type: str | None) -> set[str]:
+    """The parts a round's meetings can be (by_service: any of them)."""
+    if meeting_service_type == task_logic.BY_SERVICE:
+        return set(meeting_plan.PART_MEETING_TYPES)
+    return set(meeting_plan.MEETING_TYPE_PARTS.get(meeting_service_type or "", []))
+
+
+def _overlapping_rounds(db, org_id: str, academic_year: str, start: str, end: str,
+                        school_ids: list[str], exclude_round_id: str | None,
+                        meeting_service_type: str | None = None) -> list[dict]:
+    """Active rounds of the year whose dates overlap, that share schools with this one and whose
+    meetings can be the same kind (a שוטף round never counts a גפן meeting) — the same meeting
+    could then count in both."""
+    rows = (
+        db.table("meeting_rounds").select("id, name, start_date, end_date, school_ids, excluded_school_ids, requirement")
+        .eq("org_id", org_id).eq("academic_year", academic_year).eq("status", "active")
+        .lte("start_date", end).gte("end_date", start).execute().data or []
+    )
+    mine = set(school_ids)
+    out = []
+    for r in rows:
+        if r["id"] == exclude_round_id:
+            continue
+        if meeting_service_type and not (_round_parts(meeting_service_type)
+                                         & _round_parts((r.get("requirement") or {}).get("meeting_service_type"))):
+            continue
+        shared = sorted(mine & set(meeting_rounds.round_school_ids(r)))
+        if shared:
+            out.append({"round_id": r["id"], "name": r["name"], "start_date": r["start_date"], "end_date": r["end_date"],
+                        "meeting_service_type": (r.get("requirement") or {}).get("meeting_service_type"),
+                        "shared_school_ids": shared})
+    return out
+
+
 def _org_school_ids(db, org_id: str, ids: list[str]) -> set[str]:
     if not ids:
         return set()
@@ -192,7 +315,25 @@ def create_round(body: RoundCreateIn, user: Annotated[dict, Depends(get_current_
     school_ids = [m["school_id"] for m in matched]
     if not school_ids:
         raise HTTPException(status_code=422, detail="אין בתי ספר שעונים על הסינון")
+    if body.plan_mode not in (None, "plan"):
+        raise HTTPException(status_code=422, detail="אופן קביעת הכמות לא תקין")
     db = get_admin_client()
+    excluded = [sid for sid in dict.fromkeys(body.excluded_school_ids) if sid in set(school_ids)]
+    exclusions = _clean_exclusions(db, user["org_id"], body.advisor_exclusions) or None
+    school_plan = None
+    if body.plan_mode == "plan":
+        rnd_like = {"academic_year": body.academic_year, "start_date": body.start_date, "end_date": body.end_date,
+                    "requirement": requirement, "advisor_exclusions": exclusions, "plan_mode": "plan"}
+        # Excluded schools get their card numbers too (so returning one to the round just works),
+        # but only the round's active schools must have a number before it is saved.
+        school_plan, missing = _build_school_plan(user["org_id"], rnd_like, school_ids, body.school_plan, None, False)
+        missing = [m for m in missing if m["school_id"] not in set(excluded)]
+        if missing:
+            raise HTTPException(status_code=422, detail={
+                "code": "missing_plan",
+                "message": "יש בתי ספר בלי תוכנית פגישות — יש למלא להם מספר פגישות בטבלה",
+                "schools": missing,
+            })
     row = {
         "org_id": user["org_id"], "academic_year": body.academic_year, "name": name,
         "start_date": body.start_date, "end_date": body.end_date,
@@ -200,7 +341,9 @@ def create_round(body: RoundCreateIn, user: Annotated[dict, Depends(get_current_
         "school_ids": school_ids, "requirement": requirement,
         "physical_school_ids": [sid for sid in body.physical_school_ids if sid in set(school_ids)],
         "physical_visitors": _clean_visitors(db, user["org_id"], body.physical_visitors, set(body.physical_school_ids) & set(school_ids)),
-        "advisor_exclusions": _clean_exclusions(db, user["org_id"], body.advisor_exclusions) or None,
+        "advisor_exclusions": exclusions,
+        "excluded_school_ids": excluded,
+        "plan_mode": body.plan_mode, "school_plan": school_plan,
         "cached_total_schools": len(school_ids), "created_by": user["id"],
     }
     return db.table("meeting_rounds").insert(row).execute().data[0]
@@ -253,6 +396,93 @@ def physical_check(body: PhysicalCheckIn, user: Annotated[dict, Depends(get_curr
          for sid in conflicts),
         key=lambda x: x["school_name"] or "",
     )}
+
+
+@router.post("/plan-preview")
+def plan_preview(body: PlanPreviewIn, user: Annotated[dict, Depends(get_current_user)]):
+    """The "מי צריך כמה" table of a round "לפי תוכנית": per school and part, what its card plan
+    puts before and inside the round, what it already had before it, what's missing from before,
+    its allocation and in-person months — plus active rounds that overlap. Nothing is saved."""
+    _require_manager(user)
+    _validate_dates(body.start_date, body.end_date)
+    requirement = _validate_requirement(body.requirement)
+    db = get_admin_client()
+    existing = None
+    if body.round_id:
+        existing = _get_round(db, user, body.round_id)
+    matched = task_logic.find_matching_schools(
+        user["org_id"], body.criteria or {}, body.academic_year, manual_school_ids=body.manual_school_ids,
+    )
+    school_ids = [m["school_id"] for m in matched]
+    exclusions = _clean_exclusions(db, user["org_id"], body.advisor_exclusions) or None
+    rnd_like = {"academic_year": body.academic_year, "start_date": body.start_date, "end_date": body.end_date,
+                "requirement": requirement, "advisor_exclusions": exclusions, "plan_mode": "plan"}
+    start, end = date.fromisoformat(body.start_date), date.fromisoformat(body.end_date)
+    same_dates = bool(existing) and existing["start_date"] == body.start_date and existing["end_date"] == body.end_date
+    saved = (existing or {}).get("school_plan") or {}
+    schools, meetings_by_school, year_map, cond = _plan_inputs(user["org_id"], rnd_like, school_ids)
+    rows = []
+    for school in schools:
+        sid = school["id"]
+        year_row = year_map.get(sid) or {}
+        card = year_row.get("meeting_plan")
+        parts = {}
+        for part in _school_parts(cond, school, year_row):
+            held = meeting_plan.meetings_before(meetings_by_school.get(sid, []), part, body.academic_year, start)
+            snap = meeting_plan.snapshot_part(card, part, body.academic_year, start, end)
+            prev = (saved.get(sid) or {}).get(part)
+            entry = dict(snap or {"planned_before": 0, "planned_in": None, "offer": True, "manual": True})
+            if isinstance(prev, dict):
+                entry["offer"] = prev.get("offer", True)
+                if same_dates or prev.get("manual"):
+                    entry["planned_in"] = prev.get("planned_in")
+            need = meeting_plan.part_need({**entry, "planned_in": entry.get("planned_in") or 0}, held)
+            parts[part] = {
+                "has_card_plan": snap is not None,
+                "card_planned_in": (snap or {}).get("planned_in"),
+                "planned_before": entry.get("planned_before") or 0, "planned_in": entry.get("planned_in"),
+                "offer": entry.get("offer", True), "held_before": held,
+                "carried": need["carried"], "ahead": need["ahead"],
+                "allocation": year_row.get(f"meeting_allocation_{part}") if part in meeting_plan.PLAN_TYPES else None,
+                "physical_months": meeting_plan.physical_in(card, part, body.academic_year, start, end),
+            }
+        rows.append({"school_id": sid, "school_name": school.get("name"), "city": school.get("city"),
+                     "symbol": school.get("symbol"), "authority": school.get("authority"),
+                     "card_service_type": year_row.get("service_type"), "parts": parts})
+    rows.sort(key=lambda r: r["school_name"] or "")
+    overlaps = []
+    try:
+        overlaps = _overlapping_rounds(db, user["org_id"], body.academic_year, body.start_date, body.end_date,
+                                       school_ids, body.round_id, requirement["meeting_service_type"])
+    except Exception as exc:
+        logger.warning("plan_preview overlap check failed (non-fatal): %s", exc)
+    return {"schools": rows, "overlaps": overlaps}
+
+
+@router.post("/{round_id}/plan-refresh")
+def refresh_round_plan(round_id: str, body: PlanRefreshIn, user: Annotated[dict, Depends(get_current_user)]):
+    """"התוכנית בכרטיס השתנתה" → take these schools' numbers from their cards again (each one's
+    offer/defer answer is kept; a number typed in for a part with no plan stays until the card has one)."""
+    _require_manager(user)
+    db = get_admin_client()
+    rnd = _get_round(db, user, round_id)
+    if rnd.get("plan_mode") != "plan":
+        raise HTTPException(status_code=422, detail="הסבב אינו לפי תוכנית פגישות")
+    ids = [sid for sid in dict.fromkeys(body.school_ids) if sid in set(rnd.get("school_ids") or [])]
+    if not ids:
+        return rnd
+    previous = rnd.get("school_plan") or {}
+    # Manual numbers are dropped for parts whose card now has a plan (that's the change being taken).
+    fresh, _missing = _build_school_plan(user["org_id"], rnd, ids, None, previous, False)
+    school_plan = {**previous}
+    for sid in ids:
+        if sid in fresh:
+            school_plan[sid] = fresh[sid]
+        else:
+            school_plan.pop(sid, None)
+    return db.table("meeting_rounds").update({
+        "school_plan": school_plan, "updated_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", round_id).execute().data[0]
 
 
 @router.get("/{round_id}")
@@ -353,6 +583,18 @@ def update_round(round_id: str, body: RoundPatchIn, user: Annotated[dict, Depend
         ids = list(dict.fromkeys(body.field_exempt_advisor_ids))
         allowed = {r["id"] for r in db.table("profiles").select("id").eq("org_id", user["org_id"]).in_("id", ids).execute().data or []} if ids else set()
         patch["field_exempt_advisor_ids"] = [aid for aid in ids if aid in allowed]
+    if rnd.get("plan_mode") == "plan":
+        merged = {**rnd, **patch}
+        dates_same = merged["start_date"] == rnd["start_date"] and merged["end_date"] == rnd["end_date"]
+        reshaped = ("requirement" in patch or "advisor_exclusions" in patch or "school_ids" in patch
+                    or not dates_same)
+        if body.school_plan is not None or reshaped:
+            plan, _missing = _build_school_plan(
+                user["org_id"], merged, merged.get("school_ids") or [], body.school_plan,
+                rnd.get("school_plan") or {}, dates_same and "requirement" not in patch,
+            )
+            # Schools still without numbers show as "חסרה תוכנית" on the dashboard.
+            patch["school_plan"] = plan
     if not patch:
         return rnd
     patch["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -408,6 +650,13 @@ def apply_round_audience(round_id: str, body: AudienceApplyIn, user: Annotated[d
         "physical_visitors": {sid: v for sid, v in (rnd.get("physical_visitors") or {}).items() if sid in set(school_ids)},
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
+    if rnd.get("plan_mode") == "plan":
+        # Added schools get their card's numbers (a school with no plan shows "חסרה תוכנית");
+        # removed ones lose theirs.
+        previous = {sid: v for sid, v in (rnd.get("school_plan") or {}).items() if sid in set(school_ids)}
+        added = [sid for sid in school_ids if sid not in previous]
+        fresh, _missing = _build_school_plan(user["org_id"], rnd, added, None, None, False) if added else ({}, [])
+        patch["school_plan"] = {**previous, **fresh}
     return db.table("meeting_rounds").update(patch).eq("id", round_id).execute().data[0]
 
 

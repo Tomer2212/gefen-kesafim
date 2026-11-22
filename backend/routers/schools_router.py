@@ -21,7 +21,7 @@ from bidi.algorithm import get_display
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import Response
 from openpyxl import load_workbook, Workbook
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from reportlab.lib import colors as rl_colors
 from reportlab.lib.pagesizes import A4, landscape as rl_landscape
 from reportlab.lib.styles import ParagraphStyle
@@ -62,6 +62,7 @@ from meeting_labels import (
 )
 from meeting_upload_logic import build_upload_checklist, get_or_create_upload_token, recipient_division_scope
 import booking_requests
+import meeting_plan
 import client_entities
 import meeting_activity
 import overdue_status_alerts
@@ -285,11 +286,18 @@ class SchoolYearAdminDataIn(BaseModel):
     meeting_duration_gefen: int | None = None
     meeting_duration_current: int | None = None
     meeting_duration_district: int | None = None
+    # תוכנית פגישות — {type: {"MM": count}} (meeting_plan.py); cleaned before it is stored.
+    meeting_plan: dict | None = None
     invoice_transaction_status: str | None = None
     payment_method: str | None = None
     invoice_numbers: list[str] | None = None
     deposit_dates: list[str] | None = None
     amount_paid: float | None = None
+
+    @field_validator("meeting_plan", mode="before")
+    @classmethod
+    def _clean_meeting_plan(cls, v):
+        return meeting_plan.normalize_plan(v)
 
 
 class BulkYearAdminFieldItem(BaseModel):
@@ -1146,7 +1154,7 @@ def list_schools(
                         "closure_authority_status, closure_authority_notes, "
                         "meeting_allocation_gefen, meeting_allocation_current, meeting_allocation_district, "
                         "meeting_duration_gefen, meeting_duration_current, meeting_duration_district, "
-                        "order_method, order_method_other_text, order_amount_gefen")
+                        "meeting_plan, order_method, order_method_other_text, order_amount_gefen")
                 .eq("academic_year", academic_year)
                 .in_("school_id", school_ids)
                 .execute()
@@ -1964,6 +1972,12 @@ def bulk_upsert_year_admin_data(
 
             if not ok_items:
                 return {"field": body.field, "academic_year": body.academic_year, "updated": [], "failed": failed}
+            if body.field == "meeting_plan":
+                try:
+                    ok_items = [BulkYearAdminFieldItem(school_id=i.school_id, value=meeting_plan.normalize_plan(i.value))
+                                for i in ok_items]
+                except (TypeError, ValueError):
+                    raise HTTPException(status_code=400, detail="תוכנית פגישות לא תקינה")
 
             tracked = body.field in school_activity.TRACKED_YEAR_FIELDS
             before_by_school: dict = {}

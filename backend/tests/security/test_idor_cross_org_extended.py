@@ -1658,6 +1658,46 @@ def test_round_apply_never_adds_another_orgs_school(org_b_client, org_b_round, a
     assert ORG_A_SCHOOL_ID not in resp.json()["school_ids"]
 
 
+def test_round_plan_cross_org_rejected(org_a_client, org_b_round, admin_db):
+    # "לפי תוכנית" (plan-preview / plan-refresh): another org's round is never read or refreshed,
+    # and another org's school never shows up in the "מי צריך כמה" table.
+    rid = org_b_round["id"]
+    assert org_a_client.post(f"/rounds/{rid}/plan-refresh", json={"school_ids": [ORG_B_SCHOOL_ID]}).status_code == 404
+    base = {"academic_year": "תשפ\"ז", "start_date": "2099-12-01", "end_date": "2099-12-31",
+            "requirement": {"meeting_service_type": "gefen", "count_per_school": 1}}
+    assert org_a_client.post("/rounds/plan-preview", json={**base, "manual_school_ids": [ORG_A_SCHOOL_ID],
+                                                           "round_id": rid}).status_code == 404
+    resp = org_a_client.post("/rounds/plan-preview", json={**base, "manual_school_ids": [ORG_B_SCHOOL_ID]})
+    assert resp.status_code == 200, resp.text
+    assert ORG_B_SCHOOL_ID not in {s["school_id"] for s in resp.json()["schools"]}
+    assert all(rid != o["round_id"] for o in resp.json()["overlaps"])
+    row = admin_db.table("meeting_rounds").select("school_plan").eq("id", rid).execute().data[0]
+    assert row["school_plan"] is None
+
+
+def test_round_plan_same_org_works_and_ignores_foreign_schools(org_b_client, org_b_round, admin_db):
+    rid = org_b_round["id"]
+    base = {"academic_year": "תשפ\"ז", "start_date": "2099-12-01", "end_date": "2099-12-31",
+            "requirement": {"meeting_service_type": "gefen", "count_per_school": 1}}
+    resp = org_b_client.post("/rounds/plan-preview", json={**base, "manual_school_ids": [ORG_B_SCHOOL_ID], "round_id": rid})
+    assert resp.status_code == 200, resp.text
+    assert ORG_B_SCHOOL_ID in {s["school_id"] for s in resp.json()["schools"]}
+    created = org_b_client.post("/rounds/", json={
+        **base, "name": "בדיקת אבטחה — תוכנית", "manual_school_ids": [ORG_B_SCHOOL_ID, ORG_A_SCHOOL_ID],
+        "plan_mode": "plan", "school_plan": {ORG_B_SCHOOL_ID: {"gefen": {"planned_in": 1}},
+                                             ORG_A_SCHOOL_ID: {"gefen": {"planned_in": 1}}},
+    })
+    assert created.status_code == 200, created.text
+    try:
+        plan = created.json()["school_plan"] or {}
+        assert ORG_A_SCHOOL_ID not in plan and ORG_A_SCHOOL_ID not in created.json()["school_ids"]
+        refreshed = org_b_client.post(f"/rounds/{created.json()['id']}/plan-refresh", json={"school_ids": [ORG_B_SCHOOL_ID, ORG_A_SCHOOL_ID]})
+        assert refreshed.status_code == 200, refreshed.text
+        assert ORG_A_SCHOOL_ID not in (refreshed.json()["school_plan"] or {})
+    finally:
+        admin_db.table("meeting_rounds").delete().eq("id", created.json()["id"]).execute()
+
+
 def test_task_cannot_join_another_orgs_round(org_b_client, admin_db):
     foreign = _make_round(admin_db, org_id=str(uuid.uuid4()))  # a round of some other org
     try:

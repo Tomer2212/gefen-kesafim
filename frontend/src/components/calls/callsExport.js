@@ -1,7 +1,7 @@
 import * as XLSX from "xlsx";
 import {
   STATUS_LABELS, DEFAULT_STATUS, formatDate, formatTime, formatDuration, formatPhone,
-  counterpartLabels, computeEndTimeIso,
+  counterpartLabels, computeEndTimeIso, callSchoolCards,
 } from "./CallRow";
 
 const DIRECTION_LABELS = { outgoing: "יוצאת", incoming: "נכנסת" };
@@ -9,6 +9,13 @@ const PENDING_LABEL = "ממתין לשיוך";
 
 function advisorLabel(call) {
   return call.advisor_profile?.full_name || call.advisor_profile?.email || call.org_phone_label || call.representative_name || "—";
+}
+
+// Same as the table's "שם מוסד" cell: matched + manually linked cards, else the pending label.
+function schoolCell(call) {
+  const cards = callSchoolCards(call);
+  if (cards.length) return cards.map(c => c.name).join(", ");
+  return call.pending_school_resolution ? PENDING_LABEL : call.school_name || "—";
 }
 
 // Exports calls to xlsx with the same values (and column order) CallsTable shows.
@@ -25,7 +32,7 @@ export function exportCallsToExcel(calls, { fileName, sheetName = "שיחות", 
     { header: "מספר צד שני", wch: 14, value: c => formatPhone(c.counterpart_phone) },
     { header: "שם צד שני", wch: 20, value: c => counterpartLabels(c, c.counterpart_phone).name || "—" },
     { header: "תפקיד", wch: 16, value: c => (c.pending_school_resolution ? PENDING_LABEL : counterpartLabels(c, c.counterpart_phone).role || "—") },
-    ...(includeSchool ? [{ header: "שם מוסד", wch: 28, value: c => (c.pending_school_resolution ? PENDING_LABEL : c.school_name || "—") }] : []),
+    ...(includeSchool ? [{ header: "שם מוסד", wch: 28, value: schoolCell }] : []),
     { header: "סיכום AI", wch: 80, value: c => c.ai_summary || "" },
   ];
 

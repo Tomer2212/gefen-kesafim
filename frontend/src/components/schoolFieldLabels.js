@@ -5,6 +5,7 @@
 // fields. A field missing here falls back to showing its raw code name — keep in sync.
 import { SLOT_LABELS } from "./meetings/meetingCoordinatorSlots";
 import { GEFEN_FILES_SLOT_LABELS } from "./meetings/gefenFilesResponsibleSlots";
+import { planSummary } from "../constants/meetingPlan";
 
 export const FIELD_LABEL = {
   name: "שם מוסד", symbol: "סמל מוסד", city: "עיר", authority: "בעלות", status: "רשימת הלקוחות",
@@ -41,6 +42,7 @@ export const FIELD_LABEL = {
   meeting_allocation_district: "הקצאת פגישות (מחוז)",
   meeting_duration_gefen: "זמן לפגישה (גפן)", meeting_duration_current: "זמן לפגישה (שוטף)",
   meeting_duration_district: "זמן לפגישה (מחוז)",
+  meeting_plan: "תוכנית פגישות",
   // typed advisor lists (activity log only)
   advisors_gefen: "יועץ מלווה (גפן)", advisors_current: "יועץ מלווה (שוטף)", advisors_district: "יועץ מלווה (מחוז)",
   // profile self-service fields
@@ -134,6 +136,7 @@ const FIELD_FORMATTERS = {
   order_method: (val) => (Array.isArray(val) && val.length ? val.map(v => FUNDING_METHOD_LABEL[v] ?? v).join(", ") : "—"),
   order_amount_gefen: formatAmount,
   meeting_duration_gefen: formatMinutes, meeting_duration_current: formatMinutes, meeting_duration_district: formatMinutes,
+  meeting_plan: (val) => planSummary(val) || "—",
 };
 
 // Fields whose value is a list of profile ids — shown as names when a profiles map is given.

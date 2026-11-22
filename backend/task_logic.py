@@ -812,6 +812,16 @@ def _required_count_for_condition(cond: dict, school: dict | None = None) -> int
     on the send side). Every other meeting condition uses the manager's required_count if set,
     otherwise 1 — matching _meeting_exists's original ">=1 match" behavior exactly, so this is a
     no-op for every condition that doesn't use these new features."""
+    # A round "לפי תוכנית" sets each school's own count per meeting type (meeting_rounds.compute_round
+    # via meeting_plan.required_by_meeting_type). 0 = nothing is asked of the school in this round.
+    by_type = cond.get("required_count_by_type")
+    if by_type is not None and cond.get("meeting_service_type") in by_type:
+        n = by_type[cond["meeting_service_type"]]
+        if n <= 0:
+            return 0
+        if effective_stage_scope(cond, school) == "separate" and (school or {}).get("stage") == "sheshshnati":
+            return 2
+        return n
     if cond.get("type") == "meeting" and effective_stage_scope(cond, school) == "separate" and (school or {}).get("stage") == "sheshshnati":
         return 2
     return cond.get("required_count") or 1
@@ -1257,6 +1267,29 @@ def _by_service_stage_row(
     return {"ok": all(parts), "merged": False, "not_applicable": False}
 
 
+def plan_round_for_task(task: dict) -> dict | None:
+    """The round "לפי תוכנית" a task's meeting conditions follow (they carry round_plan), or None.
+    Non-fatal: on a failed lookup the task is evaluated as a plain one."""
+    if not task.get("round_id"):
+        return None
+    tree = task.get("success_criteria") or {}
+    if not any(c.get("round_plan") for g in tree.get("groups") or [] for c in g.get("conditions") or []):
+        return None
+    try:
+        rows = get_admin_client().table("meeting_rounds").select("*").eq("id", task["round_id"]).execute().data or []
+    except Exception as exc:
+        _log.warning("plan_round_for_task: round lookup failed (non-fatal) for task %s: %s", task.get("id"), exc)
+        return None
+    return rows[0] if rows and rows[0].get("plan_mode") == "plan" else None
+
+
+def _groups_with_round_plan(rnd: dict, groups: list[dict], school: dict, school_meetings: list[dict], year_row: dict | None) -> list[dict]:
+    """The success groups with this school's own counts from its round (meeting_rounds.with_round_plan)."""
+    import meeting_rounds  # local: meeting_rounds imports this module
+    return [{**g, "conditions": [meeting_rounds.with_round_plan(rnd, c, school, school_meetings, year_row)
+                                 for c in g.get("conditions") or []]} for g in groups]
+
+
 def compute_task_progress(
     org_id: str, task: dict, academic_year: str = DEFAULT_ACADEMIC_YEAR,
     prefetched: tuple | None = None, task_token_ids: set[str] | None = None,
@@ -1324,7 +1357,9 @@ def compute_task_progress(
             # than crash. Logged non-fatally by the caller (get_task), not here, to avoid
             # log spam on every progress computation of an affected task.
             success_tree = {"groups": []}
-    groups = success_tree.get("groups") or []
+    all_groups = success_tree.get("groups") or []
+    # A task of a round "לפי תוכנית": each school is asked its own number of meetings.
+    plan_round = plan_round_for_task(task)
 
     rows = []
     completed_count = 0
@@ -1341,6 +1376,8 @@ def compute_task_progress(
         year_row = year_map.get(school_id)
         goal_rows = _rows_for_school(goal_map, school_id)
         cl_rows = _rows_for_school(cl_map, school_id)
+        groups = (all_groups if plan_round is None
+                  else _groups_with_round_plan(plan_round, all_groups, school, school_meetings, year_row))
 
         satisfied_group_idx = None
         for gi, group in enumerate(groups):

@@ -34,6 +34,7 @@ TRACKED_YEAR_FIELDS = (
     "client_status", "service_type", "order_amount_gefen", "order_method", "order_method_other_text",
     "meeting_allocation_gefen", "meeting_allocation_current", "meeting_allocation_district",
     "meeting_duration_gefen", "meeting_duration_current", "meeting_duration_district",
+    "meeting_plan",
 )
 
 # Typed advisor lists (school_advisors_<type>) — logged as virtual list fields.

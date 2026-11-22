@@ -57,7 +57,7 @@ export default function RoundsView({ academicYear, openRoundId, setOpenRoundId, 
                     {r.status === "closed" && <span className="text-[11px] bg-slate-100 text-slate-500 rounded-full px-2 py-0.5">סגור</span>}
                   </span>
                   <span className="text-xs text-slate-500">
-                    <bdi>{formatDateDMY(r.start_date)}</bdi>–<bdi>{formatDateDMY(r.end_date)}</bdi> · {requirementLabel(r.requirement)}
+                    <bdi>{formatDateDMY(r.start_date)}</bdi>–<bdi>{formatDateDMY(r.end_date)}</bdi> · {requirementLabel(r.requirement, r.plan_mode)}
                   </span>
                   <span className="h-2 rounded-full bg-slate-100 overflow-hidden" aria-hidden="true">
                     <span className="block h-full bg-emerald-500" style={{ width: `${pct}%` }} />

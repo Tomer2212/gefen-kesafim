@@ -60,6 +60,8 @@ function useDirectoryEnabled() {
 }
 
 const EMPTY_DIRECTORY_RESULTS = { met: [], items: [], total: 0 };
+// GET /directory/picker returns at most this many directory matches (directory_router.directory_picker).
+const DIRECTORY_PAGE_SIZE = 20;
 
 // "מהמאגר" results for `query` (debounced): directory schools the org already met first, then directory entries.
 function useDirectoryResults(query, active) {
@@ -88,6 +90,10 @@ async function resolveDirectoryChoice(choice) {
   return (res.data || [])[0] || { id: schoolId, name: choice.name, symbol: choice.symbol, city: choice.city, status: "directory" };
 }
 
+// One tab per client type: "בתי ספר" (the org's client schools, plus — once 2+ characters are
+// typed — matching directory schools, tagged "מהמאגר"), and with includeClientEntities also
+// "מחוזות" / "בעלויות". Nothing big is loaded up front: the client schools are the caller's
+// list, directory matches are a debounced server search, the district/ownership catalog is small.
 export function SchoolResultsList({ schools, query, setQuery, pendingId, setPendingId, onConfirm, onCancel, submittingLabel = "יוצר...", includeClientEntities = false }) {
   // onConfirm (e.g. createMeetingForSchool) is async and does real work (a school-
   // advisors lookup, then a POST) before the modal closes — with no per-click feedback,
@@ -96,88 +102,94 @@ export function SchoolResultsList({ schools, query, setQuery, pendingId, setPend
   // mid-request. Guard against that here, once, for every caller of this shared list.
   const [submitting, setSubmitting] = useState(false);
   const directoryEnabled = useDirectoryEnabled();
-  const [tab, setTab] = useState("clients");
+  const [tab, setTab] = useState("schools");
   const [dirChoice, setDirChoice] = useState(null);
-  const [dirError, setDirError] = useState("");
-  // Directory copies a screen loaded for its meetings are not clients — they show under "מהמאגר".
-  // District/ownership cards the screen loaded for its meetings show under their own tabs.
+  const [entityChoice, setEntityChoice] = useState(null);
+  const [error, setError] = useState("");
+  const trimmed = query.trim();
+
+  // Directory copies / district-ownership cards a screen loaded for its meetings are not
+  // client schools — they come from the directory search / their own tabs.
   const filtered = schools.filter(s => {
     if (s.status === "directory" || s.status === "entity") return false;
-    if (!query.trim()) return true;
-    const q = query.trim().toLowerCase();
+    if (!trimmed) return true;
+    const q = trimmed.toLowerCase();
     return (s.name || "").toLowerCase().includes(q)
       || (s.symbol || "").toLowerCase().includes(q)
       || (s.city || "").toLowerCase().includes(q)
       || (s.authority || "").toLowerCase().includes(q)
       || (s.district || "").toLowerCase().includes(q);
   });
-  const onDirectoryTab = directoryEnabled && tab === "directory";
-  const entityTab = includeClientEntities && (tab === "district" || tab === "ownership") ? tab : null;
-  const entityCatalog = useEntityCatalog(entityTab, !!entityTab);
-  const [entityChoice, setEntityChoice] = useState(null);
-  const entityQuery = query.trim();
-  const entityOptions = entityTab
-    ? entityCatalog.items.filter(i => !entityQuery || i.label.includes(entityQuery)
-        || (i.contacts || []).some(c => (c.name || "").includes(entityQuery)))
-    : [];
 
-  async function confirmEntity() {
-    const item = entityOptions.find(i => i.key === entityChoice);
-    if (!item || submitting) return;
-    setDirError("");
-    setSubmitting(true);
-    try {
-      await onConfirm(await resolveEntityChoice(entityTab, item));
-    } catch (err) {
-      setDirError(err.message || "הפעולה נכשלה. נסו שוב.");
-    } finally {
-      setSubmitting(false);
-    }
-  }
-  // On the clients tab, directory matches are counted only when nothing matched ("לא מצאת?").
-  const wantsHint = directoryEnabled && tab === "clients" && filtered.length === 0 && query.trim().length >= 2;
-  const directory = useDirectoryResults(query, onDirectoryTab || wantsHint);
-  const directoryOptions = [
+  const onSchoolsTab = tab === "schools";
+  const searchDirectory = directoryEnabled && onSchoolsTab && trimmed.length >= 2;
+  const directory = useDirectoryResults(query, searchDirectory);
+  const clientIds = new Set(filtered.map(s => s.id));
+  const directoryOptions = searchDirectory ? [
     ...(directory.met || []).map(w => ({ key: `s:${w.id}`, schoolId: w.id, name: w.name, symbol: w.symbol, city: w.city, met: true })),
     ...directory.items.map(i => ({
       key: i.school_id ? `s:${i.school_id}` : `d:${i.directory_id}`, schoolId: i.school_id, directoryId: i.directory_id,
       name: i.name, symbol: i.symbol, city: i.city, tag: i.tag,
     })),
-  ];
+  ].filter((o, idx, arr) => !(o.schoolId && clientIds.has(o.schoolId)) && arr.findIndex(x => x.key === o.key) === idx) : [];
 
-  async function confirmDirectory() {
-    const choice = directoryOptions.find(o => o.key === dirChoice);
-    if (!choice || submitting) return;
-    setDirError("");
+  const entityTab = includeClientEntities && (tab === "district" || tab === "ownership") ? tab : null;
+  const entityCatalog = useEntityCatalog(entityTab, !!entityTab);
+  const entityOptions = entityTab
+    ? entityCatalog.items.filter(i => !trimmed || i.label.includes(trimmed)
+        || (i.contacts || []).some(c => (c.name || "").includes(trimmed)))
+    : [];
+
+  // One selection at a time across the lists.
+  function pickClient(id) { setPendingId(pendingId === id ? null : id); setDirChoice(null); setEntityChoice(null); }
+  function pickDirectory(key) { setDirChoice(dirChoice === key ? null : key); setPendingId(null); setEntityChoice(null); }
+  function pickEntity(key) { setEntityChoice(entityChoice === key ? null : key); setPendingId(null); setDirChoice(null); }
+
+  // A directory pick counts only while it's still among the results (typing on replaces them).
+  const dirChoiceShown = !!dirChoice && directoryOptions.some(o => o.key === dirChoice);
+  const hasChoice = entityTab ? !!entityChoice : !!(pendingId || dirChoiceShown);
+
+  async function confirm() {
+    if (!hasChoice || submitting) return;
+    setError("");
     setSubmitting(true);
     try {
-      await onConfirm(await resolveDirectoryChoice(choice));
+      if (entityTab) {
+        const item = entityOptions.find(i => i.key === entityChoice);
+        if (item) await onConfirm(await resolveEntityChoice(entityTab, item));
+      } else if (pendingId) {
+        const s = schools.find(x => x.id === pendingId);
+        if (s) await onConfirm(s);
+      } else {
+        const choice = directoryOptions.find(o => o.key === dirChoice);
+        if (choice) await onConfirm(await resolveDirectoryChoice(choice));
+      }
     } catch (err) {
-      setDirError(err.message || "הפעולה נכשלה. נסו שוב.");
+      setError(err.message || "הפעולה נכשלה. נסו שוב.");
     } finally {
       setSubmitting(false);
     }
   }
 
   const tabCls = active => `px-3 py-1.5 text-xs font-medium border-b-2 -mb-px ${active ? "border-blue-600 text-blue-700" : "border-transparent text-slate-500 hover:text-slate-800"}`;
+  const rowCls = "flex items-center gap-2.5 px-3 py-2 hover:bg-slate-50 cursor-pointer border-b border-slate-50 last:border-0";
+  const checkCls = "w-3.5 h-3.5 rounded accent-blue-600 flex-shrink-0";
+  const badgeCls = "text-[11px] rounded-full px-1.5 border";
 
   return (
     <div className="flex flex-col gap-2" style={{ minWidth: 280 }}>
-      {(directoryEnabled || includeClientEntities) && (
-        <div className="flex border-b border-slate-200" role="tablist" aria-label="מקור בתי הספר">
-          <button type="button" role="tab" aria-selected={tab === "clients"} className={tabCls(tab === "clients")} onClick={() => setTab("clients")}>הלקוחות שלנו</button>
-          {directoryEnabled && (
-            <button type="button" role="tab" aria-selected={tab === "directory"} className={tabCls(tab === "directory")} onClick={() => setTab("directory")}>מהמאגר</button>
-          )}
-          {includeClientEntities && ["district", "ownership"].map(t => (
-            <button key={t} type="button" role="tab" aria-selected={tab === t} className={tabCls(tab === t)}
-              onClick={() => { setTab(t); setEntityChoice(null); }}>
-              {ENTITY_TYPE_LABELS[t].plural}
+      {includeClientEntities && (
+        <div className="flex border-b border-slate-200" role="tablist" aria-label="סוג לקוח">
+          {[{ value: "schools", label: "בתי ספר" }, { value: "district", label: ENTITY_TYPE_LABELS.district.plural },
+            { value: "ownership", label: ENTITY_TYPE_LABELS.ownership.plural }].map(t => (
+            <button key={t.value} type="button" role="tab" aria-selected={tab === t.value} className={tabCls(tab === t.value)}
+              onClick={() => { setTab(t.value); setError(""); }}>
+              {t.label}
             </button>
           ))}
         </div>
       )}
-      <label htmlFor="school-picker-search" className="sr-only">חיפוש בית ספר</label>
+      <label htmlFor="school-picker-search" className="sr-only">חיפוש</label>
       <input
         id="school-picker-search"
         type="search"
@@ -185,114 +197,68 @@ export function SchoolResultsList({ schools, query, setQuery, pendingId, setPend
         value={query}
         onChange={e => setQuery(e.target.value)}
         placeholder={entityTab ? `חיפוש ${ENTITY_TYPE_LABELS[entityTab].singular} לפי שם או איש קשר...`
-          : onDirectoryTab ? "חיפוש במאגר לפי שם, סמל, יישוב או מנהל/ת..." : "חיפוש לפי שם מוסד, סמל מוסד, עיר, בעלות או מחוז..."}
+          : "חיפוש לפי שם מוסד, סמל מוסד, עיר, בעלות או מחוז..."}
         className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 outline-none focus:border-blue-400 bg-white"
-        aria-label="חיפוש בית ספר"
+        aria-label={entityTab ? `חיפוש ${ENTITY_TYPE_LABELS[entityTab].plural}` : "חיפוש בית ספר"}
       />
-      {onDirectoryTab && (
-        <>
-          <div className="max-h-56 overflow-y-auto border border-slate-100 rounded-lg" role="listbox" aria-label="תוצאות חיפוש במאגר">
-            {directory.loading ? (
-              <p role="status" className="text-xs text-slate-400 px-3 py-3 text-center">מחפש…</p>
-            ) : directoryOptions.length === 0 ? (
-              <p className="text-xs text-slate-400 px-3 py-3 text-center">{query.trim() ? "לא נמצאו בתי ספר במאגר" : "הקלידו שם, סמל או יישוב לחיפוש במאגר"}</p>
-            ) : directoryOptions.map(o => (
-              <label key={o.key} className="flex items-center gap-2.5 px-3 py-2 hover:bg-slate-50 cursor-pointer border-b border-slate-50 last:border-0">
-                <input
-                  type="checkbox"
-                  checked={dirChoice === o.key}
-                  onChange={() => setDirChoice(dirChoice === o.key ? null : o.key)}
-                  className="w-3.5 h-3.5 rounded accent-blue-600 flex-shrink-0"
-                />
+
+      <div className="max-h-56 overflow-y-auto border border-slate-100 rounded-lg" role="listbox"
+        aria-label={entityTab ? `תוצאות חיפוש ${ENTITY_TYPE_LABELS[entityTab].plural}` : "תוצאות חיפוש בתי ספר"}>
+        {entityTab ? (
+          entityCatalog.loading ? (
+            <p role="status" className="text-xs text-slate-400 px-3 py-3 text-center">טוען…</p>
+          ) : entityOptions.length === 0 ? (
+            <p className="text-xs text-slate-400 px-3 py-3 text-center">לא נמצאו {ENTITY_TYPE_LABELS[entityTab].plural}</p>
+          ) : entityOptions.map(i => (
+            <label key={i.key} className={rowCls}>
+              <input type="checkbox" checked={entityChoice === i.key} onChange={() => pickEntity(i.key)} className={checkCls} />
+              <span className="text-sm text-slate-700">{i.label}</span>
+              {i.is_client && <span className={`${badgeCls} text-emerald-700 bg-emerald-50 border-emerald-200`}>לקוח</span>}
+            </label>
+          ))
+        ) : (
+          <>
+            {filtered.map(s => (
+              <label key={s.id} className={rowCls}>
+                <input type="checkbox" checked={pendingId === s.id} onChange={() => pickClient(s.id)} className={checkCls} />
+                <span className="text-sm text-slate-700">{schoolLabel(s)}</span>
+              </label>
+            ))}
+            {directoryOptions.map(o => (
+              <label key={o.key} className={rowCls}>
+                <input type="checkbox" checked={dirChoice === o.key} onChange={() => pickDirectory(o.key)} className={checkCls} />
                 <span className="text-sm text-slate-700">{schoolLabel(o)}</span>
-                {(o.met || o.tag === "met") && <span className="text-[11px] text-blue-700 bg-blue-50 border border-blue-200 rounded-full px-1.5">היו פגישות</span>}
-                {o.tag === "client" && <span className="text-[11px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-1.5">לקוח</span>}
+                {o.tag === "client"
+                  ? <span className={`${badgeCls} text-emerald-700 bg-emerald-50 border-emerald-200`}>לקוח</span>
+                  : <span className={`${badgeCls} text-slate-500 bg-slate-50 border-slate-200`}>מהמאגר</span>}
+                {(o.met || o.tag === "met") && <span className={`${badgeCls} text-blue-700 bg-blue-50 border-blue-200`}>היו פגישות</span>}
               </label>
             ))}
-          </div>
-          {dirError && <p role="alert" className="text-xs text-red-600">{dirError}</p>}
-          <div className="flex items-center gap-2 justify-end mt-1">
-            <button type="button" onClick={onCancel} disabled={submitting} className="btn-ghost text-sm px-4 py-1.5 disabled:opacity-40">ביטול</button>
-            <button type="button" disabled={!dirChoice || submitting} onClick={confirmDirectory}
-              className="btn-blue text-sm px-4 py-1.5 disabled:opacity-40 disabled:cursor-not-allowed">
-              {submitting ? submittingLabel : "אישור"}
-            </button>
-          </div>
-        </>
-      )}
-      {entityTab && (
-        <>
-          <div className="max-h-56 overflow-y-auto border border-slate-100 rounded-lg" role="listbox" aria-label={`תוצאות חיפוש ${ENTITY_TYPE_LABELS[entityTab].plural}`}>
-            {entityCatalog.loading ? (
-              <p role="status" className="text-xs text-slate-400 px-3 py-3 text-center">טוען…</p>
-            ) : entityOptions.length === 0 ? (
-              <p className="text-xs text-slate-400 px-3 py-3 text-center">לא נמצאו {ENTITY_TYPE_LABELS[entityTab].plural}</p>
-            ) : entityOptions.map(i => (
-              <label key={i.key} className="flex items-center gap-2.5 px-3 py-2 hover:bg-slate-50 cursor-pointer border-b border-slate-50 last:border-0">
-                <input
-                  type="checkbox"
-                  checked={entityChoice === i.key}
-                  onChange={() => setEntityChoice(entityChoice === i.key ? null : i.key)}
-                  className="w-3.5 h-3.5 rounded accent-blue-600 flex-shrink-0"
-                />
-                <span className="text-sm text-slate-700">{i.label}</span>
-                {i.is_client && <span className="text-[11px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-1.5">לקוח</span>}
-              </label>
-            ))}
-          </div>
-          {dirError && <p role="alert" className="text-xs text-red-600">{dirError}</p>}
-          <div className="flex items-center gap-2 justify-end mt-1">
-            <button type="button" onClick={onCancel} disabled={submitting} className="btn-ghost text-sm px-4 py-1.5 disabled:opacity-40">ביטול</button>
-            <button type="button" disabled={!entityChoice || submitting} onClick={confirmEntity}
-              className="btn-blue text-sm px-4 py-1.5 disabled:opacity-40 disabled:cursor-not-allowed">
-              {submitting ? submittingLabel : "אישור"}
-            </button>
-          </div>
-        </>
-      )}
-      {!onDirectoryTab && !entityTab && (
-      <>
-      <div className="max-h-56 overflow-y-auto border border-slate-100 rounded-lg" role="listbox" aria-label="תוצאות חיפוש בתי ספר">
-        {filtered.length === 0 ? (
-          <div className="px-3 py-3 text-center">
-            <p className="text-xs text-slate-400">לא נמצאו בתי ספר</p>
-            {wantsHint && directory.total > 0 && (
-              <button type="button" onClick={() => setTab("directory")} className="mt-1 text-xs text-blue-700 hover:underline">
-                לא מצאת? יש {directory.total.toLocaleString("he-IL")} תוצאות במאגר ←
-              </button>
+            {searchDirectory && !directory.loading && directory.total > DIRECTORY_PAGE_SIZE && (
+              <p className="text-xs text-slate-400 px-3 py-2 text-center">
+                מוצגות {DIRECTORY_PAGE_SIZE} התאמות ראשונות מהמאגר (מתוך {directory.total.toLocaleString("he-IL")}) — המשיכו להקליד לצמצום
+              </p>
             )}
-          </div>
-        ) : filtered.map(s => (
-          <label key={s.id} className="flex items-center gap-2.5 px-3 py-2 hover:bg-slate-50 cursor-pointer border-b border-slate-50 last:border-0">
-            <input
-              type="checkbox"
-              checked={pendingId === s.id}
-              onChange={() => setPendingId(pendingId === s.id ? null : s.id)}
-              className="w-3.5 h-3.5 rounded accent-blue-600 flex-shrink-0"
-            />
-            <span className="text-sm text-slate-700">{schoolLabel(s)}</span>
-          </label>
-        ))}
+            {searchDirectory && directory.loading && (
+              <p role="status" className="text-xs text-slate-400 px-3 py-2 text-center">מחפש גם במאגר…</p>
+            )}
+            {filtered.length === 0 && directoryOptions.length === 0 && !(searchDirectory && directory.loading) && (
+              <p className="text-xs text-slate-400 px-3 py-3 text-center">
+                {directoryEnabled && trimmed.length < 2 && trimmed ? "הקלידו לפחות 2 תווים כדי לחפש גם במאגר" : "לא נמצאו בתי ספר"}
+              </p>
+            )}
+          </>
+        )}
       </div>
+
+      {error && <p role="alert" className="text-xs text-red-600">{error}</p>}
       <div className="flex items-center gap-2 justify-end mt-1">
         <button type="button" onClick={onCancel} disabled={submitting} className="btn-ghost text-sm px-4 py-1.5 disabled:opacity-40">ביטול</button>
-        <button type="button" disabled={!pendingId || submitting}
-          onClick={async () => {
-            const s = schools.find(x => x.id === pendingId);
-            if (!s || submitting) return;
-            setSubmitting(true);
-            try {
-              await onConfirm(s);
-            } finally {
-              setSubmitting(false);
-            }
-          }}
+        <button type="button" disabled={!hasChoice || submitting} onClick={confirm}
           className="btn-blue text-sm px-4 py-1.5 disabled:opacity-40 disabled:cursor-not-allowed">
           {submitting ? submittingLabel : "אישור"}
         </button>
       </div>
-      </>
-      )}
     </div>
   );
 }

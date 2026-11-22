@@ -9,6 +9,7 @@ import Sidebar from "../components/Sidebar";
 import OnboardingToast from "../components/OnboardingToast";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { ACADEMIC_YEARS, DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
+import { planSummary } from "../constants/meetingPlan";
 import { AcademicYearSelector } from "../components/AcademicYearSelector";
 import { CONTROL_LETTER_STATUS_MAP } from "../components/controlLetter/constants";
 import { MEETING_SERVICE_TYPE_BREAKDOWN_COL_ORDER } from "../components/meetings/constants";
@@ -343,6 +344,7 @@ const ALLOCATION_COLUMNS = [
   { key: "meeting_duration_gefen",      label: "הקצאת זמן פגישה [גפן]" },
   { key: "meeting_duration_current",    label: "הקצאת זמן פגישה [שוטף]" },
   { key: "meeting_duration_district",   label: "הקצאת זמן פגישה [מחוז]" },
+  { key: "meeting_plan",                label: "תוכנית פגישות" },
 ];
 const MEETINGS_DONE_COLUMNS = [
   { key: "meetings_completed",  label: 'סה"כ פגישות שבוצעו' },
@@ -469,6 +471,7 @@ const FILTER_COLUMN_META = [
   { key: "meeting_duration_gefen",      label: "הקצאת זמן פגישה [גפן]",   fmt: "hours" },
   { key: "meeting_duration_current",    label: "הקצאת זמן פגישה [שוטף]",  fmt: "hours" },
   { key: "meeting_duration_district",   label: "הקצאת זמן פגישה [מחוז]",  fmt: "hours" },
+  { key: "meeting_plan",                label: "תוכנית פגישות",           fmt: "text" },
   { key: "control_letter_received_date",  label: "מכתב בקרה - תאריך קבלה",  fmt: "date" },
   { key: "control_letter_target_date",    label: "מכתב בקרה - תאריך יעד",   fmt: "date" },
   { key: "control_letter_days_to_answer", label: "מכתב בקרה - ימים לתשובה", fmt: "int"  },
@@ -643,6 +646,7 @@ function computeFilterValues(school, combo, meetingsStats, activeSummaryBudget, 
                     "meeting_duration_gefen", "meeting_duration_current", "meeting_duration_district"]) {
     out[k] = closure[k] ?? null;
   }
+  out.meeting_plan = planSummary(closure.meeting_plan) || null;
   out.control_letter_received_date = dateToNum(controlLetterFieldValue(school, "received_date"));
   out.control_letter_target_date = dateToNum(controlLetterFieldValue(school, "target_date"));
   out.control_letter_days_to_answer = controlLetterFieldValue(school, "days_to_answer");
@@ -805,6 +809,11 @@ function renderCell(school, key, meetingsStats = {}, combo = null, activeSummary
     }
     case "meeting_allocation_gefen": case "meeting_allocation_current": case "meeting_allocation_district":
       return closure[key] ?? "—";
+    case "meeting_plan": {
+      const text = planSummary(closure.meeting_plan);
+      if (!text) return "—";
+      return <span title={text}>{text.length > 40 ? `${text.slice(0, 40)}…` : text}</span>;
+    }
     case "meeting_duration_gefen": case "meeting_duration_current": case "meeting_duration_district":
       return formatMeetingHours(closure[key]);
     default: break;
@@ -953,6 +962,8 @@ function renderCellText(school, key, meetingsStats = {}, combo = null, activeSum
       return closure[key] || "";
     case "meeting_allocation_gefen": case "meeting_allocation_current": case "meeting_allocation_district":
       return closure[key] ?? "";
+    case "meeting_plan":
+      return planSummary(closure.meeting_plan);
     case "meeting_duration_gefen": case "meeting_duration_current": case "meeting_duration_district":
       return closure[key] ? formatMeetingHours(closure[key]) : "";
     default: break;

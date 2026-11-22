@@ -63,6 +63,8 @@ import { QuestionTooltip } from "../components/QuestionTooltip";
 import { PartialAmount, partialBalance } from "../components/PartialBalanceWarning";
 import SchoolDirectoryBanner from "../components/SchoolDirectoryBanner";
 import { DISTRICT_OPTIONS, isEntityClientType } from "../constants/clientEntities";
+import MeetingPlanModal from "../components/meetingPlan/MeetingPlanModal";
+import { planTypeSummary, allocationGap } from "../constants/meetingPlan";
 
 const DIVISION_LABEL = {
   tikkon: "חטיבה עליונה",
@@ -2978,6 +2980,8 @@ export default function SchoolPage() {
   // "מחיר כולל מע"מ" — synced with the same admin-table field on AdminPage's schools table
   // (both read/write the school_year_admin_data row for this school_id+academic_year).
   const [yearAdminData, setYearAdminData] = useState({});
+  // "תוכנית פגישות" editor open for this service type (gefen/current/district), or null.
+  const [planModalType, setPlanModalType] = useState(null);
   // Bumped when this school+year's row arrives — part of the `key` of the uncontrolled
   // (defaultValue) ליווי inputs, so they remount with the loaded value instead of keeping
   // an empty default and then saving it back on blur.
@@ -3357,7 +3361,7 @@ export default function SchoolPage() {
         const schoolRes = await axios.get(`/schools/${schoolId}`);
         // A district/ownership card (e.g. a notification deeplink) has its own page.
         if (isEntityClientType(schoolRes.data?.client_type)) {
-          navigate(`/client/${schoolId}`, { replace: true });
+          navigate(`/client/${schoolId}${location.search}`, { replace: true });
           return;
         }
         setSchool(schoolRes.data);
@@ -5164,6 +5168,18 @@ export default function SchoolPage() {
                                 </div>
 
                                 <div className="min-w-0">
+                                  <span className={stackedLabelCls}>תוכנית פגישות:</span>
+                                  <div className="flex items-center gap-2 min-w-0">
+                                    <span className="text-sm text-slate-700 truncate" title={planTypeSummary(yearAdminData.meeting_plan, key) || undefined}>
+                                      {planTypeSummary(yearAdminData.meeting_plan, key) || "—"}
+                                    </span>
+                                    <button type="button" onClick={() => setPlanModalType(key)}
+                                      className="shrink-0 text-xs px-2.5 py-1 rounded-lg border border-slate-300 hover:bg-slate-50"
+                                      aria-label={`עריכת תוכנית פגישות ${label}`}>עריכה</button>
+                                  </div>
+                                </div>
+
+                                <div className="min-w-0">
                                   <span className={stackedLabelCls}>זמן לפגישה:</span>
                                   <HourMinuteInput idPrefix={`meeting-duration-${key}`} label={`זמן לפגישה [${label}]`}
                                     minutes={yearAdminData[`meeting_duration_${key}`] ?? null}
@@ -5179,6 +5195,18 @@ export default function SchoolPage() {
                   </div>
                   )}
                   </div>
+
+                  {planModalType && (
+                    <MeetingPlanModal
+                      types={[planModalType]}
+                      plan={yearAdminData.meeting_plan}
+                      allocations={{ [planModalType]: yearAdminData[`meeting_allocation_${planModalType}`] }}
+                      title={`תוכנית פגישות — ${TYPED_SERVICE_TYPES.find(t => t.key === planModalType)?.label}`}
+                      academicYear={academicYear}
+                      onSave={plan => { saveYearAdminField("meeting_plan", plan); setPlanModalType(null); }}
+                      onClose={() => setPlanModalType(null)}
+                    />
+                  )}
 
                   {/* Bottom actions */}
                   <div className="flex items-center justify-center gap-3 mt-6 pt-4 border-t border-slate-100">
@@ -5550,6 +5578,14 @@ export default function SchoolPage() {
                             <span className={labelCls}>הקצאת פגישות:</span>
                             <span className={valCls(yearAdminData[`meeting_allocation_${key}`])} style={valStyle(yearAdminData[`meeting_allocation_${key}`])}>
                               {yearAdminData[`meeting_allocation_${key}`] ?? "—"}
+                            </span>
+
+                            <span className={labelCls}>תוכנית פגישות:</span>
+                            <span className={valCls(planTypeSummary(yearAdminData.meeting_plan, key))} style={valStyle(planTypeSummary(yearAdminData.meeting_plan, key))}>
+                              {planTypeSummary(yearAdminData.meeting_plan, key) || "—"}
+                              {(allocationGap(yearAdminData.meeting_plan, key, yearAdminData[`meeting_allocation_${key}`]) || 0) !== 0 && (
+                                <span className="block text-xs text-amber-700">⚠ לא תואם להקצאה</span>
+                              )}
                             </span>
 
                             <span className={labelCls}>זמן לפגישה:</span>

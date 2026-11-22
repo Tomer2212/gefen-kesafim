@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import axios from "axios";
-import { History, Phone, UsersRound, CalendarDays } from "lucide-react";
+import { History, Phone, PhoneCall, UsersRound, CalendarDays } from "lucide-react";
+import { CallsTable } from "../components/calls/CallsTable";
 import Sidebar from "../components/Sidebar";
 import { AcademicYearSelector } from "../components/AcademicYearSelector";
 import { MultiSelectChips } from "../components/MultiSelectChips";
@@ -31,6 +32,19 @@ const WEEKDAY_OPTIONS = [
 ];
 
 const EMPTY_CONTACT = { role: "", name: "", phone: "", email: "", day_off: [] };
+const TAB_IDS = ["info", "meetings", "calls"];
+
+// Same rule as the server (clients_router.ContactIn): 9-10 digits starting with 0 (mobile or landline).
+// A contact saved from a call (UnknownCallPopup) may hold the provider's form ("972524399715",
+// "+972-52-..."): show it as a local number so editing doesn't flag a number the user never typed.
+function normalizePhone(phone) {
+  const digits = String(phone || "").replace(/\D/g, "");
+  return digits.startsWith("972") && digits.length >= 11 ? `0${digits.slice(3)}` : digits;
+}
+
+function phoneError(phone) {
+  return phone && !/^0\d{8,9}$/.test(phone) ? "9 או 10 ספרות, חייב להתחיל ב-0" : "";
+}
 const SURFACE_HEADERS = { headers: { "X-Client-Surface": "client_card" } };
 const sectionCardCls = "bg-white rounded-2xl border border-slate-200/60 shadow-sm overflow-hidden";
 const inputCls = "w-full text-sm border border-slate-200 rounded-lg px-2 py-1.5 outline-none focus:border-blue-400 bg-white";
@@ -58,7 +72,9 @@ function ContactsSection({ client, onSaved, canEditDirectly, canRequestUpdate })
   const canEdit = canEditDirectly || canRequestUpdate;
 
   function startEdit() {
-    setDraft(contacts.length ? contacts.map(c => ({ ...EMPTY_CONTACT, ...c, day_off: c.day_off || [] })) : [{ ...EMPTY_CONTACT }]);
+    setDraft(contacts.length
+      ? contacts.map(c => ({ ...EMPTY_CONTACT, ...c, phone: normalizePhone(c.phone), day_off: c.day_off || [] }))
+      : [{ ...EMPTY_CONTACT }]);
     setError("");
     setNotice("");
     setEditing(true);
@@ -72,6 +88,10 @@ function ContactsSection({ client, onSaved, canEditDirectly, canRequestUpdate })
     const cleaned = draft
       .map(c => ({ ...c, role: c.role.trim(), name: c.name.trim(), phone: c.phone.trim(), email: c.email.trim() }))
       .filter(c => c.name || c.phone || c.email);
+    if (cleaned.some(c => phoneError(c.phone))) {
+      setError("יש מספרי טלפון לא תקינים — יש לתקן את השדות המסומנים");
+      return;
+    }
     setSaving(true);
     setError("");
     try {
@@ -129,7 +149,14 @@ function ContactsSection({ client, onSaved, canEditDirectly, canRequestUpdate })
                 </td>
                 <td className="py-2 px-3">
                   <label htmlFor={`cc-phone-${i}`} className="sr-only">טלפון</label>
-                  <input id={`cc-phone-${i}`} className={`${inputCls} text-center`} dir="ltr" value={c.phone} onChange={e => setField(i, "phone", e.target.value)} />
+                  <input id={`cc-phone-${i}`} inputMode="numeric" dir="ltr"
+                    className={`${inputCls} text-center${phoneError(c.phone) ? " border-red-400 focus:border-red-500" : ""}`}
+                    aria-invalid={!!phoneError(c.phone) || undefined}
+                    aria-describedby={phoneError(c.phone) ? `cc-phone-err-${i}` : undefined}
+                    value={c.phone} onChange={e => setField(i, "phone", e.target.value.replace(/\D/g, "").slice(0, 10))} />
+                  {phoneError(c.phone) && (
+                    <span id={`cc-phone-err-${i}`} role="alert" className="text-xs text-red-500 block mt-0.5">{phoneError(c.phone)}</span>
+                  )}
                 </td>
                 <td className="py-2 px-3">
                   <label htmlFor={`cc-email-${i}`} className="sr-only">מייל</label>
@@ -230,9 +257,10 @@ function ClientMarkSection({ client, onChanged, canMark, canRequestUpdate }) {
 export default function ClientPage() {
   const { clientId } = useParams();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [client, setClient] = useState(null);
   const [loadError, setLoadError] = useState("");
-  const [activeTab, setActiveTab] = useState("info");
+  const [activeTab, setActiveTab] = useState(() => (TAB_IDS.includes(searchParams.get("tab")) ? searchParams.get("tab") : "info"));
   const [academicYear, setAcademicYear] = useState(DEFAULT_ACADEMIC_YEAR);
   const [showActivity, setShowActivity] = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
@@ -243,6 +271,11 @@ export default function ClientPage() {
   const [meetingsLoading, setMeetingsLoading] = useState(false);
   const [meetingsError, setMeetingsError] = useState("");
   const [summaryModalFor, setSummaryModalFor] = useState(null);
+  const [canRemoveCall, setCanRemoveCall] = useState(false);
+  const [calls, setCalls] = useState([]);
+  const [callsLoading, setCallsLoading] = useState(false);
+  const [callsError, setCallsError] = useState("");
+  const [callsEnabled, setCallsEnabled] = useState(true);
   const loadedYearRef = useRef(null);
   const aiSummaryEnabled = useAiSummaryEnabled();
   const { openMeetingNotes } = useMeetingNotes();
@@ -263,6 +296,7 @@ export default function ClientPage() {
     axios.get("/schools/users/me").then(res => {
       setCurrentUser(res.data || null);
       setCanDeleteMeetings(!!res.data?.can_delete_own_meetings);
+      setCanRemoveCall(!!res.data?.can_remove_call_from_school);
       if (res.data?.role === "owner" || res.data?.role === "manager") {
         axios.get("/schools/users/all").then(r => setUsers(Array.isArray(r.data) ? r.data : [])).catch(() => {});
       }
@@ -296,6 +330,30 @@ export default function ClientPage() {
   }, [activeTab, client, clientId, academicYear]);
 
   useMeetingsPolling(() => loadMeetings({ silent: true }), activeTab === "meetings" && !!client, [clientId, academicYear]);
+
+  // Calls with the card's contacts (matched by phone) + calls linked to it by hand — the same
+  // endpoint as the school card's "שיחות" tab.
+  async function loadCalls() {
+    setCallsLoading(true);
+    setCallsError("");
+    try {
+      const res = await axios.get(`/schools/${clientId}/calls`, { params: { academic_year: academicYear } });
+      setCalls(res.data?.calls || []);
+      setCallsEnabled(res.data?.calls_enabled !== false);
+    } catch (e) {
+      // A permission refusal says why (refreshing won't help); anything else is transient.
+      const detail = e?.response?.data?.detail;
+      setCallsError(e?.response?.status === 403 && typeof detail === "string" ? detail : "שגיאה בטעינת השיחות — נסה לרענן");
+      setCalls([]);
+    } finally {
+      setCallsLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (activeTab === "calls" && client) loadCalls();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, client?.id, academicYear]);
 
   async function addMeeting() {
     const payload = {
@@ -359,6 +417,7 @@ export default function ClientPage() {
   const tabs = labels ? [
     { id: "info", label: `פרטי ה${labels.singular}`, Icon: UsersRound },
     { id: "meetings", label: "פגישות", Icon: CalendarDays },
+    { id: "calls", label: "שיחות", Icon: PhoneCall },
   ] : [];
 
   return (
@@ -399,14 +458,14 @@ export default function ClientPage() {
                     </button>
                   ))}
                 </div>
-                {activeTab === "info" && (
-                  <button type="button" onClick={() => setShowActivity(true)}
-                    className="mb-1.5 inline-flex items-center gap-1.5 text-xs font-medium text-slate-500 hover:text-slate-700 px-2.5 py-1 rounded-lg hover:bg-slate-100">
-                    <History className="w-3.5 h-3.5" strokeWidth={2} aria-hidden="true" />
-                    תיעוד פעולות
-                  </button>
-                )}
-                <div className="pb-1.5 mr-auto">
+                <div className="pb-1.5 mr-auto flex items-center gap-2">
+                  {activeTab === "info" && (
+                    <button type="button" onClick={() => setShowActivity(true)}
+                      className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-500 hover:text-slate-700 px-2.5 py-1 rounded-lg hover:bg-slate-100">
+                      <History className="w-3.5 h-3.5" strokeWidth={2} aria-hidden="true" />
+                      תיעוד פעולות
+                    </button>
+                  )}
                   <AcademicYearSelector value={academicYear} onChange={setAcademicYear} />
                 </div>
               </div>
@@ -478,6 +537,34 @@ export default function ClientPage() {
                     />
                   )}
                 </div>
+              )}
+
+              {activeTab === "calls" && (
+                callsLoading ? (
+                  <div className="glass-card rounded-2xl p-10 flex justify-center">
+                    <div role="status" aria-label="טוען שיחות"><div aria-hidden="true" className="spinner w-8 h-8" /></div>
+                  </div>
+                ) : callsError ? (
+                  <div role="alert" className="glass-card rounded-2xl p-6 text-center">
+                    <p className="text-red-600 mb-3">{callsError}</p>
+                    <button type="button" onClick={loadCalls} className="btn-blue text-sm px-4 py-2">רענן</button>
+                  </div>
+                ) : !callsEnabled ? (
+                  <div className="glass-card rounded-2xl p-12 text-center">
+                    <p className="text-3xl mb-3" aria-hidden="true">📞</p>
+                    <p className="font-semibold text-slate-700 mb-1">אינטגרציית השיחות אינה מוגדרת</p>
+                    <p className="text-slate-400 text-sm">ניתן להגדיר אינטגרציית שיחות (VOICENTER / EXM) באזור ניהול</p>
+                  </div>
+                ) : calls.length === 0 ? (
+                  <div className="glass-card rounded-2xl p-12 text-center">
+                    <p className="text-3xl mb-3" aria-hidden="true">📞</p>
+                    <p className="font-semibold text-slate-700 mb-1">אין שיחות להצגה</p>
+                    <p className="text-slate-400 text-sm">בטווח שנת הלימודים הנבחרת לא נמצאו שיחות עם אנשי הקשר של ה{labels.singular}</p>
+                  </div>
+                ) : (
+                  <CallsTable calls={calls} hideSchoolColumn canManage={canRemoveCall} schoolId={clientId}
+                    cardNoun={`ה${labels.singular}`} />
+                )
               )}
             </>
           )}

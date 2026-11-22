@@ -38,7 +38,7 @@ ADMIN_CONTACT_COLUMN_LABELS = {
     "principal_phone": "טלפון מנהל/ת", "secretary_phone": "טלפון מנהלנ/ית", "finance_contact_phone": "טלפון אחראי/ת כספים",
     "meeting_coordinator_slots": "מתאם פגישות", "gefen_files_responsible_slots": "אחראי/ת קבצי גפן",
 }
-ADMIN_TEXT_COLUMNS = ["symbol", "city", "authority", "stage", "education_authority", "contract_file", *ADMIN_CONTACT_COLUMN_LABELS]
+ADMIN_TEXT_COLUMNS = ["symbol", "city", "authority", "stage", "education_authority", "contract_file", "meeting_plan", *ADMIN_CONTACT_COLUMN_LABELS]
 ADMIN_NUMBER_COLUMNS = [
     "meetings_completed", "meetings_hours", "order_amount_gefen",
     "hours_ordered", "rate", "payment_received", "payment_requests_sent", "receipts_sent",
@@ -62,6 +62,7 @@ ADMIN_COLUMN_LABELS = {
     "stage": "חשבונות במערכת גפן", "ministry_stage": "שלב חינוך", "service_type": "סוג שירות", "order_method": "אמצעי הזמנה",
     "contract_sent": "חוזה נשלח", "contract_received": "חוזה התקבל",
     "education_authority": "רשות חינוך", "sector": "מגזר", "client_status": "סטטוס לקוח",
+    "meeting_plan": 'תוכנית פגישות (טקסט כמו "כל רבעון", "כל חודש", "ספט׳")',
     **ADMIN_CONTACT_COLUMN_LABELS,
 }
 NUMBER_OPS = {"eq", "ne", "gt", "gte", "lt", "lte"}

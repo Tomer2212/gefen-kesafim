@@ -101,9 +101,9 @@ export default function UnknownCallPopup({ reminder, onDismiss, onSuccess }) {
       });
       const mode = r.data?.mode;
       setResultMsg(
-        mode === "applied" ? "איש הקשר נוסף לכרטיס בית הספר."
+        mode === "applied" ? `איש הקשר נוסף לכרטיס של ${chosenSchool?.name || ""}.`
         : mode === "requested" ? "הבקשה להוספת איש הקשר נשלחה לאישור בעלים/מנהל."
-        : mode === "duplicate" ? "המספר כבר קיים ברשימת אנשי הקשר של בית הספר."
+        : mode === "duplicate" ? "המספר כבר קיים ברשימת אנשי הקשר בכרטיס."
         : "נשמר."
       );
       setStep("result");
@@ -156,7 +156,7 @@ export default function UnknownCallPopup({ reminder, onDismiss, onSuccess }) {
             {reminder.call_time ? ` · ${fmtDateTime(reminder.call_time)}` : ""}
             {reminder.duration_seconds != null ? ` · משך ${fmtDuration(reminder.duration_seconds)}` : ""}
           </p>
-          <p className="text-sm text-slate-700 mb-3">האם היא שייכת לבית ספר מסוים?</p>
+          <p className="text-sm text-slate-700 mb-3">האם היא שייכת לבית ספר, מחוז או בעלות?</p>
           {error && <p role="alert" className="text-xs text-red-500 mb-2">{error}</p>}
           <div className="grid grid-cols-2 gap-1.5">
             <button
@@ -164,7 +164,7 @@ export default function UnknownCallPopup({ reminder, onDismiss, onSuccess }) {
               onClick={() => { setError(""); setStep("school"); setModalOpen(true); }}
               className="text-xs font-medium px-2 py-2 rounded-lg border border-green-200 bg-green-50 text-green-700 hover:bg-green-100 transition-colors disabled:opacity-50"
             >
-              כן, לשייך לבית ספר
+              כן, לשייך
             </button>
             <button
               disabled={busy}
@@ -194,7 +194,7 @@ export default function UnknownCallPopup({ reminder, onDismiss, onSuccess }) {
             className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md flex flex-col gap-3"
           >
             <h2 id="unknown-call-modal-title" className="font-bold text-slate-900">
-              {step === "school" && "שיוך השיחה לבית ספר"}
+              {step === "school" && "שיוך השיחה לבית ספר / מחוז / בעלות"}
               {step === "done" && "השיחה שויכה"}
               {step === "offer-contact" && "שמירת איש קשר"}
               {step === "contact-form" && `איש קשר חדש · ${chosenSchool?.name || ""}`}
@@ -206,7 +206,7 @@ export default function UnknownCallPopup({ reminder, onDismiss, onSuccess }) {
             {step === "school" && (
               <>
                 <p className="text-xs text-slate-500">
-                  בחר את בית הספר שאליו שייכת השיחה מהמספר <span dir="ltr">{phone}</span>.
+                  בחר את בית הספר, המחוז או הבעלות שאליו שייכת השיחה מהמספר <span dir="ltr">{phone}</span>.
                 </p>
                 <SchoolResultsList
                   schools={schools}
@@ -217,6 +217,7 @@ export default function UnknownCallPopup({ reminder, onDismiss, onSuccess }) {
                   onConfirm={handleAttribute}
                   onCancel={() => setModalOpen(false)}
                   submittingLabel="משייך..."
+                  includeClientEntities
                 />
               </>
             )}
@@ -264,7 +265,7 @@ export default function UnknownCallPopup({ reminder, onDismiss, onSuccess }) {
                   <span className="font-semibold">{chosenSchool?.name}</span>?
                 </p>
                 <p className="text-xs text-slate-400">
-                  רלוונטי רק אם המספר שייך באופן קבוע לבית הספר הזה — לא לשמור מספר של גורם שמשרת בתי ספר רבים.
+                  רלוונטי רק אם המספר שייך באופן קבוע ל{chosenSchool?.name || "כרטיס הזה"} — לא לשמור מספר של גורם שמשרת בתי ספר רבים.
                 </p>
                 <div className="flex gap-2 justify-end mt-1">
                   <button
@@ -289,7 +290,7 @@ export default function UnknownCallPopup({ reminder, onDismiss, onSuccess }) {
               <>
                 {existingCount >= 3 && (
                   <p className="text-xs text-amber-600">
-                    בכרטיס בית הספר כבר 3 אנשי קשר נוספים — ניתן עדיין {perms.canEditDirectly ? "להוסיף" : "לשלוח בקשה"}.
+                    בכרטיס כבר 3 אנשי קשר נוספים — ניתן עדיין {perms.canEditDirectly ? "להוסיף" : "לשלוח בקשה"}.
                   </p>
                 )}
                 <div className="grid grid-cols-2 gap-2">

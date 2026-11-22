@@ -63,6 +63,8 @@ import { GefenAccountsEditor } from "../components/GefenAccountsEditor";
 import { GefenAccountsRemovalModal } from "../components/GefenAccountsRemovalModal";
 import { MINISTRY_STAGE_OPTIONS, MINISTRY_STAGE_OTHER, ministryStageLabel, matchMinistryStage, stageSuggestionForMinistryStage } from "../constants/ministryStages";
 import { DISTRICT_OPTIONS } from "../constants/clientEntities";
+import MeetingPlanModal from "../components/meetingPlan/MeetingPlanModal";
+import { PLAN_TYPE_LABELS, normalizePlan, planSummary, planTypeSummary, spreadPlan } from "../constants/meetingPlan";
 
 // Tags school-data writes with the screen they came from, for the school card's "תיעוד פעולות"
 // log (backend school_activity.py).
@@ -333,6 +335,7 @@ const ADMIN_ALLOCATION_COLUMNS = [
   { key: "meeting_duration_gefen",     label: "הקצאת זמן פגישה [גפן]" },
   { key: "meeting_duration_current",   label: "הקצאת זמן פגישה [שוטף]" },
   { key: "meeting_duration_district",  label: "הקצאת זמן פגישה [מחוז]" },
+  { key: "meeting_plan",               label: "תוכנית פגישות" },
 ];
 const ADMIN_MEETINGS_DONE_COLUMNS = [
   { key: "meetings_completed",  label: 'סה"כ פגישות שבוצעו' },
@@ -450,7 +453,7 @@ const ADMIN_CONTACT_KEY_SET = new Set(ADMIN_CONTACT_KEYS);
 
 // Columns added after users already had saved admin prefs — hidden by default, like the
 // meeting breakdown columns (the back-fill effect also adds them hidden for saved prefs).
-const ADMIN_HIDDEN_BY_DEFAULT_KEYS = ["education_authority", "sector", "client_status", "ministry_stage", ...ADMIN_CONTACT_KEYS];
+const ADMIN_HIDDEN_BY_DEFAULT_KEYS = ["education_authority", "sector", "client_status", "ministry_stage", "meeting_plan", ...ADMIN_CONTACT_KEYS];
 
 // "חשבונות במערכת גפן" of the table's selected year (resolved_gefen_accounts, from the year
 // data); falls back to the school list's current-year value until that loads.
@@ -524,6 +527,8 @@ const BULK_OVERWRITE_YEAR_ADMIN_FIELDS = new Set([
   "closure_parents_status", "closure_authority_status",
   "meeting_allocation_gefen", "meeting_allocation_current", "meeting_allocation_district",
   "meeting_duration_gefen", "meeting_duration_current", "meeting_duration_district",
+  // Edited through MeetingPlanModal, not inline — see openMeetingPlan / applyMeetingPlanBulk.
+  "meeting_plan",
 ]);
 const BULK_OVERWRITE_SCHOOL_FIELDS = new Set(["finance_software", "finance_software_other_text", "education_authority", "sector", "ministry_stage", "ministry_stage_other_text"]);
 const BULK_ADVISOR_FIELDS = new Set(["advisor_gefen", "advisor_current", "advisor_district"]);
@@ -558,6 +563,7 @@ function isKnownAdminColumnKey(k) { return ADMIN_DEFAULT_COL_ORDER.includes(k); 
 const ADMIN_TEXT_FILTER_COLS = new Set([
   "symbol", "city", "authority", "stage", "education_authority", "contract_file", ...ADMIN_CONTACT_KEYS,
   "quarterly_notes_1", "quarterly_notes_2", "quarterly_notes_3", "quarterly_notes_4",
+  "meeting_plan",
 ]);
 const ADMIN_NUMBER_FILTER_COLS = new Set([
   "meetings_completed", "meetings_hours", "order_amount_gefen",
@@ -2119,6 +2125,16 @@ const SchoolRow = memo(function SchoolRow({
             className={`${ADMIN_FIELD_CLS} no-spinner w-24`}
           />
         );
+        if (key === "meeting_plan") {
+          const summary = planSummary(yad.meeting_plan);
+          return bc(
+            <button type="button" onClick={() => handlers.onOpenMeetingPlan(school.id)}
+              className="text-xs text-right max-w-[16rem] truncate px-2 py-1 rounded-md border border-transparent hover:border-slate-300 hover:bg-white"
+              title={summary || undefined} aria-label={`עריכת תוכנית פגישות — ${school.name}`}>
+              {summary || <span className="text-slate-400">— הגדרה</span>}
+            </button>
+          );
+        }
         if (key === "meeting_duration_gefen" || key === "meeting_duration_current" || key === "meeting_duration_district") return bc(
           <HourMinuteInput idPrefix={`${key}-${rowKey}`} label={colLabel}
             minutes={yad[key] ?? null}
@@ -2360,6 +2376,11 @@ export default function AdminPage() {
   // Single-slot undo buffer (not a stack) — only the most recent bulk action is undoable.
   // kind: "overwrite" (year-admin-data or schools field) | "advisor_add" (additive typed-advisor assignment).
   const [bulkUndo, setBulkUndo] = useState(null);
+  // "תוכנית פגישות" grid editor: {schoolIds, bulk} — bulk when opened on a cell that is part of a
+  // multi-cell selection of that column.
+  const [meetingPlanEdit, setMeetingPlanEdit] = useState(null);
+  const [meetingPlanSaving, setMeetingPlanSaving] = useState(false);
+  const [meetingPlanError, setMeetingPlanError] = useState("");
   // Shown when a grid edit is refused because an active client would be left without a
   // required accompanying advisor (see missingActiveAdvisorTypes).
   const [advisorGapNotice, setAdvisorGapNotice] = useState("");
@@ -2396,8 +2417,11 @@ export default function AdminPage() {
     client_status: null, service_type: null, order_method: [], order_method_other_text: null, order_amount_gefen: null,
     meeting_allocation_gefen: null, meeting_allocation_current: null, meeting_allocation_district: null,
     meeting_duration_gefen: null, meeting_duration_current: null, meeting_duration_district: null,
+    meeting_plan: null,
   };
   const [yearAdminForm, setYearAdminForm] = useState(EMPTY_YEAR_ADMIN_FORM);
+  // "תוכנית פגישות" editor open in the school form for this service type, or null.
+  const [formPlanType, setFormPlanType] = useState(null);
   // Edit mode only: the ליווי values exactly as loaded from the server, so save sends ONLY
   // the fields the user actually changed (never the whole form). Sending the whole form used
   // to wipe real data: if save happened before the async GET returned, or the GET failed
@@ -2994,6 +3018,67 @@ export default function AdminPage() {
       ? ` (${confirm.skippedCount} בתי ספר נוספים שנבחרו ידולגו: לקוח פעיל חייב יועץ מלווה)`
       : "";
     return `להחיל שינוי זה גם על ${n} בתי ספר נוספים?${skipped}`;
+  }
+
+  function openMeetingPlan(schoolId) {
+    const sel = bulkEditMode && bulkSelection.field === "meeting_plan" && bulkSelection.schoolIds.has(schoolId)
+      ? [...bulkSelection.schoolIds] : [schoolId];
+    setMeetingPlanError("");
+    setMeetingPlanEdit({ schoolIds: sel, bulk: sel.length > 1 });
+  }
+
+  // Many schools at once: only the service types changed in the editor are replaced; "לפי ההקצאה"
+  // spreads each school's own allocation (a school without one keeps that type as it was).
+  // One bulk PUT with a value per school, undoable like every other bulk overwrite.
+  async function applyMeetingPlanBulk(schoolIds, plan, allocationTypes, touchedTypes) {
+    const previousValues = schoolIds.map(id => ({ school_id: id, value: (yearAdminData[id] || {}).meeting_plan ?? null }));
+    const items = schoolIds.map(id => {
+      const yad = yearAdminData[id] || {};
+      const next = { ...(yad.meeting_plan || {}), physical: { ...(yad.meeting_plan?.physical || {}) } };
+      for (const t of touchedTypes) {
+        if (allocationTypes.includes(t)) {
+          const alloc = yad[`meeting_allocation_${t}`];
+          if (alloc) { next[t] = spreadPlan(alloc); next.physical[t] = []; }
+        } else {
+          next[t] = plan?.[t] || {};
+          next.physical[t] = plan?.physical?.[t] || [];
+        }
+      }
+      return { school_id: id, value: normalizePlan(next) };
+    });
+    setMeetingPlanSaving(true);
+    setMeetingPlanError("");
+    try {
+      const res = await axios.put("/schools/year-admin-data/bulk", {
+        field: "meeting_plan", academic_year: adminAcademicYear, items,
+      }, surface("admin_bulk"));
+      const failedIds = new Set((res.data.failed || []).map(f => f.school_id));
+      setYearAdminData(prev => {
+        const next = { ...prev };
+        for (const it of items) {
+          if (!failedIds.has(it.school_id)) next[it.school_id] = { ...(next[it.school_id] || {}), school_id: it.school_id, meeting_plan: it.value };
+        }
+        return next;
+      });
+      const okCount = items.length - failedIds.size;
+      setBulkUndo({
+        kind: "overwrite", domain: "year_admin", field: "meeting_plan", academic_year: adminAcademicYear,
+        previousValues: previousValues.filter(pv => !failedIds.has(pv.school_id)),
+        message: failedIds.size > 0 ? `עודכן ב-${okCount} בתי ספר, ${failedIds.size} נכשלו — בטל` : `עודכן ב-${okCount} בתי ספר — בטל`,
+      });
+      setMeetingPlanEdit(null);
+    } catch {
+      setMeetingPlanError("השמירה נכשלה — נסה שוב.");
+    } finally {
+      setMeetingPlanSaving(false);
+    }
+  }
+
+  function saveMeetingPlanEdit(plan, allocationTypes, touchedTypes) {
+    const { schoolIds, bulk } = meetingPlanEdit;
+    if (bulk) { applyMeetingPlanBulk(schoolIds, plan, allocationTypes, touchedTypes); return; }
+    saveYearAdminField(schoolIds[0], "meeting_plan", plan);
+    setMeetingPlanEdit(null);
   }
 
   async function applyBulkConfirm() {
@@ -4477,6 +4562,7 @@ export default function AdminPage() {
       case "closure_parents_status": case "closure_authority_status":
         return yad[key] === true ? 2 : yad[key] === false ? 1 : 0;
       case "contract_file": return yad.contract_file_name || "";
+      case "meeting_plan": return planSummary(yad.meeting_plan);
       case "control_letter_received_date": return formatDDMMYY(controlLetterFieldValue(school, "received_date"));
       case "control_letter_target_date": return formatDDMMYY(controlLetterFieldValue(school, "target_date"));
       case "control_letter_days_to_answer": return controlLetterFieldValue(school, "days_to_answer") ?? -1;
@@ -4581,7 +4667,7 @@ export default function AdminPage() {
   rowFnRef.current = {
     onSaveFieldBulkAware, toggleExpand, startEdit, downloadContractFile, openContractUpload,
     downloadControlLetterFile, createQuarterlyNote, saveQuarterlyNoteEdit, setShowSchoolNotesModalFor,
-    onSaveSchoolFieldBulkAware, onAdvisorSearchChangeBulkAware, toggleBulkCell, loadUsers,
+    onSaveSchoolFieldBulkAware, onAdvisorSearchChangeBulkAware, toggleBulkCell, loadUsers, openMeetingPlan,
   };
   const rowHandlers = useMemo(() => ({
     onSaveField: (...a) => rowFnRef.current.onSaveFieldBulkAware(...a),
@@ -4597,6 +4683,7 @@ export default function AdminPage() {
     onAdvisorSearchChange: (...a) => rowFnRef.current.onAdvisorSearchChangeBulkAware(...a),
     onToggleBulkCell: (...a) => rowFnRef.current.toggleBulkCell(...a),
     onRetryLoadUsers: (...a) => rowFnRef.current.loadUsers(...a),
+    onOpenMeetingPlan: (...a) => rowFnRef.current.openMeetingPlan(...a),
   }), []);
 
   // Row virtualization for the admin schools table — only ~40 <SchoolRow>s are mounted at a
@@ -4729,6 +4816,28 @@ export default function AdminPage() {
                   )}
                 </div>
               </div>
+
+              {meetingPlanEdit && (() => {
+                const firstYad = yearAdminData[meetingPlanEdit.schoolIds[0]] || {};
+                const firstName = schools.find(s => s.id === meetingPlanEdit.schoolIds[0])?.name;
+                return (
+                  <MeetingPlanModal
+                    types={["gefen", "current", "district"]}
+                    plan={meetingPlanEdit.bulk ? null : firstYad.meeting_plan}
+                    allocations={meetingPlanEdit.bulk ? {} : {
+                      gefen: firstYad.meeting_allocation_gefen, current: firstYad.meeting_allocation_current,
+                      district: firstYad.meeting_allocation_district,
+                    }}
+                    bulk={meetingPlanEdit.bulk}
+                    title={meetingPlanEdit.bulk ? `תוכנית פגישות — ${meetingPlanEdit.schoolIds.length} בתי ספר` : `תוכנית פגישות — ${firstName || ""}`}
+                    academicYear={adminAcademicYear}
+                    saving={meetingPlanSaving}
+                    error={meetingPlanError}
+                    onSave={saveMeetingPlanEdit}
+                    onClose={() => setMeetingPlanEdit(null)}
+                  />
+                );
+              })()}
 
               {/* Bulk-edit confirmation + undo — fixed-position so they stay visible
                   regardless of scroll position in the (potentially long/virtualized) table. */}
@@ -5413,6 +5522,16 @@ export default function AdminPage() {
                                     }} />
                                 </div>
 
+                                <span className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">תוכנית פגישות:</span>
+                                <div className="py-0.5 flex items-center gap-2 min-w-0">
+                                  <span className="text-sm text-slate-700 truncate" title={planTypeSummary(yearAdminForm.meeting_plan, key) || undefined}>
+                                    {planTypeSummary(yearAdminForm.meeting_plan, key) || "—"}
+                                  </span>
+                                  <button type="button" disabled={yearAdminLocked} onClick={() => setFormPlanType(key)}
+                                    className="shrink-0 text-xs px-2.5 py-1 rounded-lg border border-slate-300 hover:bg-white disabled:opacity-40"
+                                    aria-label={`עריכת תוכנית פגישות ${label}`}>עריכה</button>
+                                </div>
+
                                 <span className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">זמן לפגישה:</span>
                                 <div className="py-0.5">
                                   <HourMinuteInput idPrefix={`admin-ys-duration-${key}`} label={`זמן לפגישה [${label}]`}
@@ -5426,6 +5545,18 @@ export default function AdminPage() {
                       </div>
                     </div>
                   </div>
+
+                  {formPlanType && (
+                    <MeetingPlanModal
+                      types={[formPlanType]}
+                      plan={yearAdminForm.meeting_plan}
+                      allocations={{ [formPlanType]: yearAdminForm[`meeting_allocation_${formPlanType}`] }}
+                      title={`תוכנית פגישות — ${PLAN_TYPE_LABELS[formPlanType]}`}
+                      academicYear={DEFAULT_ACADEMIC_YEAR}
+                      onSave={plan => { setYearAdminForm(p => ({ ...p, meeting_plan: plan })); setFormPlanType(null); }}
+                      onClose={() => setFormPlanType(null)}
+                    />
+                  )}
 
                   <div className="flex items-center justify-center gap-3 mt-5">
                     <button onClick={saveSchool} disabled={savingSchool} className={`${editingSchool ? "btn-green-light" : "btn-blue"} text-sm px-5 py-2`}>

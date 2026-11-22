@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import axios from "axios";
 import { CallsTable, DEFAULT_CALLS_SORT, sortCalls } from "../components/calls/CallsTable";
 import { exportCallsToExcel } from "../components/calls/callsExport";
+import { linkAnswersPending } from "../components/calls/CallRow";
 
 const INPUT_CLS = "text-sm border border-slate-200 rounded-lg px-2.5 py-1.5 outline-none focus:border-blue-400 bg-white";
 
@@ -76,6 +77,19 @@ export default function PersonalCallsTab() {
     setDirection("");
     loadCalls(range);
   }
+
+  // A card linked from a row joins that call here too, so the Excel export includes it at once.
+  const handleLinked = useCallback((callId, card) => {
+    setCalls(prev => prev.map(c => (
+      c.call_id === callId && !(c.linked_schools || []).some(x => x.id === card.id)
+        ? {
+            ...c,
+            linked_schools: [...(c.linked_schools || []), card],
+            pending_school_resolution: c.pending_school_resolution && !linkAnswersPending(c, card.id),
+          }
+        : c
+    )));
+  }, []);
 
   const displayedCalls = direction ? calls.filter(c => c.direction === direction) : calls;
   const canExport = !loading && !error && callsEnabled && displayedCalls.length > 0 && !!loadedRange;
@@ -153,7 +167,7 @@ export default function PersonalCallsTab() {
           <p className="text-slate-400 text-sm mb-4">נסה לשנות את טווח התאריכים או הסינון</p>
         </div>
       ) : (
-        <CallsTable calls={displayedCalls} hideAdvisorColumn canManage={false} sort={sort} onSortChange={setSort} />
+        <CallsTable calls={displayedCalls} hideAdvisorColumn canManage={false} canLink onLinked={handleLinked} sort={sort} onSortChange={setSort} />
       )}
     </div>
   );

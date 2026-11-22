@@ -1050,6 +1050,23 @@ class MeetingRequirementIn(BaseModel):
     ask_advisor_choice: bool = False
 
 
+def _stamp_round_plan(db, org_id: str, round_id: str | None, success_criteria: dict | None) -> None:
+    """A task of a round "לפי תוכנית": its meeting conditions follow the round's per-school numbers
+    (round_plan — meeting_rounds.with_round_plan / plan_request_windows). "בקש לקבוע פגישה נוספת"
+    is turned off for them: the plan already counts what the school has, and that option would
+    count only meetings booked through this task."""
+    if not round_id or not success_criteria:
+        return
+    rows = db.table("meeting_rounds").select("plan_mode").eq("id", round_id).eq("org_id", org_id).execute().data or []
+    if not rows or rows[0].get("plan_mode") != "plan":
+        return
+    for g in success_criteria.get("groups") or []:
+        for c in g.get("conditions") or []:
+            if c.get("type") == "meeting":
+                c["round_plan"] = True
+                c["require_additional_meeting"] = None
+
+
 def _round_advisor_choices(db, org_id: str, round_id: str | None) -> dict[str, dict]:
     """{school_id: {choice key: [advisor ids]}} remembered by a round for its tasks."""
     if not round_id:
@@ -1148,11 +1165,9 @@ def _round_field_rules(db, org_id: str, round_id: str | None) -> tuple[set[str],
 
 
 def _visiting_advisors(advisor_ids: list[str], exempt: set[str] | None, visitors: list[str] | None) -> list[str]:
-    """The advisors of a physical meeting who actually go to the school: not exempted from field
-    days in the round, and — when the round recorded who visits this school (a גפן+שוטף school
-    with two different advisors, meeting_rounds.physical_visitors) — one of them."""
-    return [aid for aid in advisor_ids
-            if aid not in (exempt or set()) and (visitors is None or aid in visitors)]
+    """The advisors of a physical meeting who actually go to the school — the round dashboard's
+    rule too (meeting_rounds.visiting_advisors), so it sends each missing meeting to the right task."""
+    return meeting_rounds.visiting_advisors(advisor_ids, exempt, visitors)
 
 
 def _field_day_segments(
@@ -1197,12 +1212,13 @@ def _school_meeting_conditions(conditions: list[dict], school_advisors: dict, ca
     return out
 
 
-def _booked_meetings_for_send(task: dict, org_id: str, school_ids: list[str]) -> tuple[dict[str, list[dict]], set[str]] | None:
-    """({school_id: meetings}, the task's token ids) exactly as task progress reads them, so a
-    send can leave out what each school already booked (_still_missing_conditions). None when
-    the lookup fails — the send then asks for everything, as before."""
+def _booked_meetings_for_send(task: dict, org_id: str, school_ids: list[str]) -> tuple[dict[str, list[dict]], set[str], dict, dict] | None:
+    """({school_id: meetings}, the task's token ids, {school_id: school}, {school_id: year row})
+    exactly as task progress reads them, so a send can leave out what each school already booked
+    (_still_missing_conditions) and a round-plan task can work out each school's requests. None
+    when the lookup fails — the send then asks for everything, as before."""
     try:
-        _schools, meetings, _year, _goals, _cl = task_logic._fetch_schools_and_meetings(
+        fetched_schools, meetings, year_map, _goals, _cl = task_logic._fetch_schools_and_meetings(
             org_id, task.get("academic_year") or DEFAULT_ACADEMIC_YEAR, only_school_ids=school_ids,
         )
         token_rows = get_admin_client().table("meeting_booking_tokens").select("id").eq("task_id", task["id"]).execute().data or []
@@ -1212,7 +1228,46 @@ def _booked_meetings_for_send(task: dict, org_id: str, school_ids: list[str]) ->
     by_school: dict[str, list[dict]] = {}
     for m in meetings:
         by_school.setdefault(m["school_id"], []).append(m)
-    return by_school, {r["id"] for r in token_rows}
+    return by_school, {r["id"] for r in token_rows}, {s["id"]: s for s in fetched_schools}, year_map
+
+
+_HEBREW_MONTHS = ["ינואר", "פברואר", "מרץ", "אפריל", "מאי", "יוני", "יולי", "אוגוסט", "ספטמבר", "אוקטובר", "נובמבר", "דצמבר"]
+
+
+def _window_label(a: date, b: date) -> str:
+    """How the school sees a request's dates: its month, or "עד DD/MM" for one spanning months
+    (a meeting missing from before the round may be booked any time in it)."""
+    if (a.year, a.month) == (b.year, b.month):
+        return _HEBREW_MONTHS[a.month - 1]
+    return f"עד {b:%d/%m}"
+
+
+def _round_plan_requests(rnd: dict, conditions: list[dict], school: dict, school_meetings: list[dict],
+                         year_row: dict | None, today: date) -> list[dict]:
+    """A round-plan task's plain conditions as requests: one per meeting the school still needs,
+    each with its own dates (meeting_rounds.plan_request_windows) and marked round_plan_request,
+    so the booking page keeps it open until the school's need in the round is met. A school still
+    without numbers in the round gets nothing — the round shows it as "חסרה תוכנית" until the
+    manager fills them in."""
+    out: list[dict] = []
+    for c in conditions:
+        if not c.get("round_plan"):
+            out.append(c)
+            continue
+        if school.get("stage") == "sheshshnati" and task_logic.effective_stage_scope(c, school) == "separate":
+            # Already one request per division (_build_meeting_ranges), one meeting each — splitting
+            # it by month too would ask for twice as many.
+            out.append(c)
+            continue
+        windows = meeting_rounds.plan_request_windows(rnd, c, school, school_meetings, year_row, today)
+        for a, b in windows:
+            out.append({**c, "date_segments": [{"date_from": a.isoformat(), "date_to": b.isoformat()}],
+                        "round_plan_request": True, "round_id": rnd["id"], "label_suffix": _window_label(a, b),
+                        # A physical request whose month has none of the advisor's field days falls
+                        # back to the rest of the round (_build_meeting_ranges) instead of vanishing.
+                        "round_rest": {"date_from": max(today, date.fromisoformat(rnd["start_date"])).isoformat(),
+                                       "date_to": rnd["end_date"]}})
+    return out
 
 
 def _still_missing_conditions(conditions: list[dict], school: dict, school_meetings: list[dict], token_ids: set[str]) -> list[dict]:
@@ -1938,6 +1993,7 @@ def create_task(body: TaskCreateIn, user: Annotated[dict, Depends(get_current_us
     _prepare_meeting_conditions(success_criteria, user["org_id"], advisor_exclusions)
 
     round_members = _round_member_ids(get_admin_client(), user["org_id"], body.round_id, body.include_open_requests)
+    _stamp_round_plan(get_admin_client(), user["org_id"], body.round_id, success_criteria)
     meeting_overrides = _clean_override_advisor_choices(get_admin_client(), user["org_id"], body.meeting_overrides)
 
     scheduled_for_dt = _parse_dt(body.scheduled_for)
@@ -2773,6 +2829,7 @@ def _build_meeting_ranges(
                 continue
             range_segments, range_start, range_end = segments, start_date, end_date
             held_remotely = False
+            label_suffix = c.get("label_suffix")
             if c.get("use_field_days"):
                 # A physical meeting is offered only on its visiting advisors' field days (in the same
                 # windows); with no visiting advisor (e.g. the שוטף meeting of a separate גפן+שוטף
@@ -2781,6 +2838,11 @@ def _build_meeting_ranges(
                     held_remotely = True
                 else:
                     range_segments = _field_day_segments([(s["start_date"], s["end_date"]) for s in segments], advisor_ids, field_days or {}, field_exempt, field_visitors)
+                    rest = c.get("round_rest")
+                    if not range_segments and rest:
+                        range_segments = _field_day_segments([(rest["date_from"], rest["date_to"])], advisor_ids, field_days or {}, field_exempt, field_visitors)
+                        if range_segments:
+                            label_suffix = _window_label(date.fromisoformat(rest["date_from"]), date.fromisoformat(rest["date_to"]))
                     if not range_segments:
                         continue
                     range_start, range_end = range_segments[0]["start_date"], range_segments[-1]["end_date"]
@@ -2799,6 +2861,8 @@ def _build_meeting_ranges(
             # have one principal for both, so the participants alone don't tell.
             if split_scope in _DIVISION_LABELS:
                 label = f"{label} — {_DIVISION_LABELS[split_scope]}"
+            if label_suffix:
+                label = f"{label} — {label_suffix}"
             range_row = {
                 "key": f"r{len(ranges_data)}-{secrets.token_urlsafe(6)}",
                 "start_date": range_start, "end_date": range_end, "segments": range_segments,
@@ -2834,6 +2898,11 @@ def _build_meeting_ranges(
                 # task keeps that task's own rule.
                 "explicit_stage_scope_only": bool(c.get("explicit_stage_scope_only")),
             }
+            if c.get("round_plan_request"):
+                # One of several requests of a round "לפי תוכנית": open until the school's need in
+                # the round is met, however its meetings were booked (meeting_booking_router).
+                range_row["round_plan_request"] = True
+                range_row["round_id"] = c.get("round_id")
             if service_type == "gefen_current" and override.get("coordinator_type"):
                 # Which coordinator gets a combined meeting when גפן and שוטף have different
                 # ones — see _resolve_range_coordinator.
@@ -3058,6 +3127,8 @@ def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[st
     round_choices = _round_advisor_choices(db, task.get("org_id"), task.get("round_id")) if needs_booking_link and meeting_conditions else {}
     # What each school already booked — a reminder's link asks only for what's still missing.
     booked = _booked_meetings_for_send(task, org_id, school_ids) if needs_booking_link and meeting_conditions else None
+    # A task of a round "לפי תוכנית": each school is asked its own number of meetings, each with its dates.
+    plan_round = task_logic.plan_round_for_task(task) if booked is not None else None
 
     try:
         notes_map = _fetch_school_notes_map(db, task["id"], school_ids)
@@ -3098,9 +3169,19 @@ def _queue_messages_for_schools(db, task: dict, org_id: str, school_ids: list[st
             if _is_self_scheduled(meeting_conditions, school_conditions):
                 continue  # its advisors book every meeting themselves — nothing to request
             if school_conditions and booked is not None:
+                school_meetings = booked[0].get(school["id"], [])
+                plan_school = booked[2].get(school["id"])
+                plan_year_row = booked[3].get(school["id"])
+                if plan_round and plan_school:
+                    school_conditions = [meeting_rounds.with_round_plan(plan_round, c, plan_school, school_meetings, plan_year_row)
+                                         for c in school_conditions]
                 school_conditions = _still_missing_conditions(
-                    school_conditions, school, booked[0].get(school["id"], []), booked[1],
+                    school_conditions, school, school_meetings, booked[1],
                 )
+                if plan_round and plan_school and school_conditions:
+                    school_conditions = _round_plan_requests(
+                        plan_round, school_conditions, plan_school, school_meetings, plan_year_row, date.today(),
+                    )
                 if not school_conditions:
                     continue  # already booked everything the task asks for — nothing to remind about
             ranges_data = school_conditions and _build_meeting_ranges(

@@ -51,7 +51,11 @@ function todayIso() {
 // requirements, task due dates) — compared as plain ISO strings (sorts lexicographically).
 function isPastDate(iso) { return iso < todayIso(); }
 
-export default function DirectStyleDateInput({ id, value, onChange, invalid }) {
+// `minDate` (optional ISO): an extra lower bound on top of "not in the past" — e.g. a "to" field
+// passes its "from" date. Earlier days are disabled in the calendar, and a typed one is withheld.
+export default function DirectStyleDateInput({ id, value, onChange, invalid, minDate }) {
+  const today = todayIso();
+  const effectiveMin = minDate && minDate > today ? minDate : today;
   const [text, setText] = useState(() => isoToDDMMYY(value));
   const [lastEmitted, setLastEmitted] = useState(value);
   // Calendar-icon popover picker — same component/pattern as AdvisorFinderModal.jsx's date
@@ -64,26 +68,34 @@ export default function DirectStyleDateInput({ id, value, onChange, invalid }) {
   // just the day-vs-days-in-month case parseDateDDMMYY catches.
   const [localInvalid, setLocalInvalid] = useState(false);
   const [pastInvalid, setPastInvalid] = useState(false);
+  const [beforeMinInvalid, setBeforeMinInvalid] = useState(false);
   useEffect(() => {
     if (value === lastEmitted) return; // externally-triggered change only (e.g. "נקה בחירה")
     setText(isoToDDMMYY(value));
     setLastEmitted(value);
     setLocalInvalid(false);
     setPastInvalid(false);
+    setBeforeMinInvalid(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value]);
-  const showInvalid = invalid || localInvalid || pastInvalid;
+  const showInvalid = invalid || localInvalid || pastInvalid || beforeMinInvalid;
 
   // Shared by the popover's day-click and (indirectly) the typed-input path above — a past
-  // date is rejected exactly the same way either way.
+  // date is rejected exactly the same way either way (the popover already disables those days).
   function applyIso(iso) {
     if (isPastDate(iso)) {
       setText(isoToDDMMYY(iso));
       setPastInvalid(true);
       return;
     }
+    if (minDate && iso < minDate) {
+      setText(isoToDDMMYY(iso));
+      setBeforeMinInvalid(true);
+      return;
+    }
     setLocalInvalid(false);
     setPastInvalid(false);
+    setBeforeMinInvalid(false);
     setText(isoToDDMMYY(iso));
     setLastEmitted(iso);
     onChange(iso);
@@ -103,6 +115,7 @@ export default function DirectStyleDateInput({ id, value, onChange, invalid }) {
             setLastEmitted("");
             setLocalInvalid(false);
             setPastInvalid(false);
+            setBeforeMinInvalid(false);
             onChange("");
             return;
           }
@@ -113,13 +126,20 @@ export default function DirectStyleDateInput({ id, value, onChange, invalid }) {
               // Keep the typed text visible (don't silently revert) but withhold onChange —
               // a past date must never reach the caller.
               setPastInvalid(true);
+              setBeforeMinInvalid(false);
               return;
             }
             setPastInvalid(false);
+            if (minDate && iso < minDate) {
+              setBeforeMinInvalid(true);
+              return;
+            }
+            setBeforeMinInvalid(false);
             setLastEmitted(iso);
             onChange(iso);
           } else {
             setPastInvalid(false);
+            setBeforeMinInvalid(false);
             setLocalInvalid(digitCount === 6);
           }
         }}
@@ -133,12 +153,14 @@ export default function DirectStyleDateInput({ id, value, onChange, invalid }) {
         <DatePickerPopover
           value={parseDateDDMMYY(text)}
           anchorRef={anchorRef}
+          minDate={effectiveMin}
           onChange={iso => { applyIso(iso); setShowPicker(false); }}
           onClose={() => setShowPicker(false)}
         />
       )}
       {localInvalid && <p className="text-[11px] text-red-600 mt-0.5">תאריך לא קיים בלוח השנה</p>}
       {pastInvalid && <p className="text-[11px] text-red-600 mt-0.5">לא ניתן לבחור תאריך שחלף — יש לבחור מהיום והלאה</p>}
+      {beforeMinInvalid && <p className="text-[11px] text-red-600 mt-0.5">לא ניתן לבחור תאריך מוקדם מ-{isoToDDMMYY(minDate)}</p>}
     </div>
   );
 }

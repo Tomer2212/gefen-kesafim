@@ -10,9 +10,12 @@ const DOT_COLOR = { green: "bg-green-500", orange: "bg-amber-500", red: "bg-red-
 // element's bounding rect — same reasoning as ScheduleTooltip in MeetingRow.jsx: a plain
 // `position: absolute` popover gets silently clipped by any ancestor with `overflow` set
 // (the table's scroll container, in particular).
-export function DatePickerPopover({ value, onChange, onClose, advisorId, ownEventId, anchorRef }) {
+// `minDate` (optional ISO "YYYY-MM-DD"): days before it are shown disabled and can't be clicked;
+// with no value yet, the calendar opens on minDate's month when that is later than today.
+export function DatePickerPopover({ value, onChange, onClose, advisorId, ownEventId, anchorRef, minDate }) {
   const today = new Date();
-  const initDate = value ? new Date(value) : today;
+  const minDateObj = minDate ? new Date(`${minDate}T00:00:00`) : null;
+  const initDate = value ? new Date(value) : (minDateObj && minDateObj > today ? minDateObj : today);
   const [viewYear, setViewYear] = useState(initDate.getFullYear());
   const [viewMonth, setViewMonth] = useState(initDate.getMonth());
   // Map of day-of-month -> [{ startHM, endHM, subject }] busy time ranges for that day.
@@ -104,6 +107,15 @@ export function DatePickerPopover({ value, onChange, onClose, advisorId, ownEven
         <div className="grid grid-cols-7 gap-0.5">
           {cells.map((day, i) => {
             if (!day) return <span key={`b${i}`} />;
+            const dayIso = `${viewYear}-${String(viewMonth + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+            if (minDate && dayIso < minDate) {
+              return (
+                <button key={day} type="button" disabled aria-disabled="true"
+                  className="w-7 h-7 rounded-lg text-xs font-medium mx-auto text-slate-300 cursor-not-allowed">
+                  {day}
+                </button>
+              );
+            }
             const isSelected = selected && selected.getDate() === day && selected.getMonth() === viewMonth && selected.getFullYear() === viewYear;
             const isToday = today.getDate() === day && today.getMonth() === viewMonth && today.getFullYear() === viewYear;
             const dow = new Date(viewYear, viewMonth, day).getDay(); // 0=Sun..6=Sat

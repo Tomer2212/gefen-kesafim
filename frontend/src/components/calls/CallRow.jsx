@@ -82,6 +82,28 @@ export function computeEndTimeIso(startIso, durationSeconds) {
   return new Date(d.getTime() + (durationSeconds || 0) * 1000).toISOString();
 }
 
+// The cards a call belongs to: the school its contact matched, then the cards it was linked
+// to by hand (schools / districts / ownerships), without repeats. Shown in "שם מוסד".
+export function callSchoolCards(call, extra = []) {
+  const cards = [];
+  if (call.school_id && call.school_name) cards.push({ id: call.school_id, name: call.school_name, client_type: "school" });
+  for (const c of [...(call.linked_schools || []), ...extra]) {
+    if (c?.id && c.name && !cards.some(x => x.id === c.id)) cards.push(c);
+  }
+  return cards;
+}
+
+// A link to one of an ambiguous call's candidates answers its "ממתין לשיוך" question
+// (the server closes it too — calls_router._close_prompt_answered_by_link).
+export function linkAnswersPending(call, cardId) {
+  return !!call.pending_school_resolution && (call.candidate_schools || []).some(s => s.id === cardId);
+}
+
+function cardPath(card) {
+  return card.client_type === "district" || card.client_type === "ownership"
+    ? `/client/${card.id}` : `/school/${card.id}?tab=meetings`;
+}
+
 function buildWindowTitle(call, advisorLabel) {
   const parts = [formatDate(call.start_time), advisorLabel];
   const { name } = counterpartLabels(call, call.counterpart_phone);
@@ -90,12 +112,19 @@ function buildWindowTitle(call, advisorLabel) {
   return parts.join(" - ");
 }
 
-function CallRowBase({ call, onDelete, hideSchoolColumn, hideAdvisorColumn, canManage = true, schoolId }) {
+// canLink: offer "שייך שיחה" (defaults to canManage). With canLink but not canManage the menu
+// has only that action — the personal area, where every call is the user's own.
+function CallRowBase({ call, onDelete, hideSchoolColumn, hideAdvisorColumn, canManage = true, canLink = canManage, schoolId, cardNoun = "בית הספר", onLinked }) {
   const { openCallNote } = useCallNoteWindows();
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [linkModalOpen, setLinkModalOpen] = useState(false);
   const [linkSchools, setLinkSchools] = useState(null);
+  // Cards linked from this row since the list was loaded — shown at once, without a reload.
+  const [addedCards, setAddedCards] = useState([]);
+  const schoolCards = callSchoolCards(call, addedCards);
+  const pending = call.pending_school_resolution && !addedCards.some(c => linkAnswersPending(call, c.id));
+  const canLinkHere = canLink && !schoolId;
   const status = STATUS_LABELS[call.status] || DEFAULT_STATUS;
   const endIso = computeEndTimeIso(call.start_time, call.duration_seconds);
   // A line assigned to an office phone (ניהול → הגדרות) is named after it: "{label} – {org name}".
@@ -109,11 +138,11 @@ function CallRowBase({ call, onDelete, hideSchoolColumn, hideAdvisorColumn, canM
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(15,23,42,0.55)" }} dir="rtl">
           <div role="dialog" aria-modal="true" aria-labelledby="delete-call-title" className="glass-card rounded-2xl p-6 w-full max-w-md flex flex-col gap-4">
             <h2 id="delete-call-title" className="font-bold text-slate-900">
-              {schoolId ? "הסרת שיחה מכרטיס בית הספר" : "מחיקת נתוני שיחה"}
+              {schoolId ? `הסרת שיחה מכרטיס ${cardNoun}` : "מחיקת נתוני שיחה"}
             </h2>
             <p className="text-sm text-slate-600 leading-relaxed">
               {schoolId
-                ? "השיחה תוסר מטאב \"שיחות\" של בית הספר הזה בלבד — היא תישאר מוצגת כרגיל באזור \"ניהול\"-\"שיחות\", ובכל בית ספר אחר שהיא משויכת אליו."
+                ? `השיחה תוסר מטאב "שיחות" של ${cardNoun} הזה בלבד — היא תישאר מוצגת כרגיל באזור "ניהול"-"שיחות", ובכל כרטיס אחר שהיא משויכת אליו.`
                 : "האם אתה בטוח שברצונך למחוק את הסיכום והתמלול השמורים אצלנו לשיחה זו? השיחה עצמה תישאר שמורה במערכת Voicenter — הפעולה מוחקת רק את הנתונים המוצגים כאן."}
             </p>
             <div className="flex gap-2 justify-end">
@@ -141,11 +170,21 @@ function CallRowBase({ call, onDelete, hideSchoolColumn, hideAdvisorColumn, canM
         linkSchools ? (
           <SchoolPickerModal
             schools={linkSchools}
-            title="שיוך שיחה לבית ספר"
+            title="שיוך שיחה לבית ספר / מחוז / בעלות"
+            includeClientEntities
             submittingLabel="משייך..."
             onCancel={() => setLinkModalOpen(false)}
             onConfirm={async s => {
-              try { await axios.post(`/calls/calls/${call.call_id}/link-school`, { school_id: s.id }); } catch { /* non-fatal for UI */ }
+              try {
+                await axios.post(`/calls/calls/${call.call_id}/link-school`, { school_id: s.id, call_time: call.start_time });
+              } catch (e) {
+                // Shown inside the picker (SchoolResultsList), which stays open.
+                const detail = e.response?.data?.detail;
+                throw new Error(typeof detail === "string" ? detail : "השיוך נכשל — נסו שוב");
+              }
+              const card = { id: s.id, name: s.name, client_type: s.client_type || "school" };
+              setAddedCards(prev => [...prev, card]);
+              onLinked?.(call.call_id, card);
               setLinkModalOpen(false);
             }}
           />
@@ -181,23 +220,26 @@ function CallRowBase({ call, onDelete, hideSchoolColumn, hideAdvisorColumn, canM
       <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap" dir="ltr">{formatPhone(call.counterpart_phone)}</td>
       <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap">{counterpart.name || "—"}</td>
       <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap">
-        {call.pending_school_resolution
+        {pending
           ? <span className="text-amber-600 text-xs font-medium">ממתין לשיוך</span>
           : (counterpart.role || "—")}
       </td>
       {!hideSchoolColumn && (
         <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap">
-          {call.pending_school_resolution
-            ? <span className="text-amber-600 text-xs font-medium">ממתין לשיוך</span>
-            : call.school_id && call.school_name
-              ? (
-                <Link to={`/school/${call.school_id}?tab=meetings`}
-                  title="לחץ למעבר לאזור הפגישות בכרטיס בית הספר."
+          {schoolCards.length > 0 ? (
+            schoolCards.map((card, i) => (
+              <span key={card.id}>
+                {i > 0 && ", "}
+                <Link to={cardPath(card)}
+                  title={card.client_type === "school" ? "לחץ למעבר לאזור הפגישות בכרטיס בית הספר." : "לחץ למעבר לכרטיס."}
                   className="text-blue-700 hover:text-blue-900 hover:underline">
-                  {call.school_name}
+                  {card.name}
                 </Link>
-              )
-              : (call.school_name || "—")}
+              </span>
+            ))
+          ) : pending
+            ? <span className="text-amber-600 text-xs font-medium">ממתין לשיוך</span>
+            : (call.school_name || "—")}
         </td>
       )}
       <td className="py-2.5 px-2 text-center">
@@ -223,7 +265,7 @@ function CallRowBase({ call, onDelete, hideSchoolColumn, hideAdvisorColumn, canM
         )}
       </td>
       <td className="py-2.5 px-2 text-center relative">
-        {canManage && (
+        {(canManage || canLinkHere) && (
         <button type="button" onClick={() => setMenuOpen(v => !v)} aria-label="פעולות נוספות"
           className="text-slate-400 hover:text-slate-700 transition-colors text-base leading-none px-1.5">
           ⋮
@@ -233,7 +275,7 @@ function CallRowBase({ call, onDelete, hideSchoolColumn, hideAdvisorColumn, canM
           <>
             <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)} />
             <div className="absolute left-0 top-full mt-1 z-20 bg-white border border-slate-200 rounded-xl shadow-lg py-1 min-w-[160px]" dir="rtl">
-              {!schoolId && (
+              {canLinkHere && (
                 <button type="button"
                   onClick={async () => {
                     setMenuOpen(false);
@@ -248,14 +290,16 @@ function CallRowBase({ call, onDelete, hideSchoolColumn, hideAdvisorColumn, canM
                     }
                   }}
                   className="w-full text-right px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 transition-colors">
-                  שייך שיחה לבית ספר
+                  שייך שיחה
                 </button>
               )}
-              <button type="button"
-                onClick={() => { setMenuOpen(false); setConfirmDelete(true); }}
-                className="w-full text-right px-4 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors">
-                {schoolId ? "הסר שיחה מכרטיס בית הספר" : "מחק נתוני שיחה"}
-              </button>
+              {canManage && (
+                <button type="button"
+                  onClick={() => { setMenuOpen(false); setConfirmDelete(true); }}
+                  className="w-full text-right px-4 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors">
+                  {schoolId ? `הסר שיחה מכרטיס ${cardNoun}` : "מחק נתוני שיחה"}
+                </button>
+              )}
             </div>
           </>
         )}

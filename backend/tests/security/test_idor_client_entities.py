@@ -136,3 +136,31 @@ def test_entity_meeting_rules(org_b_client, org_b_district, admin_db):
     finally:
         admin_db.table("meeting_activity").delete().eq("meeting_id", meeting["id"]).execute()
         admin_db.table("meetings").delete().eq("id", meeting["id"]).execute()
+
+
+def test_contacts_phone_validated(org_b_client, org_b_district):
+    sid = org_b_district["id"]
+    original = org_b_district.get("extra_contacts") or []
+    for bad in ("5012345678", "05012345678", "0501", "123456789"):
+        resp = org_b_client.put(f"/clients/{sid}/contacts", json={"extra_contacts": [{"name": "בדיקה", "phone": bad}]})
+        assert resp.status_code == 422, (bad, resp.text)
+    try:
+        for good, stored in (("0501234567", "0501234567"), ("035551234", "035551234"),
+                             ("972501234567", "0501234567"), ("050-123-4567", "0501234567")):
+            resp = org_b_client.put(f"/clients/{sid}/contacts", json={"extra_contacts": [{"name": "בדיקה", "phone": good}]})
+            assert resp.status_code == 200, (good, resp.text)
+            assert resp.json()["extra_contacts"][0]["phone"] == stored
+    finally:
+        org_b_client.put(f"/clients/{sid}/contacts", json={"extra_contacts": original})
+
+
+def test_entity_calls_cross_org_rejected(org_a_client, org_b_district):
+    resp = org_a_client.get(f"/schools/{org_b_district['id']}/calls")
+    assert resp.status_code in (403, 404), resp.text
+
+
+def test_entity_calls_same_org_still_works(org_b_client, org_b_district):
+    # Passing the access check is what's tested: the request then reaches the live calls provider,
+    # which may refuse a dev machine's IP (502 "IP address ... is not trusted") — not an access denial.
+    resp = org_b_client.get(f"/schools/{org_b_district['id']}/calls")
+    assert resp.status_code not in (401, 403, 404), resp.text

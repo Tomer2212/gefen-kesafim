@@ -168,6 +168,14 @@ function SchoolPreviewList({ schools }) {
 // {round, schoolIds, physical, requireAdditional} — the audience is those schools, and the meeting
 // card starts from the round's requirement and dates. The backend narrows the audience to the
 // round's schools whatever is sent (tasks_router.create_task).
+// "יועצים שקובעים לעצמם" lists compared regardless of key/part order.
+function exclusionsKey(exclusions) {
+  return JSON.stringify(Object.entries(exclusions || {})
+    .filter(([, parts]) => parts?.length)
+    .map(([id, parts]) => [id, [...parts].sort()])
+    .sort(([a], [b]) => a.localeCompare(b)));
+}
+
 function roundMeetingGroup(roundContext) {
   const group = newConditionGroup(["meeting"]);
   const base = group.conditions[0];
@@ -337,6 +345,11 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
   // org's default (undefined until AdvisorExclusionsEditor loads it).
   const [advisorExclusions, setAdvisorExclusions] = useState(roundContext ? (roundContext.round.advisor_exclusions || {}) : undefined);
   const [selfScheduledNotice, setSelfScheduledNotice] = useState(null); // [{school_id, school_name}] before creating
+  // A round's task whose list differs from the round's: the round would keep counting the excluded
+  // advisor's meetings as missing ("טרם טופלו"), so creating the task offers to update the round too.
+  const roundExclusionsDiffer = !!roundContext && isMeetingTask && advisorExclusions !== undefined
+    && exclusionsKey(advisorExclusions) !== exclusionsKey(roundContext.round.advisor_exclusions);
+  const [syncRoundExclusions, setSyncRoundExclusions] = useState(true);
   useEffect(() => {
     if (!roundContext) return;
     axios.get(`/rounds/${roundContext.round.id}`)
@@ -354,17 +367,22 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
   const roundSplit = useMemo(() => {
     if (!roundContext || !roundState?.bySchool || !preview) return null;
     const physical = new Set(roundContext.round.physical_school_ids || []);
-    const out = { outside: [], booked: [], self: [], open: [], mismatch: [], send: [] };
+    const out = { outside: [], booked: [], notNeeded: [], noPlan: [], self: [], open: [], mismatch: [], send: [] };
     // The round's own status reflects the round's exclusions — valid here only while the task keeps them.
-    const sameExclusions = JSON.stringify(advisorExclusions || {}) === JSON.stringify(roundContext.round.advisor_exclusions || {});
+    const sameExclusions = exclusionsKey(advisorExclusions) === exclusionsKey(roundContext.round.advisor_exclusions);
     for (const s of preview.schools || []) {
       const row = roundState.bySchool[s.school_id];
       if (!row) out.outside.push(s);
       else if (["done", "booked"].includes(row.status)) out.booked.push(row);
+      // A round "לפי תוכנית": nothing asked of it in this round / no numbers yet (fill them in the round first).
+      else if (row.status === "not_needed") out.notNeeded.push(row);
+      else if (row.problem === "missing_plan") out.noPlan.push(row);
       else if (sameExclusions && row.status === "self_scheduled") out.self.push(row);
       // Same rule as the server (meeting_rounds.open_request_school_ids): any live request.
       else if (row.request?.open) out.open.push(row);
-      else if (physical.size && physical.has(row.school_id) !== taskIsPhysical) out.mismatch.push(row);
+      // Where its MISSING meetings are held (meeting_rounds.school_status location_need): a school
+      // marked physical whose visiting advisor already booked needs only a remote meeting now.
+      else if ((row.location_need ? row.location_need === "physical" : physical.has(row.school_id)) !== taskIsPhysical) out.mismatch.push(row);
       else out.send.push(row);
     }
     return out;
@@ -373,7 +391,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
     ? [...roundSplit.send, ...(includeOpenRequests ? roundSplit.open : []), ...(skipLocationMismatch ? [] : roundSplit.mismatch)].map(x => x.school_id)
     : [];
   const roundSkipIds = roundSplit
-    ? [...roundSplit.booked, ...roundSplit.self, ...(includeOpenRequests ? [] : roundSplit.open), ...(skipLocationMismatch ? roundSplit.mismatch : [])].map(x => x.school_id)
+    ? [...roundSplit.booked, ...roundSplit.notNeeded, ...roundSplit.noPlan, ...roundSplit.self, ...(includeOpenRequests ? [] : roundSplit.open), ...(skipLocationMismatch ? roundSplit.mismatch : [])].map(x => x.school_id)
     : [];
   // The pre-send check covers exactly the schools that will get a request.
   function checkAudiencePayload() {
@@ -709,6 +727,13 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
       });
       const task = res.data;
 
+      if (roundExclusionsDiffer && syncRoundExclusions) {
+        try {
+          await axios.patch(`/rounds/${roundContext.round.id}`, { advisor_exclusions: advisorExclusions || {} });
+        } catch {
+          window.alert("המשימה נוצרה, אבל עדכון רשימת \"יועצים שקובעים לעצמם\" של הסבב נכשל — אפשר לעדכן אותה בעריכת הסבב.");
+        }
+      }
       setOutlookLimitWarning(null);
       onCreated(task.id);
     } catch (err) {
@@ -1017,6 +1042,11 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
                       <span><b>{roundSendIds.length}</b> בתי ספר יקבלו בקשה במשימה הזו.</span>
                       {roundSplit.booked.length > 0 && <span className="text-slate-600">{roundSplit.booked.length} כבר קבעו את הפגישה בסבב — לא יקבלו בקשה.</span>}
                       {roundSplit.self.length > 0 && <span className="text-slate-600">{roundSplit.self.length} — היועץ קובע בעצמו את כל הפגישות שלהם — לא יקבלו בקשה.</span>}
+                      {roundSplit.notNeeded.length > 0 && <span className="text-slate-600">{roundSplit.notNeeded.length} לא צריכים פגישה בסבב הזה לפי התוכנית שלהם — לא יקבלו בקשה.</span>}
+                      {roundSplit.noPlan.length > 0 && <span className="text-red-700">{roundSplit.noPlan.length} בלי מספר פגישות בסבב (אין תוכנית בכרטיס) — לא יקבלו בקשה עד שיוגדר להם מספר בסבב.</span>}
+                      {roundContext.round.plan_mode === "plan" && roundSplit.send.length > 0 && (
+                        <span className="text-slate-600">כל בית ספר יקבל קישור אחד עם בקשה נפרדת לכל פגישה שחסרה לו בסבב, כל אחת בחודש שלה לפי התוכנית.</span>
+                      )}
                       {roundSplit.outside.length > 0 && <span className="text-slate-600">{roundSplit.outside.length} לא שייכים לסבב (או הוחרגו ממנו) — לא ייכללו.</span>}
                       {roundSplit.open.length > 0 && (
                         <span className="flex flex-col gap-1">
@@ -1034,7 +1064,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
                       {roundSplit.mismatch.length > 0 && (
                         <span className="flex flex-col gap-1">
                           <span className="text-slate-600">
-                            {roundSplit.mismatch.length} מסומנים בסבב כ{taskIsPhysical ? "מרחוק" : "פיזיים"}, והמשימה הזו {taskIsPhysical ? "פיזית" : "מרחוק"}
+                            {roundSplit.mismatch.length} צריכים כעת פגישה {taskIsPhysical ? "מרחוק" : "פיזית"}, והמשימה הזו {taskIsPhysical ? "פיזית" : "מרחוק"}
                             {skipLocationMismatch ? " — לא ייכללו (צרו להם משימה נפרדת מהסבב)." : " — ייכללו בכל זאת."}
                           </span>
                           <label className="flex items-center gap-1.5 text-xs cursor-pointer w-fit">
@@ -1050,6 +1080,16 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
               )}
 
               <AdvisorExclusionsEditor value={advisorExclusions} onChange={setAdvisorExclusions} users={orgUsers} idPrefix="task-exclusions" />
+              {roundExclusionsDiffer && (
+                <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-slate-700 flex flex-col gap-1">
+                  <span>הרשימה במשימה הזו שונה מהרשימה של הסבב. בלי עדכון, הסבב ימשיך לספור את הפגישות של היועצים שהוצאו כפגישות חסרות.</span>
+                  <label htmlFor="task-sync-round-exclusions" className="flex items-center gap-1.5 cursor-pointer w-fit">
+                    <input id="task-sync-round-exclusions" type="checkbox" checked={syncRoundExclusions}
+                      onChange={e => setSyncRoundExclusions(e.target.checked)} className="accent-blue-600" />
+                    עדכן גם ברשימת הסבב
+                  </label>
+                </div>
+              )}
 
               <div className="pt-1">
                 <button type="button" onClick={() => setShowScheduleModal(true)}

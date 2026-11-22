@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import * as XLSX from "xlsx";
 import { useFocusTrap } from "../../hooks/useFocusTrap";
@@ -10,6 +10,7 @@ import { MEETING_SERVICE_TYPE_LABELS, formatDateDMY } from "../tasks/taskShared"
 import { exclusionTypesLabel } from "../tasks/AdvisorExclusionsEditor";
 import {
   ROUND_STATUS_META, ROUND_STATUS_ORDER, ROUND_PROBLEM_LABELS, STALE_REQUEST_DAYS, requirementLabel, daysSince,
+  PLAN_PART_LABELS,
   MEETING_KIND_ORDER, meetingKindOf, meetingKindLabel,
 } from "./roundsShared";
 
@@ -56,6 +57,10 @@ function ConfirmDialog({ title, children, actions, onClose }) {
   );
 }
 
+// The card's advisor list(s) a meeting type's advisor comes from (takuma: the גפן list) — what's
+// missing when a meeting shows under "ללא יועץ בכרטיס" (meeting_rounds._ADVISOR_LISTS).
+const NO_ADVISOR_LISTS = { gefen: ["גפן"], current: ["שוטף"], district: ["מחוז"], takuma: ["גפן"], gefen_current: ["גפן", "שוטף"] };
+
 export default function RoundDashboard({ roundId, onBack, onChanged }) {
   const { openTask } = useTasks();
   const [data, setData] = useState(null);
@@ -72,6 +77,7 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  const [showNoAdvisor, setShowNoAdvisor] = useState(false); // "ללא יועץ בכרטיס" row expanded
 
   function load() {
     axios.get(`/rounds/${roundId}`)
@@ -95,6 +101,8 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
   const untouched = schools.filter(s => s.status === "untouched");
   const partial = schools.filter(s => s.status === "partial");
   const problems = schools.filter(s => s.status === "problem");
+  // Still missing a meeting with no live request asking for it — nothing happens unless a task is made.
+  const noRequest = schools.filter(s => s.needs_request);
 
   // How many schools need each kind of meeting (only kinds with at least one school are shown).
   const byKind = useMemo(() => {
@@ -108,22 +116,35 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
     return MEETING_KIND_ORDER.filter(k => out[k]?.schools).map(k => ({ kind: k, ...out[k] }));
   }, [schools, rnd]);
 
+  // Each advisor is credited only with the meetings they're in (school_status parts) — not the
+  // meeting of the school's other advisor (e.g. the שוטף one of a גפן+שוטף school).
   const byAdvisor = useMemo(() => {
     const out = {};
     for (const s of schools) {
-      for (const aid of s.advisor_ids.length ? s.advisor_ids : ["__none__"]) {
-        const e = out[aid] ||= { id: aid, schools: 0, required: 0, booked: 0, untouched: 0 };
-        e.schools += 1;
-        e.required += s.required_count;
-        e.booked += s.booked_count;
-        if (s.status === "untouched") e.untouched += 1;
+      const parts = s.parts?.length ? s.parts : [{ advisor_ids: s.advisor_ids, required: s.required_count, booked: s.booked_count }];
+      const seen = new Set();
+      for (const p of parts) {
+        for (const aid of p.advisor_ids.length ? p.advisor_ids : ["__none__"]) {
+          const e = out[aid] ||= { id: aid, schools: 0, required: 0, booked: 0, untouched: 0, items: [] };
+          e.required += p.required;
+          e.booked += p.booked;
+          // "ללא יועץ בכרטיס": which school, and which card list is empty (none = no service type).
+          if (aid === "__none__") {
+            const item = e.items.find(i => i.school === s) || e.items[e.items.push({ school: s, types: [] }) - 1];
+            if (p.type) item.types.push(p.type);
+          }
+          if (seen.has(aid)) continue;
+          seen.add(aid);
+          e.schools += 1;
+          if (s.status === "untouched") e.untouched += 1;
+        }
       }
     }
     return Object.values(out).sort((a, b) => (b.required - b.booked) - (a.required - a.booked));
   }, [schools]);
 
   const shown = schools.filter(s =>
-    (!statusFilter || (statusFilter === "stale" ? stale.includes(s) : s.status === statusFilter))
+    (!statusFilter || (statusFilter === "stale" ? stale.includes(s) : statusFilter === "no_request" ? s.needs_request : s.status === statusFilter))
     && (!physicalFilter || (physicalFilter === "physical") === s.physical)
     && (!query.trim() || `${s.school_name} ${s.symbol || ""} ${s.authority || ""} ${s.city || ""}`.includes(query.trim())),
   );
@@ -141,7 +162,13 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
     const visitors = rnd.physical_visitors || {};
     // An advisor of a part with several card advisors isn't required yet: the task's pre-check
     // asks which of them the meeting is for, and then checks the chosen one's field days.
-    const wanted = new Set(rows.flatMap(s => (visitors[s.school_id] ? s.advisor_ids.filter(a => visitors[s.school_id].includes(a)) : s.advisor_ids)
+    // The task asks only for the meetings still missing, so an advisor whose meeting is already
+    // booked needs no field days for it.
+    const neededIds = s => {
+      const missing = (s.parts || []).filter(p => p.booked < p.required);
+      return missing.length ? [...new Set(missing.flatMap(p => p.advisor_ids))] : s.advisor_ids;
+    };
+    const wanted = new Set(rows.flatMap(s => (visitors[s.school_id] ? neededIds(s).filter(a => visitors[s.school_id].includes(a)) : neededIds(s))
       .filter(a => !(s.advisor_choice_open_ids || []).includes(a))));
     const missing = (fieldDays.advisors || []).filter(a => wanted.has(a.advisor_id) && !a.exempt && !a.days.length);
     return missing.length ? { missing: missing.map(a => a.name || "יועץ"), missingIds: missing.map(a => a.advisor_id) } : {};
@@ -156,6 +183,16 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
     // live request from another task of the round → left out unless chosen (also enforced by
     // the server), the rest get a request.
     setTaskDraft({ key: Date.now(), schoolIds: rows.map(s => s.school_id), physical, requireAdditional });
+  }
+
+  // "הצג": filters the schools table and scrolls to it — it's far below the summary sections, so
+  // filtering alone changed nothing visible. The search and the physical filter are cleared, so
+  // every school of this kind is shown.
+  function showInTable(filter) {
+    setStatusFilter(filter);
+    setPhysicalFilter("");
+    setQuery("");
+    requestAnimationFrame(() => document.getElementById("round-schools-title")?.scrollIntoView({ behavior: "smooth", block: "start" }));
   }
 
   // Straight to the "הוספת יום" field of the first advisor missing days (RoundFieldDays' input ids).
@@ -201,6 +238,21 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
       onChanged?.();
     } catch {
       setNotice("השמירה נכשלה — נסו שוב.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // A round "לפי תוכנית": take these schools' numbers from their cards again (the card changed).
+  async function refreshPlan(schoolIds) {
+    setBusy(true);
+    try {
+      await axios.post(`/rounds/${roundId}/plan-refresh`, { school_ids: schoolIds });
+      load();
+      onChanged?.();
+      setNotice(`המספרים עודכנו מהכרטיס עבור ${schoolIds.length} בתי ספר.`);
+    } catch {
+      setNotice("העדכון מהכרטיס נכשל — נסו שוב.");
     } finally {
       setBusy(false);
     }
@@ -276,14 +328,27 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
   const pct = totals.required ? Math.round((totals.booked / totals.required) * 100) : 0;
   const allShownSelected = shown.length > 0 && shown.every(s => selected.has(s.school_id));
   const selectedRows = schools.filter(s => selected.has(s.school_id));
-  const physicalUntouched = untouched.filter(s => s.physical);
-  const remoteUntouched = untouched.filter(s => !s.physical);
+  // Physical or remote task by where the school's MISSING meetings are held (location_need): a school
+  // marked physical whose visiting advisor already booked needs only a remote meeting now.
+  const needsPhysical = s => (s.location_need ? s.location_need === "physical" : s.physical);
+  const physicalUntouched = untouched.filter(needsPhysical);
+  const remoteUntouched = untouched.filter(s => !needsPhysical(s));
+  const physicalPartial = partial.filter(needsPhysical);
+  const remotePartial = partial.filter(s => !needsPhysical(s));
+  const physicalNoRequest = noRequest.filter(needsPhysical);
+  const remoteNoRequest = noRequest.filter(s => !needsPhysical(s));
   const excludedNames = (data.excluded_school_ids || []).length;
   const physicalReady = physicalReadiness(physicalUntouched);
-  const selectedAllPhysical = selectedRows.length > 0 && selectedRows.every(s => s.physical);
-  const selectedMixed = selectedRows.some(s => s.physical) && !selectedAllPhysical;
+  const physicalPartialReady = physicalReadiness(physicalPartial);
+  const physicalNoRequestReady = physicalReadiness(physicalNoRequest);
+  // A round asking 2+ meetings per school: a school that holds some of them asks for another one.
+  const askAdditional = rnd.plan_mode !== "plan" && (rnd.requirement?.count_per_school || 1) > 1;
+  const selectedAllPhysical = selectedRows.length > 0 && selectedRows.every(needsPhysical);
+  const selectedMixed = selectedRows.some(needsPhysical) && !selectedAllPhysical;
   const selectedReady = selectedAllPhysical ? physicalReadiness(selectedRows) : {};
   const ACTION_BTN = "text-xs px-3 py-1.5 rounded-lg bg-blue-600 text-white disabled:opacity-50 disabled:cursor-not-allowed";
+  const planChanged = schools.filter(s => s.plan?.changed);
+  const planMissing = schools.filter(s => s.problem === "missing_plan");
 
   return (
     <div dir="rtl" className="flex flex-col gap-5">
@@ -295,7 +360,7 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
             {rnd.status === "closed" && <span className="mr-2 text-xs font-medium bg-slate-100 text-slate-500 rounded-full px-2 py-0.5">סגור</span>}
           </h2>
           <p className="text-sm text-slate-500">
-            <bdi>{formatDateDMY(rnd.start_date)}</bdi>–<bdi>{formatDateDMY(rnd.end_date)}</bdi> · {requirementLabel(rnd.requirement)}
+            <bdi>{formatDateDMY(rnd.start_date)}</bdi>–<bdi>{formatDateDMY(rnd.end_date)}</bdi> · {requirementLabel(rnd.requirement, rnd.plan_mode)}
           </p>
           {Object.keys(rnd.advisor_exclusions || {}).length > 0 && (
             <p className="text-xs text-violet-700">
@@ -319,6 +384,19 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
       {notice && (
         <p role="status" className="text-sm bg-blue-50 text-blue-800 rounded-lg px-3 py-2 flex justify-between">
           {notice}<button type="button" aria-label="סגירת ההודעה" onClick={() => setNotice("")}>✕</button>
+        </p>
+      )}
+
+      {planChanged.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          <span>תוכנית הפגישות בכרטיס השתנתה אחרי יצירת הסבב ב-{planChanged.length} בתי ספר ({planChanged.slice(0, 5).map(s => s.school_name).join(", ")}{planChanged.length > 5 ? "…" : ""}). הסבב עדיין סופר לפי המספרים הקודמים.</span>
+          <button type="button" disabled={busy} onClick={() => refreshPlan(planChanged.map(s => s.school_id))}
+            className="text-xs px-2.5 py-1 rounded-md border border-amber-400 bg-white hover:bg-amber-100 disabled:opacity-50">עדכן את כולם מהכרטיס</button>
+        </div>
+      )}
+      {planMissing.length > 0 && (
+        <p role="alert" className="text-sm rounded-lg bg-red-50 text-red-700 px-3 py-2">
+          ל-{planMissing.length} בתי ספר בסבב חסר מספר פגישות (אין להם תוכנית בכרטיס) — הם לא נספרים ולא יקבלו בקשה. אפשר להגדיר להם תוכנית בכרטיס ואז "עדכן מהכרטיס", או למלא מספר ב"עריכת הסבב" ← "מי צריך כמה".
         </p>
       )}
 
@@ -365,9 +443,34 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
         </div>
       </div>
 
-      {(untouched.length > 0 || partial.length > 0 || stale.length > 0 || problems.length > 0) && (
+      {(untouched.length > 0 || partial.length > 0 || stale.length > 0 || problems.length > 0 || noRequest.length > 0) && (
         <section aria-labelledby="round-actions-title" className="bg-amber-50/60 border border-amber-200 rounded-xl p-4 flex flex-col gap-2 text-sm">
           <h3 id="round-actions-title" className="font-bold text-slate-800">מה עושים עכשיו</h3>
+          {noRequest.length > 0 && (
+            <div className="flex flex-col gap-1 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <span className="text-red-800"><b>{noRequest.length}</b> בתי ספר שעדיין חסרה להם פגישה — ולא נשלחה להם עליה בקשה.</span>
+                <span className="flex gap-2 flex-wrap">
+                  <button type="button" onClick={() => showInTable("no_request")} className="text-xs px-3 py-1.5 rounded-lg bg-white border border-slate-300">הצג</button>
+                  {remoteNoRequest.length > 0 && (
+                    <button type="button" disabled={busy} onClick={() => startTask(remoteNoRequest, { requireAdditional: askAdditional })} className={ACTION_BTN}>
+                      צור משימה עבורם ({remoteNoRequest.length})
+                    </button>
+                  )}
+                  {physicalNoRequest.length > 0 && (
+                    <button type="button" disabled={busy || physicalNoRequestReady.loading || !!physicalNoRequestReady.missing}
+                      aria-describedby={physicalNoRequestReady.missing ? "round-norequest-physical-missing" : undefined}
+                      onClick={() => startTask(physicalNoRequest, { physical: true, requireAdditional: askAdditional })} className={ACTION_BTN}>
+                      {physicalNoRequestReady.loading ? "בודק ימי שטח…" : `צור משימה פיזית (${physicalNoRequest.length})`}
+                    </button>
+                  )}
+                </span>
+              </div>
+              {physicalNoRequestReady.missing && (
+                <FieldDaysMissingNote id="round-norequest-physical-missing" names={physicalNoRequestReady.missing} onGo={() => goToFieldDays(physicalNoRequestReady.missingIds)} />
+              )}
+            </div>
+          )}
           {remoteUntouched.length > 0 && (
             <div className="flex items-center justify-between gap-2 flex-wrap">
               <span><b>{remoteUntouched.length}</b> בתי ספר עוד לא קיבלו שום בקשה.</span>
@@ -390,16 +493,34 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
             </div>
           )}
           {partial.length > 0 && (
-            <div className="flex items-center justify-between gap-2 flex-wrap">
-              <span><b>{partial.length}</b> בתי ספר קבעו רק חלק מהפגישות הנדרשות.</span>
-              <button type="button" disabled={busy} onClick={() => startTask(partial, { requireAdditional: (rnd.requirement?.count_per_school || 1) > 1 })} className={ACTION_BTN}>צור משימה לפגישות שחסרות</button>
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <span><b>{partial.length}</b> בתי ספר קבעו רק חלק מהפגישות הנדרשות.</span>
+                <span className="flex gap-2 flex-wrap">
+                  {remotePartial.length > 0 && (
+                    <button type="button" disabled={busy} onClick={() => startTask(remotePartial, { requireAdditional: askAdditional })} className={ACTION_BTN}>
+                      צור משימה לפגישות שחסרות{physicalPartial.length > 0 ? ` (${remotePartial.length})` : ""}
+                    </button>
+                  )}
+                  {physicalPartial.length > 0 && (
+                    <button type="button" disabled={busy || physicalPartialReady.loading || !!physicalPartialReady.missing}
+                      aria-describedby={physicalPartialReady.missing ? "round-partial-physical-missing" : undefined}
+                      onClick={() => startTask(physicalPartial, { physical: true, requireAdditional: askAdditional })} className={ACTION_BTN}>
+                      {physicalPartialReady.loading ? "בודק ימי שטח…" : `צור משימה פיזית לפגישות שחסרות (${physicalPartial.length})`}
+                    </button>
+                  )}
+                </span>
+              </div>
+              {physicalPartialReady.missing && (
+                <FieldDaysMissingNote id="round-partial-physical-missing" names={physicalPartialReady.missing} onGo={() => goToFieldDays(physicalPartialReady.missingIds)} />
+              )}
             </div>
           )}
           {stale.length > 0 && (
             <div className="flex items-center justify-between gap-2 flex-wrap">
               <span><b>{stale.length}</b> בתי ספר קיבלו בקשה לפני {STALE_REQUEST_DAYS} ימים ויותר ועדיין לא קבעו.</span>
               <span className="flex gap-2">
-                <button type="button" onClick={() => setStatusFilter("stale")} className="text-xs px-3 py-1.5 rounded-lg bg-white border border-slate-300">הצג</button>
+                <button type="button" onClick={() => showInTable("stale")} className="text-xs px-3 py-1.5 rounded-lg bg-white border border-slate-300">הצג</button>
                 <button type="button" disabled={busy} onClick={() => sendReminders(stale)} className={ACTION_BTN}>שלח להם תזכורת</button>
               </span>
             </div>
@@ -407,7 +528,7 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
           {problems.length > 0 && (
             <div className="flex items-center justify-between gap-2 flex-wrap">
               <span><b>{problems.length}</b> בתי ספר עם בעיה (חסר איש קשר, סוג שירות, או שליחה שנכשלה).</span>
-              <button type="button" onClick={() => setStatusFilter("problem")} className="text-xs px-3 py-1.5 rounded-lg bg-white border border-slate-300">הצג</button>
+              <button type="button" onClick={() => showInTable("problem")} className="text-xs px-3 py-1.5 rounded-lg bg-white border border-slate-300">הצג</button>
             </div>
           )}
         </section>
@@ -429,8 +550,14 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
             </thead>
             <tbody className="divide-y divide-slate-100">
               {byAdvisor.map(a => (
-                <tr key={a.id}>
-                  <td className="px-3 py-2">{a.id === "__none__" ? <span className="text-red-600">ללא יועץ בכרטיס</span> : names[a.id] || "—"}</td>
+                <Fragment key={a.id}>
+                <tr>
+                  <td className="px-3 py-2">{a.id === "__none__" ? (
+                    <button type="button" onClick={() => setShowNoAdvisor(v => !v)} aria-expanded={showNoAdvisor}
+                      aria-controls="round-no-advisor-details" className="text-red-600 underline decoration-dotted text-right">
+                      ללא יועץ בכרטיס <span aria-hidden="true">{showNoAdvisor ? "▲" : "▼"}</span>
+                    </button>
+                  ) : names[a.id] || "—"}</td>
                   <td className="px-3 py-2">{a.schools}</td>
                   <td className="px-3 py-2">{a.booked}/{a.required}</td>
                   <td className="px-3 py-2 font-semibold">{a.required - a.booked}</td>
@@ -441,6 +568,30 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
                     </div>
                   </td>
                 </tr>
+                {a.id === "__none__" && showNoAdvisor && (
+                  <tr id="round-no-advisor-details">
+                    <td colSpan={6} className="px-3 py-3 bg-red-50/50">
+                      <ul className="flex flex-col gap-2 text-xs text-slate-700">
+                        {a.items.map(({ school: s, types }) => (
+                          <li key={s.school_id}>
+                            <a href={`/school/${s.school_id}`} target="_blank" rel="noreferrer" className="font-semibold text-slate-800 hover:underline">{s.school_name}</a>
+                            {" — "}
+                            {types.length
+                              ? <>בכרטיס בית הספר אין {[...new Set(types.flatMap(t => NO_ADVISOR_LISTS[t] || []))].map(l => `יועץ מלווה [${l}]`).join(" ו")} לשנה זו.
+                                  {" "}מה עושים: פותחים את כרטיס בית הספר ← "פרטי בית הספר" ← "ליווי", ומוסיפים יועץ.</>
+                              : <>בכרטיס בית הספר אין סוג שירות לשנה זו, ולכן לא ידוע איזו פגישה הוא צריך ועם מי. מה עושים: פותחים את כרטיס בית הספר ← "פרטי בית הספר" ← "ליווי", ובוחרים סוג שירות ויועץ מלווה.</>}
+                            {s.request && (
+                              <span className="block text-slate-500 mt-0.5">
+                                לבית הספר כבר נשלחה בקשה לפגישה — מי שיופיע בה הוא היועץ שהיה בכרטיס בזמן השליחה. אם היועץ הוחלף, יש לבדוק מול בית הספר.
+                              </span>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    </td>
+                  </tr>
+                )}
+                </Fragment>
               ))}
             </tbody>
           </table>
@@ -463,6 +614,7 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
               <option value="">כל המצבים</option>
               {ROUND_STATUS_ORDER.map(st => <option key={st} value={st}>{ROUND_STATUS_META[st].label}</option>)}
               <option value="stale">ממתינים {STALE_REQUEST_DAYS}+ ימים</option>
+              <option value="no_request">חסרה פגישה ולא נשלחה בקשה</option>
             </select>
             {(rnd.physical_school_ids || []).length > 0 && (
               <>
@@ -493,7 +645,7 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
             )}
             {selectedMixed && (
               <p id="round-selected-mixed" className="text-xs text-slate-600">
-                בבחירה יש בתי ספר פיזיים ובתי ספר מרחוק — המשימה תהיה מרחוק, ובתי הספר הפיזיים יסומנו בחלון המשימה וידולגו כברירת מחדל.
+                בבחירה יש בתי ספר שחסרה להם פגישה פיזית ובתי ספר שחסרה להם רק פגישה מרחוק — המשימה תהיה מרחוק, ובתי הספר שצריכים פגישה פיזית יסומנו בחלון המשימה וידולגו כברירת מחדל.
                 ליצירת משימה פיזית בחרו רק בתי ספר פיזיים (סינון "פיזי בלבד").
               </p>
             )}
@@ -537,7 +689,21 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
                   </td>
                   <td className="px-3 py-2 text-xs">
                     {s.required_types.map(t => MEETING_SERVICE_TYPE_LABELS[t]).join(" · ") || "—"}
-                    {s.required_count > 1 && <span className="text-slate-500"> ({s.booked_count}/{s.required_count})</span>}
+                    {(s.required_count > 1 || s.plan) && <span className="text-slate-500"> ({s.booked_count}/{s.required_count})</span>}
+                    {s.plan && Object.entries(s.plan.parts).map(([part, p]) => (
+                      <span key={part} className="block text-[11px] text-slate-500">
+                        {PLAN_PART_LABELS[part]}: {p.missing ? <span className="text-red-600">חסר מספר</span> : <>
+                          {p.required} בסבב
+                          {p.carried > 0 && (p.offer
+                            ? <span className="text-amber-700"> · כולל {p.carried} שלא התקיימו</span>
+                            : <span className="text-slate-500"> · {p.carried} שלא התקיימו נדחו לסבב הבא</span>)}
+                        </>}
+                        {p.changed && (
+                          <button type="button" disabled={busy} onClick={() => refreshPlan([s.school_id])}
+                            className="mr-1 text-blue-700 hover:underline disabled:opacity-50">הכרטיס השתנה — עדכן</button>
+                        )}
+                      </span>
+                    ))}
                   </td>
                   <td className="px-3 py-2 text-xs">
                     {s.meetings.length ? s.meetings.map(m => (

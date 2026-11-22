@@ -486,7 +486,10 @@ export default function MeetingBookingPage() {
                           <span className="text-xs px-3 py-1 rounded-lg bg-green-100 text-green-700 font-semibold">✓ נקבע</span>
                         ) : r.existing_meeting ? (
                           <span className="text-xs px-3 py-1 rounded-lg bg-green-100 text-green-700 font-semibold whitespace-nowrap">
-                            ✓ כבר נקבעה פגישה בתאריך {formatDateDDMMYYYY(r.existing_meeting.meeting_date)} בשעה {r.existing_meeting.start_time}
+                            {/* One of several requests of a round: closed once all the meetings needed are booked. */}
+                            {r.round_plan_request || !r.existing_meeting.meeting_date
+                              ? "✓ כל הפגישות הנדרשות כבר נקבעו"
+                              : `✓ כבר נקבעה פגישה בתאריך ${formatDateDDMMYYYY(r.existing_meeting.meeting_date)} בשעה ${r.existing_meeting.start_time}`}
                           </span>
                         ) : (
                           <button type="button" onClick={() => setPickerRange(r)}

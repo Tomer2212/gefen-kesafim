@@ -1,18 +1,21 @@
 """District / ownership client cards ("סוג לקוח: מחוזות / בעלויות") — see client_entities.py."""
 
 import logging
+import re
 import time
 from datetime import date
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from pydantic import BaseModel, field_validator
 
 import client_entities
 import school_activity
 from academic_years import DEFAULT_ACADEMIC_YEAR
 from auth import get_current_user
-from routers.schools_router import _check_permission
+from routers.schools_router import (
+    _check_permission, _resync_school_meetings_after_contact_change, _school_phone_suffixes,
+)
 from supabase_client import get_admin_client, reset_admin_client
 
 logger = logging.getLogger(__name__)
@@ -215,6 +218,9 @@ def get_client(entity_id: str, user: Annotated[dict, Depends(get_current_user)])
     return out
 
 
+_PHONE_RE = re.compile(r"^0\d{8,9}$")
+
+
 class ContactIn(BaseModel):
     role: str | None = None
     name: str | None = None
@@ -222,13 +228,26 @@ class ContactIn(BaseModel):
     email: str | None = None
     day_off: list[str] | None = None
 
+    @field_validator("phone")
+    @classmethod
+    def _phone_format(cls, v):
+        # Same rule as ClientPage.phoneError: 9-10 digits starting with 0 (mobile or landline).
+        # Normalized first like ClientPage.normalizePhone ("972524399715" / "052-439-9715" -> "0524399715").
+        v = re.sub(r"\D", "", v or "")
+        if v.startswith("972") and len(v) >= 11:
+            v = "0" + v[3:]
+        if v and not _PHONE_RE.match(v):
+            raise ValueError("מספר טלפון חייב להכיל 9 או 10 ספרות ולהתחיל ב-0")
+        return v or None
+
 
 class ContactsIn(BaseModel):
     extra_contacts: list[ContactIn]
 
 
 @router.put("/{entity_id}/contacts")
-def update_client_contacts(entity_id: str, body: ContactsIn, user: Annotated[dict, Depends(get_current_user)]):
+def update_client_contacts(entity_id: str, body: ContactsIn, user: Annotated[dict, Depends(get_current_user)],
+                           background_tasks: BackgroundTasks):
     """Direct edit — owner/manager, or an advisor with "can_edit_school_directly" (no advisor
     assignment needed: every org user sees every district / ownership). Others submit an update
     request (POST /schools/{id}/update-requests) instead."""
@@ -244,6 +263,9 @@ def update_client_contacts(entity_id: str, body: ContactsIn, user: Annotated[dic
         action="updated", before={"extra_contacts": row.get("extra_contacts")}, after={"extra_contacts": contacts},
         fields=("extra_contacts",),
     )
+    # A contact phone changed → calls with that number may belong to past meetings too (as on the school card).
+    if _school_phone_suffixes(row) != _school_phone_suffixes({**row, "extra_contacts": contacts}):
+        background_tasks.add_task(_resync_school_meetings_after_contact_change, user["org_id"], entity_id)
     return _row_out(updated[0] if updated else {**row, "extra_contacts": contacts})
 
 
