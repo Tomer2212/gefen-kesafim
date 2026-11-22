@@ -41,8 +41,25 @@ function SpreadsheetIcon() {
   );
 }
 
-function fieldConfigForMode(mode, endTimeMethod) {
-  return MEETING_IMPORT_FIELD_CONFIG.filter(f => {
+// Past mode only — what to do with the "יועץ מבצע" column (sent as advisor_link_mode).
+const ADVISOR_LINK_OPTIONS = [
+  {
+    value: "link",
+    label: "שייך למשתמשים קיימים במערכת (מומלץ)",
+    hint: "שיוך אוטומטי לפי התאמה מלאה של מייל או שם מלא. שמות שלא יזוהו יוצגו בשלב הבא — תוכל לבחור משתמש או לשמור כטקסט חופשי.",
+    fieldHint: "שם מלא או מייל של משתמש במערכת — מה שלא יזוהה ייבדק בשלב הבא",
+  },
+  {
+    value: "text",
+    label: "שמור כטקסט חופשי בלבד",
+    hint: "השם יישמר כפי שהוא בקובץ, ללא שיוך למשתמש. מתאים להעלאה מהירה של פגישות היסטוריות.",
+    fieldHint: "יישמר כטקסט חופשי, ללא שיוך למשתמש קיים",
+  },
+];
+
+function fieldConfigForMode(mode, endTimeMethod, advisorLinkMode) {
+  const advisorHint = ADVISOR_LINK_OPTIONS.find(o => o.value === advisorLinkMode)?.fieldHint;
+  return MEETING_IMPORT_FIELD_CONFIG.map(f => (f.key === "advisor_name_text" && advisorHint ? { ...f, hint: advisorHint } : f)).filter(f => {
     if (mode === "past" && f.key === "advisor_name_or_email") return false;
     if (mode === "future" && f.key === "advisor_name_text") return false;
     // "שעת סיום" and the duration-based fields are mutually exclusive input methods for the
@@ -146,7 +163,9 @@ export default function ImportMeetingsModal({ orgUsers, academicYear, onClose, o
   const [dragOver, setDragOver] = useState(false);
   const [endTimeMethod, setEndTimeMethod] = useState(null); // "direct" | "duration"
   const [durationPriority, setDurationPriority] = useState("planned_first"); // "planned_first" | "actual_first"
+  const [advisorLinkMode, setAdvisorLinkMode] = useState("link"); // past mode only: "link" | "text"
   const inputRef = useRef();
+  const advisorLinkModeForRequest = mode === "past" ? advisorLinkMode : null;
 
   function readFile(file) {
     if (!file) return;
@@ -226,7 +245,7 @@ export default function ImportMeetingsModal({ orgUsers, academicYear, onClose, o
         const chunk = rows.slice(i, i + MEETING_IMPORT_CHUNK_SIZE);
         const res = await axios.post(
           "/schools/meetings/import/validate",
-          { mode, duration_priority: durationPriorityForRequest, rows: chunk },
+          { mode, duration_priority: durationPriorityForRequest, advisor_link_mode: advisorLinkModeForRequest, rows: chunk },
           { timeout: 60000 }
         );
         mergedRows.push(...res.data.rows);
@@ -251,6 +270,7 @@ export default function ImportMeetingsModal({ orgUsers, academicYear, onClose, o
       <MeetingImportProblemsModal
         mode={mode}
         durationPriority={durationPriorityForRequest}
+        advisorLinkMode={advisorLinkModeForRequest}
         rows={validateRows}
         schoolsContacts={schoolsContacts}
         orgUsers={orgUsers}
@@ -270,7 +290,7 @@ export default function ImportMeetingsModal({ orgUsers, academicYear, onClose, o
         headers={sheetData.headers}
         previewRow={sheetData.previewRow}
         totalRows={sheetData.dataRows.length}
-        fieldConfig={fieldConfigForMode(mode, endTimeMethod)}
+        fieldConfig={fieldConfigForMode(mode, endTimeMethod, advisorLinkModeForRequest)}
         confirmLabel={`בדוק ${sheetData.dataRows.length} שורות`}
         onConfirm={handleMappingConfirm}
         onCancel={onClose}
@@ -285,8 +305,8 @@ export default function ImportMeetingsModal({ orgUsers, academicYear, onClose, o
         className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl mx-4">
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
           <div className="flex items-center gap-2">
-            {(step === "upload" || step === "end_method") && (
-              <button type="button" onClick={() => setStep(step === "upload" ? "mode" : "upload")} aria-label="חזרה" className="text-slate-400 hover:text-slate-600">
+            {(step === "upload" || step === "end_method" || step === "advisor_method") && (
+              <button type="button" onClick={() => setStep({ upload: "mode", end_method: "upload", advisor_method: "end_method" }[step])} aria-label="חזרה" className="text-slate-400 hover:text-slate-600">
                 <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M9 6l6 6-6 6" />
                 </svg>
@@ -417,8 +437,32 @@ export default function ImportMeetingsModal({ orgUsers, academicYear, onClose, o
 
             <div className="flex items-center justify-between">
               <button type="button" onClick={onClose} className="text-sm px-4 py-2 rounded-xl font-medium text-slate-500 hover:bg-slate-50">ביטול</button>
-              <button type="button" disabled={!endTimeMethod} onClick={() => setStep("mapping")}
+              <button type="button" disabled={!endTimeMethod} onClick={() => setStep(mode === "past" ? "advisor_method" : "mapping")}
                 className="text-sm px-5 py-2.5 rounded-xl font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+                {mode === "past" ? "המשך" : "המשך למיפוי עמודות"}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {step === "advisor_method" && (
+          <div className="p-6 space-y-4">
+            <p className="text-sm text-slate-600">איך לטפל בעמודת "יועץ מבצע"?</p>
+            <div className="grid grid-cols-2 gap-3" role="radiogroup" aria-label="טיפול בעמודת יועץ מבצע">
+              {ADVISOR_LINK_OPTIONS.map(o => (
+                <button key={o.value} type="button" role="radio" aria-checked={advisorLinkMode === o.value}
+                  onClick={() => setAdvisorLinkMode(o.value)}
+                  className={`text-right border rounded-xl p-4 transition-colors ${advisorLinkMode === o.value ? "border-blue-400 bg-blue-50/50" : "border-slate-200 hover:border-blue-300"}`}>
+                  <div className="font-semibold text-slate-800 mb-1">{o.label}</div>
+                  <div className="text-sm text-slate-500">{o.hint}</div>
+                </button>
+              ))}
+            </div>
+            <p className="text-xs text-slate-400">בסוף הייבוא אפשר להוריד קובץ אקסל עם כל הפגישות שבהן היועץ נשמר כטקסט חופשי.</p>
+            <div className="flex items-center justify-between">
+              <button type="button" onClick={onClose} className="text-sm px-4 py-2 rounded-xl font-medium text-slate-500 hover:bg-slate-50">ביטול</button>
+              <button type="button" onClick={() => setStep("mapping")}
+                className="text-sm px-5 py-2.5 rounded-xl font-medium bg-blue-600 text-white hover:bg-blue-700 transition-colors">
                 המשך למיפוי עמודות
               </button>
             </div>

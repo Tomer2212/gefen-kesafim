@@ -21,7 +21,7 @@ export const MEETING_IMPORT_FIELD_CONFIG = [
   { key: "actual_duration_hours", label: "זמן פגישה בפועל (שעות)",   required: false, hint: "אותו עיקרון כמו 'מתוכנן' — כמות השעות שבאמת ארכה הפגישה" },
   { key: "stage_scope",           label: "היקף פגישה (שש-שנתי)",      required: false, hint: "תיכון / חטיבת ביניים / שתיהן" },
   { key: "advisor_name_or_email", label: "יועץ מבצע",                 required: true, hint: "שם מלא או מייל של יועץ קיים במערכת" },
-  { key: "advisor_name_text",     label: "יועץ מבצע",                 required: true, hint: "יישמר כטקסט חופשי, ללא שיוך למשתמש קיים" },
+  { key: "advisor_name_text",     label: "יועץ מבצע",                 required: true }, // hint set per advisor_link_mode in ImportMeetingsModal.jsx
   { key: "meeting_type",          label: "מיקום פגישה",               required: false, hint: "פיזי / מרחוק" },
   { key: "meeting_service_type",  label: "סוג פגישה",                 required: true, hint: "גפן / שוטף / גפן+שוטף / מחוז — נושא הפגישה הספציפי, לא סוג השירות הקבוע של בית הספר" },
   { key: "participant_roles",     label: "תפקיד/י משתתפים (מהכרטיס)", required: false, hint: 'לדוגמה: "מנהל" או "מנהלנית" או "מנהל, מנהלנית" — המערכת תזהה אוטומטית את איש/י הקשר המתאימים מכרטיס בית הספר' },

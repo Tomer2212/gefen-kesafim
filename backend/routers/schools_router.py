@@ -501,6 +501,9 @@ class MeetingImportRowIn(BaseModel):
     # participant role" mapping step. Grouped per (school_id, token) on the frontend since
     # extra_contacts roles are school-specific — see MeetingImportProblemsModal.jsx.
     participant_role_overrides: dict[str, str] | None = None
+    # Past mode with advisor_link_mode="link": the user chose to keep this row's "יועץ מבצע" as
+    # free text (no matching user) in the problems screen — resolves advisor_unmatched_past.
+    advisor_keep_text: bool = False
 
 
 class MeetingImportValidateIn(BaseModel):
@@ -509,12 +512,17 @@ class MeetingImportValidateIn(BaseModel):
     # present for the same row — the other is used only as a fallback when the preferred one is
     # empty for that specific row. Meaningless (ignored) when end_time is mapped directly.
     duration_priority: str | None = None  # "planned_first" | "actual_first"
+    # Past mode only: "link" = match "יועץ מבצע" to an org user (exact email / unique full name),
+    # unmatched values become advisor_unmatched_past problems; "text" (default — what tabs loaded
+    # before this option send) = keep it as free text in advisor_name_text, as before.
+    advisor_link_mode: str | None = None
     rows: list[MeetingImportRowIn]
 
 
 class MeetingImportCommitIn(BaseModel):
     mode: str
     duration_priority: str | None = None
+    advisor_link_mode: str | None = None
     rows: list[MeetingImportRowIn]
     # Optional shared id across chunked commit requests for one logical import (frontend splits
     # large files into several /commit calls to stay under the HTTP timeout). If omitted, a fresh
@@ -5440,7 +5448,7 @@ def _build_secretary_upload_email_html(recipient_name: str, when_bet: str, schoo
       <p style="margin: 0 0 16px 0; font-size: 15px;">{greeting}</p>
       <p style="margin: 0 0 16px 0; color: #334155; line-height: 1.8;">
         לקראת הפגישה שתתקיים {when_bet}, <b>{date_fmt}</b>{time_clause}{advisor_clause} על תקציב הגפ"ן,
-        נשמח <b>שתעלי עוד היום</b> את הקבצים הבאים בקישור המצורף כדי שנוכל להיערך בהתאם:
+        נשמח <b>שתעלו עוד היום</b> את הקבצים הבאים בקישור המצורף כדי שנוכל להיערך בהתאם:
       </p>
       {baseline_note}
       {items_html}
@@ -9745,7 +9753,24 @@ def _sync_new_meeting_calendar(db, org_id: str, school_id: str, meeting: dict, u
 # ---------------------------------------------------------------------------
 
 def _normalize_match_str(s: str | None) -> str:
-    return (s or "").strip().lower()
+    return " ".join((s or "").split()).lower()
+
+
+def _suggest_advisor_match(profiles: list[dict], query: str | None) -> str | None:
+    """A likely (NOT certain) user for an import's advisor text that had no exact match: the
+    full name with its words in another order ("כהן רינה"), or the text equal to an email's
+    local part. Only offered in the problems screen as "אולי: X" — never applied by itself."""
+    q = _normalize_match_str(query)
+    if not q:
+        return None
+    words = sorted(q.split())
+    hits = []
+    for p in profiles:
+        name = _normalize_match_str(p.get("full_name"))
+        local = _normalize_match_str(p.get("email")).split("@")[0]
+        if (name and sorted(name.split()) == words) or (local and local == q):
+            hits.append(p["id"])
+    return hits[0] if len(hits) == 1 else None
 
 
 def _resolve_advisor_match(profiles_by_email: dict, profiles_by_name: dict, query: str | None) -> str | None:
@@ -9914,7 +9939,8 @@ def _participant_from_role_key(school: dict, role_key: str) -> dict | None:
     return None
 
 
-def _run_meeting_import_validation(db, org_id: str, mode: str, rows: list, duration_priority: str | None = None) -> tuple[list[dict], dict]:
+def _run_meeting_import_validation(db, org_id: str, mode: str, rows: list, duration_priority: str | None = None,
+                                   advisor_link_mode: str | None = None) -> tuple[list[dict], dict]:
     """Shared row-by-row validation used by both /meetings/import/validate (first pass) and
     /meetings/import/commit (mandatory server-side re-check before committing). Batch-fetches
     schools/profiles/existing-meetings once (CLAUDE.md rule 7 — no per-row queries).
@@ -9985,15 +10011,16 @@ def _run_meeting_import_validation(db, org_id: str, mode: str, rows: list, durat
     # live per-row fetch via prefetched_blocks=None), never an incorrect result.
     advisor_date_range: dict[str, list[date]] = {}
     for row in rows:
-        if mode != "future":
-            continue
+        # Any future-dated row is checked in the main loop — also a past file's (accepted mode
+        # mismatch), whose advisor comes from advisor_name_text (same query as the main loop).
         s = schools_by_id.get(row.school_id) if row.school_id else schools_by_symbol.get(str(row.school_symbol or "").strip())
         if not s:
             continue
         d = _parse_import_date(row.meeting_date_override) or _parse_import_date(row.meeting_date)
         if not d or d < today:
             continue
-        aid = row.resolved_advisor_id if (row.resolved_advisor_id and row.resolved_advisor_id in profiles_by_id) else _resolve_advisor_match(profiles_by_email, profiles_by_name, row.advisor_name_or_email)
+        advisor_query = row.advisor_name_or_email if mode == "future" else row.advisor_name_text
+        aid = row.resolved_advisor_id if (row.resolved_advisor_id and row.resolved_advisor_id in profiles_by_id) else _resolve_advisor_match(profiles_by_email, profiles_by_name, advisor_query)
         if not aid:
             continue
         advisor_date_range.setdefault(aid, [d, d])
@@ -10060,12 +10087,28 @@ def _run_meeting_import_validation(db, org_id: str, mode: str, rows: list, durat
 
         advisor_id = None
         if effective_mode == "future":
+            # A past file's future-dated row (accepted mode mismatch) only has advisor_name_text.
+            advisor_query = row.advisor_name_or_email if mode == "future" else row.advisor_name_text
             if row.resolved_advisor_id and row.resolved_advisor_id in profiles_by_id:
                 advisor_id = row.resolved_advisor_id
             else:
-                advisor_id = _resolve_advisor_match(profiles_by_email, profiles_by_name, row.advisor_name_or_email)
+                advisor_id = _resolve_advisor_match(profiles_by_email, profiles_by_name, advisor_query)
             if not advisor_id:
-                problems.append({"type": "advisor_unresolved", "detail": f"לא נמצא יועץ תואם ל-'{row.advisor_name_or_email or ''}'"})
+                problems.append({"type": "advisor_unresolved", "detail": f"לא נמצא יועץ תואם ל-'{advisor_query or ''}'",
+                                 "raw_value": (advisor_query or "").strip(),
+                                 "suggested_advisor_id": _suggest_advisor_match(profiles, advisor_query)})
+        elif mode == "past" and advisor_link_mode == "link":
+            # The past file's advisor column is advisor_name_text (a row of a past file can be
+            # future-dated — effective_mode — and then still carries only this column).
+            if row.resolved_advisor_id and row.resolved_advisor_id in profiles_by_id:
+                advisor_id = row.resolved_advisor_id
+            elif not row.advisor_keep_text and (row.advisor_name_text or "").strip():
+                advisor_id = _resolve_advisor_match(profiles_by_email, profiles_by_name, row.advisor_name_text)
+                if not advisor_id:
+                    problems.append({"type": "advisor_unmatched_past",
+                                     "detail": f"לא נמצא משתמש תואם ל-'{row.advisor_name_text.strip()}' — יש לבחור משתמש או לשמור כטקסט חופשי",
+                                     "raw_value": row.advisor_name_text.strip(),
+                                     "suggested_advisor_id": _suggest_advisor_match(profiles, row.advisor_name_text)})
 
         stage_scope = _normalize_stage_scope(row.stage_scope)
         # Only required for future meetings — a past-documentation row doesn't need this
@@ -10222,7 +10265,8 @@ def validate_meeting_import(body: MeetingImportValidateIn, user: Annotated[dict,
     for attempt in range(2):
         try:
             db = get_admin_client()
-            results, schools_contacts = _run_meeting_import_validation(db, user["org_id"], body.mode, body.rows, body.duration_priority)
+            results, schools_contacts = _run_meeting_import_validation(db, user["org_id"], body.mode, body.rows, body.duration_priority,
+                                                                        body.advisor_link_mode)
             break
         except HTTPException:
             raise
@@ -10265,7 +10309,8 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
     _require_manager(user)
     db = get_admin_client()
     active_rows = [r for r in body.rows if not r.excluded]
-    revalidated, _schools_contacts = _run_meeting_import_validation(db, user["org_id"], body.mode, active_rows, body.duration_priority)
+    revalidated, _schools_contacts = _run_meeting_import_validation(db, user["org_id"], body.mode, active_rows, body.duration_priority,
+                                                                    body.advisor_link_mode)
 
     unresolved_row_indexes = []
     for row, val in zip(active_rows, revalidated):
@@ -10283,6 +10328,8 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
             if t == "mode_date_mismatch" and row.accept_mode_mismatch:
                 continue
             if t == "advisor_unresolved" and row.resolved_advisor_id:
+                continue
+            if t == "advisor_unmatched_past" and (row.resolved_advisor_id or row.advisor_keep_text):
                 continue
             if t == "stage_scope_ambiguous" and row.stage_scope:
                 continue
@@ -10308,6 +10355,8 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
 
     import_batch_id = body.import_batch_id or str(uuid4())
     imported, past_count, future_count, future_unqueued = 0, 0, 0, 0
+    # Past rows saved with their "יועץ מבצע" as free text only — downloadable as Excel at the end.
+    free_text_advisor_rows: list[dict] = []
     errors: list[str] = []
     activity_events: list[dict] = []
     # The file's "הערות" column — shown in the meeting's notes window (📝), see _import_meeting_notes.
@@ -10372,12 +10421,20 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
                 "meeting_type": row.meeting_type,
                 "meeting_service_type": row.meeting_service_type,
             }
+            if row.advisor_name_text:
+                import_raw["advisor"] = row.advisor_name_text
             if effective_mode == "future" and row_status == "completed":
                 row_status = "scheduled"
             elif effective_mode == "past" and row_status == "scheduled":
                 row_status = "completed"
 
             if effective_mode == "past":
+                # Linked only when the import asked for it (advisor_link_mode="link") — the
+                # validation then matched the text or the user picked a user. A past meeting
+                # with an advisor triggers nothing (no Outlook sync / reminders below).
+                # data_ctx only — the validation kept row.resolved_advisor_id only if it's a user of
+                # this org; the raw request value is never trusted.
+                past_advisor_id = data_ctx.get("resolved_advisor_id") if body.advisor_link_mode == "link" else None
                 insert_data = {
                     "school_id": school_id,
                     "created_by": user["id"],
@@ -10385,8 +10442,8 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
                     "meeting_type": final_meeting_type or "remote",
                     "meeting_service_type": final_service_type,
                     "stage_scope": stage_scope,
-                    "advisor_ids": [],
-                    "advisor_name_text": row.advisor_name_text,
+                    "advisor_ids": [past_advisor_id] if past_advisor_id else [],
+                    "advisor_name_text": None if past_advisor_id else row.advisor_name_text,
                     "participants": participants,
                     "notes": row.notes,
                     "reminder_enabled": False,
@@ -10402,6 +10459,12 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
                 if past_res.data and (row.notes or "").strip():
                     import_notes.append({"meeting_id": past_res.data[0]["id"], "school_id": school_id,
                                          "content": row.notes.strip()})
+                if past_res.data and not past_advisor_id and (row.advisor_name_text or "").strip():
+                    free_text_advisor_rows.append({
+                        "row_index": row.row_index,
+                        "reason": ("keep_text" if row.advisor_keep_text else "no_match")
+                                  if body.advisor_link_mode == "link" else "text_mode",
+                    })
                 if past_res.data:
                     activity_events.append(dict(
                         meeting_id=past_res.data[0]["id"], school_id=school_id, org_id=user["org_id"],
@@ -10411,7 +10474,8 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
                 imported += 1
                 past_count += 1
             else:
-                advisor_id = row.resolved_advisor_id or data_ctx.get("resolved_advisor_id")
+                # Validated value only (an org user) — never the raw row.resolved_advisor_id.
+                advisor_id = data_ctx.get("resolved_advisor_id")
                 # Reminder auto-enable is deliberately scoped to ROLE-MATCHED participants only
                 # (data_ctx["resolved_participants"] — pulled from the school's own verified
                 # contact fields, same source create_meeting's toggle already trusts), never to
@@ -10489,6 +10553,7 @@ def commit_meeting_import(body: MeetingImportCommitIn, user: Annotated[dict, Dep
     return {
         "imported": imported, "past": past_count, "future": future_count, "errors": errors,
         "future_unqueued": future_unqueued,
+        "free_text_advisor_rows": free_text_advisor_rows,
         "import_batch_id": import_batch_id if future_count else None,
     }
 

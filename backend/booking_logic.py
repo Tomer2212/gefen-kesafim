@@ -160,7 +160,7 @@ def build_booking_request_email_html(recipient_name: str, school_name: str, advi
       <p style="margin: 0 0 16px 0; font-size: 15px;">{greeting}</p>
       <p style="margin: 0 0 16px 0; color: #334155; line-height: 1.8;">
         לבית הספר <b>{school_name}</b> טרם נקבעה פגישת ליווי{advisor_clause} עבור {months_label}.
-        נשמח <b>שתקבעי מועד</b> בקישור המצורף — תוכלי לבחור זמן פנוי ביומן ישירות:
+        נשמח <b>שתקבעו מועד</b> בקישור המצורף — תוכלו לבחור זמן פנוי ביומן ישירות:
       </p>
       <div style="text-align: center; margin-bottom: 8px;">
         <a href="{booking_url}"
@@ -268,7 +268,7 @@ def build_direct_coordination_email_html(recipient_name: str, school_name: str, 
       <p style="margin: 0 0 16px 0; font-size: 15px;">{greeting}</p>
       <p style="margin: 0 0 16px 0; color: #334155; line-height: 1.8;">
         לבית הספר <b>{school_name}</b> מבוקש לתאם{advisor_clause} את הפגישות הבאות.
-        נשמח <b>שתקבעי מועד</b> לכל אחת מהן בקישור המצורף — תוכלי לבחור זמן פנוי ביומן ישירות:
+        נשמח <b>שתקבעו מועד</b> לכל אחת מהן בקישור המצורף — תוכלו לבחור זמן פנוי ביומן ישירות:
       </p>
       {range_rows_html}
       <div style="text-align: center; margin-bottom: 8px;">

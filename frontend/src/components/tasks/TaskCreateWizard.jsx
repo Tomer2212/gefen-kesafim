@@ -64,7 +64,7 @@ const MEETING_TASK_BUILT_IN_TEMPLATE = {
   id: "__builtin_meeting_task",
   name: "ברירת מחדל — קביעת פגישות",
   subject: "קביעת פגישה - {school_name}",
-  body_template: "היי {recipient_name},\n\nלבית הספר {school_name} מבוקש לתאם עם {advisor_names} את הפגישות הבאות. נשמח שתקבעי מועד לכל אחת מהן בקישור המצורף — תוכלי לבחור זמן פנוי ביומן ישירות:\n\n{meetings_list}\n\n{booking_link}\n\nתודה!",
+  body_template: "היי {recipient_name},\n\nלבית הספר {school_name} מבוקש לתאם עם {advisor_names} את הפגישות הבאות. נשמח שתקבעו מועד לכל אחת מהן בקישור המצורף — תוכלו לבחור זמן פנוי ביומן ישירות:\n\n{meetings_list}\n\n{booking_link}\n\nתודה!",
 };
 
 // Per-phase title shown in the wizard header (replaces the old constant "יצירת משימה"/"יצירת

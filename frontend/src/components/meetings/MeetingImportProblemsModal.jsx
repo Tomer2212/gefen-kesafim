@@ -56,6 +56,7 @@ const PROBLEM_TITLES = {
   academic_year_out_of_range: "תאריך מחוץ לשנות הלימודים המוכרות",
   mode_date_mismatch: "אי-התאמה בין מצב הייבוא לתאריך השורה",
   advisor_unresolved: "לא נמצא יועץ תואם",
+  advisor_unmatched_past: "יועץ מבצע לא זוהה",
   stage_scope_ambiguous: "היקף פגישה לא ברור (בית ספר שש-שנתי)",
   calendar_conflict: "התנגשות ביומן Outlook",
   possible_duplicate: "ייתכן שזו כפילות של פגישה קיימת",
@@ -316,7 +317,16 @@ function QuickAddSchoolForm({ row, orgUsers, academicYear, onCreated, onCancel }
 
 const IGNORE_PARTICIPANT_ROLE = "__ignore__";
 
-export default function MeetingImportProblemsModal({ mode, durationPriority, rows, schoolsContacts = {}, orgUsers, academicYear, onSubmit, onClose }) {
+// "יועץ מבצע" values that matched no user — mapped once per distinct value (all its rows).
+// Only a past row (advisor_unmatched_past) may be kept as free text; a future meeting needs a user.
+const ADVISOR_PROBLEM_TYPES = new Set(["advisor_unresolved", "advisor_unmatched_past"]);
+const FREE_TEXT_REASON_LABELS = {
+  keep_text: "נבחר לשמור כטקסט חופשי (לא נמצא משתמש תואם)",
+  no_match: "לא נמצא משתמש תואם — נשמר כטקסט חופשי",
+  text_mode: "נבחר בתחילת הייבוא: שמירה כטקסט חופשי בלבד",
+};
+
+export default function MeetingImportProblemsModal({ mode, durationPriority, advisorLinkMode = null, rows, schoolsContacts = {}, orgUsers, academicYear, onSubmit, onClose }) {
   const { ref, handleKeyDown } = useFocusTrap(onClose);
   const { openCalendarSync } = useCalendarSync();
   const [resolvedKeys, setResolvedKeys] = useState(new Set());
@@ -505,6 +515,106 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
     });
   }
 
+  const advisorGroups = (() => {
+    const groups = new Map(); // `${type}|${rawValue}` -> { type, rawValue, suggestedId, rowIndexes, unresolvedCount }
+    for (const r of problemRows) {
+      if (excludedRows.has(r.row_index)) continue;
+      for (const p of r.problems) {
+        if (!ADVISOR_PROBLEM_TYPES.has(p.type)) continue;
+        const raw = p.raw_value ?? "";
+        const k = `${p.type}|${raw}`;
+        if (!groups.has(k)) groups.set(k, { type: p.type, rawValue: raw, suggestedId: p.suggested_advisor_id || null, rowIndexes: [], unresolvedCount: 0 });
+        const g = groups.get(k);
+        g.rowIndexes.push(r.row_index);
+        if (!isResolved(p.type, r.row_index)) g.unresolvedCount += 1;
+      }
+    }
+    return [...groups.values()].filter(g => g.unresolvedCount > 0);
+  })();
+  const keepTextAdvisorGroups = advisorGroups.filter(g => g.type === "advisor_unmatched_past");
+
+  // choice = a user id, or KEEP_RAW (past rows only) = save the file's text without a user.
+  function mapAdvisorGroups(groupsToMap, choice) {
+    if (!choice) return;
+    const patch = choice === KEEP_RAW
+      ? { resolved_advisor_id: null, advisor_keep_text: true }
+      : { resolved_advisor_id: choice, advisor_keep_text: false };
+    setRowResolutions(prev => {
+      const next = { ...prev };
+      for (const g of groupsToMap) for (const idx of g.rowIndexes) next[idx] = { ...next[idx], ...patch };
+      return next;
+    });
+    setResolvedKeys(prev => {
+      const next = new Set(prev);
+      for (const g of groupsToMap) for (const idx of g.rowIndexes) next.add(key(g.type, idx));
+      return next;
+    });
+  }
+
+  // Advisors the server matched by itself (exact email / unique full name), one entry per file
+  // value + user — shown for transparency, and each can still be changed for all its rows.
+  const autoLinkedGroups = (() => {
+    const groups = new Map(); // `${rawValue}|${autoId}` -> { rawValue, autoId, rowIndexes }
+    for (const r of rows) {
+      if (excludedRows.has(r.row_index)) continue;
+      const autoId = r.data.resolved_advisor_id;
+      if (!autoId || r.problems.some(p => ADVISOR_PROBLEM_TYPES.has(p.type))) continue;
+      const raw = ((mode === "past" ? r.data.advisor_name_text : r.data.advisor_name_or_email) || "").trim();
+      const k = `${raw}|${autoId}`;
+      if (!groups.has(k)) groups.set(k, { rawValue: raw, autoId, rowIndexes: [], allPast: true });
+      const g = groups.get(k);
+      g.rowIndexes.push(r.row_index);
+      // A future-dated row always needs a user — free text is offered only for past rows.
+      if (r.data.effective_mode !== "past") g.allPast = false;
+    }
+    return [...groups.values()].sort((a, b) => b.rowIndexes.length - a.rowIndexes.length);
+  })();
+
+  function changeAutoLinkedGroup(group, choice) {
+    const patch = choice === KEEP_RAW
+      ? { resolved_advisor_id: null, advisor_keep_text: true }
+      : { resolved_advisor_id: choice, advisor_keep_text: false };
+    setRowResolutions(prev => {
+      const next = { ...prev };
+      for (const idx of group.rowIndexes) next[idx] = { ...next[idx], ...patch };
+      return next;
+    });
+  }
+
+  function autoLinkedChoice(group) {
+    const res = rowResolutions[group.rowIndexes[0]];
+    if (res?.advisor_keep_text) return KEEP_RAW;
+    return res?.resolved_advisor_id || group.autoId;
+  }
+
+  function userLabel(id) {
+    const u = orgUsers.find(x => x.id === id);
+    return u ? (u.full_name || u.email) : null;
+  }
+
+  // The meetings saved with their advisor as free text only (rows from the server's
+  // free_text_advisor_rows), so the org can sort them out later.
+  function handleExportFreeTextAdvisors() {
+    const byIndex = new Map(rows.map(r => [r.row_index, r]));
+    const wsData = [["שורה", "שם מוסד", "סמל מוסד", "תאריך", "שעת התחלה", "יועץ מבצע (כפי שנכתב בקובץ)", "סיבה"]];
+    for (const f of submitResult.freeTextAdvisorRows) {
+      const d = byIndex.get(f.row_index)?.data || {};
+      wsData.push([
+        f.row_index + 1,
+        d.resolved_school_name || d.school_name || "",
+        d.school_symbol || "",
+        d.true_date || d.meeting_date || "",
+        d.resolved_start_time || d.start_time || "",
+        d.advisor_name_text || "",
+        FREE_TEXT_REASON_LABELS[f.reason] || "",
+      ]);
+    }
+    const ws = XLSX.utils.aoa_to_sheet(wsData);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "יועץ כטקסט חופשי");
+    XLSX.writeFile(wb, "פגישות_עם_יועץ_כטקסט_חופשי.xlsx");
+  }
+
   // Exports every row that still has at least one unresolved problem (any type) — lets the
   // manager skip them now and handle/re-import separately later, per the user's request.
   function handleExportProblems() {
@@ -535,7 +645,8 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
         row_index: r.row_index,
         excluded: excludedRows.has(r.row_index),
         school_id: res.school_id ?? r.data.resolved_school_id ?? r.data.school_id ?? null,
-        resolved_advisor_id: res.resolved_advisor_id ?? r.data.resolved_advisor_id ?? null,
+        resolved_advisor_id: res.resolved_advisor_id !== undefined ? res.resolved_advisor_id : (r.data.resolved_advisor_id ?? null),
+        advisor_keep_text: res.advisor_keep_text ?? false,
         academic_year_override: res.academic_year_override ?? r.data.academic_year_override ?? null,
         meeting_date_override: res.meeting_date_override ?? r.data.meeting_date_override ?? null,
         resolved_start_time_override: res.resolved_start_time_override ?? r.data.resolved_start_time_override ?? null,
@@ -555,7 +666,7 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
     // from this file (regardless of which chunk it landed in) is tagged together — this is
     // what makes it possible to look up "everything this import produced" later if needed.
     const importBatchId = crypto.randomUUID();
-    const totals = { imported: 0, past: 0, future: 0, futureUnqueued: 0, errors: [] };
+    const totals = { imported: 0, past: 0, future: 0, futureUnqueued: 0, errors: [], freeTextAdvisorRows: [] };
     setSubmitProgress({ done: 0, total: payloadRows.length });
 
     for (let i = 0; i < payloadRows.length; i += MEETING_IMPORT_CHUNK_SIZE) {
@@ -563,7 +674,7 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
       try {
         const res = await axios.post(
           "/schools/meetings/import/commit",
-          { mode, duration_priority: durationPriority, rows: chunk, import_batch_id: importBatchId },
+          { mode, duration_priority: durationPriority, advisor_link_mode: advisorLinkMode, rows: chunk, import_batch_id: importBatchId },
           { timeout: 60000 }
         );
         totals.imported += res.data.imported || 0;
@@ -571,6 +682,7 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
         totals.future += res.data.future || 0;
         totals.futureUnqueued += res.data.future_unqueued || 0;
         if (res.data.errors?.length) totals.errors.push(...res.data.errors);
+        if (res.data.free_text_advisor_rows?.length) totals.freeTextAdvisorRows.push(...res.data.free_text_advisor_rows);
       } catch (e) {
         // Keep going to the next chunk rather than aborting the whole import — a transient
         // failure on one chunk shouldn't cost the rows in every other chunk their chance.
@@ -615,6 +727,15 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
             <p role="alert" className="text-xs text-amber-700 bg-amber-50 rounded-lg px-3 py-2">
               {submitResult.futureUnqueued} מתוך הפגישות העתידיות יובאו למערכת אך לא ישויכו ליומן Outlook — לא נמצא עבורן יועץ מתאים. ניתן לשייך יועץ ידנית בכרטיס הפגישה.
             </p>
+          )}
+          {submitResult.freeTextAdvisorRows?.length > 0 && (
+            <div className="text-xs text-slate-600 bg-slate-50 rounded-lg px-3 py-2 space-y-2">
+              <p>{submitResult.freeTextAdvisorRows.length} פגישות נשמרו עם "יועץ מבצע" כטקסט חופשי, ללא שיוך למשתמש.</p>
+              <button type="button" onClick={handleExportFreeTextAdvisors}
+                className="text-xs px-2.5 py-1.5 rounded-lg font-medium border border-slate-300 text-slate-700 bg-white hover:bg-slate-50">
+                הורד אקסל — פגישות עם יועץ כטקסט חופשי
+              </button>
+            </div>
           )}
           <button type="button" onClick={() => onSubmit(submitResult)} className="text-sm px-4 py-2 rounded-xl font-medium bg-blue-600 text-white hover:bg-blue-700">
             סגור
@@ -690,6 +811,67 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
                       <option value="" disabled>בחר קטגוריה...</option>
                       {g.cfg.options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                       <option value={KEEP_RAW}>השאר כטקסט חופשי ("{g.rawValue}")</option>
+                    </select>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {autoLinkedGroups.length > 0 && (
+            <details className="border border-slate-200 bg-slate-50/60 rounded-xl p-3">
+              <summary className="text-xs text-slate-700 cursor-pointer">
+                יועצים שזוהו אוטומטית: {autoLinkedGroups.reduce((n, g) => n + g.rowIndexes.length, 0)} פגישות שויכו ל-{new Set(autoLinkedGroups.map(g => g.autoId)).size} משתמשים (לחץ לצפייה ולשינוי)
+              </summary>
+              <div className="space-y-1.5 mt-2">
+                {autoLinkedGroups.map(g => (
+                  <div key={`${g.rawValue}|${g.autoId}`} className="flex items-center gap-2 flex-wrap bg-white rounded-lg border border-slate-100 px-2.5 py-1.5">
+                    <b className="text-xs text-slate-800">"{g.rawValue}"</b>
+                    <span aria-hidden="true" className="text-xs text-slate-400">←</span>
+                    <span className="text-xs text-slate-400">({g.rowIndexes.length} שורות)</span>
+                    <select aria-label={`המשתמש המשויך ליועץ ${g.rawValue}`} value={autoLinkedChoice(g)}
+                      onChange={e => changeAutoLinkedGroup(g, e.target.value)}
+                      className="text-xs border border-slate-300 rounded-lg px-2 py-1.5 bg-white mr-auto">
+                      {orgUsers.map(u => <option key={u.id} value={u.id}>{u.full_name || u.email}</option>)}
+                      {!orgUsers.some(u => u.id === g.autoId) && <option value={g.autoId}>{g.rawValue}</option>}
+                      {mode === "past" && g.allPast && <option value={KEEP_RAW}>שמור כטקסט חופשי ("{g.rawValue}")</option>}
+                    </select>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
+
+          {advisorGroups.length > 0 && (
+            <div className="border border-amber-200 bg-amber-50/60 rounded-xl p-3 space-y-2">
+              <p className="text-xs text-amber-800">
+                יועצים שלא זוהו — כל שם ממופה פעם אחת וחל על כל השורות שלו:
+              </p>
+              {keepTextAdvisorGroups.length > 0 && (
+                <button type="button" onClick={() => mapAdvisorGroups(keepTextAdvisorGroups, KEEP_RAW)}
+                  className="text-xs px-2.5 py-1.5 rounded-lg font-medium border border-slate-300 text-slate-600 bg-white hover:bg-slate-50">
+                  שמור את כל היועצים שלא זוהו כטקסט חופשי ({keepTextAdvisorGroups.reduce((n, g) => n + g.unresolvedCount, 0)} שורות)
+                </button>
+              )}
+              {advisorGroups.map(g => {
+                const suggestion = g.suggestedId ? userLabel(g.suggestedId) : null;
+                return (
+                  <div key={`${g.type}|${g.rawValue}`} className="flex items-center gap-2 flex-wrap bg-white rounded-lg border border-amber-100 px-2.5 py-1.5">
+                    <span className="text-xs text-slate-500">יועץ מבצע:</span>
+                    <b className="text-xs text-slate-800">"{g.rawValue || "ריק"}"</b>
+                    <span className="text-xs text-slate-400">({g.rowIndexes.length} שורות)</span>
+                    {suggestion && (
+                      <button type="button" onClick={() => mapAdvisorGroups([g], g.suggestedId)}
+                        className="text-xs px-2 py-1 rounded-lg font-medium bg-amber-600 text-white hover:bg-amber-700">
+                        אולי: {suggestion} — שייך
+                      </button>
+                    )}
+                    <select aria-label={`בחר משתמש עבור היועץ ${g.rawValue}`} defaultValue=""
+                      onChange={e => mapAdvisorGroups([g], e.target.value)}
+                      className="text-xs border border-amber-300 rounded-lg px-2 py-1.5 bg-white mr-auto">
+                      <option value="" disabled>בחר משתמש...</option>
+                      {orgUsers.map(u => <option key={u.id} value={u.id}>{u.full_name || u.email}</option>)}
+                      {g.type === "advisor_unmatched_past" && <option value={KEEP_RAW}>שמור כטקסט חופשי ("{g.rawValue}")</option>}
                     </select>
                   </div>
                 );
@@ -801,13 +983,8 @@ export default function MeetingImportProblemsModal({ mode, durationPriority, row
                             </button>
                           )}
 
-                          {p.type === "advisor_unresolved" && (
-                            <select aria-label="בחר יועץ" defaultValue=""
-                              onChange={e => { if (!e.target.value) return; setRowField(r.row_index, { resolved_advisor_id: e.target.value }); markResolved("advisor_unresolved", r.row_index); }}
-                              className="text-xs border border-amber-300 rounded-lg px-2 py-1.5 bg-white">
-                              <option value="" disabled>בחר יועץ...</option>
-                              {orgUsers.map(u => <option key={u.id} value={u.id}>{u.full_name || u.email}</option>)}
-                            </select>
+                          {ADVISOR_PROBLEM_TYPES.has(p.type) && (
+                            <p className="text-[11px] text-slate-400">יש לבחור משתמש בסקשן "יועצים שלא זוהו" למעלה.</p>
                           )}
 
                           {p.type === "stage_scope_ambiguous" && (
