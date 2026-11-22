@@ -17,29 +17,38 @@ function SortableHeader({ field, sortField, sortDir, onSort, children }) {
   );
 }
 
-export function CallsTable({ calls, hideSchoolColumn, hideAdvisorColumn, canManage = true, schoolId }) {
-  const [sortField, setSortField] = useState("start_time");
-  const [sortDir, setSortDir] = useState("desc");
+export const DEFAULT_CALLS_SORT = { field: "start_time", dir: "desc" };
+
+// The table's row order — also used by the Excel export so the file matches the screen.
+export function sortCalls(calls, { field, dir }) {
+  return [...calls].sort((a, b) => {
+    if (!field) return 0;
+    let va, vb;
+    if (field === "start_time") { va = a.start_time || ""; vb = b.start_time || ""; }
+    else if (field === "duration_seconds") { va = a.duration_seconds || 0; vb = b.duration_seconds || 0; }
+    else if (field === "direction") { va = a.direction || ""; vb = b.direction || ""; }
+    else if (field === "status") { va = a.status || ""; vb = b.status || ""; }
+    const cmp = typeof va === "number" ? va - vb : va.localeCompare(vb, "he");
+    return dir === "asc" ? cmp : -cmp;
+  });
+}
+
+// `sort` + `onSortChange` are optional: pass them when the parent needs the current order.
+export function CallsTable({ calls, hideSchoolColumn, hideAdvisorColumn, canManage = true, schoolId, sort, onSortChange }) {
+  const [ownSort, setOwnSort] = useState(DEFAULT_CALLS_SORT);
+  const { field: sortField, dir: sortDir } = sort || ownSort;
+  const setSort = onSortChange || setOwnSort;
   const [removedIds, setRemovedIds] = useState(() => new Set());
   const visibleCalls = calls.filter(c => !removedIds.has(c.call_id));
   const numColumns = 14 - (hideSchoolColumn ? 1 : 0) - (hideAdvisorColumn ? 1 : 0);
 
   function handleSort(field) {
-    if (sortField !== field) { setSortField(field); setSortDir("asc"); }
-    else if (sortDir === "asc") setSortDir("desc");
-    else { setSortField(null); setSortDir("asc"); }
+    if (sortField !== field) setSort({ field, dir: "asc" });
+    else if (sortDir === "asc") setSort({ field, dir: "desc" });
+    else setSort({ field: null, dir: "asc" });
   }
 
-  const sortedCalls = [...visibleCalls].sort((a, b) => {
-    if (!sortField) return 0;
-    let va, vb;
-    if (sortField === "start_time") { va = a.start_time || ""; vb = b.start_time || ""; }
-    else if (sortField === "duration_seconds") { va = a.duration_seconds || 0; vb = b.duration_seconds || 0; }
-    else if (sortField === "direction") { va = a.direction || ""; vb = b.direction || ""; }
-    else if (sortField === "status") { va = a.status || ""; vb = b.status || ""; }
-    const cmp = typeof va === "number" ? va - vb : va.localeCompare(vb, "he");
-    return sortDir === "asc" ? cmp : -cmp;
-  });
+  const sortedCalls = sortCalls(visibleCalls, { field: sortField, dir: sortDir });
 
   const rows = sortedCalls.map(c => ({ type: "call", call: c }));
 

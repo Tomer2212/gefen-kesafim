@@ -4,14 +4,14 @@ import { Link } from "react-router-dom";
 import { useCallNoteWindows } from "../../context/CallNoteWindowsContext";
 import { SchoolPickerModal } from "../meetings/SchoolPickerCell";
 
-const STATUS_LABELS = {
+export const STATUS_LABELS = {
   ANSWER: { label: "נענתה", dot: "#22c55e" },
   NOANSWER: { label: "לא נענתה", dot: "#94a3b8" },
   BUSY: { label: "תפוס", dot: "#eab308" },
   ABANDONE: { label: "ננטשה", dot: "#ef4444" },
   CANCEL: { label: "אין מענה", dot: "#94a3b8" },
 };
-const DEFAULT_STATUS = { label: "לא ידוע", dot: "#94a3b8" };
+export const DEFAULT_STATUS = { label: "לא ידוע", dot: "#94a3b8" };
 
 function ArrowIcon({ pointing, color }) {
   const d = pointing === "left" ? "M20 12H4m6-6l-6 6 6 6" : "M4 12h16m-6-6l6 6-6 6";
@@ -22,21 +22,21 @@ function ArrowIcon({ pointing, color }) {
   );
 }
 
-function formatDate(iso) {
+export function formatDate(iso) {
   if (!iso) return "—";
   const d = new Date(iso);
   if (isNaN(d)) return "—";
   const pad = n => String(n).padStart(2, "0");
   return `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${String(d.getFullYear()).slice(-2)}`;
 }
-function formatTime(iso) {
+export function formatTime(iso) {
   if (!iso) return "—";
   const d = new Date(iso);
   if (isNaN(d)) return "—";
   const pad = n => String(n).padStart(2, "0");
   return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
-function formatDuration(seconds) {
+export function formatDuration(seconds) {
   if (!seconds) return "0:00";
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
@@ -56,7 +56,7 @@ export function isLandline(raw) {
 // Israeli numbers arrive with a "972" international prefix — display them the way
 // they're dialed locally instead: "0XX-XXXXXXX" for mobiles, "0X-XXXXXXX" for landlines.
 // Any other country code is shown as-is.
-function formatPhone(raw) {
+export function formatPhone(raw) {
   if (!raw) return "—";
   const digits = localDigits(raw);
   if (digits.length <= 3) return digits;
