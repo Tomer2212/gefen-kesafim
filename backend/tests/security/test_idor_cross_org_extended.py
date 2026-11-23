@@ -2059,3 +2059,22 @@ def test_org_phone_cross_org_isolation(org_b_client, org_a_client, monkeypatch):
         if phone_id:
             cleanup = org_b_client.delete(f"/org-settings/phones/{phone_id}")
             assert cleanup.status_code == 200, f"Cleanup failed — org_phones {phone_id} may remain: {cleanup.text}"
+
+
+# "פגישה לא נדרשת בסבב" (PATCH /rounds/{id}/part-exclusions/{school_id}): never through another
+# org's round, and only for a school of the round.
+def test_round_part_exclusions_cross_org_rejected(org_a_client, org_b_round, admin_db):
+    rid = org_b_round["id"]
+    assert org_a_client.patch(f"/rounds/{rid}/part-exclusions/{ORG_B_SCHOOL_ID}", json={"parts": ["gefen"]}).status_code == 404
+    row = admin_db.table("meeting_rounds").select("part_exclusions").eq("id", rid).execute().data[0]
+    assert not row["part_exclusions"]
+
+
+def test_round_part_exclusions_same_org_works(org_b_client, org_b_round, admin_db):
+    rid = org_b_round["id"]
+    resp = org_b_client.patch(f"/rounds/{rid}/part-exclusions/{ORG_B_SCHOOL_ID}", json={"parts": ["gefen", "bogus"]})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["part_exclusions"] == {ORG_B_SCHOOL_ID: ["gefen"]}
+    # A school outside the round (here: another org's) is rejected.
+    assert org_b_client.patch(f"/rounds/{rid}/part-exclusions/{ORG_A_SCHOOL_ID}", json={"parts": ["gefen"]}).status_code == 404
+    assert org_b_client.patch(f"/rounds/{rid}/part-exclusions/{ORG_B_SCHOOL_ID}", json={"parts": []}).json()["part_exclusions"] == {}

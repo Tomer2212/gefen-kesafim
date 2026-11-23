@@ -43,6 +43,8 @@ def round_condition(rnd: dict) -> dict:
         cond["required_count"] = count
     if rnd.get("advisor_exclusions"):
         cond["advisor_exclusions"] = rnd["advisor_exclusions"]
+    if rnd.get("part_exclusions"):
+        cond["school_part_exclusions"] = rnd["part_exclusions"]
     return cond
 
 
@@ -110,6 +112,21 @@ def visiting_advisors(advisor_ids: list[str], exempt: set[str] | None, visitors:
             if aid not in (exempt or set()) and (visitors is None or aid in visitors)]
 
 
+def part_options(cond: dict, school: dict, year_row: dict | None) -> list[dict]:
+    """[{part, advisor_ids}] — the parts the round's requirement asks of this school by its card,
+    whatever is excluded (the "התאמת פגישות" choices)."""
+    plain = {k: v for k, v in cond.items() if k not in ("school_part_exclusions", "advisor_exclusions")}
+    expanded = task_logic.expand_meeting_condition(
+        plain, (year_row or {}).get("service_type"), bool(school.get("advisor_gefen_current_same")),
+    )
+    out: list[dict] = []
+    for c in expanded:
+        for part in task_logic.meeting_parts(c.get("meeting_service_type")):
+            if part not in [o["part"] for o in out]:
+                out.append({"part": part, "advisor_ids": _advisor_ids_for(school, [part])})
+    return out
+
+
 def _is_open_request(msg: dict | None, token: dict | None, now_iso: str) -> bool:
     if not msg or msg.get("status") not in ("sent", "pending", "sending", "outlook_pending"):
         return False
@@ -172,7 +189,9 @@ def school_status(
     if plan is not None:
         cond = plan["cond"]
     res = task_logic._meeting_condition_result(cond, school, school_meetings, year_row, token_ids)
-    expanded, self_scheduled = task_logic.expand_for_school_detail(cond, school, year_row)
+    expanded, nothing_asked = task_logic.expand_for_school_reason(cond, school, year_row)
+    self_scheduled = nothing_asked == "self_scheduled"
+    not_needed = nothing_asked == "not_needed"
     types = [c["meeting_service_type"] for c in expanded]
     # Advisors who book their own part (round's advisor_exclusions) aren't this school's advisors here.
     removed = {a for c in expanded for a in c.get("exclude_advisor_ids") or []}
@@ -218,7 +237,9 @@ def school_status(
             p["required"] = p["booked"] = 0
     missing_parts = [p for p in parts if p["booked"] < p["required"]]
 
-    if self_scheduled:
+    if not_needed:
+        status = "not_needed"  # the round needs none of its meetings ("פגישה לא נדרשת בסבב")
+    elif self_scheduled:
         status = "self_scheduled"  # every meeting is booked by its advisors themselves
     elif not expanded:
         status = "problem"
@@ -244,8 +265,8 @@ def school_status(
         "authority": school.get("authority"), "district": school.get("district"), "city": school.get("city"),
         "stage": school.get("stage"),
         "status": status,
-        "problem": "missing_service_type" if not expanded and not self_scheduled else "missing_plan" if (
-            plan is not None and plan["missing"] and not self_scheduled) else (
+        "problem": "missing_service_type" if not expanded and not nothing_asked else "missing_plan" if (
+            plan is not None and plan["missing"] and not nothing_asked) else (
             "send_failed" if (msg or {}).get("status") == "failed" else (note or {}).get("skip_reason") if status == "problem" else None),
         "required_types": types,
         # For the dashboard's "by type" breakdown: the card's service type and whether its גפן and
@@ -258,6 +279,10 @@ def school_status(
         "plan": None if plan is None else {"parts": plan["parts"], "missing": plan["missing"], "changed": plan["changed"]},
         "advisor_ids": advisor_ids,
         "parts": parts,
+        # "התאמת פגישות": every part the round could ask of the school (its card, before any
+        # exclusion) with its card advisors, and the parts marked "not needed in this round".
+        "part_options": part_options(cond, school, year_row),
+        "excluded_parts": list(((cond.get("school_part_exclusions") or {}).get(school["id"])) or []),
         # Where the meetings it still lacks are held: "physical" when one of them has a visiting
         # advisor (a physical task asks for all of them, the others as remote ranges), "remote"
         # when none has — even at a school marked physical whose in-person part is already booked.

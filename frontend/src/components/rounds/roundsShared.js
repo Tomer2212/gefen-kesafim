@@ -34,12 +34,14 @@ export const STALE_REQUEST_DAYS = 7;
 
 // The dashboard's "which meetings" breakdown — one group per kind of meeting a school is asked
 // for. gefen_current splits by whether its גפן and שוטף advisors are the same people.
-export const MEETING_KIND_ORDER = ["gefen", "current", "gefen_current_same", "gefen_current_diff", "district", "takuma", "missing", "self_scheduled"];
+export const MEETING_KIND_ORDER = ["gefen", "current", "gefen_current_same", "gefen_current_diff", "district", "takuma", "missing", "self_scheduled", "not_needed"];
 
 // From what the school is actually asked (required_types: after "לפי סוג שירות" and after the
 // parts its self-scheduling advisors book are removed).
 export function meetingKindOf(school) {
   if (school.status === "self_scheduled") return "self_scheduled";
+  // "התאמת פגישות": none of its meetings is needed in this round (not a missing card type).
+  if (school.status === "not_needed" && !(school.required_types || []).length) return "not_needed";
   const types = school.required_types || [];
   if (types.length === 2 && types.includes("gefen") && types.includes("current")) return "gefen_current_diff";
   const type = types[0];
@@ -60,6 +62,7 @@ export function meetingKindLabel(kind, requirement) {
     case "district": return "פגישת מחוז";
     case "takuma": return "פגישת תקומה";
     case "self_scheduled": return "היועץ קובע בעצמו (לא נשלחת בקשה)";
+    case "not_needed": return "לא נדרשת פגישה בסבב (התאמת פגישות)";
     default: return "בלי סוג שירות בכרטיס";
   }
 }

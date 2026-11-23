@@ -10,6 +10,7 @@ import TaskContactResolutionModal from "./TaskContactResolutionModal";
 import TaskMeetingResolutionModal from "./TaskMeetingResolutionModal";
 import SavedAudiencesModal from "./SavedAudiencesModal";
 import AdvisorExclusionsEditor from "./AdvisorExclusionsEditor";
+import PartExclusionsModal, { partExclusionsSavedNotice } from "../rounds/PartExclusionsModal";
 import { SchoolMultiPickerModal } from "../meetings/SchoolPickerCell";
 import { AcademicYearSelector } from "../AcademicYearSelector";
 import { DEFAULT_ACADEMIC_YEAR } from "../../constants/academicYears";
@@ -155,6 +156,61 @@ function SchoolPreviewList({ schools }) {
       </table>
     </div>
   );
+}
+
+// The schools a task will send to, each with "הסר מהמשימה", and below them the removed ones with
+// "החזר למשימה" — removed schools go to the server as excluded_school_ids (kept on the task, so a
+// scheduled task leaves them out too). rows/removed: [{school_id, label, detail?}]; onCustomize
+// (a round's task) opens the round's "התאמת פגישות" for the school.
+function AudienceEditList({ rows, removed, onRemove, onRestore, onCustomize }) {
+  const shown = rows.slice(0, PREVIEW_SCHOOL_LIMIT);
+  const extra = rows.length - shown.length;
+  const table = (list, action, actionLabel) => (
+    <table className="w-full text-xs">
+      <tbody className="divide-y divide-slate-100">
+        {list.map(s => (
+          <tr key={s.school_id}>
+            <td className="px-2.5 py-1.5 text-slate-800">
+              {s.label}
+              {s.detail && <span className="block text-[11px] text-slate-500">{s.detail}</span>}
+            </td>
+            <td className="px-2.5 py-1.5 text-left whitespace-nowrap align-top">
+              {onCustomize && action === onRemove && (
+                <button type="button" onClick={() => onCustomize(s.school_id)} className="text-blue-700 hover:underline ml-3">התאמת פגישות</button>
+              )}
+              <button type="button" onClick={() => action(s.school_id)} aria-label={`${actionLabel}: ${s.label}`}
+                className={action === onRemove ? "text-red-600 hover:underline" : "text-blue-700 hover:underline"}>{actionLabel}</button>
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+  return (
+    <div className="flex flex-col gap-2 mt-1">
+      <div>
+        <p className="text-xs font-semibold text-slate-700 mb-1">ייכללו במשימה ({rows.length})</p>
+        {rows.length > 0 && (
+          <div className="border border-slate-200 bg-white rounded-xl max-h-56 overflow-y-auto">
+            {table(shown, onRemove, "הסר מהמשימה")}
+            {extra > 0 && <p className="px-2.5 py-1.5 text-xs text-slate-400 italic">…ועוד {extra} בתי ספר (הרשימה נחתכה לתצוגה)</p>}
+          </div>
+        )}
+      </div>
+      {removed.length > 0 && (
+        <div>
+          <p className="text-xs font-semibold text-slate-700 mb-1">הוסרו מהמשימה — לא יקבלו קישור ({removed.length})</p>
+          <div className="border border-slate-200 bg-slate-50 rounded-xl max-h-40 overflow-y-auto">
+            {table(removed, onRestore, "החזר למשימה")}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function schoolLabel(s) {
+  return [s.school_name, s.authority, s.symbol].filter(Boolean).join(" - ");
 }
 
 // Round-2 redesign: two parallel wizard tracks sharing the message-config/review steps.
@@ -350,16 +406,25 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
   const roundExclusionsDiffer = !!roundContext && isMeetingTask && advisorExclusions !== undefined
     && exclusionsKey(advisorExclusions) !== exclusionsKey(roundContext.round.advisor_exclusions);
   const [syncRoundExclusions, setSyncRoundExclusions] = useState(true);
-  useEffect(() => {
-    if (!roundContext) return;
+  function loadRoundState() {
     axios.get(`/rounds/${roundContext.round.id}`)
       .then(r => setRoundState({
         bySchool: Object.fromEntries((r.data.schools || []).map(x => [x.school_id, x])),
         taskNames: Object.fromEntries((r.data.tasks || []).map(t => [t.id, t.name])),
+        names: r.data.advisor_names || {},
       }))
-      .catch(() => setRoundState({ failed: true }));
+      .catch(() => setRoundState(prev => prev?.bySchool ? prev : { failed: true }));
+  }
+  useEffect(() => {
+    if (roundContext) loadRoundState();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  // "הסר מהמשימה" — schools the manager took out of this task's audience (sent as excluded_school_ids).
+  const [removedIds, setRemovedIds] = useState(() => new Set());
+  const removeSchool = id => setRemovedIds(prev => new Set(prev).add(id));
+  const restoreSchool = id => setRemovedIds(prev => { const n = new Set(prev); n.delete(id); return n; });
+  const [partsSchoolId, setPartsSchoolId] = useState(null); // the round's "התאמת פגישות" window
+  const [partsNotice, setPartsNotice] = useState("");
   // Whether this task's meetings are in person — a school the round marks physical shouldn't get
   // a remote request through a broad filter, and the other way round (skipped by default).
   const taskIsPhysical = meetingRequirementGroups.some(g => g.conditions.some(c => c.use_field_days || c.meeting_type === "physical"));
@@ -387,15 +452,29 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
     }
     return out;
   }, [roundContext, roundState, preview, taskIsPhysical, advisorExclusions]);
-  const roundSendIds = roundSplit
-    ? [...roundSplit.send, ...(includeOpenRequests ? roundSplit.open : []), ...(skipLocationMismatch ? [] : roundSplit.mismatch)].map(x => x.school_id)
+  const roundCandidates = roundSplit
+    ? [...roundSplit.send, ...(includeOpenRequests ? roundSplit.open : []), ...(skipLocationMismatch ? [] : roundSplit.mismatch)]
     : [];
+  const roundSendRows = roundCandidates.filter(x => !removedIds.has(x.school_id));
+  const roundRemovedRows = roundCandidates.filter(x => removedIds.has(x.school_id));
+  const roundSendIds = roundSendRows.map(x => x.school_id);
   const roundSkipIds = roundSplit
-    ? [...roundSplit.booked, ...roundSplit.notNeeded, ...roundSplit.noPlan, ...roundSplit.self, ...(includeOpenRequests ? [] : roundSplit.open), ...(skipLocationMismatch ? roundSplit.mismatch : [])].map(x => x.school_id)
+    ? [...roundSplit.booked, ...roundSplit.notNeeded, ...roundSplit.noPlan, ...roundSplit.self, ...(includeOpenRequests ? [] : roundSplit.open), ...(skipLocationMismatch ? roundSplit.mismatch : []), ...roundRemovedRows].map(x => x.school_id)
     : [];
-  // The pre-send check covers exactly the schools that will get a request.
+  // What a round's school will be asked: its missing meetings, their advisors and where.
+  function roundRowDetail(row) {
+    const names = roundState?.names || {};
+    return (row.parts || []).filter(p => p.booked < p.required).map(p =>
+      `${MEETING_SERVICE_TYPE_LABELS[p.type] || p.type}${p.advisor_ids.length ? ` — ${p.advisor_ids.map(a => names[a]).filter(Boolean).join(", ")}` : ""}${p.physical ? " · פיזית" : " · מרחוק"}`,
+    ).join(" | ");
+  }
+  // The pre-send checks cover exactly the schools that will get a request.
   function checkAudiencePayload() {
-    return roundContext && roundSplit ? { criteria: { groups: [] }, manual_school_ids: roundSendIds } : audiencePayload();
+    if (roundContext && roundSplit) return { criteria: { groups: [] }, manual_school_ids: roundSendIds };
+    if (removedIds.size && preview?.schools) {
+      return { criteria: { groups: [] }, manual_school_ids: preview.schools.map(x => x.school_id).filter(id => !removedIds.has(id)) };
+    }
+    return audiencePayload();
   }
   const [submitting, setSubmitting] = useState(false);
   const [switchingChannel, setSwitchingChannel] = useState(false);
@@ -709,7 +788,8 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
         success_criteria: buildSuccessCriteria(),
         track_success: trackSuccess,
         is_meeting_task: isMeetingTask,
-        excluded_school_ids: [...(excludedIds || excludedSchoolIds || []), ...roundSkipIds],
+        excluded_school_ids: [...new Set([...(excludedIds || excludedSchoolIds || []), ...roundSkipIds, ...removedIds])],
+        removed_school_ids: [...new Set([...(excludedIds || excludedSchoolIds || []), ...removedIds])],
         meeting_overrides: overrides || meetingOverrides,
         round_id: roundContext?.round.id || null,
         include_open_requests: !!(roundContext && includeOpenRequests),
@@ -839,7 +919,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
     }
     setCheckingContacts(true);
     try {
-      const { criteria, manual_school_ids } = audiencePayload();
+      const { criteria, manual_school_ids } = checkAudiencePayload();
       const res = await axios.post("/tasks/contacts/check", {
         criteria, manual_school_ids, recipient_role: recipientRole, channel, is_meeting_task: isMeetingTask, academic_year: academicYear,
       });
@@ -1019,7 +1099,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
                 <div className="flex items-center justify-between gap-2">
                   <span>
                     {previewLoading ? "בודק כמות בתי ספר תואמים..." : preview
-                      ? <>נמצאו <b>{preview.count}</b> בתי ספר תואמים.</>
+                      ? <>נמצאו <b>{preview.count}</b> בתי ספר תואמים.{!roundContext && removedIds.size > 0 && <> {[...removedIds].filter(id => preview.schools?.some(x => x.school_id === id)).length} הוסרו מהמשימה.</>}</>
                       : "הגדר קריטריון סינון או בחר בתי ספר כדי לראות תצוגה מקדימה."}
                   </span>
                   {preview?.count > 0 && (
@@ -1028,9 +1108,15 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
                     </button>
                   )}
                 </div>
-                {showPreviewList && preview?.schools?.length > 0 && (
+                {showPreviewList && preview?.schools?.length > 0 && (roundContext ? (
                   <SchoolPreviewList schools={preview.schools} />
-                )}
+                ) : (
+                  <AudienceEditList
+                    rows={preview.schools.filter(x => !removedIds.has(x.school_id)).map(x => ({ school_id: x.school_id, label: schoolLabel(x) }))}
+                    removed={preview.schools.filter(x => removedIds.has(x.school_id)).map(x => ({ school_id: x.school_id, label: schoolLabel(x) }))}
+                    onRemove={removeSchool} onRestore={restoreSchool}
+                  />
+                ))}
               </div>
 
               {roundContext && preview && (
@@ -1040,9 +1126,18 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
                   ) : (
                     <>
                       <span><b>{roundSendIds.length}</b> בתי ספר יקבלו בקשה במשימה הזו.</span>
+                      {roundCandidates.length > 0 && (
+                        <AudienceEditList
+                          rows={roundSendRows.map(r => ({ school_id: r.school_id, label: schoolLabel(r), detail: roundRowDetail(r) }))}
+                          removed={roundRemovedRows.map(r => ({ school_id: r.school_id, label: schoolLabel(r) }))}
+                          onRemove={removeSchool} onRestore={restoreSchool}
+                          onCustomize={id => setPartsSchoolId(id)}
+                        />
+                      )}
+                      {partsNotice && <span role="status" className="text-xs text-emerald-700">{partsNotice}</span>}
                       {roundSplit.booked.length > 0 && <span className="text-slate-600">{roundSplit.booked.length} כבר קבעו את הפגישה בסבב — לא יקבלו בקשה.</span>}
                       {roundSplit.self.length > 0 && <span className="text-slate-600">{roundSplit.self.length} — היועץ קובע בעצמו את כל הפגישות שלהם — לא יקבלו בקשה.</span>}
-                      {roundSplit.notNeeded.length > 0 && <span className="text-slate-600">{roundSplit.notNeeded.length} לא צריכים פגישה בסבב הזה לפי התוכנית שלהם — לא יקבלו בקשה.</span>}
+                      {roundSplit.notNeeded.length > 0 && <span className="text-slate-600">{roundSplit.notNeeded.length} לא צריכים פגישה בסבב הזה (לפי התוכנית שלהם או "התאמת פגישות" בסבב) — לא יקבלו בקשה.</span>}
                       {roundSplit.noPlan.length > 0 && <span className="text-red-700">{roundSplit.noPlan.length} בלי מספר פגישות בסבב (אין תוכנית בכרטיס) — לא יקבלו בקשה עד שיוגדר להם מספר בסבב.</span>}
                       {roundContext.round.plan_mode === "plan" && roundSplit.send.length > 0 && (
                         <span className="text-slate-600">כל בית ספר יקבל קישור אחד עם בקשה נפרדת לכל פגישה שחסרה לו בסבב, כל אחת בחודש שלה לפי התוכנית.</span>
@@ -1195,7 +1290,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
                 <div className="flex items-center justify-between gap-2">
                   <span>
                     {previewLoading ? "בודק כמות בתי ספר תואמים..." : preview
-                      ? <>נמצאו <b>{preview.count}</b> בתי ספר תואמים.</>
+                      ? <>נמצאו <b>{preview.count}</b> בתי ספר תואמים.{!roundContext && removedIds.size > 0 && <> {[...removedIds].filter(id => preview.schools?.some(x => x.school_id === id)).length} הוסרו מהמשימה.</>}</>
                       : "הגדר קריטריון סינון או בחר בתי ספר כדי לראות תצוגה מקדימה."}
                   </span>
                   {preview?.count > 0 && (
@@ -1204,9 +1299,15 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
                     </button>
                   )}
                 </div>
-                {showPreviewList && preview?.schools?.length > 0 && (
+                {showPreviewList && preview?.schools?.length > 0 && (roundContext ? (
                   <SchoolPreviewList schools={preview.schools} />
-                )}
+                ) : (
+                  <AudienceEditList
+                    rows={preview.schools.filter(x => !removedIds.has(x.school_id)).map(x => ({ school_id: x.school_id, label: schoolLabel(x) }))}
+                    removed={preview.schools.filter(x => removedIds.has(x.school_id)).map(x => ({ school_id: x.school_id, label: schoolLabel(x) }))}
+                    onRemove={removeSchool} onRestore={restoreSchool}
+                  />
+                ))}
               </div>
 
               <div className="pt-1">
@@ -1519,8 +1620,8 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
 
       {showContactModal && (
         <TaskContactResolutionModal
-          criteria={audiencePayload().criteria}
-          manualSchoolIds={audiencePayload().manual_school_ids}
+          criteria={checkAudiencePayload().criteria}
+          manualSchoolIds={checkAudiencePayload().manual_school_ids}
           recipientRole={recipientRole}
           onChangeRecipientRole={setRecipientRole}
           channel={channel}
@@ -1547,6 +1648,16 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
           }}
           onClose={() => setShowMeetingResolutionModal(false)}
         />
+      )}
+
+      {partsSchoolId && roundState?.bySchool?.[partsSchoolId] && (
+        <PartExclusionsModal roundId={roundContext.round.id} school={roundState.bySchool[partsSchoolId]} names={roundState.names || {}}
+          onClose={() => setPartsSchoolId(null)}
+          onSaved={res => {
+            setPartsNotice(partExclusionsSavedNotice(roundState.bySchool[partsSchoolId].school_name, res));
+            setPartsSchoolId(null);
+            loadRoundState();
+          }} />
       )}
 
       {selfScheduledNotice && (

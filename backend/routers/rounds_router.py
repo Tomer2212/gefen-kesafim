@@ -1,6 +1,7 @@
 """"סבבי פגישות" — a folder with a goal for meeting tasks (see backend/meeting_rounds.py).
 Owner/manager only, like the tasks area; every endpoint checks the round belongs to the caller's
 org. Tasks join a round through org_tasks.round_id (set in tasks_router.create_task)."""
+import copy
 import logging
 import time
 from datetime import date, datetime, timezone
@@ -14,6 +15,7 @@ import meeting_rounds
 import task_logic
 from academic_years import DEFAULT_ACADEMIC_YEAR, resolve_inherited_year_admin
 from auth import get_current_user
+from routers import tasks_router as _tasks_router
 from supabase_client import get_admin_client, reset_admin_client
 
 logger = logging.getLogger(__name__)
@@ -115,6 +117,12 @@ class AudienceApplyIn(BaseModel):
     remove_ids: list[str] = []
 
 
+class PartExclusionsIn(BaseModel):
+    # "פגישה לא נדרשת בסבב" — the parts ("gefen" / "current" / "district" / "takuma") this round
+    # doesn't need from the school; [] = everything its card asks.
+    parts: list[str] = []
+
+
 def _validate_dates(start: str, end: str) -> None:
     try:
         s, e = date.fromisoformat(start), date.fromisoformat(end)
@@ -183,6 +191,7 @@ def _plan_inputs(org_id: str, rnd: dict, school_ids: list[str]):
 
 
 def _school_parts(cond: dict, school: dict, year_row: dict | None) -> list[str]:
+    cond = {k: v for k, v in cond.items() if k != "school_part_exclusions"}
     expanded, _self = task_logic.expand_for_school_detail(cond, school, year_row)
     return meeting_plan.parts_for_types([c["meeting_service_type"] for c in expanded])
 
@@ -514,7 +523,9 @@ def get_round(round_id: str, user: Annotated[dict, Depends(get_current_user)]):
         logger.warning("get_round cache write failed (non-fatal): %s", exc)
     advisor_names: dict[str, str] = {}
     try:
-        ids = list({aid for s in result["schools"] for aid in s["advisor_ids"]} | set(rnd.get("advisor_exclusions") or {}))
+        ids = list({aid for s in result["schools"] for aid in s["advisor_ids"]}
+                   | {aid for s in result["schools"] for o in s.get("part_options") or [] for aid in o["advisor_ids"]}
+                   | set(rnd.get("advisor_exclusions") or {}))
         if ids:
             rows = db.table("profiles").select("id, full_name, email").in_("id", ids).execute().data or []
             advisor_names = {p["id"]: p.get("full_name") or p.get("email") or "" for p in rows}
@@ -579,6 +590,7 @@ def update_round(round_id: str, body: RoundPatchIn, user: Annotated[dict, Depend
         patch["excluded_school_ids"] = [sid for sid in rnd.get("excluded_school_ids") or [] if sid in members]
         patch["physical_school_ids"] = [sid for sid in rnd.get("physical_school_ids") or [] if sid in members]
         patch["physical_visitors"] = {sid: v for sid, v in (rnd.get("physical_visitors") or {}).items() if sid in members}
+        patch["part_exclusions"] = {sid: v for sid, v in (rnd.get("part_exclusions") or {}).items() if sid in members} or None
     if body.physical_school_ids is not None:
         patch["physical_school_ids"] = [sid for sid in dict.fromkeys(body.physical_school_ids) if sid in members]
     if body.excluded_school_ids is not None:
@@ -611,6 +623,56 @@ def update_round(round_id: str, body: RoundPatchIn, user: Annotated[dict, Depend
         return rnd
     patch["updated_at"] = datetime.now(timezone.utc).isoformat()
     return db.table("meeting_rounds").update(patch).eq("id", round_id).execute().data[0]
+
+
+@router.patch("/{round_id}/part-exclusions/{school_id}")
+def set_round_part_exclusions(
+    round_id: str, school_id: str, body: PartExclusionsIn, user: Annotated[dict, Depends(get_current_user)],
+):
+    """"פגישה לא נדרשת בסבב" — which parts of its card's meetings the round doesn't need from one
+    school (task_logic.apply_part_exclusions). Applies at once to every task of the round: their
+    meeting conditions are restamped (school_part_exclusions — progress, sends, reminders and the
+    pre-check follow it), and requests their links still offer the school for those parts, not
+    booked yet, are removed (_tasks_router._drop_self_scheduled_ranges). Booked meetings stay."""
+    _require_manager(user)
+    db = get_admin_client()
+    rnd = _get_round(db, user, round_id)
+    if school_id not in set(rnd.get("school_ids") or []):
+        raise HTTPException(status_code=404, detail="בית הספר אינו בסבב")
+    parts = task_logic.clean_part_exclusions(body.parts)
+    exclusions = dict(rnd.get("part_exclusions") or {})
+    if parts:
+        exclusions[school_id] = parts
+    else:
+        exclusions.pop(school_id, None)
+    saved = db.table("meeting_rounds").update({
+        "part_exclusions": exclusions or None, "updated_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", round_id).eq("org_id", user["org_id"]).execute().data[0]
+
+    removed = 0
+    tasks = db.table("org_tasks").select("*").eq("round_id", round_id).eq("org_id", user["org_id"]).execute().data or []
+    for task in tasks:
+        criteria = copy.deepcopy(task.get("success_criteria") or {})
+        changed = False
+        for g in criteria.get("groups") or []:
+            for c in g.get("conditions") or []:
+                if c.get("type") != "meeting":
+                    continue
+                if exclusions:
+                    c["school_part_exclusions"] = exclusions
+                else:
+                    c.pop("school_part_exclusions", None)
+                changed = True
+        if not changed:
+            continue
+        db.table("org_tasks").update({"success_criteria": criteria}).eq("id", task["id"]).execute()
+        if parts:
+            removed += _tasks_router._drop_self_scheduled_ranges(db, task["id"], {}, {school_id: parts}, school_id)
+        try:
+            task_logic.recompute_task_status_and_cache(db, user["org_id"], {**task, "success_criteria": criteria})
+        except Exception as exc:
+            logger.warning("set_round_part_exclusions progress refresh failed (non-fatal, next cron run): %s", exc)
+    return {"part_exclusions": saved.get("part_exclusions") or {}, "removed_requests": removed}
 
 
 @router.delete("/{round_id}")
@@ -660,6 +722,7 @@ def apply_round_audience(round_id: str, body: AudienceApplyIn, user: Annotated[d
         "physical_school_ids": [sid for sid in (rnd.get("physical_school_ids") or []) if sid in set(school_ids)],
         "excluded_school_ids": [sid for sid in (rnd.get("excluded_school_ids") or []) if sid in set(school_ids)],
         "physical_visitors": {sid: v for sid, v in (rnd.get("physical_visitors") or {}).items() if sid in set(school_ids)},
+        "part_exclusions": {sid: v for sid, v in (rnd.get("part_exclusions") or {}).items() if sid in set(school_ids)} or None,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     if rnd.get("plan_mode") == "plan":

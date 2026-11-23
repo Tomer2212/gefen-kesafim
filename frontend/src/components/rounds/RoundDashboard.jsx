@@ -6,6 +6,7 @@ import { useTasks } from "../../context/TasksContext";
 import TaskCreateWizard from "../tasks/TaskCreateWizard";
 import RoundFieldDays from "./RoundFieldDays";
 import RoundCreateModal from "./RoundCreateModal";
+import PartExclusionsModal, { partExclusionsSavedNotice } from "./PartExclusionsModal";
 import { MEETING_SERVICE_TYPE_LABELS, formatDateDMY } from "../tasks/taskShared";
 import { exclusionTypesLabel } from "../tasks/AdvisorExclusionsEditor";
 import {
@@ -79,6 +80,7 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
   const [notice, setNotice] = useState("");
   const [syncExclusionsOpen, setSyncExclusionsOpen] = useState(false); // "עדכן לפי הסבב" confirm
   const [showNoAdvisor, setShowNoAdvisor] = useState(false); // "ללא יועץ בכרטיס" row expanded
+  const [partsSchool, setPartsSchool] = useState(null); // "התאמת פגישות" window — a school row
 
   function load() {
     axios.get(`/rounds/${roundId}`)
@@ -122,6 +124,7 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
   const byAdvisor = useMemo(() => {
     const out = {};
     for (const s of schools) {
+      if (s.status === "not_needed" && !s.parts?.length) continue; // "התאמת פגישות": nothing asked of it
       const parts = s.parts?.length ? s.parts : [{ advisor_ids: s.advisor_ids, required: s.required_count, booked: s.booked_count }];
       const seen = new Set();
       for (const p of parts) {
@@ -725,6 +728,17 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
                   </td>
                   <td className="px-3 py-2 text-xs">
                     {s.required_types.map(t => MEETING_SERVICE_TYPE_LABELS[t]).join(" · ") || "—"}
+                    {s.excluded_parts?.length > 0 && (
+                      <span className="block text-[11px] text-slate-500">
+                        <span className="bg-slate-100 text-slate-700 rounded-full px-1.5 py-0.5 ml-1">התאמה אישית</span>
+                        לא נדרשת: {s.excluded_parts.map(p => PLAN_PART_LABELS[p] || p).join(", ")}
+                      </span>
+                    )}
+                    {s.part_options?.length > 0 && (
+                      <button type="button" onClick={() => setPartsSchool(s)} className="block text-[11px] text-blue-700 hover:underline mt-0.5">
+                        התאמת פגישות
+                      </button>
+                    )}
                     {(s.required_count > 1 || s.plan) && <span className="text-slate-500"> ({s.booked_count}/{s.required_count})</span>}
                     {s.plan && Object.entries(s.plan.parts).map(([part, p]) => (
                       <span key={part} className="block text-[11px] text-slate-500">
@@ -846,6 +860,11 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
           onClose={() => setEditing(false)}
           onCreated={() => { setEditing(false); load(); onChanged?.(); }}
         />
+      )}
+
+      {partsSchool && (
+        <PartExclusionsModal roundId={roundId} school={partsSchool} names={names} onClose={() => setPartsSchool(null)}
+          onSaved={res => { setNotice(partExclusionsSavedNotice(partsSchool.school_name, res)); setPartsSchool(null); load(); }} />
       )}
 
       {taskDraft && (

@@ -692,15 +692,49 @@ def apply_advisor_exclusions(cond: dict, school_advisors: dict) -> list[dict]:
     removed = [a for a in dict.fromkeys(a for p in kept_parts for a in lists[p]) if a not in staying]
     out = dict(base)
     if t == "gefen_current" and len(kept_parts) == 1:
-        out["meeting_service_type"] = kept_parts[0]
         # The advisor who books their own part may well book one combined meeting.
-        out["also_matches_types"] = ["gefen_current"]
-        if kept_parts[0] == "current":
-            out["stage_scope"] = None
-            out["stage_scope_by_school"] = None
+        out = _one_part_of_combined(out, kept_parts[0])
     if removed:
         out["exclude_advisor_ids"] = removed
     return [out]
+
+
+def _one_part_of_combined(cond: dict, part: str) -> dict:
+    """A "גפן+שוטף" condition asked as one of its parts only; a combined meeting held anyway still
+    counts for it."""
+    out = {**cond, "meeting_service_type": part, "also_matches_types": ["gefen_current"]}
+    if part == "current":
+        out["stage_scope"] = None
+        out["stage_scope_by_school"] = None
+    return out
+
+
+# "פגישה לא נדרשת בסבב" — meeting_rounds.part_exclusions {school_id: [part, ...]}: the parts a
+# round doesn't ask of one school (e.g. a גפן+שוטף school that needs only its שוטף meeting this
+# time). Stamped on the round's tasks' meeting conditions as school_part_exclusions.
+def clean_part_exclusions(raw) -> list[str]:
+    return [t for t in ADVISOR_EXCLUSION_TYPES if t in (raw or [])]
+
+
+def meeting_parts(service_type: str | None) -> list[str]:
+    return ["gefen", "current"] if service_type == "gefen_current" else [service_type] if service_type else []
+
+
+def apply_part_exclusions(cond: dict, school_id: str | None) -> list[dict]:
+    """A plain meeting condition minus the parts its round doesn't need from this school: none
+    left → [] (nothing is asked), one part of a גפן+שוטף left → that part. The map itself is
+    dropped from the result, so what follows sees a plain condition."""
+    base = {k: v for k, v in cond.items() if k != "school_part_exclusions"}
+    excluded = set(((cond.get("school_part_exclusions") or {}).get(school_id) or []) if school_id else [])
+    if not excluded:
+        return [base]
+    t = cond.get("meeting_service_type")
+    kept = [p for p in meeting_parts(t) if p not in excluded]
+    if not kept:
+        return []
+    if t == "gefen_current" and len(kept) == 1:
+        return [_one_part_of_combined(base, kept[0])]
+    return [base]
 
 
 def school_advisor_lists(school: dict) -> dict:
@@ -764,17 +798,31 @@ def range_split_scopes(school: dict, stage_scope: str | None) -> list[str | None
     return ["tichon", "chativa"] if stage_scope == "separate" else [stage_scope]
 
 
-def expand_for_school_detail(cond: dict, school: dict, year_row: dict | None) -> tuple[list[dict], bool]:
-    """(the plain conditions asked of this school, self_scheduled). self_scheduled = every part
-    belongs to an advisor who books it themselves, so nothing is asked (not a missing card type)."""
+def expand_for_school_reason(cond: dict, school: dict, year_row: dict | None) -> tuple[list[dict], str | None]:
+    """(the plain conditions asked of this school, why nothing is asked). The reason is
+    "not_needed" when the round doesn't need any of its parts (apply_part_exclusions) and
+    "self_scheduled" when every part left belongs to an advisor who books it themselves — either
+    way nothing is asked (not a missing card type, which is [] with no reason)."""
     expanded = expand_meeting_condition(
         cond, (year_row or {}).get("service_type"), bool(school.get("advisor_gefen_current_same")),
     )
-    if not expanded or not cond.get("advisor_exclusions"):
-        return expanded, False
+    if not expanded:
+        return expanded, None
+    if cond.get("school_part_exclusions"):
+        expanded = [c2 for c in expanded for c2 in apply_part_exclusions(c, school.get("id"))]
+        if not expanded:
+            return [], "not_needed"
+    if not cond.get("advisor_exclusions"):
+        return expanded, None
     advisors = school_advisor_lists(school)
     out = [c2 for c in expanded for c2 in apply_advisor_exclusions(c, advisors)]
-    return out, not out
+    return out, None if out else "self_scheduled"
+
+
+def expand_for_school_detail(cond: dict, school: dict, year_row: dict | None) -> tuple[list[dict], bool]:
+    """(the plain conditions asked of this school, nothing asked — see expand_for_school_reason)."""
+    out, reason = expand_for_school_reason(cond, school, year_row)
+    return out, reason is not None
 
 
 def _expand_for_school(cond: dict, school: dict, year_row: dict | None) -> list[dict]:
@@ -782,7 +830,8 @@ def _expand_for_school(cond: dict, school: dict, year_row: dict | None) -> list[
 
 
 def _needs_school_expansion(cond: dict) -> bool:
-    return cond.get("meeting_service_type") == BY_SERVICE or bool(cond.get("advisor_exclusions"))
+    return (cond.get("meeting_service_type") == BY_SERVICE or bool(cond.get("advisor_exclusions"))
+            or bool(cond.get("school_part_exclusions")))
 
 
 def stage_scope_is_covered(requested_scope: str, meeting_scopes) -> bool:
@@ -1214,11 +1263,11 @@ def _meeting_condition_result(
     """One results-table cell for a meeting condition. A "לפי סוג שירות" condition stays one
     column: its plain meetings for this school are summed (resolved_types says which they were),
     so the table has the same columns for every school."""
-    expanded, self_scheduled = expand_for_school_detail(cond, school, year_row)
+    expanded, reason = expand_for_school_reason(cond, school, year_row)
     is_six_year = school.get("stage") == "sheshshnati"
-    if self_scheduled:
+    if reason:
         return {"ok": True, "meeting_exists": False, "actual_count": 0, "required_count": 0,
-                "requested_scope": None, "resolved_types": [], "self_scheduled": True}
+                "requested_scope": None, "resolved_types": [], reason: True}
     if not expanded:
         return {"ok": False, "meeting_exists": False, "actual_count": 0, "required_count": 1,
                 "requested_scope": None, "resolved_types": []}
