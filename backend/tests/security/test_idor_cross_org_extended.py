@@ -1526,6 +1526,42 @@ def test_advisor_choice_same_org_works(org_b_client, admin_db):
             admin_db.table("school_advisors_gefen").delete().eq("school_id", ORG_B_SCHOOL_ID).eq("advisor_id", ORG_B_MANAGER_ID).execute()
 
 
+# "יועצים שקובעים לעצמם" of an existing task — PATCH /tasks/{task_id}/advisor-exclusions. Rewrites
+# the task's conditions and may remove requests from its booking links, so the task must be the
+# caller's own, and an advisor of another org is never stored.
+
+def _meeting_task_id(admin_db, org_id):
+    rows = admin_db.table("org_tasks").select("id").eq("org_id", org_id).eq("is_meeting_task", True).limit(1).execute().data
+    if not rows:
+        pytest.skip(f"no meeting task in org {org_id}")
+    return rows[0]["id"]
+
+
+def test_task_advisor_exclusions_cross_org_rejected(org_b_client, admin_db):
+    foreign_task = _meeting_task_id(admin_db, ORG_A_ID)
+    before = admin_db.table("org_tasks").select("advisor_exclusions, success_criteria").eq("id", foreign_task).execute().data[0]
+    resp = org_b_client.patch(f"/tasks/{foreign_task}/advisor-exclusions",
+                              json={"advisor_exclusions": {ORG_B_MANAGER_ID: ["all"]}})
+    assert resp.status_code in (403, 404), resp.text
+    after = admin_db.table("org_tasks").select("advisor_exclusions, success_criteria").eq("id", foreign_task).execute().data[0]
+    assert after == before
+
+
+def test_task_advisor_exclusions_same_org_works(org_b_client, admin_db):
+    own_task = _meeting_task_id(admin_db, ORG_B_ID)
+    original = admin_db.table("org_tasks").select("advisor_exclusions, success_criteria").eq("id", own_task).execute().data[0]
+    try:
+        # Another org's advisor is dropped, so nothing is excluded and no link is touched.
+        resp = org_b_client.patch(f"/tasks/{own_task}/advisor-exclusions",
+                                  json={"advisor_exclusions": {ORG_A_MANAGER_ID: ["all"]}})
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"advisor_exclusions": {}, "removed_requests": 0}
+        saved = admin_db.table("org_tasks").select("advisor_exclusions").eq("id", own_task).execute().data[0]
+        assert saved["advisor_exclusions"] is None
+    finally:
+        admin_db.table("org_tasks").update(original).eq("id", own_task).execute()
+
+
 # ---------------------------------------------------------------------------
 # "מחליפה או נוספת?" — POST /schools/{school_id}/meetings/{meeting_id}/booking-request-resolutions.
 # The meeting, the school and the booking link must all be the caller's own org's. Org A is never

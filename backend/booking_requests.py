@@ -39,6 +39,22 @@ def range_contains(range_row: dict, day_iso: str) -> bool:
     return any(seg["start_date"] <= day_iso <= seg["end_date"] for seg in range_segments(range_row))
 
 
+def range_is_self_scheduled(range_row: dict, exclusions: dict | None) -> bool:
+    """A request whose every advisor books that part themselves under the task's CURRENT
+    "יועצים שקובעים לעצמם" list (task_logic.apply_advisor_exclusions — same {advisor_id: ["all"] |
+    [part, ...]} shape): it is no longer the task's to ask for. A גפן+שוטף request counts only when
+    each of its advisors is excluded from both parts (the range doesn't say who holds which)."""
+    service_type = range_row.get("service_type")
+    parts = ["gefen", "current"] if service_type == "gefen_current" else [service_type]
+    advisor_ids = range_row.get("advisor_ids") or []
+    if not exclusions or not advisor_ids or not all(parts):
+        return False
+    return all(
+        "all" in (exclusions.get(aid) or []) or all(p in (exclusions.get(aid) or []) for p in parts)
+        for aid in advisor_ids
+    )
+
+
 def same_task_fillers(db, rows: list[dict], additional: dict | None = None,
                       exclude_meeting_id: str | None = None) -> dict[tuple[str, str], dict]:
     """(token_id, range_key) → the meeting filling a "בקש לקבוע פגישה נוספת" request: one the
@@ -162,10 +178,11 @@ def _live_tokens(db, org_id: str, school_id: str | None = None, token_ids: list[
     task_ids = list({t["task_id"] for t in tokens if t.get("task_id")})
     tasks = {}
     if task_ids:
-        tasks = {t["id"]: t for t in db.table("org_tasks").select("id, name, status").in_("id", task_ids).execute().data or []}
+        tasks = {t["id"]: t for t in db.table("org_tasks").select("id, name, status, advisor_exclusions").in_("id", task_ids).execute().data or []}
     for t in tokens:
         task = tasks.get(t.get("task_id"))
         t["_task_name"] = (task or {}).get("name")
+        t["_exclusions"] = (task or {}).get("advisor_exclusions") or {}
         t["_active"] = not t.get("task_id") or (task or {}).get("status") == "active"
     return tokens
 
@@ -287,8 +304,11 @@ def reconcile_booked_ranges(db, org_id: str, token_ids: list[str] | None = None)
         # (booked through the link / marked "replaces") none of which is live any more. A booked
         # request with no known filler (links from before bookings recorded their link) is left
         # alone; a deleted meeting reopens its request in the delete endpoint (reopen_for_deleted_meeting).
+        # Nor is a request reopened whose advisors now book it themselves (the task's list changed
+        # after the link was sent): that advisor cancelling their own meeting asks nothing of the school.
         reopen = {k for k in current - live if k in fillers and k in ranges
-                  and max(s["end_date"] for s in range_segments(ranges[k])) >= today}
+                  and max(s["end_date"] for s in range_segments(ranges[k])) >= today
+                  and not range_is_self_scheduled(ranges[k], t.get("_exclusions"))}
         close = live - current
         if not reopen and not close:
             continue

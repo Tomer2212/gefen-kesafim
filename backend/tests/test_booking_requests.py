@@ -132,6 +132,29 @@ def test_cancelled_link_meeting_reopens_and_back_closes(db):
     assert db.tables["meeting_booking_tokens"][0]["booked_ranges"] == ["r1"]
 
 
+def test_cancelled_meeting_of_self_scheduling_advisor_does_not_reopen(db):
+    # The task's "קובעים לעצמם" list now names the request's advisor (e.g. updated from the round
+    # after the link was sent): their cancelling their own meeting asks nothing of the school.
+    db.tables["org_tasks"][0]["advisor_exclusions"] = {"a": ["all"]}
+    tok = db.tables["meeting_booking_tokens"][0]
+    tok["date_ranges"] = [{**RANGE, "advisor_ids": ["a"]}]
+    tok["booked_ranges"] = ["r1"]
+    db.tables["meetings"].append(meeting("m1", booking_token_id="t1", booking_range_key="r1", status="cancelled"))
+    assert booking_requests.reconcile_booked_ranges(db, ORG) == 0
+    assert tok["booked_ranges"] == ["r1"]
+
+
+def test_range_is_self_scheduled():
+    ex = {"a": ["all"], "b": ["gefen"]}
+    assert booking_requests.range_is_self_scheduled({"service_type": "gefen", "advisor_ids": ["a", "b"]}, ex)
+    assert not booking_requests.range_is_self_scheduled({"service_type": "current", "advisor_ids": ["b"]}, ex)
+    assert not booking_requests.range_is_self_scheduled({"service_type": "gefen", "advisor_ids": ["a", "c"]}, ex)
+    # A combined request needs each advisor excluded from both parts.
+    assert not booking_requests.range_is_self_scheduled({"service_type": "gefen_current", "advisor_ids": ["a", "b"]}, ex)
+    assert booking_requests.range_is_self_scheduled({"service_type": "gefen_current", "advisor_ids": ["a"]}, ex)
+    assert not booking_requests.range_is_self_scheduled({"service_type": "gefen", "advisor_ids": ["a"]}, {})
+
+
 def test_cancelled_replacing_meeting_reopens(db):
     db.tables["meeting_booking_tokens"][0]["booked_ranges"] = ["r1"]
     db.tables["meetings"].append(meeting("m1", status="postponed"))

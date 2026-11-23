@@ -1,4 +1,5 @@
 import base64
+import copy
 import hmac
 import html
 import io
@@ -1826,6 +1827,75 @@ def set_task_meeting_override(
     if is_advisor_choice:
         _merge_round_advisor_choices(db, user["org_id"], task_rows[0].get("round_id"), {school_id: choice})
     return {"ok": True}
+
+
+SELF_SCHEDULED_LINK_CLOSED_MESSAGE = "אין צורך לקבוע פגישה דרך קישור זה — היועץ/ת יתאמו איתכם את הפגישה ישירות. תודה!"
+
+
+def _drop_self_scheduled_ranges(db, task_id: str, exclusions: dict) -> int:
+    """Removes from the task's links every request not booked yet whose advisors all book it
+    themselves (booking_requests.range_is_self_scheduled), so the school is no longer offered it and
+    reconcile_booked_ranges never reopens it (it only reads keys still in date_ranges). A link left
+    with no request is closed (closed_message). Booked requests stay: they record what was booked.
+    Returns how many requests were removed."""
+    if not exclusions:
+        return 0
+    tokens = (
+        db.table("meeting_booking_tokens").select("id, date_ranges, booked_ranges, closed_message")
+        .eq("task_id", task_id).execute().data or []
+    )
+    removed = 0
+    for t in tokens:
+        ranges = t.get("date_ranges") or []
+        if t.get("closed_message") or not ranges:
+            continue
+        booked = set(t.get("booked_ranges") or [])
+        kept = [r for r in ranges if r.get("key") in booked or not booking_requests.range_is_self_scheduled(r, exclusions)]
+        if len(kept) == len(ranges):
+            continue
+        patch: dict = {"date_ranges": kept}
+        if not kept:
+            patch["closed_message"] = SELF_SCHEDULED_LINK_CLOSED_MESSAGE
+        db.table("meeting_booking_tokens").update(patch).eq("id", t["id"]).execute()
+        removed += len(ranges) - len(kept)
+    return removed
+
+
+@router.patch("/{task_id}/advisor-exclusions")
+def set_task_advisor_exclusions(
+    task_id: str, body: AdvisorExclusionsIn, user: Annotated[dict, Depends(get_current_user)],
+):
+    """Replaces the "יועצים שקובעים לעצמם" list of an existing meeting task — e.g. one created
+    before the list existed, or whose round's list changed since ("עדכן לפי הסבב" in
+    RoundDashboard). Stamped like _prepare_meeting_conditions does at creation, so progress, sends
+    and the pre-check follow it at once; the requests its links still offer for excluded advisors
+    are removed (_drop_self_scheduled_ranges). The audience (matched_school_ids) is unchanged: a
+    school left with nothing to ask counts as done (task_logic.expand_for_school_detail)."""
+    _require_manager(user)
+    db = get_admin_client()
+    task = _get_task_or_404(db, task_id, user["org_id"])
+    if not task.get("is_meeting_task"):
+        raise HTTPException(status_code=400, detail="המשימה אינה משימת פגישות")
+    cleaned = _org_advisor_exclusions(user["org_id"], body.advisor_exclusions)
+    criteria = copy.deepcopy(task.get("success_criteria") or {})
+    for g in criteria.get("groups") or []:
+        for c in g.get("conditions") or []:
+            if c.get("type") != "meeting":
+                continue
+            c.pop("exclude_advisor_ids", None)
+            c.pop("also_matches_types", None)
+            if cleaned:
+                c["advisor_exclusions"] = cleaned
+            else:
+                c.pop("advisor_exclusions", None)
+    patch = {"advisor_exclusions": cleaned or None, "success_criteria": criteria}
+    db.table("org_tasks").update(patch).eq("id", task_id).eq("org_id", user["org_id"]).execute()
+    removed = _drop_self_scheduled_ranges(db, task_id, cleaned)
+    try:
+        task_logic.recompute_task_status_and_cache(db, user["org_id"], {**task, **patch})
+    except Exception as exc:
+        logger.warning("set_task_advisor_exclusions progress refresh failed (non-fatal, next cron run): %s", exc)
+    return {"advisor_exclusions": cleaned, "removed_requests": removed}
 
 
 class MeetingProblemRowIn(BaseModel):

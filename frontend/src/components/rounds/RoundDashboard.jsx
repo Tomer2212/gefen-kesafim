@@ -77,6 +77,7 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  const [syncExclusionsOpen, setSyncExclusionsOpen] = useState(false); // "עדכן לפי הסבב" confirm
   const [showNoAdvisor, setShowNoAdvisor] = useState(false); // "ללא יועץ בכרטיס" row expanded
 
   function load() {
@@ -228,6 +229,41 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
     } finally {
       setBusy(false);
     }
+  }
+
+  // Live tasks that still ask for meetings the round leaves to their advisor (GET /rounds/{id} →
+  // missing_round_exclusions). The update ADDS the round's list to the task's: a task that
+  // deliberately excludes more advisors than the round keeps them.
+  const tasksWithOtherExclusions = (data?.tasks || []).filter(t => t.missing_round_exclusions);
+
+  function withRoundExclusions(taskExclusions) {
+    const out = { ...(taskExclusions || {}) };
+    for (const [id, types] of Object.entries(rnd.advisor_exclusions || {})) {
+      const cur = out[id] || [];
+      out[id] = cur.includes("all") || types.includes("all") ? ["all"] : [...new Set([...cur, ...types])];
+    }
+    return out;
+  }
+
+  async function syncTaskExclusions() {
+    setBusy(true);
+    let failed = 0;
+    let removed = 0;
+    for (const t of tasksWithOtherExclusions) {
+      try {
+        const r = await axios.patch(`/tasks/${t.id}/advisor-exclusions`, { advisor_exclusions: withRoundExclusions(t.advisor_exclusions) });
+        removed += r.data?.removed_requests || 0;
+      } catch {
+        failed += 1;
+      }
+    }
+    setSyncExclusionsOpen(false);
+    setBusy(false);
+    load();
+    onChanged?.();
+    setNotice(failed
+      ? `העדכון נכשל ב-${failed} משימות — נסו שוב.`
+      : `הרשימה עודכנה ב-${tasksWithOtherExclusions.length} משימות${removed ? `, ו-${removed} בקשות הוסרו מקישורים שכבר נשלחו` : ""}.`);
   }
 
   async function patchRound(patch) {
@@ -740,6 +776,15 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
 
       <section aria-labelledby="round-tasks-title">
         <h3 id="round-tasks-title" className="font-bold text-slate-800 text-sm mb-2">המשימות בסבב ({data.tasks.length})</h3>
+        {tasksWithOtherExclusions.length > 0 && (
+          <div className="mb-2 flex items-center justify-between gap-3 flex-wrap rounded-lg border border-violet-200 bg-violet-50 px-3 py-2 text-sm text-violet-800">
+            <span>
+              {tasksWithOtherExclusions.length === 1 ? "משימה אחת בסבב לא יודעת" : `${tasksWithOtherExclusions.length} משימות בסבב לא יודעות`} על חלק מהיועצים שהסבב מגדיר כ"קובעים לעצמם",
+              ולכן עלולות לבקש מבתי ספר פגישות שהיועץ אמור לקבוע בעצמו.
+            </span>
+            <button type="button" disabled={busy} onClick={() => setSyncExclusionsOpen(true)} className="text-sm px-3 py-1.5 rounded-lg bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-50">עדכן לפי הסבב</button>
+          </div>
+        )}
         {data.tasks.length === 0 ? (
           <p className="text-sm text-slate-500">עוד לא נוצרו משימות. התחילו ב"+ משימה חדשה בסבב".</p>
         ) : (
@@ -747,7 +792,10 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
             {data.tasks.map(t => (
               <li key={t.id}>
                 <button type="button" onClick={() => openTask(t.id)} className="w-full text-right flex items-center justify-between gap-3 border border-slate-200 rounded-lg px-3 py-2 hover:bg-slate-50 text-sm">
-                  <span>{t.name}</span>
+                  <span>
+                    {t.name}
+                    {t.missing_round_exclusions && <span className="mr-2 text-[11px] font-medium bg-violet-100 text-violet-700 rounded-full px-2 py-0.5">חסרים "קובעים לעצמם" של הסבב</span>}
+                  </span>
                   <span className="text-xs text-slate-500">
                     {t.cached_total_schools ?? "—"} בתי ספר · {t.cached_actions_completed ?? 0}/{t.cached_actions_needed ?? 0} פגישות · {formatDateDMY((t.created_at || "").slice(0, 10))}
                   </span>
@@ -768,6 +816,19 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
               {audienceDiff.removed.length > 0 && <p><b>{audienceDiff.removed.length}</b> בתי ספר בסבב כבר לא עונים לסינון: {audienceDiff.removed.slice(0, 10).map(s => s.school_name).join(", ")}{audienceDiff.removed.length > 10 ? "…" : ""}</p>}
             </>
           )}
+        </ConfirmDialog>
+      )}
+
+      {syncExclusionsOpen && (
+        <ConfirmDialog title='עדכון "קובעים לעצמם" לפי הסבב' onClose={() => setSyncExclusionsOpen(false)} actions={
+          <button type="button" disabled={busy} onClick={syncTaskExclusions} className="px-4 py-2 rounded-xl bg-blue-600 text-white disabled:opacity-40">עדכן</button>
+        }>
+          <p>רשימת "קובעים לעצמם" של הסבב תתווסף למשימות הבאות (יועצים שהמשימה כבר מחריגה נשארים):</p>
+          <ul className="list-disc pr-5">
+            {tasksWithOtherExclusions.map(t => <li key={t.id}>{t.name}</li>)}
+          </ul>
+          <p>{`לפי הסבב: ${Object.entries(rnd.advisor_exclusions || {}).map(([id, t]) => `${names[id] || "יועץ"} — ${exclusionTypesLabel(t)}`).join(" · ")}.`}</p>
+          <p>פגישות של היועצים האלה לא ייספרו יותר כחסרות במשימות, וקישורים שכבר נשלחו לא יציעו יותר לבתי הספר לקבוע אותן. פגישות שכבר נקבעו לא משתנות.</p>
         </ConfirmDialog>
       )}
 

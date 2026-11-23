@@ -523,9 +523,21 @@ def get_round(round_id: str, user: Annotated[dict, Depends(get_current_user)]):
     try:
         if result["tasks"]:
             full = (
-                db.table("org_tasks").select("id, name, status, created_at, cached_progress_pct, cached_total_schools, cached_actions_completed, cached_actions_needed")
+                db.table("org_tasks").select("id, name, status, created_at, cached_progress_pct, cached_total_schools, cached_actions_completed, cached_actions_needed, advisor_exclusions")
                 .in_("id", [t["id"] for t in result["tasks"]]).execute().data or []
             )
+            # A live task that still asks for a part the round leaves to its advisor (made before the
+            # list existed, or the round's list grew since) — the dashboard offers "עדכן לפי הסבב",
+            # which adds the round's list to the task's. A task excluding MORE than the round is a
+            # deliberate choice in the wizard and is not flagged.
+            round_exclusions = task_logic.clean_advisor_exclusions(rnd.get("advisor_exclusions"))
+            for t in full:
+                task_exclusions = t.get("advisor_exclusions") or {}
+                t["missing_round_exclusions"] = t.get("status") in ("active", "scheduled") and any(
+                    not task_logic._excluded_from(task_exclusions, aid, part)
+                    for aid, types in round_exclusions.items()
+                    for part in (task_logic.ADVISOR_EXCLUSION_TYPES if "all" in types else types)
+                )
             result["tasks"] = sorted(full, key=lambda t: t.get("created_at") or "", reverse=True)
     except Exception as exc:
         logger.warning("get_round task enrichment failed (non-fatal): %s", exc)
