@@ -8,6 +8,7 @@ import FileUpload from "../components/FileUpload";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useDebouncedValue, useDebouncedCallback } from "../hooks/useDebouncedValue";
 import { useGefenOrganizedResults } from "../context/GefenOrganizedResultsContext";
+import DateField from "../components/DateField";
 
 // Tags school-data writes for the school card's "תיעוד פעולות" log (backend school_activity.py).
 const SURFACE_HEADERS = { headers: { "X-Client-Surface": "collection" } };
@@ -292,20 +293,18 @@ function CollectionColumnFilterPopover({ colKey, colLabel, filterType, spec, opt
       <div className="flex flex-col gap-2">
         <p className="text-xs text-slate-500">סינון: {colLabel}</p>
         <label htmlFor={`collection-filter-from-${colKey}`} className="text-xs text-slate-500">מתאריך</label>
-        <input
+        <DateField
           id={`collection-filter-from-${colKey}`}
-          type="date"
-          className="input-field text-sm"
+          className="input-field text-sm w-full"
           value={from}
-          onChange={e => onChange({ from: e.target.value, to })}
+          onChange={v => onChange({ from: v, to })}
         />
         <label htmlFor={`collection-filter-to-${colKey}`} className="text-xs text-slate-500">עד תאריך</label>
-        <input
+        <DateField
           id={`collection-filter-to-${colKey}`}
-          type="date"
-          className="input-field text-sm"
+          className="input-field text-sm w-full"
           value={to}
-          onChange={e => onChange({ from, to: e.target.value })}
+          onChange={v => onChange({ from, to: v })}
         />
         <div className="flex justify-between gap-2">
           <button type="button" onClick={() => { onClear(); onClose(); }} className="text-xs text-slate-400 hover:text-slate-600">נקה</button>
@@ -516,6 +515,9 @@ function DepositDatesCell({ savedValues, onSave }) {
   const valuesRef = useRef(savedValues);
   valuesRef.current = values;
   const dirtyRef = useRef(false);
+  // Set by commitField so a blur fired while the committed field unmounts can't re-save the
+  // pre-commit list over it (its handler closes over the old `values`).
+  const committedRef = useRef(false);
   const onSaveRef = useRef(onSave);
   onSaveRef.current = onSave;
 
@@ -529,6 +531,7 @@ function DepositDatesCell({ savedValues, onSave }) {
   function addField() {
     const newIndex = values.length;
     setValues(prev => [...prev, ""]);
+    committedRef.current = false;
     setEditingIndex(newIndex);
   }
 
@@ -540,17 +543,25 @@ function DepositDatesCell({ savedValues, onSave }) {
     onSave(next.filter(v => v !== ""));
   }
 
-  // Only updates the in-progress value — must NOT commit/exit edit mode here.
-  // Native date inputs fire onChange on every keystroke (e.g. typing "2" then "5" into
-  // the year segment fires onChange after the "2" with a zero-padded year like "0002"),
-  // so committing on every change would lock in that intermediate value before the user
-  // finishes typing. Committing happens only on blur, once the user is done.
+  // Only updates the in-progress value — must NOT commit/exit edit mode here. Used for a
+  // cleared field (the user may be about to retype it); clearing commits only on blur.
   function changeField(i, raw) {
     dirtyRef.current = true;
     setValues(prev => prev.map((v, idx) => (idx === i ? raw : v)));
   }
 
+  // DateField emits only a complete, real date — safe to commit (and leave edit mode) at once.
+  function commitField(i, iso) {
+    committedRef.current = true;
+    setEditingIndex(null);
+    dirtyRef.current = false;
+    const next = values.map((v, idx) => (idx === i ? iso : v));
+    setValues(next);
+    onSave(next.filter(v => v !== ""));
+  }
+
   function blurField(i) {
+    if (committedRef.current) { committedRef.current = false; return; }
     setEditingIndex(null);
     dirtyRef.current = false;
     if (values[i] === "") {
@@ -567,11 +578,10 @@ function DepositDatesCell({ savedValues, onSave }) {
       {values.map((v, i) => (
         <div key={i} className="flex items-center gap-1">
           {editingIndex === i ? (
-            <input
-              type="date"
+            <DateField
               autoFocus
               value={v}
-              onChange={e => changeField(i, e.target.value)}
+              onChange={iso => (iso ? commitField(i, iso) : changeField(i, iso))}
               onBlur={() => blurField(i)}
               aria-label="תאריך הפקדה"
               className={`${ADMIN_FIELD_CLS} w-32`}
@@ -579,7 +589,7 @@ function DepositDatesCell({ savedValues, onSave }) {
           ) : (
             <button
               type="button"
-              onClick={() => setEditingIndex(i)}
+              onClick={() => { committedRef.current = false; setEditingIndex(i); }}
               className="text-sm text-slate-700 hover:text-blue-600 underline decoration-dotted underline-offset-2"
             >
               {formatDDMMYY(v)}

@@ -559,7 +559,11 @@ def _matching_meetings(cond: dict, school_meetings: list[dict], task_token_ids: 
         # purpose (a physical meeting no visiting advisor goes to — tasks_router
         # _build_meeting_ranges, held_remotely), so it counts as booked.
         booked_via_task_link = task_token_ids is not None and m.get("booking_token_id") in task_token_ids
-        if meeting_type and m.get("meeting_type") != meeting_type and not booked_via_task_link:
+        # count_any_meeting_type (stamped on meeting tasks' conditions at creation): physical/remote
+        # only says how a NEW meeting is offered — a meeting held either way counts, as for the
+        # round and the booking page (meeting_booking_router._range_existing_meeting).
+        if (meeting_type and m.get("meeting_type") != meeting_type and not booked_via_task_link
+                and not cond.get("count_any_meeting_type")):
             continue
         if require_additional and m.get("booking_token_id") not in task_token_ids:
             continue

@@ -1,20 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import axios from "axios";
-import { CallsTable, DEFAULT_CALLS_SORT, sortCalls } from "../components/calls/CallsTable";
+import { CallsTable, callsInView, useCallsTableView } from "../components/calls/CallsTable";
 import { exportCallsToExcel } from "../components/calls/callsExport";
 import { linkAnswersPending } from "../components/calls/CallRow";
+import { clearDailyRange, readDailyRange, saveDailyRange, todayRange, useResetRangeOnNewDay } from "../lib/dailyDateRange";
+import DateField from "../components/DateField";
 
 const INPUT_CLS = "text-sm border border-slate-200 rounded-lg px-2.5 py-1.5 outline-none focus:border-blue-400 bg-white";
 
-// Local date (not toISOString, which is UTC — after midnight in Israel it still says yesterday).
-function localDateDaysAgo(days) {
-  const d = new Date();
-  d.setDate(d.getDate() - days);
-  const pad = n => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
-// Computed on each use, so a tab left open past midnight still defaults to the real today.
-const defaultRange = () => ({ from: localDateDaysAgo(7), to: localDateDaysAgo(0) });
+// The default range is today only; a searched range is kept until the next 07:00.
+const RANGE_KEY = "personal_calls";
 
 // "2026-11-22" → "22.11.26"
 function shortDate(iso) {
@@ -22,16 +17,19 @@ function shortDate(iso) {
   return `${d}.${m}.${y.slice(-2)}`;
 }
 
-export default function PersonalCallsTab() {
+export default function PersonalCallsTab({ userId }) {
   const [calls, setCalls] = useState([]);
   const [callsEnabled, setCallsEnabled] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [dateFrom, setDateFrom] = useState(() => defaultRange().from);
-  const [dateTo, setDateTo] = useState(() => defaultRange().to);
+  const [initialRange] = useState(() => readDailyRange(RANGE_KEY, userId) || todayRange());
+  const [dateFrom, setDateFrom] = useState(initialRange.from);
+  const [dateTo, setDateTo] = useState(initialRange.to);
+  const rangeSetAtRef = useRef(Date.now());
   const [direction, setDirection] = useState("");
-  // Held here (not inside CallsTable) so the Excel export keeps the table's row order.
-  const [sort, setSort] = useState(DEFAULT_CALLS_SORT);
+  // The table's column filters + sort, held here so the Excel export matches the screen and
+  // they survive a new search.
+  const tableView = useCallsTableView();
   // The range the table actually shows — the date inputs may have been edited without "חפש".
   const [loadedRange, setLoadedRange] = useState(null);
   // Only the latest search may fill the table: an older, slower response must not overwrite it.
@@ -65,18 +63,32 @@ export default function PersonalCallsTab() {
   }, []);
 
   function applyFilters() {
+    rangeSetAtRef.current = Date.now();
+    saveDailyRange(RANGE_KEY, userId, { from: dateFrom, to: dateTo });
     loadCalls();
   }
 
   // Passes the range explicitly — the old setTimeout(loadCalls) read the pre-reset dates from
   // its closure, so the inputs showed the default week while the table kept the old range.
   function clearFilters() {
-    const range = defaultRange();
+    const range = todayRange();
+    rangeSetAtRef.current = Date.now();
+    clearDailyRange(RANGE_KEY, userId);
     setDateFrom(range.from);
     setDateTo(range.to);
     setDirection("");
+    tableView.clear();
     loadCalls(range);
   }
+
+  // A page left open overnight shows the new day once it's back on screen after 07:00.
+  useResetRangeOnNewDay(rangeSetAtRef, () => {
+    const range = todayRange();
+    rangeSetAtRef.current = Date.now();
+    setDateFrom(range.from);
+    setDateTo(range.to);
+    loadCalls(range);
+  });
 
   // A card linked from a row joins that call here too, so the Excel export includes it at once.
   const handleLinked = useCallback((callId, card) => {
@@ -92,10 +104,11 @@ export default function PersonalCallsTab() {
   }, []);
 
   const displayedCalls = direction ? calls.filter(c => c.direction === direction) : calls;
-  const canExport = !loading && !error && callsEnabled && displayedCalls.length > 0 && !!loadedRange;
+  const exportedCalls = callsInView(displayedCalls, tableView);
+  const canExport = !loading && !error && callsEnabled && exportedCalls.length > 0 && !!loadedRange;
 
   function exportToExcel() {
-    exportCallsToExcel(sortCalls(displayedCalls, sort), {
+    exportCallsToExcel(exportedCalls, {
       fileName: `שיחות_${shortDate(loadedRange.from)}-${shortDate(loadedRange.to)}.xlsx`,
       sheetName: "השיחות שלי",
     });
@@ -119,13 +132,13 @@ export default function PersonalCallsTab() {
         <div className="flex flex-wrap items-end gap-4">
           <div>
             <label htmlFor="personal-calls-filter-date-from" className="block text-xs font-medium text-slate-500 mb-1">מתאריך</label>
-            <input id="personal-calls-filter-date-from" type="date" value={dateFrom}
-              onChange={e => setDateFrom(e.target.value)} className={INPUT_CLS} />
+            <DateField id="personal-calls-filter-date-from" value={dateFrom}
+              onChange={setDateFrom} className={INPUT_CLS} />
           </div>
           <div>
             <label htmlFor="personal-calls-filter-date-to" className="block text-xs font-medium text-slate-500 mb-1">עד תאריך</label>
-            <input id="personal-calls-filter-date-to" type="date" value={dateTo}
-              onChange={e => setDateTo(e.target.value)} className={INPUT_CLS} />
+            <DateField id="personal-calls-filter-date-to" value={dateTo}
+              onChange={setDateTo} className={INPUT_CLS} />
           </div>
           <div>
             <label htmlFor="personal-calls-filter-direction" className="block text-xs font-medium text-slate-500 mb-1">כיוון</label>
@@ -167,7 +180,7 @@ export default function PersonalCallsTab() {
           <p className="text-slate-400 text-sm mb-4">נסה לשנות את טווח התאריכים או הסינון</p>
         </div>
       ) : (
-        <CallsTable calls={displayedCalls} hideAdvisorColumn canManage={false} canLink onLinked={handleLinked} sort={sort} onSortChange={setSort} />
+        <CallsTable calls={displayedCalls} hideAdvisorColumn canManage={false} canLink onLinked={handleLinked} view={tableView} />
       )}
     </div>
   );

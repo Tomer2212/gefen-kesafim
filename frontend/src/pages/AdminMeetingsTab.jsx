@@ -24,6 +24,7 @@ import { useAiSummaryEnabled } from "../hooks/useAiSummaryEnabled";
 import { mergeMeetingsSilently, recentDateBounds, visibleDateBounds } from "../components/meetings/mergeMeetings";
 import { useMeetingNotes } from "../context/MeetingNotesContext";
 import { useMeetingDirectorySchools } from "../hooks/useMeetingDirectorySchools";
+import DateField from "../components/DateField";
 
 // Local (Asia/Jerusalem) date, computed on each call — toISOString() is UTC and would show
 // yesterday between midnight and 02:00/03:00, and a module-level constant goes stale overnight.
@@ -413,7 +414,8 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
       ...(draft.status ? { status: draft.status, status_changed: true } : {}),
       start_time: normalizeTime(draft.start_time),
       end_time: normalizeTime(draft.end_time),
-      advisor_ids: draft.advisor_ids || [],
+      // Present only when the user changed the advisors — see MeetingRow.performSave.
+      ...("advisor_ids" in draft ? { advisor_ids: draft.advisor_ids || [] } : {}),
       participants: draft.participants || [],
       meeting_type: draft.meeting_type || null,
       meeting_service_type: draft.meeting_service_type || null,
@@ -426,8 +428,15 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
     };
     try {
       const res = await axios.put(`/schools/${draft.school_id}/meetings/${draft.id}`, payload, { headers: { "X-Client-Surface": "admin" } });
-      const saved = { ...res.data, advisor_profiles: draft.advisor_profiles || [], school_name: draft.school_name, school_symbol: draft.school_symbol, school_city: draft.school_city, school_id: draft.school_id };
-      setMeetings(prev => prev.map(m => m.id === draft.id ? saved : m));
+      const base = { ...res.data, school_name: draft.school_name, school_symbol: draft.school_symbol, school_city: draft.school_city, school_id: draft.school_id };
+      // Names follow what the server holds — the advisors may not have been sent (unchanged
+      // in this row) while someone else joined meanwhile.
+      setMeetings(prev => prev.map(m => {
+        if (m.id !== draft.id) return m;
+        const known = [...(draft.advisor_profiles || []), ...(m.advisor_profiles || [])];
+        const advisorProfiles = (res.data?.advisor_ids || []).map(id => known.find(p => p?.id === id)).filter(Boolean);
+        return { ...base, advisor_profiles: advisorProfiles };
+      }));
     } catch (err) {
       console.error("Update meeting failed:", err);
       loadAllMeetings(filters, academicYear, { silent: true });
@@ -1058,14 +1067,14 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
         <div className="flex flex-wrap items-end gap-4">
           <div>
             <FilterLabel htmlFor="filter-date-from" active={activeBaseFilters.date_from}>מתאריך</FilterLabel>
-            <input id="filter-date-from" type="date" value={filters.date_from || ""}
-              onChange={e => setServerFilter("date_from", e.target.value)}
+            <DateField id="filter-date-from" value={filters.date_from || ""}
+              onChange={v => setServerFilter("date_from", v)}
               className={INPUT_CLS + (activeBaseFilters.date_from ? ACTIVE_INPUT_CLS : "")} />
           </div>
           <div>
             <FilterLabel htmlFor="filter-date-to" active={activeBaseFilters.date_to}>עד תאריך</FilterLabel>
-            <input id="filter-date-to" type="date" value={filters.date_to || ""}
-              onChange={e => setServerFilter("date_to", e.target.value)}
+            <DateField id="filter-date-to" value={filters.date_to || ""}
+              onChange={v => setServerFilter("date_to", v)}
               className={INPUT_CLS + (activeBaseFilters.date_to ? ACTIVE_INPUT_CLS : "")} />
           </div>
           <div>

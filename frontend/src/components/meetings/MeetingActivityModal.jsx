@@ -92,6 +92,7 @@ function actionLabel(ev, profiles, tasks) {
     case "moved_year":        return "העברה לשנת לימודים אחרת";
     case "reassigned_school": return "שיוך לבית ספר אחר";
     case "advisor_joined":    return "הצטרף כיועץ מבצע";
+    case "advisor_left":      return "הסיר את עצמו כיועץ מבצע";
     case "deleted":           return "מחיקת הפגישה";
     case "note_added":        return "הוספת הערה";
     case "note_edited":       return "עריכת הערה";
@@ -142,7 +143,7 @@ ${meta.decision === "replaces"
   }
 }
 
-const FIELD_ROW_ACTIONS = new Set(["created", "updated", "moved_year", "reassigned_school", "advisor_joined", "deleted"]);
+const FIELD_ROW_ACTIONS = new Set(["created", "updated", "moved_year", "reassigned_school", "advisor_joined", "advisor_left", "deleted"]);
 
 function ChangedCell({ children, before }) {
   return (

@@ -142,7 +142,7 @@ function AudienceSearch({ id, label, value, onChange }) {
   );
 }
 
-function AudienceEditList({ title, rows, removed, onRemove, onRestore, onCustomize, globalQuery = "", idPrefix }) {
+function AudienceEditList({ title, rows, removed, onRemove, onRestore, onCustomize, globalQuery = "", idPrefix, removedNote }) {
   const [includedQuery, setIncludedQuery] = useState("");
   const [removedQuery, setRemovedQuery] = useState("");
   const section = (heading, list, query, setQuery, isRemoved) => {
@@ -160,6 +160,7 @@ function AudienceEditList({ title, rows, removed, onRemove, onRestore, onCustomi
               label={isRemoved ? "חיפוש בבתי הספר שהוסרו מהמשימה" : "חיפוש בבתי הספר במשימה"} value={query} onChange={setQuery} />
           )}
         </div>
+        {isRemoved && removedNote && <p className="text-xs text-slate-600 mb-1">{removedNote}</p>}
         {list.length > 0 && (
           <div className={`border border-slate-200 rounded-xl overflow-y-auto ${isRemoved ? "bg-slate-50 max-h-40" : "bg-white max-h-56"}`}>
             <table className="w-full text-xs">
@@ -171,7 +172,7 @@ function AudienceEditList({ title, rows, removed, onRemove, onRestore, onCustomi
                       {r.detail && <span className="block text-[11px] text-slate-500">{r.detail}</span>}
                     </td>
                     <td className="px-2.5 py-1.5 text-left whitespace-nowrap align-top">
-                      {onCustomize && !isRemoved && (
+                      {onCustomize && (
                         <button type="button" onClick={() => onCustomize(r.school_id)} className="text-blue-700 hover:underline ml-3">התאמת פגישות</button>
                       )}
                       <button type="button" onClick={() => action(r.school_id)} aria-label={`${actionLabel}: ${r.label}`}
@@ -1135,6 +1136,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
                           removed={roundRemovedRows.map(r => ({ school_id: r.school_id, label: schoolLabel(r) }))}
                           onRemove={removeSchool} onRestore={restoreSchool}
                           onCustomize={id => setPartsSchoolId(id)} globalQuery={audienceQuery} idPrefix="round-audience"
+                          removedNote={'הסרה מהמשימה לא משנה את הסבב: שם הם עדיין נחשבים "חסרה פגישה". בית ספר שלא צריך את הפגישה בסבב הזה — סמנו אצלו "התאמת פגישות".'}
                         />
                       ) : <span className="font-semibold text-slate-800">בתי ספר במשימה (0)</span>}
                       {partsNotice && <span role="status" className="text-xs text-emerald-700">{partsNotice}</span>}

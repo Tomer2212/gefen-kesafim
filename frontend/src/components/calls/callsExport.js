@@ -19,7 +19,7 @@ function schoolCell(call) {
 }
 
 // Exports calls to xlsx with the same values (and column order) CallsTable shows.
-// Rows are written in the given order — pass them sorted like the table (`sortCalls`).
+// Rows are written in the given order — pass the table's view (`callsInView`).
 export function exportCallsToExcel(calls, { fileName, sheetName = "שיחות", includeAdvisor = false, includeSchool = true }) {
   const columns = [
     { header: "תאריך", wch: 10, value: c => formatDate(c.start_time) },

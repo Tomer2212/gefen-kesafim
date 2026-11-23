@@ -1,4 +1,5 @@
 import { MEETING_STATUS_OPTIONS } from "./constants";
+import DateField from "../DateField";
 
 export function MeetingsAdvancedFilterPanel({ filters, onChange, onClear, advisors }) {
   function set(key, val) {
@@ -9,14 +10,14 @@ export function MeetingsAdvancedFilterPanel({ filters, onChange, onClear, adviso
     <div className="glass-card rounded-xl p-4 mb-3 flex flex-wrap items-end gap-4" dir="rtl">
       <div>
         <label htmlFor="filter-date-from" className="block text-xs font-medium text-slate-500 mb-1">מתאריך</label>
-        <input id="filter-date-from" type="date" value={filters.date_from || ""}
-          onChange={e => set("date_from", e.target.value)}
+        <DateField id="filter-date-from" value={filters.date_from || ""}
+          onChange={v => set("date_from", v)}
           className="text-sm border border-slate-200 rounded-lg px-2.5 py-1.5 outline-none focus:border-blue-400 bg-white" />
       </div>
       <div>
         <label htmlFor="filter-date-to" className="block text-xs font-medium text-slate-500 mb-1">עד תאריך</label>
-        <input id="filter-date-to" type="date" value={filters.date_to || ""}
-          onChange={e => set("date_to", e.target.value)}
+        <DateField id="filter-date-to" value={filters.date_to || ""}
+          onChange={v => set("date_to", v)}
           className="text-sm border border-slate-200 rounded-lg px-2.5 py-1.5 outline-none focus:border-blue-400 bg-white" />
       </div>
       <div>

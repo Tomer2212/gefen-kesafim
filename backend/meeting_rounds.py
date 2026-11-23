@@ -68,8 +68,11 @@ def _fetch_round_requests(db, round_id: str) -> tuple[list[dict], dict[str, dict
         .select("task_id, school_id, status, sent_at, created_at, booking_token_id")
         .in_("task_id", task_ids).order("created_at", desc=True).execute().data or []
     )
+    by_school: dict[str, list[dict]] = {}
     for m in msgs:
-        latest_msg.setdefault(m["school_id"], m)
+        by_school.setdefault(m["school_id"], []).append(m)
+    for sid, rows in by_school.items():
+        latest_msg[sid] = school_request_message(rows)
     token_ids = list({m["booking_token_id"] for m in latest_msg.values() if m.get("booking_token_id")})
     if token_ids:
         rows = (
@@ -85,6 +88,23 @@ def _fetch_round_requests(db, round_id: str) -> tuple[list[dict], dict[str, dict
         if n.get("skip_reason"):
             notes.setdefault(n["school_id"], n)
     return tasks, latest_msg, tokens, notes
+
+
+# A message never sent (stopped by the last check before sending — e.g. its link asked only for
+# what was booked meanwhile — or opted out) isn't the school's request; ranked below every other.
+_NOT_A_REQUEST = {"skipped"}
+_REQUEST_STATUS_RANK = {"sent": 0, "outlook_pending": 1, "sending": 2, "pending": 3, "failed": 4}
+
+
+def school_request_message(rows: list[dict]) -> dict:
+    """The message that stands for a school's request in the round. A send can create several
+    messages for one school at the same instant (one per coordinator — e.g. the גפן request to the
+    principal and the שוטף one to the secretary), so "the latest" alone is a coin toss: the newest
+    message that was not skipped wins, and among messages of the same moment the one actually sent."""
+    candidates = [m for m in rows if m.get("status") not in _NOT_A_REQUEST] or rows
+    # max() keeps the first of equal timestamps, so rank the statuses first.
+    ranked = sorted(candidates, key=lambda m: _REQUEST_STATUS_RANK.get(m.get("status"), 9))
+    return max(ranked, key=lambda m: m.get("created_at") or "")
 
 
 def _all_token_ids(db, task_ids: list[str]) -> set[str]:

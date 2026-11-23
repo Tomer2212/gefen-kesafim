@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import axios from "axios";
-import { CallsTable } from "../components/calls/CallsTable";
+import { CallsTable, useCallsTableView } from "../components/calls/CallsTable";
+import DateField from "../components/DateField";
 
 const INPUT_CLS = "text-sm border border-slate-200 rounded-lg px-2.5 py-1.5 outline-none focus:border-blue-400 bg-white";
 
@@ -31,6 +32,8 @@ export default function AdminCallsTab({ users }) {
   const [advisorId, setAdvisorId] = useState("");
   const [direction, setDirection] = useState("");
   const [reload, setReload] = useState(0);
+  // Kept here so the column filters survive moving to another day/week.
+  const tableView = useCallsTableView();
 
   const advisors = (users || []).filter(u => u.role === "advisor" || u.role === "manager" || u.role === "owner");
 
@@ -72,6 +75,7 @@ export default function AdminCallsTab({ users }) {
     setAnchorDate(TODAY);
     setAdvisorId("");
     setDirection("");
+    tableView.clear();
   }
 
   const displayedCalls = direction ? calls.filter(c => c.direction === direction) : calls;
@@ -93,8 +97,8 @@ export default function AdminCallsTab({ users }) {
           </div>
           <div>
             <label htmlFor="calls-filter-date" className="block text-xs font-medium text-slate-500 mb-1">תאריך</label>
-            <input id="calls-filter-date" type="date" value={anchorDate}
-              onChange={e => setAnchorDate(e.target.value)} className={INPUT_CLS} />
+            <DateField id="calls-filter-date" value={anchorDate}
+              onChange={v => { if (v) setAnchorDate(v); }} className={INPUT_CLS} />
           </div>
           <div className="flex items-center gap-1 self-end">
             <button type="button" onClick={goPrev} aria-label="הקודם" className="btn-ghost text-sm px-3 py-1.5 rounded-lg">▶</button>
@@ -139,7 +143,7 @@ export default function AdminCallsTab({ users }) {
           <p className="text-slate-400 text-sm mb-4">נסה לבחור יום או שבוע אחר, או לשנות את הסינון</p>
         </div>
       ) : (
-        <CallsTable calls={displayedCalls} />
+        <CallsTable calls={displayedCalls} view={tableView} />
       )}
     </div>
   );

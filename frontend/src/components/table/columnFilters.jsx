@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { CONTROL_LETTER_STATUS_MAP, CONTROL_LETTER_STATUS_OPTIONS } from "../controlLetter/constants";
+import DateField from "../DateField";
 
 export const TEXT_FMTS = new Set(["text", "textMulti"]);
 
@@ -21,6 +22,31 @@ export function dateToNum(iso) {
 export function numToISO(n) {
   const s = String(n).padStart(8, "0");
   return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
+}
+
+// fmt "time": minutes since midnight, shown "14:30"; typed "14:30" (or "14").
+// fmt "duration": seconds, shown "2:30" (m:ss); typed in minutes ("5", "2.5") or as "2:30".
+export function fmtClockMinutes(n) {
+  return `${String(Math.floor(n / 60)).padStart(2, "0")}:${String(n % 60).padStart(2, "0")}`;
+}
+
+export function fmtDurationSeconds(n) {
+  return `${Math.floor(n / 60)}:${String(n % 60).padStart(2, "0")}`;
+}
+
+function parseClockInput(text) {
+  const m = /^(\d{1,2})(?::(\d{1,2}))?$/.exec(text.trim());
+  if (!m) return null;
+  const h = Number(m[1]), mi = Number(m[2] || 0);
+  return h > 23 || mi > 59 ? null : h * 60 + mi;
+}
+
+function parseDurationInput(text) {
+  const t = text.trim();
+  const m = /^(\d+):(\d{1,2})$/.exec(t);
+  if (m) return Number(m[1]) * 60 + Number(m[2]);
+  const n = Number(t.replace(/,/g, ""));
+  return Number.isNaN(n) ? null : Math.round(n * 60);
 }
 
 export const NUMBER_FILTER_OPERATORS = [
@@ -83,6 +109,8 @@ export function formatFilterValueLabel(raw, fmt) {
   }
   if (fmt === "date") return raw ? formatDDMMYY(numToISO(raw)) : "";
   if (fmt === "hours") return formatMeetingHours(raw);
+  if (fmt === "time") return fmtClockMinutes(raw);
+  if (fmt === "duration") return fmtDurationSeconds(raw);
   if (fmt === "pct") return fmtPct2(raw);
   if (fmt === "int") return fmtInt(raw);
   return fmtMoney(raw);
@@ -113,6 +141,7 @@ export function describeColumnFilter(spec, fmt, allValues = []) {
       : fmt === "date" ? formatDDMMYY(c.value)
       : fmt === "pct" ? `${c.value}%`
       : fmt === "hours" ? `${c.value} שעות`
+      : fmt === "duration" && !String(c.value).includes(":") ? `${c.value} דק'`
       : c.value;
     return `${opLabel} ${value}`;
   };
@@ -126,6 +155,8 @@ export function describeColumnFilter(spec, fmt, allValues = []) {
 export function parseFilterInput(rawInput, fmt) {
   if (rawInput === "" || rawInput === null || rawInput === undefined) return null;
   if (fmt === "date") return dateToNum(String(rawInput));
+  if (fmt === "time") return parseClockInput(String(rawInput));
+  if (fmt === "duration") return parseDurationInput(String(rawInput));
   const n = Number(String(rawInput).replace(/,/g, "").trim());
   if (Number.isNaN(n)) return null;
   if (fmt === "pct") return n / 100;
@@ -149,13 +180,24 @@ export function evalCond(numericValue, cond, fmt) {
   }
 }
 
+// A query made only of digits (and phone separators) is matched against the value's digits:
+// phones are shown "050-1234567", and a user searching "0501234567" must still find them.
+function isDigitQuery(q) { return /\d/.test(q) && /^[\d\s\-+]+$/.test(q); }
+function stripPhoneSeparators(v) { return v.replace(/[\s\-+]/g, ""); }
+
+export function textMatchesQuery(text, query) {
+  const t = String(text ?? "");
+  return isDigitQuery(query) ? stripPhoneSeparators(t).includes(stripPhoneSeparators(query)) : t.includes(query);
+}
+
 // String predicate for a "text"/"textMulti" custom condition. Empty value = no-op (true),
 // matching evalCond's behavior for numeric columns.
 export function evalTextCond(strValue, cond) {
   if (!cond || !cond.op) return true;
-  const target = String(cond.value ?? "").trim().toLowerCase();
+  let target = String(cond.value ?? "").trim().toLowerCase();
   if (target === "") return true;
-  const v = String(strValue ?? "").toLowerCase();
+  let v = String(strValue ?? "").toLowerCase();
+  if (isDigitQuery(target)) { target = stripPhoneSeparators(target); v = stripPhoneSeparators(v); }
   switch (cond.op) {
     case "eq": return v === target;
     case "ne": return v !== target;
@@ -363,7 +405,7 @@ export function ColumnHeaderFilter({ colDef, columnFilters, setColumnFilters, so
     const wasEmpty = prevQueryEmptyRef.current;
     prevQueryEmptyRef.current = q === "";
     if (q && wasEmpty) {
-      setDraftSelected(distinctValues.filter(v => v.label.includes(q)).map(v => v.value));
+      setDraftSelected(distinctValues.filter(v => textMatchesQuery(v.label, q)).map(v => v.value));
     } else if (!q && !wasEmpty) {
       setDraftSelected(spec?.mode === "values" ? spec.selected : distinctValues.map(v => v.value));
     }
@@ -402,7 +444,7 @@ export function ColumnHeaderFilter({ colDef, columnFilters, setColumnFilters, so
   // when there is no query.
   const trimmedQuery = searchQuery.trim();
   const filteredDistinctValues = trimmedQuery
-    ? distinctValues.filter(v => v.label.includes(trimmedQuery))
+    ? distinctValues.filter(v => textMatchesQuery(v.label, trimmedQuery))
     : distinctValues;
 
   function toggleSelectAll() {
@@ -455,7 +497,7 @@ export function ColumnHeaderFilter({ colDef, columnFilters, setColumnFilters, so
 
   const isTextLike = fmt === "text" || fmt === "textMulti";
   const customOperators = isTextLike ? TEXT_FILTER_OPERATORS : NUMBER_FILTER_OPERATORS;
-  const valuePlaceholder = fmt === "pct" ? "%" : fmt === "hours" ? "שעות" : isTextLike ? "טקסט" : "ערך";
+  const valuePlaceholder = fmt === "pct" ? "%" : fmt === "hours" ? "שעות" : fmt === "time" ? "שעה" : fmt === "duration" ? "דקות" : isTextLike ? "טקסט" : "ערך";
 
   return (
     <div ref={containerRef} className="relative inline-flex">
@@ -520,7 +562,7 @@ export function ColumnHeaderFilter({ colDef, columnFilters, setColumnFilters, so
                     aria-expanded={numberFiltersOpen}
                     className="w-full flex items-center justify-between px-3 py-1.5 text-sm text-slate-700 hover:bg-blue-50"
                   >
-                    {isTextLike ? "מסנני טקסט" : fmt === "date" ? "מסנני תאריכים" : "מסנני מספרים"}
+                    {isTextLike ? "מסנני טקסט" : fmt === "date" ? "מסנני תאריכים" : fmt === "time" ? "מסנני שעות" : fmt === "duration" ? "מסנני משך" : "מסנני מספרים"}
                     <svg aria-hidden="true" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"
                       style={{ transform: numberFiltersOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s" }}>
                       <polyline points="9 18 15 12 9 6" />
@@ -594,7 +636,9 @@ export function ColumnHeaderFilter({ colDef, columnFilters, setColumnFilters, so
                 <select value={customCond1.op} onChange={e => setCustomCond1(c => ({ ...c, op: e.target.value }))} className="input-field text-xs flex-shrink-0" style={{ width: 120 }} aria-label="אופרטור תנאי 1">
                   {customOperators.map(o => <option key={o.op} value={o.op}>{o.label}</option>)}
                 </select>
-                <input type={fmt === "date" ? "date" : "text"} value={customCond1.value} onChange={e => setCustomCond1(c => ({ ...c, value: e.target.value }))} className="input-field text-xs flex-1" placeholder={valuePlaceholder} aria-label="ערך תנאי 1" />
+                {fmt === "date"
+                  ? <DateField value={customCond1.value} onChange={v => setCustomCond1(c => ({ ...c, value: v }))} className="input-field text-xs w-full" wrapperClassName="relative flex-1 min-w-0" aria-label="ערך תנאי 1" />
+                  : <input type="text" value={customCond1.value} onChange={e => setCustomCond1(c => ({ ...c, value: e.target.value }))} className="input-field text-xs flex-1" placeholder={valuePlaceholder} aria-label="ערך תנאי 1" />}
               </div>
               <div className="inline-flex self-center rounded-lg border border-slate-200 overflow-hidden text-xs font-semibold" style={{ direction: "ltr" }}>
                 <button type="button" onClick={() => setCustomJoiner("AND")} className={`px-3 py-1 transition-colors ${customJoiner === "AND" ? "bg-blue-600 text-white" : "bg-white text-slate-500 hover:bg-slate-50"}`}>וגם</button>
@@ -604,10 +648,14 @@ export function ColumnHeaderFilter({ colDef, columnFilters, setColumnFilters, so
                 <select value={customCond2.op} onChange={e => setCustomCond2(c => ({ ...c, op: e.target.value }))} className="input-field text-xs flex-shrink-0" style={{ width: 120 }} aria-label="אופרטור תנאי 2">
                   {customOperators.map(o => <option key={o.op} value={o.op}>{o.label}</option>)}
                 </select>
-                <input type={fmt === "date" ? "date" : "text"} value={customCond2.value} onChange={e => setCustomCond2(c => ({ ...c, value: e.target.value }))} className="input-field text-xs flex-1" placeholder={valuePlaceholder} aria-label="ערך תנאי 2" />
+                {fmt === "date"
+                  ? <DateField value={customCond2.value} onChange={v => setCustomCond2(c => ({ ...c, value: v }))} className="input-field text-xs w-full" wrapperClassName="relative flex-1 min-w-0" aria-label="ערך תנאי 2" />
+                  : <input type="text" value={customCond2.value} onChange={e => setCustomCond2(c => ({ ...c, value: e.target.value }))} className="input-field text-xs flex-1" placeholder={valuePlaceholder} aria-label="ערך תנאי 2" />}
               </div>
               {fmt === "hours" && <p className="text-xs text-slate-400">לדוגמה: 5.5 (5 שעות ו-30 דק')</p>}
               {fmt === "pct" && <p className="text-xs text-slate-400">הזן אחוז, לדוגמה: 75</p>}
+              {fmt === "time" && <p className="text-xs text-slate-400">הזן שעה, לדוגמה: 14:30</p>}
+              {fmt === "duration" && <p className="text-xs text-slate-400">הזן דקות, לדוגמה: 5 או 2:30</p>}
               <div className="flex items-center gap-2 pt-1">
                 <button type="button" onClick={applyCustom} className="btn-blue text-xs px-4 py-1.5 rounded-lg">החל</button>
                 <button type="button" onClick={() => setSubview("main")} className="text-xs text-slate-400 hover:text-slate-600 transition-colors px-2 py-1.5">ביטול</button>

@@ -20,15 +20,16 @@ import { useAiSummaryEnabled } from "../hooks/useAiSummaryEnabled";
 import { mergeMeetingsSilently, recentDateBounds, visibleDateBounds } from "../components/meetings/mergeMeetings";
 import { useMeetingNotes } from "../context/MeetingNotesContext";
 import { useMeetingDirectorySchools } from "../hooks/useMeetingDirectorySchools";
+import { clearDailyRange, localToday, readDailyRange, saveDailyRange, todayRange, useResetRangeOnNewDay } from "../lib/dailyDateRange";
+import DateField from "../components/DateField";
 
-const TODAY = new Date().toISOString().slice(0, 10);
-// date_from defaults to the start of a given academic year (not a fixed value) so the list
-// doesn't silently hide that year's meetings the moment they're dated in the future relative
-// to today — see the dynamic-date-from plan. date_to intentionally stays "today" always.
-function buildDefaultFilters(academicYear) {
-  return { status: "", date_from: getAcademicYearStartDate(academicYear), date_to: TODAY };
+// The default range is today only; a range the user picks is kept until the next 07:00
+// (lib/dailyDateRange.js), the rest of the filters per browser tab (sessionStorage).
+function buildDefaultFilters() {
+  return { status: "", date_from: localToday(), date_to: localToday() };
 }
 const SS_KEY = "personal_meetings_ui_state";
+const RANGE_KEY = "personal_meetings";
 const INPUT_CLS = "text-sm border border-slate-200 rounded-lg px-2.5 py-1.5 outline-none focus:border-blue-400 bg-white";
 const ACTIVE_INPUT_CLS = " border-blue-400 ring-1 ring-blue-300 bg-blue-50/50";
 
@@ -57,7 +58,11 @@ export default function PersonalMeetingsTab({ userId, role, canDeleteMeetings, u
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [academicYear, setAcademicYear] = useState(DEFAULT_ACADEMIC_YEAR);
-  const [filters, setFilters] = useState(saved?.filters ?? buildDefaultFilters(DEFAULT_ACADEMIC_YEAR));
+  const [filters, setFilters] = useState(() => {
+    const range = readDailyRange(RANGE_KEY, userId) || todayRange();
+    return { ...buildDefaultFilters(), ...(saved?.filters || {}), date_from: range.from, date_to: range.to };
+  });
+  const rangeSetAtRef = useRef(Date.now());
   const [showAdvanced, setShowAdvanced] = useState(saved?.showAdvanced ?? false);
 
   const [nameFilter, setNameFilter] = useState(saved?.nameFilter ?? "");
@@ -116,6 +121,23 @@ export default function PersonalMeetingsTab({ userId, role, canDeleteMeetings, u
   useEffect(() => {
     saveState({ filters, showAdvanced, nameFilter, symbolFilter, cityFilter, districtFilter });
   }, [filters, showAdvanced, nameFilter, symbolFilter, cityFilter, districtFilter]);
+
+  // Persist the date range until the next 07:00; today-only is the default, so it's not stored.
+  useEffect(() => {
+    rangeSetAtRef.current = Date.now();
+    const today = localToday();
+    if (filters.date_from === today && filters.date_to === today) clearDailyRange(RANGE_KEY, userId);
+    else saveDailyRange(RANGE_KEY, userId, { from: filters.date_from, to: filters.date_to });
+  }, [filters.date_from, filters.date_to, userId]);
+
+  // A page left open overnight shows the new day once it's back on screen after 07:00.
+  // The ref is refreshed here too: if the range already is today (opened before 07:00), the
+  // dates don't change, the persist effect doesn't run, and every later focus would reload.
+  useResetRangeOnNewDay(rangeSetAtRef, () => {
+    rangeSetAtRef.current = Date.now();
+    const today = localToday();
+    setFilters(f => (f.date_from === today && f.date_to === today ? f : { ...f, date_from: today, date_to: today }));
+  });
 
   // Click-outside for 3-dot
   useEffect(() => {
@@ -343,7 +365,7 @@ export default function PersonalMeetingsTab({ userId, role, canDeleteMeetings, u
     const eligible = displayedMeetings.filter(m =>
       selectedIds[m.id] &&
       m.status === "scheduled" &&
-      m.meeting_date <= TODAY &&
+      m.meeting_date <= localToday() &&
       m.end_time &&
       new Date(`${m.meeting_date}T${m.end_time}:00`) <= new Date()
     );
@@ -402,7 +424,7 @@ export default function PersonalMeetingsTab({ userId, role, canDeleteMeetings, u
   }
 
   function clearFilters() {
-    setFilters(buildDefaultFilters(academicYear));
+    setFilters(buildDefaultFilters());
     setNameFilter(""); setSymbolFilter(""); setCityFilter(""); setDistrictFilter("");
   }
 
@@ -435,11 +457,11 @@ export default function PersonalMeetingsTab({ userId, role, canDeleteMeetings, u
   const advancedFilterCount = (cityFilter ? 1 : 0) + (districtFilter ? 1 : 0);
 
   // Highlights each base filter field (blue label+dot+ring) the moment its value diverges
-  // from the "hidden" default (date_from/date_to default to today, not empty) — same pattern
+  // from the "hidden" default (both dates default to today, not empty) — same pattern
   // as AdminMeetingsTab.jsx, so a filtered view is never invisible to the user.
   const activeBaseFilters = {
-    date_from: (filters.date_from || "") !== getAcademicYearStartDate(academicYear),
-    date_to: (filters.date_to || "") !== TODAY,
+    date_from: (filters.date_from || "") !== localToday(),
+    date_to: (filters.date_to || "") !== localToday(),
     status: !!filters.status,
     school_name: !!nameFilter,
     school_symbol: !!symbolFilter,
@@ -591,14 +613,14 @@ export default function PersonalMeetingsTab({ userId, role, canDeleteMeetings, u
         <div className="flex flex-wrap items-end gap-4">
           <div>
             <FilterLabel htmlFor="pmt-date-from" active={activeBaseFilters.date_from}>מתאריך</FilterLabel>
-            <input id="pmt-date-from" type="date" value={filters.date_from || ""}
-              onChange={e => setServerFilter("date_from", e.target.value)}
+            <DateField id="pmt-date-from" value={filters.date_from || ""}
+              onChange={v => setServerFilter("date_from", v)}
               className={INPUT_CLS + (activeBaseFilters.date_from ? ACTIVE_INPUT_CLS : "")} />
           </div>
           <div>
             <FilterLabel htmlFor="pmt-date-to" active={activeBaseFilters.date_to}>עד תאריך</FilterLabel>
-            <input id="pmt-date-to" type="date" value={filters.date_to || ""}
-              onChange={e => setServerFilter("date_to", e.target.value)}
+            <DateField id="pmt-date-to" value={filters.date_to || ""}
+              onChange={v => setServerFilter("date_to", v)}
               className={INPUT_CLS + (activeBaseFilters.date_to ? ACTIVE_INPUT_CLS : "")} />
           </div>
           <div>

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-export function AdvisorCell({ value, usersWithAccess, usersWithoutAccess, onChange, onRequestAccess, readOnly, canJoin, onJoin }) {
+export function AdvisorCell({ value, usersWithAccess, usersWithoutAccess, onChange, onRequestAccess, readOnly, canJoin, onJoin, canLeave, onLeave }) {
   const [open, setOpen] = useState(false);
   const [showOthers, setShowOthers] = useState(false);
   const containerRef = useRef(null);
@@ -24,6 +24,12 @@ export function AdvisorCell({ value, usersWithAccess, usersWithoutAccess, onChan
           <button type="button" onClick={onJoin}
             className="text-xs text-blue-600 hover:text-blue-800 hover:underline whitespace-nowrap">
             + הצטרף כיועץ מבצע
+          </button>
+        )}
+        {canLeave && (
+          <button type="button" onClick={onLeave}
+            className="text-xs text-slate-400 hover:text-red-600 hover:underline whitespace-nowrap opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity">
+            הסר אותי מהפגישה
           </button>
         )}
       </div>

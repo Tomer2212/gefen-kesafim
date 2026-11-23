@@ -1060,6 +1060,8 @@ class MeetingRequirementIn(BaseModel):
     # "פגישה לא נדרשת בסבב" — {school_id: [part, ...]} copied from the task's round
     # (task_logic.apply_part_exclusions); never taken from the request body.
     school_part_exclusions: dict | None = None
+    # Stamped at creation (_prepare_meeting_conditions) — see task_logic._matching_meetings.
+    count_any_meeting_type: bool = False
 
 
 def _stamp_round_plan(db, org_id: str, round_id: str | None, success_criteria: dict | None) -> None:
@@ -2031,6 +2033,9 @@ def _prepare_meeting_conditions(success_criteria: dict | None, org_id: str, advi
         for c in g.get("conditions") or []:
             if c.get("type") == "meeting":
                 c["explicit_stage_scope_only"] = True
+                # Physical/remote decides how a new meeting is offered, never whether one held the
+                # other way counts (task_logic._matching_meetings) — the round's and booking page's rule.
+                c["count_any_meeting_type"] = True
                 # Always from the cleaned task-level list (never trusted from the condition body).
                 c.pop("exclude_advisor_ids", None)
                 c.pop("also_matches_types", None)
@@ -2390,15 +2395,18 @@ def get_task(task_id: str, user: Annotated[dict, Depends(get_current_user)]):
     try:
         msg_rows = (
             db.table("org_task_messages")
-            .select("school_id, status, sent_at, error, channel, booking_token_id, fallback_used, outlook_sent_at")
+            .select("school_id, status, sent_at, created_at, error, channel, booking_token_id, fallback_used, outlook_sent_at")
             .eq("task_id", task_id)
             .order("created_at", desc=True)
             .execute()
             .data or []
         )
-        latest_by_school = {}
+        rows_by_school: dict[str, list[dict]] = {}
         for m in msg_rows:
-            latest_by_school.setdefault(m["school_id"], m)
+            rows_by_school.setdefault(m["school_id"], []).append(m)
+        # One send can create several messages per school at the same instant (one per
+        # coordinator) — the same choice as the round dashboard, never a coin toss.
+        latest_by_school = {sid: meeting_rounds.school_request_message(rows) for sid, rows in rows_by_school.items()}
 
         # Round 7: "link clicked" / "meeting booked" — the two reliable (non-pixel) send-status
         # signals for TaskPanel's tooltip. Batched, not N+1.

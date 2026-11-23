@@ -16,6 +16,7 @@ import {
   MEETING_SERVICE_TYPE_OPTIONS,
 } from "./constants";
 import { DISTRICT_OPTIONS } from "../../constants/clientEntities";
+import DateField from "../DateField";
 
 // Tags school-data writes for the school card's "תיעוד פעולות" log (backend school_activity.py).
 const SURFACE_HEADERS = { headers: { "X-Client-Surface": "import" } };
@@ -73,7 +74,7 @@ function InvalidDateFix({ rowIndex, onConfirm }) {
   return (
     <div className="flex items-center gap-2">
       <label htmlFor={`fix-date-${rowIndex}`} className="sr-only">תאריך מתוקן</label>
-      <input id={`fix-date-${rowIndex}`} type="date" value={value} onChange={e => setValue(e.target.value)}
+      <DateField id={`fix-date-${rowIndex}`} value={value} onChange={setValue}
         className="text-xs border border-amber-300 rounded-lg px-2 py-1.5 bg-white" />
       <button type="button" disabled={!value} onClick={() => onConfirm(value)}
         className="text-xs px-2.5 py-1.5 rounded-lg font-medium bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">

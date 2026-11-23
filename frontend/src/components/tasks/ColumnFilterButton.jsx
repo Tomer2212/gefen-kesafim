@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import DateField from "../DateField";
 
 const NUMBER_OPS = [
   { op: "eq", label: "שווה ל..." }, { op: "ne", label: "לא שווה ל..." },
@@ -130,13 +131,22 @@ export default function ColumnFilterButton({ col, filter, onFilterChange, sortDi
                 {(col.kind === "date" ? DATE_OPS : NUMBER_OPS).map(o => <option key={o.op} value={o.op}>{o.label}</option>)}
               </select>
               <label className="sr-only" htmlFor={`colfilter-val-${col.key}`}>ערך</label>
-              <input
-                id={`colfilter-val-${col.key}`}
-                type={col.kind === "date" ? "date" : "number"}
-                value={filter?.value ?? ""}
-                onChange={e => onFilterChange({ op: filter?.op || (col.kind === "date" ? "on" : "eq"), value: e.target.value })}
-                className="w-full border border-slate-200 rounded-lg px-2 py-1"
-              />
+              {col.kind === "date" ? (
+                <DateField
+                  id={`colfilter-val-${col.key}`}
+                  value={filter?.value ?? ""}
+                  onChange={v => onFilterChange({ op: filter?.op || "on", value: v })}
+                  className="w-full border border-slate-200 rounded-lg px-2 py-1"
+                />
+              ) : (
+                <input
+                  id={`colfilter-val-${col.key}`}
+                  type="number"
+                  value={filter?.value ?? ""}
+                  onChange={e => onFilterChange({ op: filter?.op || "eq", value: e.target.value })}
+                  className="w-full border border-slate-200 rounded-lg px-2 py-1"
+                />
+              )}
             </div>
           )}
 

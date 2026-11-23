@@ -382,7 +382,8 @@ export default function ClientPage() {
       ...(draft.status ? { status: draft.status, status_changed: true } : {}),
       start_time: normalizeTime(draft.start_time),
       end_time: normalizeTime(draft.end_time),
-      advisor_ids: draft.advisor_ids || [],
+      // Present only when the user changed the advisors — see MeetingRow.performSave.
+      ...("advisor_ids" in draft ? { advisor_ids: draft.advisor_ids || [] } : {}),
       participants: draft.participants || [],
       meeting_type: draft.meeting_type || null,
       meeting_service_type: draft.meeting_service_type || null,

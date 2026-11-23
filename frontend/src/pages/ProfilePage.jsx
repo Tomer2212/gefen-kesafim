@@ -13,6 +13,7 @@ import { MultiSelectChips } from "../components/MultiSelectChips";
 import { DOMAIN_OPTIONS } from "../constants/domains";
 import Avatar from "../components/Avatar";
 import AvatarCropModal from "../components/AvatarCropModal";
+import DateField from "../components/DateField";
 
 const AVATAR_MAX_BYTES = 5 * 1024 * 1024;
 const AVATAR_TYPES = ["image/png", "image/jpeg", "image/webp"];
@@ -266,15 +267,14 @@ export default function ProfilePage() {
     }
   }
 
-  // Save only when the field loses focus (or Enter) — NOT on every keystroke, so a
-  // native <input type="date"> isn't locked to a half-typed year like "0019".
-  async function handleBirthDateBlur(e) {
-    const value = e.target.value; // "" | "YYYY-MM-DD"
+  // DateField emits only a complete, real date inside min/max, so a picked/typed date saves at
+  // once. A cleared field ("") saves only when the field is left — the user may be retyping.
+  const birthClearedRef = useRef(false);
+  async function saveBirthDate(value) { // "" | "YYYY-MM-DD"
     setBirthDateError("");
     if (value === (birthDate || "")) return;
     if (value && (value < "1900-01-01" || value > new Date().toISOString().slice(0, 10))) {
       setBirthDateError("תאריך לידה לא חוקי");
-      e.target.value = birthDate || "";
       return;
     }
     const prev = birthDate;
@@ -423,7 +423,7 @@ export default function ProfilePage() {
 
               {activeTab === "tasks" && <PersonalTasksSection />}
 
-              {activeTab === "calls" && callsTabEnabled && <PersonalCallsTab />}
+              {activeTab === "calls" && callsTabEnabled && <PersonalCallsTab userId={userId} />}
 
               {activeTab === "connections" && <ConnectionsTab />}
 
@@ -722,14 +722,13 @@ export default function ProfilePage() {
                           תאריך לידה
                         </label>
                         <div className="flex items-center gap-2">
-                          <input
-                            key={birthDate}
+                          <DateField
                             id="profile-birth-date"
-                            type="date"
-                            defaultValue={birthDate}
+                            value={birthDate || ""}
                             min="1900-01-01"
                             max={new Date().toISOString().slice(0, 10)}
-                            onBlur={handleBirthDateBlur}
+                            onChange={v => { birthClearedRef.current = !v; if (v) saveBirthDate(v); }}
+                            onBlur={() => { if (birthClearedRef.current) { birthClearedRef.current = false; saveBirthDate(""); } }}
                             onKeyDown={e => { if (e.key === "Enter") e.currentTarget.blur(); }}
                             disabled={birthDateSaving}
                             className="border border-slate-200 rounded-xl px-3 py-2 text-sm text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-blue-200 disabled:opacity-60"

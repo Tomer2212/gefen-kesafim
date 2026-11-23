@@ -6,6 +6,7 @@ import {
   MEETING_SERVICE_TYPE_OPTIONS,
   formatMeetingDate,
 } from "./constants";
+import DateField from "../DateField";
 
 // Excel-style per-column filter + sort for the meetings table (MeetingsTable.jsx), modeled on
 // DashboardPage.jsx's ColumnHeaderFilter but trimmed for categorical / text / date / time
@@ -374,27 +375,25 @@ export function MeetingColumnMenu({
             </>
           ) : (
             <div className="p-3 flex flex-col gap-2">
-              <label className="flex flex-col gap-1 text-xs text-slate-600">
-                <span>{DATE_OPS.find(o => o.op === dateDraft.op)?.label}</span>
-                <input
-                  type="date"
+              <div className="flex flex-col gap-1 text-xs text-slate-600">
+                <span aria-hidden="true">{DATE_OPS.find(o => o.op === dateDraft.op)?.label}</span>
+                <DateField
                   value={dateDraft.d1}
-                  onChange={e => setDateDraft(d => ({ ...d, d1: e.target.value }))}
-                  className="input-field text-xs"
+                  onChange={v => setDateDraft(d => ({ ...d, d1: v }))}
+                  className="input-field text-xs w-full"
                   aria-label="תאריך התחלה"
                 />
-              </label>
+              </div>
               {dateDraft.op === "between" && (
-                <label className="flex flex-col gap-1 text-xs text-slate-600">
-                  <span>עד תאריך</span>
-                  <input
-                    type="date"
+                <div className="flex flex-col gap-1 text-xs text-slate-600">
+                  <span aria-hidden="true">עד תאריך</span>
+                  <DateField
                     value={dateDraft.d2}
-                    onChange={e => setDateDraft(d => ({ ...d, d2: e.target.value }))}
-                    className="input-field text-xs"
+                    onChange={v => setDateDraft(d => ({ ...d, d2: v }))}
+                    className="input-field text-xs w-full"
                     aria-label="תאריך סיום"
                   />
-                </label>
+                </div>
               )}
               <div className="flex items-center gap-2 pt-1">
                 <button type="button" onClick={applyDateFilter} className="btn-blue text-xs px-4 py-1.5 rounded-lg">החל</button>

@@ -3,6 +3,7 @@ import axios from "axios";
 import { fetchRangeBusyByDate } from "../components/meetings/dayScheduleUtils";
 import { computeEndTimeIso } from "../components/calls/CallRow";
 import { PerformanceDayCard } from "../components/performance/PerformanceDayCard";
+import DateField from "../components/DateField";
 
 const INPUT_CLS = "text-sm border border-slate-200 rounded-lg px-2.5 py-1.5 outline-none focus:border-blue-400 bg-white";
 const WEEKDAY_LABELS = ["יום א׳", "יום ב׳", "יום ג׳", "יום ד׳", "יום ה׳", "יום ו׳", "שבת"];
@@ -245,8 +246,8 @@ export default function AdminPerformanceTab({ users, loadingUsers, loadUsers }) 
           </div>
           <div>
             <label htmlFor="perf-filter-date" className="block text-xs font-medium text-slate-500 mb-1">תאריך</label>
-            <input id="perf-filter-date" type="date" value={anchorDate}
-              onChange={e => setAnchorDate(e.target.value)} className={INPUT_CLS} />
+            <DateField id="perf-filter-date" value={anchorDate}
+              onChange={v => { if (v) setAnchorDate(v); }} className={INPUT_CLS} />
           </div>
           <div className="flex items-center gap-1 self-end">
             <button type="button" onClick={goPrev} aria-label="הקודם" className="btn-ghost text-sm px-3 py-1.5 rounded-lg">▶</button>

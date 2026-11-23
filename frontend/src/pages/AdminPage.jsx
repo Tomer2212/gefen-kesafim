@@ -66,6 +66,7 @@ import { MINISTRY_STAGE_OPTIONS, MINISTRY_STAGE_OTHER, ministryStageLabel, match
 import { DISTRICT_OPTIONS } from "../constants/clientEntities";
 import MeetingPlanModal from "../components/meetingPlan/MeetingPlanModal";
 import { PLAN_TYPE_LABELS, normalizePlan, planSummary, planTypeSummary, spreadPlan } from "../constants/meetingPlan";
+import DateField from "../components/DateField";
 
 // Tags school-data writes with the screen they came from, for the school card's "תיעוד פעולות"
 // log (backend school_activity.py).
@@ -3909,6 +3910,8 @@ export default function AdminPage() {
     const [y, m, day] = d.split("-");
     return `${day}/${m}/${y}`;
   }
+  // {userId: true} while that row's birth-date field has been cleared but not yet left.
+  const birthClearedRef = useRef({});
   function startEditBirthDate(u) {
     setBirthEditingIds(prev => new Set(prev).add(u.id));
   }
@@ -6162,15 +6165,21 @@ export default function AdminPage() {
                           {birthEditingIds.has(u.id) ? (
                             <>
                               <label htmlFor={`birth-${u.id}`} className="sr-only">תאריך לידה {u.full_name || u.email}</label>
-                              <input id={`birth-${u.id}`} autoFocus type="date" dir="ltr"
+                              {/* A picked/typed date saves at once; a cleared field saves on blur (null),
+                                  anything else just leaves edit mode. */}
+                              <DateField id={`birth-${u.id}`} autoFocus
                                 className="input-field text-sm w-40"
-                                defaultValue={u.birth_date || ""}
+                                value={u.birth_date || ""}
                                 min="1900-01-01"
                                 max={new Date().toISOString().slice(0, 10)}
-                                onBlur={e => saveUserBirthDate(u, e.target.value)}
+                                onChange={v => { birthClearedRef.current[u.id] = !v; if (v) saveUserBirthDate(u, v); }}
+                                onBlur={() => {
+                                  if (birthClearedRef.current[u.id]) { delete birthClearedRef.current[u.id]; saveUserBirthDate(u, ""); }
+                                  else cancelEditBirthDate(u);
+                                }}
                                 onKeyDown={e => {
                                   if (e.key === "Enter") e.target.blur();
-                                  if (e.key === "Escape") cancelEditBirthDate(u);
+                                  if (e.key === "Escape") { delete birthClearedRef.current[u.id]; cancelEditBirthDate(u); }
                                 }}
                               />
                             </>

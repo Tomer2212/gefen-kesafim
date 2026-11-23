@@ -132,6 +132,41 @@ function ConflictModal({ advisorName, existingEvent, newEvent, onClose }) {
   );
 }
 
+const LAST_ADVISOR_LEAVE_MSG = "לא ניתן להשאיר פגישה ללא יועץ מבצע. יש לפנות לגורם האחראי בארגון כדי להוסיף יועץ מבצע אחר לפגישה ורק אז ניתן יהיה להסיר אותך מהפגישה.";
+
+// "הסר אותי מהפגישה": confirms leaving, or — for the only performing advisor — explains
+// why it isn't possible (a meeting is never left without one; the server enforces it too).
+function LeaveMeetingModal({ blockedMessage, busy, onConfirm, onClose }) {
+  const { ref, handleKeyDown } = useFocusTrap(onClose);
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
+      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="leave-meeting-title" onKeyDown={handleKeyDown}
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6" dir="rtl">
+        <h2 id="leave-meeting-title" className="text-base font-bold text-slate-900 mb-3">
+          {blockedMessage ? "לא ניתן להסיר אותך מהפגישה" : "להסיר אותך מהפגישה?"}
+        </h2>
+        {blockedMessage
+          ? <p role="alert" className="text-sm text-slate-700 mb-5">{blockedMessage}</p>
+          : <p className="text-sm text-slate-700 mb-5">לא תהיה עוד יועץ מבצע בפגישה זו, והיא תוסר גם מיומן ה-Outlook שלך. שאר היועצים המבצעים יישארו בפגישה.</p>}
+        <div className="flex gap-2">
+          {!blockedMessage && (
+            <button type="button" onClick={onConfirm} disabled={busy}
+              className="flex-1 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-60 text-white font-medium text-sm transition-colors">
+              הסר אותי
+            </button>
+          )}
+          <button type="button" onClick={onClose}
+            className="flex-1 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium text-sm transition-colors">
+            {blockedMessage ? "סגור" : "ביטול"}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 // Asks which participant to use as "who to call" in the Outlook event subject, when
 // there are multiple participants and none of them is the principal (so it's ambiguous).
 function ChooseContactModal({ options, onChoose, onClose }) {
@@ -316,6 +351,8 @@ function MeetingRowImpl({
   const [showReminderTip, setShowReminderTip] = useState(false);
   const [reminderStatus, setReminderStatus] = useState(null);
   const [showNoParticipantsModal, setShowNoParticipantsModal] = useState(false);
+  const [leavePrompt, setLeavePrompt] = useState(null); // {blockedMessage} while the leave dialog is open
+  const [leaveBusy, setLeaveBusy] = useState(false);
   const [showActionsMenu, setShowActionsMenu] = useState(false);
   const [advisorBusy, setAdvisorBusy] = useState([]);
   const [busyLoading, setBusyLoading] = useState(true);
@@ -392,6 +429,25 @@ function MeetingRowImpl({
     if (!saveFailedRef.current) setDraft(d => (d.status === prevStatus ? { ...d, status: meeting.status } : d));
     prevStatusRef.current = meeting.status;
   }, [meeting.status]);
+
+  // Same for the advisors: someone may join or leave from another screen (picked up by a
+  // poll). Without this the row keeps its old list, performSave sees it as a change and
+  // re-sends it — removing whoever joined. Only pulled through while the row has no
+  // unsaved advisor change of its own.
+  const meetingAdvisorKey = [...meetingAdvisorIds].sort().join(",");
+  const prevAdvisorIdsRef = useRef(meetingAdvisorIds);
+  useEffect(() => {
+    const prevIds = prevAdvisorIdsRef.current;
+    prevAdvisorIdsRef.current = meetingAdvisorIds;
+    setDraft(d => {
+      const draftIds = d.advisor_ids || [];
+      if (draftIds.length !== prevIds.length || !draftIds.every(id => prevIds.includes(id))) return d;
+      const known = [...(meeting.advisor_profiles || []), ...(d.advisor_profiles || [])];
+      const profiles = meetingAdvisorIds.map(id => known.find(p => p?.id === id)).filter(Boolean);
+      return { ...d, advisor_ids: meetingAdvisorIds, advisor_profiles: profiles };
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [meetingAdvisorKey]);
 
   // Fetch the advisor's Outlook busy ranges for this specific meeting date — used both
   // to warn/block saving on a real overlap, and to power the schedule hover tooltips.
@@ -515,12 +571,41 @@ function MeetingRowImpl({
       const res = await axios.post(`/schools/${meeting.school_id}/meetings/${meeting.id}/join`);
       const newIds = res.data?.advisor_ids || [...meetingAdvisorIds, currentUserId];
       const selfProfile = usersWithAccess?.find(u => u.id === currentUserId) || usersWithoutAccess?.find(u => u.id === currentUserId);
-      const newProfiles = [...(draft.advisor_profiles || []), ...(selfProfile && !meetingAdvisorIds.includes(currentUserId) ? [selfProfile] : [])];
+      // Built from the server's list (it may hold someone else who joined meanwhile).
+      const known = [...(draft.advisor_profiles || []), ...(meeting.advisor_profiles || []), ...(selfProfile ? [selfProfile] : [])];
+      const newProfiles = newIds.map(id => known.find(p => p?.id === id)).filter(Boolean);
       const nd = { ...draft, advisor_ids: newIds, advisor_profiles: newProfiles };
       setDraft(nd);
-      onMeetingPatched?.(meeting.id, { advisor_ids: newIds });
+      onMeetingPatched?.(meeting.id, { advisor_ids: newIds, advisor_profiles: newProfiles });
     } catch (err) {
       onPermissionDenied?.(err?.response?.data?.detail || "ההצטרפות לפגישה נכשלה, נסה שוב");
+    }
+  }
+
+  // The counterpart of joining: removes only the current user, and never the last advisor.
+  function openLeaveMeeting() {
+    setLeavePrompt({ blockedMessage: meetingAdvisorIds.filter(id => id !== currentUserId).length === 0 ? LAST_ADVISOR_LEAVE_MSG : null });
+  }
+
+  async function handleLeaveAsAdvisor() {
+    setLeaveBusy(true);
+    try {
+      const res = await axios.post(`/schools/${meeting.school_id}/meetings/${meeting.id}/leave`);
+      const newIds = res.data?.advisor_ids || meetingAdvisorIds.filter(id => id !== currentUserId);
+      const known = [...(draft.advisor_profiles || []), ...(meeting.advisor_profiles || [])];
+      const newProfiles = newIds.map(id => known.find(p => p?.id === id)).filter(Boolean);
+      setDraft(d => ({ ...d, advisor_ids: newIds, advisor_profiles: newProfiles }));
+      onMeetingPatched?.(meeting.id, { advisor_ids: newIds, advisor_profiles: newProfiles });
+      setLeavePrompt(null);
+    } catch (err) {
+      const detail = err?.response?.data?.detail;
+      if (err?.response?.status === 409) setLeavePrompt({ blockedMessage: detail?.message || LAST_ADVISOR_LEAVE_MSG });
+      else {
+        setLeavePrompt(null);
+        onPermissionDenied?.((typeof detail === "string" && detail) || "ההסרה מהפגישה נכשלה, נסה שוב");
+      }
+    } finally {
+      setLeaveBusy(false);
     }
   }
 
@@ -594,9 +679,17 @@ function MeetingRowImpl({
     // looking authoritative for the full cache TTL even though it's now stale again.
     // status is sent only when the user actually changed it, so a save from a row that
     // hasn't seen a server-side auto-completion yet can't flip the meeting back to "scheduled".
+    // Same for the advisors: sent only when the user changed them in this row, so a row
+    // opened before another advisor joined can't drop them by saving an unrelated field.
     const { status: _unchangedStatus, ...withoutStatus } = draftToSave;
+    const toSend = draftToSave.status === meeting.status ? withoutStatus : { ...draftToSave };
+    const draftAdvisorIds = draftToSave.advisor_ids || [];
+    if (draftAdvisorIds.length === meetingAdvisorIds.length && draftAdvisorIds.every(id => meetingAdvisorIds.includes(id))) {
+      delete toSend.advisor_ids;
+      delete toSend.advisor_id;
+    }
     try {
-      await onSave(draftToSave.status === meeting.status ? withoutStatus : draftToSave);
+      await onSave(toSend);
       markSaveFailed(false);
     } catch (err) {
       // Not saved: forget that it was sent, so the row stays dirty and the next blur re-sends
@@ -657,6 +750,10 @@ function MeetingRowImpl({
   return (
     <>
       {showNoParticipantsModal && <NoParticipantsModal onClose={() => setShowNoParticipantsModal(false)} />}
+      {leavePrompt && (
+        <LeaveMeetingModal blockedMessage={leavePrompt.blockedMessage} busy={leaveBusy}
+          onConfirm={handleLeaveAsAdvisor} onClose={() => { if (!leaveBusy) setLeavePrompt(null); }} />
+      )}
       {bookingRequests && (
         <BookingRequestResolutionModal
           schoolId={meeting.school_id} meetingId={meeting.id} schoolName={meeting.school_name}
@@ -921,6 +1018,8 @@ function MeetingRowImpl({
               usersWithoutAccess={usersWithoutAccess}
               canJoin={rowLocked}
               onJoin={handleJoinAsAdvisor}
+              canLeave={isAdvisorRole && !!meeting.id && meetingAdvisorIds.includes(currentUserId)}
+              onLeave={openLeaveMeeting}
               readOnly={isAdvisorRole}
               onChange={profiles => { const nd = { ...draft, advisor_ids: profiles.map(x => x.id), advisor_profiles: profiles }; setDraft(nd); saveDraft(nd); }}
               onRequestAccess={(advisorId, name) => onRequestAccess?.(advisorId, name, draft.meeting_date, meeting)}

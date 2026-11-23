@@ -99,6 +99,11 @@ export function linkAnswersPending(call, cardId) {
   return !!call.pending_school_resolution && (call.candidate_schools || []).some(s => s.id === cardId);
 }
 
+// A line assigned to an office phone (ניהול → הגדרות) is named after it: "{label} – {org name}".
+export function callAdvisorLabel(call) {
+  return call.advisor_profile?.full_name || call.advisor_profile?.email || call.org_phone_label || call.representative_name || "—";
+}
+
 function cardPath(card) {
   return card.client_type === "district" || card.client_type === "ownership"
     ? `/client/${card.id}` : `/school/${card.id}?tab=meetings`;
@@ -127,8 +132,7 @@ function CallRowBase({ call, onDelete, hideSchoolColumn, hideAdvisorColumn, canM
   const canLinkHere = canLink && !schoolId;
   const status = STATUS_LABELS[call.status] || DEFAULT_STATUS;
   const endIso = computeEndTimeIso(call.start_time, call.duration_seconds);
-  // A line assigned to an office phone (ניהול → הגדרות) is named after it: "{label} – {org name}".
-  const advisorLabel = call.advisor_profile?.full_name || call.advisor_profile?.email || call.org_phone_label || call.representative_name || "—";
+  const advisorLabel = callAdvisorLabel(call);
   const windowTitle = buildWindowTitle(call, advisorLabel);
   const counterpart = counterpartLabels(call, call.counterpart_phone);
 

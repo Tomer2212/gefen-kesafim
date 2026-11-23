@@ -11339,7 +11339,9 @@ def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annot
         raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
     if client_entities.is_entity(school_check.data[0]) and "meeting_service_type" in body.model_fields_set:
         client_entities.check_meeting_service_type(body.meeting_service_type)
-    if user["role"] not in ("owner", "manager"):
+    is_manager = user["role"] in ("owner", "manager")
+    existing_advisor_ids: list[str] = []
+    if not is_manager:
         # NOT .single() — that raises PGRST116 on zero matches (e.g. a nonexistent or
         # cross-school meeting_id, which is the normal/expected case here, not an error),
         # which would be misreported as a 503 instead of the intended 404.
@@ -11376,13 +11378,23 @@ def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annot
     if body.primary_contact_key is not None: data["primary_contact_key"] = body.primary_contact_key
     if body.stage_scope is not None: data["stage_scope"] = body.stage_scope
     if body.requested_upload_years is not None: data["requested_upload_years"] = body.requested_upload_years
+    # An advisor-role user never changes the advisor list through a save: they join via
+    # POST .../join and leave via POST .../leave. Coercing it to [self] here (the old
+    # behavior) silently removed every other advisor — and their Outlook event — on any
+    # field autosave after joining (2026-11-22/23). Rows of tabs loaded before the client
+    # stopped sending unchanged advisor_ids still send it, so it's ignored, not rejected.
+    # For owner/manager, the list is written only when the client sent it (MeetingRow sends
+    # it only when the user changed it), so a stale row can't drop an advisor who joined.
+    # (Rows carry a legacy null advisor_id, so "sent" means a list or a real id — never the null.)
     # advisor_ids takes precedence; fall back to legacy advisor_id
-    if body.advisor_ids is not None:
-        data["advisor_ids"] = _enforce_advisor_ids_for_role(db, user, body.advisor_ids, "update_meeting")
-    elif body.advisor_id:
-        data["advisor_ids"] = _enforce_advisor_ids_for_role(db, user, [body.advisor_id], "update_meeting")
-    else:
-        data["advisor_ids"] = _enforce_advisor_ids_for_role(db, user, [], "update_meeting")
+    requested_advisor_ids = body.advisor_ids if body.advisor_ids is not None else ([body.advisor_id] if body.advisor_id else None)
+    if is_manager and requested_advisor_ids is not None:
+        data["advisor_ids"] = _enforce_advisor_ids_for_role(db, user, requested_advisor_ids, "update_meeting")
+    elif not is_manager and requested_advisor_ids is not None and sorted(requested_advisor_ids) != sorted(existing_advisor_ids):
+        logger.warning(
+            "advisor %s sent advisor_ids=%s on update_meeting %s — ignored, kept %s",
+            user["id"], requested_advisor_ids, meeting_id, existing_advisor_ids,
+        )
 
     # Auto-enable the reminder the first time a meeting becomes eligible for one (gains its
     # first participant, or a future date) — the whole point of the org "send reminders"
@@ -11645,6 +11657,61 @@ def join_meeting_as_advisor(school_id: str, meeting_id: str, user: Annotated[dic
         actor_id=user["id"], actor_type="user", source=None, action="advisor_joined",
         before=activity_before, after={"advisor_ids": new_advisor_ids},
     )
+    return res.data[0] if res.data else {"advisor_ids": new_advisor_ids}
+
+
+LAST_ADVISOR_LEAVE_MSG = (
+    "לא ניתן להשאיר פגישה ללא יועץ מבצע. יש לפנות לגורם האחראי בארגון כדי להוסיף יועץ מבצע אחר "
+    "לפגישה ורק אז ניתן יהיה להסיר אותך מהפגישה."
+)
+
+
+@router.post("/{school_id}/meetings/{meeting_id}/leave")
+def leave_meeting_as_advisor(school_id: str, meeting_id: str, user: Annotated[dict, Depends(get_current_user)]):
+    """The counterpart of /join: a user removes themselves — never anyone else — from a
+    meeting's performing advisors, only while another performing advisor remains (a meeting
+    is never left with none: 409 last_advisor). Their own Outlook event is removed; the
+    other advisors' events are updated as on any save."""
+    db = get_admin_client()
+    school_check = db.table("schools").select("id").eq("id", school_id).eq("org_id", user["org_id"]).execute()
+    if not school_check.data:
+        raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
+    existing_rows = db.table("meetings").select("advisor_ids, advisor_id") \
+        .eq("id", meeting_id).eq("school_id", school_id).execute().data
+    existing_row = existing_rows[0] if existing_rows else None
+    if not existing_row:
+        raise HTTPException(status_code=404, detail="פגישה לא נמצאה")
+    existing_advisor_ids = existing_row.get("advisor_ids") or ([existing_row["advisor_id"]] if existing_row.get("advisor_id") else [])
+    if user["id"] not in existing_advisor_ids:
+        return {"advisor_ids": existing_advisor_ids}
+    new_advisor_ids = [aid for aid in existing_advisor_ids if aid != user["id"]]
+    if not new_advisor_ids:
+        raise HTTPException(status_code=409, detail={"code": "last_advisor", "message": LAST_ADVISOR_LEAVE_MSG})
+    activity_before = meeting_activity.fetch_tracked(db, meeting_id)
+    res = db.table("meetings").update({"advisor_ids": new_advisor_ids}).eq("id", meeting_id).eq("school_id", school_id).execute()
+    meeting_activity.log_meeting_activity(
+        db, meeting_id=meeting_id, school_id=school_id, org_id=user["org_id"],
+        actor_id=user["id"], actor_type="user", source=None, action="advisor_left",
+        before=activity_before, after={"advisor_ids": new_advisor_ids},
+    )
+    try:
+        with graph_client.calendar_sync_lock(db, meeting_id) as acquired:
+            if acquired:
+                row = db.table("meetings").select("*").eq("id", meeting_id).execute()
+                meeting = row.data[0] if row.data else None
+                if meeting:
+                    previous_sync = meeting.get("calendar_sync") or {}
+                    subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"), meeting.get("meeting_service_type"))
+                    cancelled_like = is_cancelled_like(meeting.get("status"))
+                    if cancelled_like:
+                        subject = f"[{calendar_status_label(meeting['status'])}] {subject}"
+                    sync_map = graph_client.sync_meeting_update(
+                        db, user["org_id"], meeting, previous_sync, subject,
+                        show_as=("free" if cancelled_like else "busy"), clear_attendees=cancelled_like,
+                    )
+                    graph_client.persist_calendar_sync(db, meeting_id, sync_map)
+    except Exception as exc:
+        logger.warning("calendar sync failed after advisor left meeting %s (non-fatal): %s", meeting_id, exc)
     return res.data[0] if res.data else {"advisor_ids": new_advisor_ids}
 
 

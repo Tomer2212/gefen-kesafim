@@ -29,7 +29,7 @@ TRACKED_SELECT = "id, " + ", ".join(TRACKED_FIELDS) + ", advisor_id"
 # Actions whose meaning is a change of meeting fields (diffed; an "updated" with no real
 # change is dropped). Every other action (created, deleted, note_*, offline_*, summary_*)
 # is recorded as-is.
-FIELD_CHANGE_ACTIONS = {"updated", "moved_year", "reassigned_school", "advisor_joined"}
+FIELD_CHANGE_ACTIONS = {"updated", "moved_year", "reassigned_school", "advisor_joined", "advisor_left"}
 
 # Client surfaces allowed in the X-Client-Surface header (anything else is stored as None).
 CLIENT_SURFACES = {"school_card", "personal", "admin", "status_popup", "client_card"}
