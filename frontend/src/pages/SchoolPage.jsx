@@ -62,6 +62,7 @@ import { GEFEN_FILES_SLOT_LABELS, gefenFilesSlotsForSchool, resolveGefenFilesRes
 import { QuestionTooltip } from "../components/QuestionTooltip";
 import { PartialAmount, partialBalance } from "../components/PartialBalanceWarning";
 import SchoolDirectoryBanner from "../components/SchoolDirectoryBanner";
+import DirectoryOnboardingPanel from "../components/DirectoryOnboardingPanel";
 import { DISTRICT_OPTIONS, isEntityClientType } from "../constants/clientEntities";
 import MeetingPlanModal from "../components/meetingPlan/MeetingPlanModal";
 import { planTypeSummary, allocationGap } from "../constants/meetingPlan";
@@ -3193,6 +3194,12 @@ export default function SchoolPage() {
     setTimeout(() => setMeetingReminderToasts(prev => prev.filter(t => t.id !== id)), 3000);
   }
   const [canEditDirectly, setCanEditDirectly] = useState(false);
+  const [canAddSchool, setCanAddSchool] = useState(false);
+  // Onboarding mode — a directory copy ("מהמאגר") being added to the client list: the card is in
+  // edit mode and these "פרטי ליווי" drafts are sent with "שמור והוסף לרשימת הלקוחות".
+  // null = off; {client_status, service_type} = on (service_type undefined = not picked yet →
+  // the year's own value, which may still be loading when the mode opens).
+  const [onboarding, setOnboarding] = useState(null);
   const [canRequestUpdate, setCanRequestUpdate] = useState(false);
   const [requestSuccessData, setRequestSuccessData] = useState(null);
   const [isRequestMode, setIsRequestMode] = useState(false);
@@ -3258,8 +3265,29 @@ export default function SchoolPage() {
   const [requestSubmitting, setRequestSubmitting] = useState(false);
   const [requestMsg, setRequestMsg] = useState("");
 
-  const isDirty = isEditing && originalForm !== null &&
-    JSON.stringify(editForm) !== JSON.stringify(originalForm);
+  const isDirty = isEditing && originalForm !== null && (
+    JSON.stringify(editForm) !== JSON.stringify(originalForm)
+    // Onboarding drafts count too — leaving with only them filled would drop them silently.
+    || !!(onboarding && (onboarding.client_status || onboarding.service_type !== undefined))
+  );
+
+  // The service type the edit form's mandatory fields follow — onboarding's draft while adding.
+  const editServiceType = onboarding && onboarding.service_type !== undefined
+    ? (onboarding.service_type || null)
+    : yearAdminData.service_type;
+
+  // "?onboard=1" (from "+ הוסף בית ספר" → a directory school): open onboarding mode once the
+  // card and the caller's permissions are loaded, then drop the param.
+  useEffect(() => {
+    if (searchParams.get("onboard") !== "1" || loading || !school) return;
+    if (school.status === "directory" && canAddSchool && !isEditing) startOnboarding();
+    setSearchParams(prev => {
+      const p = new URLSearchParams(prev);
+      p.delete("onboard");
+      return p;
+    }, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, loading, school?.status, canAddSchool]);
 
   const incompleteSessionMeetings = meetings.filter(m =>
     sessionCreatedMeetingIdsRef.current.has(m.id) && isMeetingIncomplete(m, { requireAdvisor: true })
@@ -3346,6 +3374,7 @@ export default function SchoolPage() {
         setCanDeleteMeetings(!!meRes.data?.can_delete_own_meetings);
         setCanRemoveCallFromSchool(!!meRes.data?.can_remove_call_from_school);
         setCanEditDirectly(!!meRes.data?.can_edit_school_directly);
+        setCanAddSchool(!!meRes.data?.can_add_school);
         setCanRequestUpdate(meRes.data?.can_request_school_update !== false);
       } catch {
         // non-fatal
@@ -3843,6 +3872,30 @@ export default function SchoolPage() {
     setIsRequestMode(requestMode);
   }
 
+  // Users an advisor may pick as accompanying advisors while adding a school — /users/all is
+  // manager-only, so the org's name list (open to every role) serves them.
+  async function loadAdvisorChoices() {
+    if (role === "owner" || role === "manager") return loadUsers();
+    setLoadingUsers(true);
+    try {
+      const res = await axios.get("/schools/users/mentionable");
+      setUsers(Array.isArray(res.data) ? res.data : []);
+    } finally {
+      setLoadingUsers(false);
+    }
+  }
+
+  function startOnboarding() {
+    if (!school || school.status !== "directory" || !canAddSchool) return;
+    startEdit(false);
+    if (!(role === "owner" || role === "manager")) {
+      setDraftTypedAdvisorIds(emptyTypedAdvisorIds);
+      setOriginalTypedAdvisorIds(emptyTypedAdvisorIds);
+      loadAdvisorChoices().catch(() => {});
+    }
+    setOnboarding({ client_status: "", service_type: undefined });
+  }
+
   async function submitFullRequest() {
     const changes = {};
     Object.keys(editForm).forEach(f => {
@@ -3913,14 +3966,19 @@ export default function SchoolPage() {
       setSaveError("יש שגיאות בטופס — אנא בדוק את השדות המסומנים.");
       return false;
     }
-    const missingSlots = slotsForSchool(editForm, yearAdminData.service_type).filter(slot => !editForm.meeting_coordinators?.[slot]);
+    if (onboarding && !onboarding.client_status) {
+      setSaveError("יש לבחור סטטוס לקוח כדי להוסיף את בית הספר לרשימת הלקוחות.");
+      return false;
+    }
+    const missingSlots = slotsForSchool(editForm, editServiceType).filter(slot => !editForm.meeting_coordinators?.[slot]);
     if (missingSlots.length > 0) {
       setSaveError(`יש לבחור אחראי/ת לתיאום פגישות עבור: ${missingSlots.map(s => SLOT_LABELS[s]).join(", ")}.`);
       return false;
     }
     const managingAdvisors = role === "owner" || role === "manager";
-    const requiredServiceTypes = activeServiceTypes(yearAdminData.service_type);
-    if (managingAdvisors && yearAdminData.client_status === "active" && requiredServiceTypes.some(t => draftTypedAdvisorIds[t].length === 0)) {
+    const requiredServiceTypes = activeServiceTypes(editServiceType);
+    const clientStatus = onboarding ? onboarding.client_status : yearAdminData.client_status;
+    if ((managingAdvisors || onboarding) && clientStatus === "active" && requiredServiceTypes.some(t => draftTypedAdvisorIds[t].length === 0)) {
       setSaveError("יש לבחור לפחות יועץ מלווה אחד עבור כל סוג שירות פעיל (גפן/שוטף/מחוז).");
       return false;
     }
@@ -4003,6 +4061,38 @@ export default function SchoolPage() {
         ? null
         : parseInt(editForm.student_count, 10);
       await axios.put(`/schools/${schoolId}`, { ...editForm, ...chativaSync, ...legacyCoordinatorSync, student_count: studentCountValue }, SCHOOL_CARD_SURFACE);
+      if (onboarding) {
+        try {
+          await axios.post(`/directory/client-list/${schoolId}`, {
+            action: "add",
+            client_status: onboarding.client_status,
+            service_type: editServiceType || null,
+            // A manager's advisors were just saved by the typed calls above; an advisor's go here.
+            ...(managingAdvisors ? {} : { typed_advisors: draftTypedAdvisorIds }),
+            academic_year: academicYear,
+          });
+        } catch (err) {
+          const detail = err?.response?.data?.detail;
+          const reason = (typeof detail === "string" ? detail : detail?.message) || "נסו שוב.";
+          setSaveError(`הפרטים נשמרו, אבל בית הספר עדיין לא נוסף לרשימת הלקוחות: ${reason}`);
+          return false;
+        }
+        setYearAdminData(prev => ({
+          ...prev,
+          client_status: onboarding.client_status,
+          ...(editServiceType ? { service_type: editServiceType } : {}),
+        }));
+        setOnboarding(null);
+        axios.get(`/schools/${schoolId}`).then(res => {
+          setSchool(res.data);
+          setSchoolAdvisors((res.data?.advisor_schools || []).map(as => as.profiles).filter(Boolean));
+          setTypedAdvisors({
+            gefen: res.data?.advisors_gefen || [],
+            current: res.data?.advisors_current || [],
+            district: res.data?.advisors_district || [],
+          });
+        }).catch(() => {});
+      }
       let updatedAdvisors = schoolAdvisors;
       if (managingAdvisors) {
         const updatedTyped = {
@@ -4024,6 +4114,7 @@ export default function SchoolPage() {
       }
       setSchool(prev => ({
         ...prev,
+        ...(onboarding ? { status: "active" } : {}),
         ...editForm,
         ...chativaSync,
         ...legacyCoordinatorSync,
@@ -4356,6 +4447,7 @@ export default function SchoolPage() {
           }}
           onDiscard={() => {
             setIsEditing(false);
+            setOnboarding(null);
             setOriginalForm(null);
             setDraftTypedAdvisorIds(originalTypedAdvisorIds);
             blocker.proceed();
@@ -4465,11 +4557,9 @@ export default function SchoolPage() {
           </div>
 
           <SchoolDirectoryBanner
-            school={school} role={role} academicYear={academicYear}
-            onChanged={({ status, client_status }) => {
-              setSchool(prev => (prev ? { ...prev, status } : prev));
-              if (client_status) setYearAdminData(prev => ({ ...prev, client_status }));
-            }}
+            school={school} role={role} canAddSchool={canAddSchool}
+            onboarding={!!onboarding} onStartOnboarding={startOnboarding}
+            onChanged={({ status }) => setSchool(prev => (prev ? { ...prev, status } : prev))}
           />
 
           {/* Tab bar */}
@@ -4557,6 +4647,16 @@ export default function SchoolPage() {
                 {/* ─── EDIT MODE ─── */}
                 {isEditing ? (
                 <div className="space-y-10">
+                  {onboarding && (
+                    <DirectoryOnboardingPanel
+                      draft={onboarding} onChange={setOnboarding} serviceType={editServiceType}
+                      serviceTypeOptions={SERVICE_TYPE_OPTIONS}
+                      requiredAdvisorTypes={activeServiceTypes(editServiceType)}
+                      showAdvisors={!(role === "owner" || role === "manager")}
+                      advisorIds={draftTypedAdvisorIds} onAdvisorsChange={setDraftTypedAdvisorIds}
+                      users={users} loadingUsers={loadingUsers} onRetryUsers={loadAdvisorChoices}
+                      triedSave={triedSave} schoolId={schoolId} />
+                  )}
                   {/* פרטי מוסד + ליווי side by side at the top of the page */}
                   <div className="grid grid-cols-2 gap-4">
                   {/* פרטי מוסד card */}
@@ -4784,7 +4884,7 @@ export default function SchoolPage() {
                         </div>
                       )}
 
-                      {(role === "owner" || role === "manager") && (
+                      {(role === "owner" || role === "manager") && !onboarding && (
                         <div className={tileCls}>
                           <label htmlFor="service-type-select" className={`${tileLabelCls} block`}>סוג שירות</label>
                           <select id="service-type-select" className={editFieldCls(false, !yearAdminData.service_type)}
@@ -4871,7 +4971,7 @@ export default function SchoolPage() {
                   </div>
                   <div className={sectionBodyCls}>
                     {(() => {
-                      const activeSlots = slotsForSchool(editForm, yearAdminData.service_type);
+                      const activeSlots = slotsForSchool(editForm, editServiceType);
                       const gefenFilesSlots = gefenFilesSlotsForSchool(editForm);
                       const contactRows = [
                         editForm.stage === "sheshshnati" ? PRINCIPAL_TICHON_ROW : PRINCIPAL_SINGLE_ROW,
@@ -4883,7 +4983,7 @@ export default function SchoolPage() {
                       ];
                       const missingSlots = activeSlots.filter(slot => !editForm.meeting_coordinators?.[slot]);
                       const gefenRelatedServiceTypes = ["gefen", "gefen_current", "district", "takuma"];
-                      const missingGefenFilesSlots = gefenRelatedServiceTypes.includes(yearAdminData.service_type)
+                      const missingGefenFilesSlots = gefenRelatedServiceTypes.includes(editServiceType)
                         ? gefenFilesSlots.filter(slot => !resolveGefenFilesResponsibleForSlot(editForm, slot))
                         : [];
                       const colCount = 5 + activeSlots.length + gefenFilesSlots.length;
@@ -5138,7 +5238,7 @@ export default function SchoolPage() {
                     <div className={sectionBodyCls}>
                       <div className="grid grid-cols-3 gap-4">
                         {TYPED_SERVICE_TYPES.map(({ key, label }, idx) => {
-                          const isRequired = activeServiceTypes(yearAdminData.service_type).includes(key);
+                          const isRequired = activeServiceTypes(editServiceType).includes(key);
                           const invalid = triedSave && isRequired && draftTypedAdvisorIds[key].length === 0;
                           return (
                             <div key={key} className="bg-slate-50/70 border border-slate-200/70 rounded-xl p-3 min-w-0">
@@ -5210,10 +5310,10 @@ export default function SchoolPage() {
 
                   {/* Bottom actions */}
                   <div className="flex items-center justify-center gap-3 mt-6 pt-4 border-t border-slate-100">
-                    <button onClick={isRequestMode ? submitFullRequest : saveEdit} disabled={saving} className="btn-green-light text-sm px-5 py-2">
-                      {saving ? (isRequestMode ? "שולח..." : "שומר...") : (isRequestMode ? "הגש בקשה" : "שמור שינויים")}
+                    <button onClick={isRequestMode ? submitFullRequest : () => saveEdit()} disabled={saving} className="btn-green-light text-sm px-5 py-2">
+                      {saving ? (isRequestMode ? "שולח..." : "שומר...") : (isRequestMode ? "הגש בקשה" : onboarding ? "שמור והוסף לרשימת הלקוחות" : "שמור שינויים")}
                     </button>
-                    <button onClick={() => { setIsEditing(false); setIsRequestMode(false); setOriginalForm(null); setSaveError(""); setAccessLinkedToAdvisors(false); setDraftTypedAdvisorIds(originalTypedAdvisorIds); }} disabled={saving} className="btn-ghost text-sm px-5 py-2">ביטול</button>
+                    <button onClick={() => { setIsEditing(false); setIsRequestMode(false); setOnboarding(null); setOriginalForm(null); setSaveError(""); setAccessLinkedToAdvisors(false); setDraftTypedAdvisorIds(originalTypedAdvisorIds); }} disabled={saving} className="btn-ghost text-sm px-5 py-2">ביטול</button>
                   </div>
                 </div>
 

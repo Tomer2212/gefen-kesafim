@@ -6,6 +6,7 @@ import * as XLSX from "xlsx";
 import { principalNames, gefenFilesResponsibleLines, meetingCoordinatorLines } from "../components/schoolContactLines";
 import { Building2, Phone, Handshake, UsersRound } from "lucide-react";
 import Sidebar from "../components/Sidebar";
+import AddSchoolChooserModal from "../components/AddSchoolChooserModal";
 
 // ── Shared visual language with SchoolPage.jsx's "פרטי בית הספר" tab ──
 const SECTION_TITLE_CLS = "text-[23px] font-bold text-black flex items-center gap-2";
@@ -2323,6 +2324,7 @@ export default function AdminPage() {
 
   // Schools state
   const [schools, setSchools] = useState([]);
+  const [addChooserOpen, setAddChooserOpen] = useState(false);
   const [loadingSchools, setLoadingSchools] = useState(true);
   const [schoolForm, setSchoolForm] = useState(EMPTY_FORM);
   // "חשבונות במערכת גפן" in the add/edit school modal — saved with PUT /schools/{id}/accounts,
@@ -4805,7 +4807,7 @@ export default function AdminPage() {
                 </button>
                 <div className="relative group">
                   <button
-                    onClick={canAddSchool === true ? openNewForm : undefined}
+                    onClick={canAddSchool === true ? () => setAddChooserOpen(true) : undefined}
                     disabled={canAddSchool !== true}
                     className={`btn-blue text-sm px-4 py-2 ${canAddSchool !== true ? "opacity-40 cursor-not-allowed" : ""}`}
                   >+ הוסף בית ספר</button>
@@ -4877,6 +4879,11 @@ export default function AdminPage() {
 
 
               {/* School form */}
+              {addChooserOpen && (
+                <AddSchoolChooserModal schools={schools}
+                  onClose={() => setAddChooserOpen(false)}
+                  onManualAdd={() => { setAddChooserOpen(false); openNewForm(); }} />
+              )}
               {showSchoolForm && (
                 <div className="bg-white rounded-2xl border border-slate-200/60 shadow-sm p-6 mb-4">
                   <div className={SECTION_HEADER_CLS}>

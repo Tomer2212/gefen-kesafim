@@ -46,14 +46,17 @@ async function resolveEntityChoice(type, item) {
 
 // Whether the org has the national school directory ("מאגר בתי ספר") — asked once per page load.
 let directoryEnabledPromise = null;
+export function isDirectoryEnabled() {
+  if (!directoryEnabledPromise) {
+    directoryEnabledPromise = axios.get("/directory/enabled").then(r => !!r.data?.enabled).catch(() => false);
+  }
+  return directoryEnabledPromise;
+}
 function useDirectoryEnabled() {
   const [enabled, setEnabled] = useState(false);
   useEffect(() => {
-    if (!directoryEnabledPromise) {
-      directoryEnabledPromise = axios.get("/directory/enabled").then(r => !!r.data?.enabled).catch(() => false);
-    }
     let cancelled = false;
-    directoryEnabledPromise.then(v => { if (!cancelled) setEnabled(v); });
+    isDirectoryEnabled().then(v => { if (!cancelled) setEnabled(v); });
     return () => { cancelled = true; };
   }, []);
   return enabled;
@@ -87,14 +90,17 @@ function useDirectoryResults(query, active) {
 async function resolveDirectoryChoice(choice) {
   const schoolId = choice.schoolId || await adoptDirectorySchool(choice.directoryId);
   const res = await axios.get("/schools/", { params: { ids: schoolId } });
-  return (res.data || [])[0] || { id: schoolId, name: choice.name, symbol: choice.symbol, city: choice.city, status: "directory" };
+  // A copy in the recycle bin isn't returned by /schools/ — keep its real status, not "directory".
+  return (res.data || [])[0] || { id: schoolId, name: choice.name, symbol: choice.symbol, city: choice.city, status: choice.tag === "recycle" ? "pending_deletion" : "directory" };
 }
 
 // One tab per client type: "בתי ספר" (the org's client schools, plus — once 2+ characters are
 // typed — matching directory schools, tagged "מהמאגר"), and with includeClientEntities also
 // "מחוזות" / "בעלויות". Nothing big is loaded up front: the client schools are the caller's
 // list, directory matches are a debounced server search, the district/ownership catalog is small.
-export function SchoolResultsList({ schools, query, setQuery, pendingId, setPendingId, onConfirm, onCancel, submittingLabel = "יוצר...", includeClientEntities = false }) {
+// addMode ("הוסף בית ספר"): nothing is listed until the user types, client schools are tagged
+// "כבר לקוח", and onManualAdd adds a small "הוסף בית ספר ידנית" link to the footer.
+export function SchoolResultsList({ schools, query, setQuery, pendingId, setPendingId, onConfirm, onCancel, submittingLabel = "יוצר...", includeClientEntities = false, addMode = false, onManualAdd, confirmLabel = "אישור" }) {
   // onConfirm (e.g. createMeetingForSchool) is async and does real work (a school-
   // advisors lookup, then a POST) before the modal closes — with no per-click feedback,
   // a user who doesn't see anything happen right away tends to click again, and again;
@@ -112,7 +118,7 @@ export function SchoolResultsList({ schools, query, setQuery, pendingId, setPend
   // client schools — they come from the directory search / their own tabs.
   const filtered = schools.filter(s => {
     if (s.status === "directory" || s.status === "entity") return false;
-    if (!trimmed) return true;
+    if (!trimmed) return !addMode;
     const q = trimmed.toLowerCase();
     return (s.name || "").toLowerCase().includes(q)
       || (s.symbol || "").toLowerCase().includes(q)
@@ -222,6 +228,7 @@ export function SchoolResultsList({ schools, query, setQuery, pendingId, setPend
               <label key={s.id} className={rowCls}>
                 <input type="checkbox" checked={pendingId === s.id} onChange={() => pickClient(s.id)} className={checkCls} />
                 <span className="text-sm text-slate-700">{schoolLabel(s)}</span>
+                {addMode && <span className={`${badgeCls} text-emerald-700 bg-emerald-50 border-emerald-200`}>כבר לקוח</span>}
               </label>
             ))}
             {directoryOptions.map(o => (
@@ -229,8 +236,10 @@ export function SchoolResultsList({ schools, query, setQuery, pendingId, setPend
                 <input type="checkbox" checked={dirChoice === o.key} onChange={() => pickDirectory(o.key)} className={checkCls} />
                 <span className="text-sm text-slate-700">{schoolLabel(o)}</span>
                 {o.tag === "client"
-                  ? <span className={`${badgeCls} text-emerald-700 bg-emerald-50 border-emerald-200`}>לקוח</span>
-                  : <span className={`${badgeCls} text-slate-500 bg-slate-50 border-slate-200`}>מהמאגר</span>}
+                  ? <span className={`${badgeCls} text-emerald-700 bg-emerald-50 border-emerald-200`}>{addMode ? "כבר לקוח" : "לקוח"}</span>
+                  : o.tag === "recycle"
+                    ? <span className={`${badgeCls} text-slate-600 bg-slate-100 border-slate-200`}>בסל המחזור</span>
+                    : <span className={`${badgeCls} text-slate-500 bg-slate-50 border-slate-200`}>מהמאגר</span>}
                 {(o.met || o.tag === "met") && <span className={`${badgeCls} text-blue-700 bg-blue-50 border-blue-200`}>היו פגישות</span>}
               </label>
             ))}
@@ -244,7 +253,9 @@ export function SchoolResultsList({ schools, query, setQuery, pendingId, setPend
             )}
             {filtered.length === 0 && directoryOptions.length === 0 && !(searchDirectory && directory.loading) && (
               <p className="text-xs text-slate-400 px-3 py-3 text-center">
-                {directoryEnabled && trimmed.length < 2 && trimmed ? "הקלידו לפחות 2 תווים כדי לחפש גם במאגר" : "לא נמצאו בתי ספר"}
+                {addMode && !trimmed ? "הקלידו שם מוסד, סמל מוסד או עיר"
+                  : directoryEnabled && trimmed.length < 2 && trimmed ? "הקלידו לפחות 2 תווים כדי לחפש גם במאגר"
+                  : "לא נמצאו בתי ספר"}
               </p>
             )}
           </>
@@ -253,10 +264,16 @@ export function SchoolResultsList({ schools, query, setQuery, pendingId, setPend
 
       {error && <p role="alert" className="text-xs text-red-600">{error}</p>}
       <div className="flex items-center gap-2 justify-end mt-1">
+        {onManualAdd && (
+          <button type="button" onClick={onManualAdd} disabled={submitting}
+            className="me-auto text-xs text-slate-500 hover:text-slate-800 hover:underline disabled:opacity-40">
+            הוסף בית ספר ידנית
+          </button>
+        )}
         <button type="button" onClick={onCancel} disabled={submitting} className="btn-ghost text-sm px-4 py-1.5 disabled:opacity-40">ביטול</button>
         <button type="button" disabled={!hasChoice || submitting} onClick={confirm}
           className="btn-blue text-sm px-4 py-1.5 disabled:opacity-40 disabled:cursor-not-allowed">
-          {submitting ? submittingLabel : "אישור"}
+          {submitting ? submittingLabel : confirmLabel}
         </button>
       </div>
     </div>

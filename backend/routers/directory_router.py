@@ -22,6 +22,7 @@ import school_activity
 import school_directory
 from academic_years import DEFAULT_ACADEMIC_YEAR
 from auth import get_current_user
+from routers import schools_router
 from routers.signup_router import _require_superadmin
 from supabase_client import get_admin_client, reset_admin_client
 
@@ -152,15 +153,27 @@ def adopt_directory_school(directory_id: str, user: Annotated[dict, Depends(get_
 class ClientListIn(BaseModel):
     action: Literal["add", "return"]
     client_status: Literal["in_progress", "active"] | None = None
+    # "add" only: the "פרטי ליווי" completed in the card's onboarding mode (both optional —
+    # a missing service_type keeps the year's current one; typed_advisors are added to any already set).
+    service_type: str | None = None
+    typed_advisors: dict[str, list[str]] | None = None
     academic_year: str = DEFAULT_ACADEMIC_YEAR
 
 
 @router.post("/client-list/{school_id}")
 def change_client_list(school_id: str, body: ClientListIn, user: Annotated[dict, Depends(get_current_user)]):
-    if user["role"] not in ("owner", "manager"):
-        raise HTTPException(status_code=403, detail="אין הרשאה לפעולה זו")
+    """"add" = the last step of adding a school from the directory: same permission and the same
+    mandatory fields as adding a school by hand. "return" stays manager+."""
     db = get_admin_client()
-    rows = db.table("schools").select("id, org_id, status").eq("id", school_id).eq("org_id", user["org_id"]).execute().data or []
+    if body.action == "add":
+        if user["role"] not in ("owner", "manager", "advisor") or not schools_router._check_permission(db, user, "can_add_school"):
+            raise HTTPException(status_code=403, detail="אין הרשאה להוסיף בתי ספר")
+    elif user["role"] not in ("owner", "manager"):
+        raise HTTPException(status_code=403, detail="אין הרשאה לפעולה זו")
+    rows = (
+        db.table("schools").select("id, org_id, status, stage, meeting_coordinators")
+        .eq("id", school_id).eq("org_id", user["org_id"]).execute().data or []
+    )
     if not rows:
         raise HTTPException(status_code=404, detail="בית ספר לא נמצא")
     school = rows[0]
@@ -171,22 +184,24 @@ def change_client_list(school_id: str, body: ClientListIn, user: Annotated[dict,
             raise HTTPException(status_code=400, detail="בית הספר כבר ברשימת הלקוחות")
         if not body.client_status:
             raise HTTPException(status_code=400, detail="יש לבחור סטטוס לקוח")
-        if body.client_status == "active" and not _has_typed_advisor(db, school_id):
-            raise HTTPException(status_code=400, detail={
-                "code": "missing_advisor",
-                "message": "לקוח פעיל חייב יועץ מלווה. סמנו \"בתהליך\", או הגדירו קודם יועץ מלווה בפרטי הליווי.",
-            })
-        year_before = _year_row(db, school_id, body.academic_year)
-        db.table("school_year_admin_data").upsert(
-            {"school_id": school_id, "academic_year": body.academic_year, "client_status": body.client_status},
-            on_conflict="school_id,academic_year",
-        ).execute()
-        db.table("schools").update({"status": "active"}).eq("id", school_id).execute()
-        school_activity.log_school_activity(
-            db, school_id=school_id, org_id=user["org_id"], actor_id=user["id"], source="directory",
-            action="updated", before=year_before or {}, after={"client_status": body.client_status},
-            fields=("client_status",), academic_year=body.academic_year,
+        onboarding = schools_router.OnboardingIn(
+            client_status=body.client_status, service_type=body.service_type, typed_advisors=body.typed_advisors,
         )
+        typed = schools_router._clean_onboarding_advisors(db, user, onboarding)
+        service_type = body.service_type or _year_service_type(db, school_id, body.academic_year)
+        advisors = {
+            t: typed.get(t, []) + _typed_advisor_ids(db, table, school_id)
+            for t, table in schools_router._TYPED_ADVISOR_TABLES.items()
+        }
+        schools_router._require_onboarding_complete(school, service_type, body.client_status, advisors, check_slots=True)
+        schools_router._apply_onboarding(db, user, school_id, onboarding, typed, body.academic_year, "directory")
+        # Whoever adds it keeps seeing it, like the creator of a manual add.
+        if user["role"] == "advisor":
+            db.table("advisor_schools").upsert({"advisor_id": user["id"], "school_id": school_id}).execute()
+        updated = db.table("schools").update({"status": "active"}).eq("id", school_id).eq("status", "directory").execute().data or []
+        if not updated:  # added meanwhile by someone else — they already got the notification
+            return {"status": "active"}
+        schools_router._notify_school_created(db, user, school_id, updated[0].get("name") or "בית ספר")
         return {"status": "active"}
 
     if school["status"] != "active":
@@ -201,19 +216,19 @@ def change_client_list(school_id: str, body: ClientListIn, user: Annotated[dict,
     return {"status": "directory"}
 
 
-def _has_typed_advisor(db, school_id: str) -> bool:
-    for table in ("school_advisors_gefen", "school_advisors_current", "school_advisors_district"):
-        if db.table(table).select("advisor_id").eq("school_id", school_id).limit(1).execute().data:
-            return True
-    return False
+def _typed_advisor_ids(db, table: str, school_id: str) -> list[str]:
+    return [r["advisor_id"] for r in db.table(table).select("advisor_id").eq("school_id", school_id).execute().data or []]
 
 
-def _year_row(db, school_id: str, academic_year: str) -> dict | None:
+def _year_service_type(db, school_id: str, academic_year: str) -> str | None:
+    """The year's service type, inherited from an earlier year when unset (like the card shows it)."""
     rows = (
-        db.table("school_year_admin_data").select("client_status")
+        db.table("school_year_admin_data").select("school_id, service_type, client_status")
         .eq("school_id", school_id).eq("academic_year", academic_year).execute().data or []
     )
-    return rows[0] if rows else None
+    row = dict(rows[0]) if rows else {"school_id": school_id}
+    schools_router._fill_inherited_year_admin(db, [row], academic_year)
+    return row.get("service_type")
 
 
 # ---------------------------------------------------------------------------

@@ -207,6 +207,15 @@ def _shift_goal_date(goal_def: dict, academic_year: str) -> str:
 # Request models
 # ---------------------------------------------------------------------------
 
+class OnboardingIn(BaseModel):
+    """"פרטי ליווי" chosen while a school is being added — a manual add (POST /schools/) or a
+    directory copy joining the client list (POST /directory/client-list/{id}). The only place an
+    advisor with can_add_school may set them (see _apply_onboarding)."""
+    client_status: str | None = None
+    service_type: str | None = None
+    typed_advisors: dict[str, list[str]] | None = None  # {gefen|current|district: [profile id]}
+
+
 class SchoolIn(BaseModel):
     name: str
     symbol: str | None = None
@@ -259,6 +268,8 @@ class SchoolIn(BaseModel):
     grade_levels: list[str] | None = None
     study_days: list[str] | None = None
     student_count: int | None = None
+    # Not a column — handled by create_school only (excluded from every schools write).
+    onboarding: OnboardingIn | None = None
 
 
 class SchoolYearAdminDataIn(BaseModel):
@@ -743,6 +754,104 @@ def _slots_for_school(school: dict, service_type: str | None) -> list[str]:
         else:
             slots.extend([f"{t}_tichon", f"{t}_beinayim"])
     return slots
+
+
+# ---------------------------------------------------------------------------
+# Adding a school — "פרטי ליווי" set as part of the add (manual or from the directory)
+# ---------------------------------------------------------------------------
+
+_ONBOARDING_CLIENT_STATUSES = {"active", "inactive", "in_progress", "former"}
+_ONBOARDING_SERVICE_TYPES = {"gefen", "current", "district", "gefen_current", "takuma", "other"}
+MISSING_ADVISOR_MESSAGE = "יש לבחור לפחות יועץ מלווה אחד עבור כל סוג שירות פעיל (גפן/שוטף/מחוז)."
+
+
+def _active_advisor_types(service_type: str | None) -> list[str]:
+    """Typed advisor lists an active client must have — mirrors the frontend's activeServiceTypes."""
+    return {
+        "gefen": ["gefen"], "current": ["current"], "district": ["district"],
+        "gefen_current": ["gefen", "current"], "takuma": ["gefen"],
+    }.get(service_type or "", [])
+
+
+def _clean_onboarding_advisors(db, user: dict, onboarding: OnboardingIn) -> dict[str, list[str]]:
+    """Validates the onboarding values; returns the typed advisor lists (deduped, own org only)."""
+    if onboarding.client_status and onboarding.client_status not in _ONBOARDING_CLIENT_STATUSES:
+        raise HTTPException(status_code=400, detail="סטטוס לקוח לא תקין")
+    if onboarding.service_type and onboarding.service_type not in _ONBOARDING_SERVICE_TYPES:
+        raise HTTPException(status_code=400, detail="סוג שירות לא תקין")
+    typed: dict[str, list[str]] = {}
+    for t, ids in (onboarding.typed_advisors or {}).items():
+        if t not in _TYPED_ADVISOR_TABLES:
+            raise HTTPException(status_code=400, detail="סוג שירות לא תקין")
+        typed[t] = list(dict.fromkeys(i for i in (ids or []) if i))
+    all_ids = {i for ids in typed.values() for i in ids}
+    if all_ids:
+        found = db.table("profiles").select("id").eq("org_id", user["org_id"]).in_("id", list(all_ids)).execute().data or []
+        if len(found) != len(all_ids):
+            raise HTTPException(status_code=400, detail="יועץ מלווה שנבחר אינו משתמש בארגון")
+    return typed
+
+
+def _require_onboarding_complete(school: dict, service_type: str | None, client_status: str | None,
+                                 advisors: dict[str, list[str]], check_slots: bool) -> None:
+    """The same mandatory fields as adding a school by hand: a meeting coordinator per slot, and
+    an accompanying advisor per active service type when the client is active."""
+    if check_slots:
+        coordinators = school.get("meeting_coordinators") or {}
+        missing = [s for s in _slots_for_school(school, service_type) if not coordinators.get(s)]
+        if missing:
+            raise HTTPException(status_code=400, detail={
+                "code": "missing_coordinators",
+                "message": f"יש לבחור אחראי/ת לתיאום פגישות עבור: {', '.join(_SLOT_LABELS.get(s, s) for s in missing)}.",
+            })
+    if client_status == "active" and any(not advisors.get(t) for t in _active_advisor_types(service_type)):
+        raise HTTPException(status_code=400, detail={"code": "missing_advisor", "message": MISSING_ADVISOR_MESSAGE})
+
+
+def _apply_onboarding(db, user: dict, school_id: str, onboarding: OnboardingIn, typed: dict[str, list[str]],
+                      academic_year: str, source: str | None) -> None:
+    """Writes the year's client_status/service_type and the typed advisors (+ access rows),
+    logging both to school_activity and notifying newly assigned advisors."""
+    year_fields = {k: getattr(onboarding, k) for k in ("client_status", "service_type") if getattr(onboarding, k)}
+    if year_fields:
+        old = (
+            db.table("school_year_admin_data")
+            .select("school_id, " + ", ".join(school_activity.TRACKED_YEAR_FIELDS))
+            .eq("school_id", school_id).eq("academic_year", academic_year).execute().data or []
+        )
+        before = dict(old[0]) if old else {"school_id": school_id}
+        _fill_inherited_year_admin(db, [before], academic_year)
+        db.table("school_year_admin_data").upsert({
+            "school_id": school_id, "academic_year": academic_year, **year_fields,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }, on_conflict="school_id,academic_year").execute()
+        school_activity.log_school_activity(
+            db, school_id=school_id, org_id=user["org_id"], actor_id=user["id"], source=source,
+            action="updated", before=before, after={**before, **year_fields},
+            fields=tuple(year_fields), academic_year=academic_year,
+        )
+    newly_assigned: set[str] = set()
+    for t, ids in typed.items():
+        if not ids:
+            continue
+        table = _TYPED_ADVISOR_TABLES[t]
+        before = school_activity.fetch_typed_advisors(db, table, [school_id])
+        db.table(table).upsert([{"advisor_id": i, "school_id": school_id} for i in ids]).execute()
+        db.table("advisor_schools").upsert([{"advisor_id": i, "school_id": school_id} for i in ids]).execute()
+        _log_typed_advisor_changes(db, user, t, before, [school_id], source)
+        newly_assigned.update(i for i in ids if i not in ((before or {}).get(school_id) or []))
+    recipients = [i for i in newly_assigned if i != user["id"]]
+    if recipients:
+        try:
+            rows = db.table("schools").select("name").eq("id", school_id).execute().data or []
+            school_name = rows[0]["name"] if rows else "בית ספר"
+            _create_notifications(db, [{
+                "recipient_id": i, "type": "advisor_assigned", "school_id": school_id,
+                "data": {"title": f"שויכת לבית הספר {school_name}", "school_name": school_name,
+                         "sender_name": user.get("full_name", ""), "deeplink": f"/school/{school_id}"},
+            } for i in recipients], pref_key="notify_advisor_assignment")
+        except Exception as exc:
+            logger.warning("onboarding advisor_assigned notification failed (non-fatal): %s", exc)
 
 
 def _resolve_coordinator_ref(school: dict, ref: str | None) -> dict | None:
@@ -1295,6 +1404,34 @@ def _find_existing_school_by_symbol(db, org_id: str, symbol: str | None) -> dict
     return res.data[0] if res.data else None
 
 
+def _notify_school_created(db, user: dict, school_id: str, school_name: str) -> None:
+    """Notifies owners (and managers when an advisor adds) about a school joining the client
+    list — a manual add, or a directory school added (POST /directory/client-list/{id})."""
+    try:
+        if user["role"] in ("advisor", "manager"):
+            notif_title = f'{user.get("full_name", "יועץ")} הוסיף את בית הספר {school_name}'
+            if user["role"] == "advisor":
+                # Notify all owners + all managers
+                recipients = db.table("profiles").select("id").eq("org_id", user["org_id"]).in_("role", ["owner", "manager"]).execute()
+            else:
+                # Manager created — notify owners only
+                recipients = db.table("profiles").select("id").eq("org_id", user["org_id"]).eq("role", "owner").execute()
+            notif_rows = [{
+                "recipient_id": r["id"],
+                "type": "school_created",
+                "school_id": school_id,
+                "data": {
+                    "title": notif_title,
+                    "school_name": school_name,
+                    "sender_name": user.get("full_name", ""),
+                    "deeplink": f"/school/{school_id}",
+                }
+            } for r in (recipients.data or []) if r["id"] != user["id"]]
+            _create_notifications(db, notif_rows, pref_key="notify_school_created")
+    except Exception as exc:
+        logger.warning("school_created notification failed (non-fatal): %s", exc)
+
+
 @router.post("/")
 def create_school(
     body: SchoolIn,
@@ -1314,6 +1451,13 @@ def create_school(
     has_any_coordinator = bool(body.meeting_coordinator) or bool(body.meeting_coordinators and any(body.meeting_coordinators.values()))
     if not has_any_coordinator:
         raise HTTPException(status_code=400, detail="יש להגדיר אחראי/ת לתיאום פגישות")
+    # "פרטי ליווי" sent with the add (the advisor path of AddSchoolPage). Slots aren't checked here
+    # for the same reason as above: the school's accounts (its stage) are saved after creation.
+    onboarding_advisors: dict[str, list[str]] = {}
+    if body.onboarding:
+        onboarding_advisors = _clean_onboarding_advisors(db, user, body.onboarding)
+        _require_onboarding_complete({}, body.onboarding.service_type, body.onboarding.client_status,
+                                     onboarding_advisors, check_slots=False)
     existing = _find_existing_school_by_symbol(db, user["org_id"], body.symbol)
     if existing:
         raise HTTPException(status_code=409, detail={
@@ -1323,7 +1467,7 @@ def create_school(
             "existing_school_name": existing["name"],
             "existing_school_status": existing["status"],
         })
-    payload = body.model_dump(exclude_none=True)
+    payload = body.model_dump(exclude_none=True, exclude={"onboarding"})
     payload["org_id"] = user["org_id"]
     row = db.table("schools").insert(payload).execute()
     new_school = row.data[0]
@@ -1343,6 +1487,9 @@ def create_school(
             db.table("advisor_schools").upsert({"advisor_id": user["id"], "school_id": new_school_id}).execute()
         except Exception as e:
             logger.warning("Failed to auto-assign advisor to new school (non-fatal): %s", e)
+    if body.onboarding:
+        _apply_onboarding(db, user, new_school_id, body.onboarding, onboarding_advisors,
+                          DEFAULT_ACADEMIC_YEAR, school_activity.client_surface(x_client_surface))
     # A caller that sends only the legacy `stage` (Excel import, meeting-import quick add) gets
     # the accounts that stage implies; the school-card surfaces then PUT their own list.
     if gefen_accounts.STAGE_ACCOUNTS.get(body.stage or ""):
@@ -1352,31 +1499,7 @@ def create_school(
             ])
         except Exception as e:
             logger.warning("Failed to create gefen accounts for new school (non-fatal): %s", e)
-    # Notify owners (and managers when advisor creates) about the new school
-    try:
-        if user["role"] in ("advisor", "manager"):
-            school_name = new_school.get("name", "בית ספר")
-            notif_title = f'{user.get("full_name", "יועץ")} הוסיף את בית הספר {school_name}'
-            if user["role"] == "advisor":
-                # Notify all owners + all managers
-                recipients = db.table("profiles").select("id").eq("org_id", user["org_id"]).in_("role", ["owner", "manager"]).execute()
-            else:
-                # Manager created — notify owners only
-                recipients = db.table("profiles").select("id").eq("org_id", user["org_id"]).eq("role", "owner").execute()
-            notif_rows = [{
-                "recipient_id": r["id"],
-                "type": "school_created",
-                "school_id": new_school_id,
-                "data": {
-                    "title": notif_title,
-                    "school_name": school_name,
-                    "sender_name": user.get("full_name", ""),
-                    "deeplink": f"/school/{new_school_id}",
-                }
-            } for r in (recipients.data or []) if r["id"] != user["id"]]
-            _create_notifications(db, notif_rows, pref_key="notify_school_created")
-    except Exception as exc:
-        logger.warning("school_created notification failed (non-fatal): %s", exc)
+    _notify_school_created(db, user, new_school_id, new_school.get("name", "בית ספר"))
     return new_school
 
 
@@ -1466,7 +1589,7 @@ def update_school(
     x_client_surface: Annotated[str | None, Header()] = None,
 ):
     db = get_admin_client()
-    if user["role"] not in ("owner", "manager"):
+    if user["role"] not in ("owner", "manager") and not _can_complete_directory_copy(db, user, school_id):
         if not _check_permission(db, user, "can_edit_school_directly"):
             raise HTTPException(status_code=403, detail="אין הרשאה לפעולה זו")
         assigned = (
@@ -1484,7 +1607,7 @@ def update_school(
     school_name = old_school.data[0]["name"] if old_school.data else "בית ספר"
     activity_before = school_activity.fetch_school(db, school_id) if old_school.data else None
 
-    update_data = body.model_dump(exclude_none=True)
+    update_data = body.model_dump(exclude_none=True, exclude={"onboarding"})
     # schools.stage mirrors the Gefen accounts (PUT /{school_id}/accounts) — a tab loaded before
     # the accounts editor existed may still send it; dropping it keeps the mirror consistent.
     update_data.pop("stage", None)
@@ -2651,8 +2774,16 @@ def _replace_gefen_accounts(db, school_id: str, academic_year: str, specs: list[
     return {"before": old, "after": [{"division_type": e["division_type"], "covers": e["covers"]} for e in new]}
 
 
+def _can_complete_directory_copy(db, user: dict, school_id: str) -> bool:
+    """A directory copy (status 'directory') of the caller's org is a school still being added:
+    anyone allowed to add schools may fill in its card before it joins the client list, like
+    the blank card of a manual add. Once it is a client, the regular edit rules apply."""
+    rows = db.table("schools").select("status").eq("id", school_id).eq("org_id", user["org_id"]).execute().data or []
+    return bool(rows) and rows[0]["status"] == "directory" and _check_permission(db, user, "can_add_school")
+
+
 def _require_accounts_editor(db, user: dict, school_id: str) -> None:
-    if user["role"] in ("owner", "manager"):
+    if user["role"] in ("owner", "manager") or _can_complete_directory_copy(db, user, school_id):
         return
     if not (_check_permission(db, user, "can_add_school") or _check_permission(db, user, "can_edit_school_directly")):
         raise HTTPException(status_code=403, detail="אין הרשאה לפעולה זו")
@@ -6379,6 +6510,7 @@ def get_me(user: Annotated[dict, Depends(get_current_user)]):
     try:
         db = get_admin_client()
         result["can_view_school_card"] = _check_permission(db, user, "can_view_school_card")
+        result["can_add_school"] = _check_permission(db, user, "can_add_school")
         result["can_delete_schools"] = _check_permission(db, user, "can_delete_schools")
         result["can_edit_school_directly"] = _check_permission(db, user, "can_edit_school_directly")
         result["can_request_school_update"] = _check_permission(db, user, "can_request_school_update")
@@ -6409,6 +6541,7 @@ def get_me(user: Annotated[dict, Depends(get_current_user)]):
         # error too, not silently revert to "allowed".
         _role = user.get("role")
         result["can_view_school_card"] = _role == "owner" or PERMISSION_DEFAULTS["can_view_school_card"].get(_role, False)
+        result["can_add_school"] = _role == "owner" or PERMISSION_DEFAULTS["can_add_school"].get(_role, False)
         result["can_delete_schools"] = _role == "owner"
         result["can_edit_school_directly"] = _role in ("owner", "manager")
         result["can_request_school_update"] = _role == "owner" or PERMISSION_DEFAULTS["can_request_school_update"].get(_role, False)
@@ -6825,7 +6958,7 @@ def list_mentionable_users(user: Annotated[dict, Depends(get_current_user)]):
     for attempt in range(2):
         try:
             db = get_admin_client()
-            rows = db.table("profiles").select("id, full_name").eq("org_id", user["org_id"]).order("full_name").execute()
+            rows = db.table("profiles").select("id, full_name, role").eq("org_id", user["org_id"]).order("full_name").execute()
             return rows.data
         except Exception as exc:
             if attempt == 0:

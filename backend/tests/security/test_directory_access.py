@@ -65,7 +65,9 @@ def org_b_copy(admin_db):
         yield entry, created
     finally:
         for school_id in created:
-            admin_db.table("school_activity").delete().eq("school_id", school_id).execute()
+            for table in ("school_activity", "school_year_admin_data", "school_advisors_gefen",
+                          "school_advisors_current", "school_advisors_district", "advisor_schools", "notifications"):
+                admin_db.table(table).delete().eq("school_id", school_id).execute()
             admin_db.table("schools").delete().eq("id", school_id).execute()
         admin_db.table("organizations").update({"directory_enabled": before}).eq("id", ORG_B_ID).execute()
 
@@ -99,3 +101,90 @@ def test_org_import_requires_manager(make_client):
     files = {"file": ("x.xlsx", b"x", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
     advisor = {**ORG_B_MANAGER_USER, "role": "advisor"}
     assert make_client(advisor).post("/directory/org-import", files=files, data={"rights_confirmed": "true"}).status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Adding a directory school to the client list ("שמור והוסף לרשימת הלקוחות")
+# ---------------------------------------------------------------------------
+
+ORG_B_FAKE_ADVISOR = {**ORG_B_MANAGER_USER, "role": "advisor"}
+
+
+@pytest.fixture
+def add_school_override(admin_db):
+    """Sets a per-user can_add_school override for the org B user the tests act as (as an advisor)."""
+    def set_allowed(allowed: bool):
+        admin_db.table("user_permission_overrides").delete().eq("user_id", ORG_B_MANAGER_USER["id"]).eq("permission", "can_add_school").execute()
+        admin_db.table("user_permission_overrides").insert({
+            "user_id": ORG_B_MANAGER_USER["id"], "owner_id": ORG_B_OWNER_USER["id"],
+            "permission": "can_add_school", "allowed": allowed,
+        }).execute()
+    try:
+        yield set_allowed
+    finally:
+        admin_db.table("user_permission_overrides").delete().eq("user_id", ORG_B_MANAGER_USER["id"]).eq("permission", "can_add_school").execute()
+
+
+def _adopt(client, entry, created):
+    res = client.post(f"/directory/schools/{entry['id']}/adopt")
+    assert res.status_code == 200, res.text
+    created.append(res.json()["school_id"])
+    return res.json()["school_id"]
+
+
+def test_client_list_add_validates_like_a_manual_add(make_client, admin_db, org_b_copy):
+    entry, created = org_b_copy
+    org_b = make_client(ORG_B_MANAGER_USER)
+    copy_id = _adopt(org_b, entry, created)
+    url = f"/directory/client-list/{copy_id}"
+
+    # Another org's user can never be made an accompanying advisor.
+    res = org_b.post(url, json={"action": "add", "client_status": "in_progress", "typed_advisors": {"gefen": [ORG_A_MANAGER_USER["id"]]}})
+    assert res.status_code == 400, res.text
+    # A meeting coordinator per slot of the service type is mandatory.
+    res = org_b.post(url, json={"action": "add", "client_status": "in_progress", "service_type": "gefen"})
+    assert res.status_code == 400 and res.json()["detail"]["code"] == "missing_coordinators", res.text
+    admin_db.table("schools").update({"meeting_coordinators": {"gefen": "principal"}, "principal_name": "בדיקה"}).eq("id", copy_id).execute()
+    # An active client needs an accompanying advisor per active service type.
+    res = org_b.post(url, json={"action": "add", "client_status": "active", "service_type": "gefen"})
+    assert res.status_code == 400 and res.json()["detail"]["code"] == "missing_advisor", res.text
+    assert admin_db.table("schools").select("status").eq("id", copy_id).execute().data[0]["status"] == "directory"
+
+    res = org_b.post(url, json={"action": "add", "client_status": "active", "service_type": "gefen",
+                                "typed_advisors": {"gefen": [ORG_B_MANAGER_USER["id"]]}})
+    assert res.status_code == 200, res.text
+    assert admin_db.table("schools").select("status").eq("id", copy_id).execute().data[0]["status"] == "active"
+    assert admin_db.table("school_advisors_gefen").select("advisor_id").eq("school_id", copy_id).execute().data == [{"advisor_id": ORG_B_MANAGER_USER["id"]}]
+
+
+def test_advisor_completes_directory_copy_only_with_add_permission(make_client, admin_db, org_b_copy, add_school_override):
+    entry, created = org_b_copy
+    copy_id = _adopt(make_client(ORG_B_MANAGER_USER), entry, created)
+    advisor = make_client(ORG_B_FAKE_ADVISOR)
+    body = {"name": "בדיקה", "meeting_coordinators": {}}
+
+    add_school_override(False)
+    assert advisor.put(f"/schools/{copy_id}", json=body).status_code == 403
+    assert advisor.post(f"/directory/client-list/{copy_id}", json={"action": "add", "client_status": "in_progress"}).status_code == 403
+
+    add_school_override(True)
+    assert advisor.put(f"/schools/{copy_id}", json=body).status_code == 200
+    res = advisor.post(f"/directory/client-list/{copy_id}", json={"action": "add", "client_status": "in_progress"})
+    assert res.status_code == 200, res.text
+    # Once it is a client, the regular edit rules apply again (no can_edit_school_directly here).
+    admin_db.table("user_permission_overrides").insert({
+        "user_id": ORG_B_MANAGER_USER["id"], "owner_id": ORG_B_OWNER_USER["id"],
+        "permission": "can_edit_school_directly", "allowed": False,
+    }).execute()
+    try:
+        assert advisor.put(f"/schools/{copy_id}", json=body).status_code == 403
+    finally:
+        admin_db.table("user_permission_overrides").delete().eq("user_id", ORG_B_MANAGER_USER["id"]).eq("permission", "can_edit_school_directly").execute()
+
+
+def test_create_school_onboarding_rejects_foreign_advisors(make_client):
+    res = make_client(ORG_B_MANAGER_USER).post("/schools/", json={
+        "name": "בדיקת אבטחה", "symbol": "999997", "meeting_coordinator": "principal",
+        "onboarding": {"client_status": "in_progress", "typed_advisors": {"gefen": [ORG_A_MANAGER_USER["id"]]}},
+    })
+    assert res.status_code == 400, res.text

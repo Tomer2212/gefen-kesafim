@@ -120,91 +120,80 @@ function buildMessageBadges({ isMeetingTask, looksLikeMissingMeetingTask, recipi
   return badges;
 }
 
-// Same table shape/styling as PersonTaskCreateWizard.jsx's "יועץ מלווה" preview table — a
-// single "בית ספר" column here since a general school-audience preview has no per-row advisor
-// to show. The hard PREVIEW_SCHOOL_LIMIT cap (not true virtualization) is what actually keeps
-// this safe for large orgs: at most 200 <tr> ever mount regardless of how many schools matched,
-// so there's no DOM-size blowup to virtualize away — same proven approach already used here and
-// in the advisor table.
-function SchoolPreviewList({ schools }) {
-  const shown = schools.slice(0, PREVIEW_SCHOOL_LIMIT);
-  const extra = schools.length - shown.length;
-  return (
-    <div className="mt-2 border border-slate-200 rounded-xl max-h-56 overflow-y-auto">
-      <table className="w-full text-xs">
-        <thead className="sticky top-0 bg-slate-50">
-          <tr>
-            <th scope="col" className="text-right px-2.5 py-1.5 font-semibold text-slate-600">בית ספר</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-slate-100">
-          {shown.map(s => (
-            <tr key={s.school_id}>
-              <td className="px-2.5 py-1.5 text-slate-800">
-                {[s.school_name, s.authority, s.symbol].filter(Boolean).join(" - ")}
-              </td>
-            </tr>
-          ))}
-          {extra > 0 && (
-            <tr>
-              <td className="px-2.5 py-1.5 text-slate-400 italic">
-                …ועוד {extra} בתי ספר (הרשימה נחתכה לתצוגה; המספר המלא מוצג למעלה)
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
 // The schools a task will send to, each with "הסר מהמשימה", and below them the removed ones with
 // "החזר למשימה" — removed schools go to the server as excluded_school_ids (kept on the task, so a
 // scheduled task leaves them out too). rows/removed: [{school_id, label, detail?}]; onCustomize
-// (a round's task) opens the round's "התאמת פגישות" for the school.
-function AudienceEditList({ rows, removed, onRemove, onRestore, onCustomize }) {
-  const shown = rows.slice(0, PREVIEW_SCHOOL_LIMIT);
-  const extra = rows.length - shown.length;
-  const table = (list, action, actionLabel) => (
-    <table className="w-full text-xs">
-      <tbody className="divide-y divide-slate-100">
-        {list.map(s => (
-          <tr key={s.school_id}>
-            <td className="px-2.5 py-1.5 text-slate-800">
-              {s.label}
-              {s.detail && <span className="block text-[11px] text-slate-500">{s.detail}</span>}
-            </td>
-            <td className="px-2.5 py-1.5 text-left whitespace-nowrap align-top">
-              {onCustomize && action === onRemove && (
-                <button type="button" onClick={() => onCustomize(s.school_id)} className="text-blue-700 hover:underline ml-3">התאמת פגישות</button>
-              )}
-              <button type="button" onClick={() => action(s.school_id)} aria-label={`${actionLabel}: ${s.label}`}
-                className={action === onRemove ? "text-red-600 hover:underline" : "text-blue-700 hover:underline"}>{actionLabel}</button>
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  );
+// (a round's task) opens the round's "התאמת פגישות" for the school. Each list has its own search;
+// globalQuery (the search next to "נמצאו X") filters both.
+function matchesQuery(row, query) {
+  const q = query.trim().toLowerCase();
+  return !q || `${row.label} ${row.detail || ""}`.toLowerCase().includes(q);
+}
+
+function AudienceSearch({ id, label, value, onChange }) {
   return (
-    <div className="flex flex-col gap-2 mt-1">
+    <>
+      <label htmlFor={id} className="sr-only">{label}</label>
+      {/* Esc clears the search instead of closing the whole wizard (useFocusTrap) — only while it has text. */}
+      <input id={id} type="search" value={value} onChange={e => onChange(e.target.value)} placeholder="חיפוש לפי שם או סמל מוסד…"
+        onKeyDown={e => { if (e.key === "Escape" && value) { e.stopPropagation(); e.preventDefault(); onChange(""); } }}
+        className="text-xs border border-slate-300 bg-white rounded-lg px-2 py-1 w-52 max-w-full outline-none focus:border-blue-400" />
+    </>
+  );
+}
+
+function AudienceEditList({ title, rows, removed, onRemove, onRestore, onCustomize, globalQuery = "", idPrefix }) {
+  const [includedQuery, setIncludedQuery] = useState("");
+  const [removedQuery, setRemovedQuery] = useState("");
+  const section = (heading, list, query, setQuery, isRemoved) => {
+    const filtered = list.filter(r => matchesQuery(r, globalQuery) && matchesQuery(r, query));
+    const shown = filtered.slice(0, PREVIEW_SCHOOL_LIMIT);
+    const extra = filtered.length - shown.length;
+    const action = isRemoved ? onRestore : onRemove;
+    const actionLabel = isRemoved ? "החזר למשימה" : "הסר מהמשימה";
+    return (
       <div>
-        <p className="text-xs font-semibold text-slate-700 mb-1">ייכללו במשימה ({rows.length})</p>
-        {rows.length > 0 && (
-          <div className="border border-slate-200 bg-white rounded-xl max-h-56 overflow-y-auto">
-            {table(shown, onRemove, "הסר מהמשימה")}
-            {extra > 0 && <p className="px-2.5 py-1.5 text-xs text-slate-400 italic">…ועוד {extra} בתי ספר (הרשימה נחתכה לתצוגה)</p>}
+        <div className="flex items-center justify-between gap-2 flex-wrap mb-1">
+          <p className="text-sm font-semibold text-slate-800">{heading}</p>
+          {list.length > 0 && (
+            <AudienceSearch id={`${idPrefix}-${isRemoved ? "removed" : "included"}-search`}
+              label={isRemoved ? "חיפוש בבתי הספר שהוסרו מהמשימה" : "חיפוש בבתי הספר במשימה"} value={query} onChange={setQuery} />
+          )}
+        </div>
+        {list.length > 0 && (
+          <div className={`border border-slate-200 rounded-xl overflow-y-auto ${isRemoved ? "bg-slate-50 max-h-40" : "bg-white max-h-56"}`}>
+            <table className="w-full text-xs">
+              <tbody className="divide-y divide-slate-100">
+                {shown.map(r => (
+                  <tr key={r.school_id}>
+                    <td className="px-2.5 py-1.5 text-slate-800">
+                      {r.label}
+                      {r.detail && <span className="block text-[11px] text-slate-500">{r.detail}</span>}
+                    </td>
+                    <td className="px-2.5 py-1.5 text-left whitespace-nowrap align-top">
+                      {onCustomize && !isRemoved && (
+                        <button type="button" onClick={() => onCustomize(r.school_id)} className="text-blue-700 hover:underline ml-3">התאמת פגישות</button>
+                      )}
+                      <button type="button" onClick={() => action(r.school_id)} aria-label={`${actionLabel}: ${r.label}`}
+                        className={isRemoved ? "text-blue-700 hover:underline" : "text-red-600 hover:underline"}>{actionLabel}</button>
+                    </td>
+                  </tr>
+                ))}
+                {filtered.length === 0 && (
+                  <tr><td className="px-2.5 py-2 text-slate-400">אין בתי ספר שמתאימים לחיפוש</td></tr>
+                )}
+              </tbody>
+            </table>
+            {extra > 0 && <p className="px-2.5 py-1.5 text-xs text-slate-400 italic">…ועוד {extra} בתי ספר (הרשימה נחתכה לתצוגה — אפשר לחפש)</p>}
           </div>
         )}
       </div>
-      {removed.length > 0 && (
-        <div>
-          <p className="text-xs font-semibold text-slate-700 mb-1">הוסרו מהמשימה — לא יקבלו קישור ({removed.length})</p>
-          <div className="border border-slate-200 bg-slate-50 rounded-xl max-h-40 overflow-y-auto">
-            {table(removed, onRestore, "החזר למשימה")}
-          </div>
-        </div>
-      )}
+    );
+  };
+  return (
+    <div className="flex flex-col gap-2 mt-1">
+      {section(title, rows, includedQuery, setIncludedQuery, false)}
+      {removed.length > 0 && section(`בתי ספר שהוסרו מהמשימה (${removed.length})`, removed, removedQuery, setRemovedQuery, true)}
     </div>
   );
 }
@@ -425,6 +414,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
   const restoreSchool = id => setRemovedIds(prev => { const n = new Set(prev); n.delete(id); return n; });
   const [partsSchoolId, setPartsSchoolId] = useState(null); // the round's "התאמת פגישות" window
   const [partsNotice, setPartsNotice] = useState("");
+  const [audienceQuery, setAudienceQuery] = useState(""); // the search next to "נמצאו X" — both lists
   // Whether this task's meetings are in person — a school the round marks physical shouldn't get
   // a remote request through a broad filter, and the other way round (skipped by default).
   const taskIsPhysical = meetingRequirementGroups.some(g => g.conditions.some(c => c.use_field_days || c.meeting_type === "physical"));
@@ -468,6 +458,41 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
       `${MEETING_SERVICE_TYPE_LABELS[p.type] || p.type}${p.advisor_ids.length ? ` — ${p.advisor_ids.map(a => names[a]).filter(Boolean).join(", ")}` : ""}${p.physical ? " · פיזית" : " · מרחוק"}`,
     ).join(" | ");
   }
+  // "נמצאו X בתי ספר תואמים" with the search over both lists. Outside a round the editable list is
+  // right under it; in a round it is the "בתי ספר במשימה" box below (only those that really get a
+  // request), so the plain match list isn't repeated.
+  function renderPreviewBox() {
+    const removedCount = preview?.schools ? preview.schools.filter(x => removedIds.has(x.school_id)).length : 0;
+    const hasList = roundContext ? roundCandidates.length > 0 : showPreviewList && preview?.schools?.length > 0;
+    return (
+      <div className="text-sm bg-slate-50 rounded-lg px-3 py-2">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <span role="status">
+            {previewLoading ? "בודק כמות בתי ספר תואמים..." : preview
+              ? <>נמצאו <b>{preview.count}</b> בתי ספר תואמים.</>
+              : "הגדר קריטריון סינון או בחר בתי ספר כדי לראות תצוגה מקדימה."}
+          </span>
+          <div className="flex items-center gap-2">
+            {hasList && <AudienceSearch id="audience-search-all" label="חיפוש בכל רשימות בתי הספר" value={audienceQuery} onChange={setAudienceQuery} />}
+            {!roundContext && preview?.count > 0 && (
+              <button type="button" onClick={() => setShowPreviewList(v => !v)} className="text-xs text-blue-700 hover:underline whitespace-nowrap shrink-0">
+                {showPreviewList ? "סגור רשימה" : "הצג רשימה"}
+              </button>
+            )}
+          </div>
+        </div>
+        {!roundContext && showPreviewList && preview?.schools?.length > 0 && (
+          <AudienceEditList
+            title={`בתי ספר במשימה (${preview.schools.length - removedCount})`}
+            rows={preview.schools.filter(x => !removedIds.has(x.school_id)).map(x => ({ school_id: x.school_id, label: schoolLabel(x) }))}
+            removed={preview.schools.filter(x => removedIds.has(x.school_id)).map(x => ({ school_id: x.school_id, label: schoolLabel(x) }))}
+            onRemove={removeSchool} onRestore={restoreSchool} globalQuery={audienceQuery} idPrefix="audience"
+          />
+        )}
+      </div>
+    );
+  }
+
   // The pre-send checks cover exactly the schools that will get a request.
   function checkAudiencePayload() {
     if (roundContext && roundSplit) return { criteria: { groups: [] }, manual_school_ids: roundSendIds };
@@ -1095,29 +1120,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
                   Same immediate table + separate תזמון button as PersonTaskCreateWizard.jsx's
                   "יועץ מלווה" preview — list shown by default, with a collapse toggle to its
                   left (large orgs can have long match lists). */}
-              <div role="status" className="text-sm bg-slate-50 rounded-lg px-3 py-2">
-                <div className="flex items-center justify-between gap-2">
-                  <span>
-                    {previewLoading ? "בודק כמות בתי ספר תואמים..." : preview
-                      ? <>נמצאו <b>{preview.count}</b> בתי ספר תואמים.{!roundContext && removedIds.size > 0 && <> {[...removedIds].filter(id => preview.schools?.some(x => x.school_id === id)).length} הוסרו מהמשימה.</>}</>
-                      : "הגדר קריטריון סינון או בחר בתי ספר כדי לראות תצוגה מקדימה."}
-                  </span>
-                  {preview?.count > 0 && (
-                    <button type="button" onClick={() => setShowPreviewList(v => !v)} className="text-xs text-blue-700 hover:underline whitespace-nowrap shrink-0">
-                      {showPreviewList ? "סגור רשימה" : "הצג רשימה"}
-                    </button>
-                  )}
-                </div>
-                {showPreviewList && preview?.schools?.length > 0 && (roundContext ? (
-                  <SchoolPreviewList schools={preview.schools} />
-                ) : (
-                  <AudienceEditList
-                    rows={preview.schools.filter(x => !removedIds.has(x.school_id)).map(x => ({ school_id: x.school_id, label: schoolLabel(x) }))}
-                    removed={preview.schools.filter(x => removedIds.has(x.school_id)).map(x => ({ school_id: x.school_id, label: schoolLabel(x) }))}
-                    onRemove={removeSchool} onRestore={restoreSchool}
-                  />
-                ))}
-              </div>
+              {renderPreviewBox()}
 
               {roundContext && preview && (
                 <div className="text-sm border border-indigo-200 bg-indigo-50/60 rounded-lg px-3 py-2.5 flex flex-col gap-1.5">
@@ -1125,15 +1128,15 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
                     <span>{roundState?.failed ? "לא ניתן היה לבדוק מול הסבב — השרת ישמיט בכל מקרה בתי ספר שכבר קיבלו בקשה." : "בודק מול הסבב..."}</span>
                   ) : (
                     <>
-                      <span><b>{roundSendIds.length}</b> בתי ספר יקבלו בקשה במשימה הזו.</span>
-                      {roundCandidates.length > 0 && (
+                      {roundCandidates.length > 0 ? (
                         <AudienceEditList
+                          title={`בתי ספר במשימה (${roundSendIds.length})`}
                           rows={roundSendRows.map(r => ({ school_id: r.school_id, label: schoolLabel(r), detail: roundRowDetail(r) }))}
                           removed={roundRemovedRows.map(r => ({ school_id: r.school_id, label: schoolLabel(r) }))}
                           onRemove={removeSchool} onRestore={restoreSchool}
-                          onCustomize={id => setPartsSchoolId(id)}
+                          onCustomize={id => setPartsSchoolId(id)} globalQuery={audienceQuery} idPrefix="round-audience"
                         />
-                      )}
+                      ) : <span className="font-semibold text-slate-800">בתי ספר במשימה (0)</span>}
                       {partsNotice && <span role="status" className="text-xs text-emerald-700">{partsNotice}</span>}
                       {roundSplit.booked.length > 0 && <span className="text-slate-600">{roundSplit.booked.length} כבר קבעו את הפגישה בסבב — לא יקבלו בקשה.</span>}
                       {roundSplit.self.length > 0 && <span className="text-slate-600">{roundSplit.self.length} — היועץ קובע בעצמו את כל הפגישות שלהם — לא יקבלו בקשה.</span>}
@@ -1286,29 +1289,7 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
                 </div>
               )}
 
-              <div role="status" className="text-sm bg-slate-50 rounded-lg px-3 py-2">
-                <div className="flex items-center justify-between gap-2">
-                  <span>
-                    {previewLoading ? "בודק כמות בתי ספר תואמים..." : preview
-                      ? <>נמצאו <b>{preview.count}</b> בתי ספר תואמים.{!roundContext && removedIds.size > 0 && <> {[...removedIds].filter(id => preview.schools?.some(x => x.school_id === id)).length} הוסרו מהמשימה.</>}</>
-                      : "הגדר קריטריון סינון או בחר בתי ספר כדי לראות תצוגה מקדימה."}
-                  </span>
-                  {preview?.count > 0 && (
-                    <button type="button" onClick={() => setShowPreviewList(v => !v)} className="text-xs text-blue-700 hover:underline whitespace-nowrap shrink-0">
-                      {showPreviewList ? "סגור רשימה" : "הצג רשימה"}
-                    </button>
-                  )}
-                </div>
-                {showPreviewList && preview?.schools?.length > 0 && (roundContext ? (
-                  <SchoolPreviewList schools={preview.schools} />
-                ) : (
-                  <AudienceEditList
-                    rows={preview.schools.filter(x => !removedIds.has(x.school_id)).map(x => ({ school_id: x.school_id, label: schoolLabel(x) }))}
-                    removed={preview.schools.filter(x => removedIds.has(x.school_id)).map(x => ({ school_id: x.school_id, label: schoolLabel(x) }))}
-                    onRemove={removeSchool} onRestore={restoreSchool}
-                  />
-                ))}
-              </div>
+              {renderPreviewBox()}
 
               <div className="pt-1">
                 <button type="button" onClick={() => setShowScheduleModal(true)}

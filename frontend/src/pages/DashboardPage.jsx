@@ -7,6 +7,7 @@ import * as XLSX from "xlsx";
 import { supabase } from "../lib/supabase";
 import Sidebar from "../components/Sidebar";
 import OnboardingToast from "../components/OnboardingToast";
+import AddSchoolChooserModal from "../components/AddSchoolChooserModal";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { ACADEMIC_YEARS, DEFAULT_ACADEMIC_YEAR } from "../constants/academicYears";
 import { planSummary } from "../constants/meetingPlan";
@@ -1407,6 +1408,7 @@ const DashboardSchoolRow = memo(function DashboardSchoolRow({
 export default function DashboardPage() {
   const navigate = useNavigate();
   const [schools, setSchools] = useState([]);
+  const [addChooserOpen, setAddChooserOpen] = useState(false);
   const [allOrgUsers, setAllOrgUsers] = useState([]);
   const [meetingsStats, setMeetingsStats] = useState({});
   const [loading, setLoading] = useState(true);
@@ -1797,9 +1799,13 @@ export default function DashboardPage() {
           setIsOwner(true);
           setOnboardingDismissed(meRes.data?.onboarding_dismissed || {});
         }
-        // Determine canAddSchool using server-confirmed role (not stale JWT)
+        // Determine canAddSchool using server-confirmed role (not stale JWT). /users/me's
+        // can_add_school is the effective permission (per-user override included); the role
+        // defaults are only a fallback for a server that doesn't send it yet.
         if (confirmedRole === "owner") {
           setCanAddSchool(true);
+        } else if (typeof meRes.data?.can_add_school === "boolean") {
+          setCanAddSchool(meRes.data.can_add_school);
         } else {
           try {
             const permRes = await axios.get("/schools/permissions/defaults");
@@ -2123,7 +2129,7 @@ export default function DashboardPage() {
             </div>
             {clientTab === "school" && canAddSchool === true && (
               <button
-                onClick={() => navigate("/school/new")}
+                onClick={() => setAddChooserOpen(true)}
                 className="btn-blue text-sm px-4 py-2"
               >+ הוסף בית ספר</button>
             )}
@@ -2385,7 +2391,7 @@ export default function DashboardPage() {
               <p className="text-slate-500 text-lg">אין בתי ספר משויכים לחשבונך</p>
               {canAddSchool === true && (
                 <button
-                  onClick={() => navigate("/school/new")}
+                  onClick={() => setAddChooserOpen(true)}
                   className="btn-blue px-6 py-2 text-sm mt-4"
                 >הוסף בית ספר ראשון</button>
               )}
@@ -2663,6 +2669,12 @@ export default function DashboardPage() {
           onClose={() => setShowBulkAccessModal(false)}
           onSaved={loadSchools}
         />
+      )}
+
+      {addChooserOpen && (
+        <AddSchoolChooserModal schools={schools}
+          onClose={() => setAddChooserOpen(false)}
+          onManualAdd={() => { setAddChooserOpen(false); navigate("/school/new"); }} />
       )}
 
       {isOwner && onboardingDismissed !== null && (

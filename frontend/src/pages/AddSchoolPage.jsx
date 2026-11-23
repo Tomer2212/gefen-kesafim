@@ -383,6 +383,9 @@ export default function AddSchoolPage() {
 
         if (role === "owner") {
           // always allowed
+        } else if (typeof meRes.data?.can_add_school === "boolean") {
+          // The effective permission (per-user override included).
+          if (!meRes.data.can_add_school) { navigate("/", { replace: true }); return; }
         } else if (role === "manager") {
           try {
             const permRes = await axios.get("/schools/permissions/defaults");
@@ -401,16 +404,18 @@ export default function AddSchoolPage() {
           navigate("/", { replace: true }); return;
         }
 
-        // Managers/owners can see all users for advisor selection
-        if (role !== "advisor") {
-          setCanSeeAll(true);
-          setLoadingUsers(true);
-          try {
-            const res = await axios.get("/schools/users/all");
-            setUsers(Array.isArray(res.data) ? res.data : []);
-          } finally {
-            setLoadingUsers(false);
-          }
+        // Managers/owners can see all users for advisor selection. An advisor who may add
+        // schools picks the accompanying advisors too (sent with the add as `onboarding`), from
+        // the org's name list — /users/all is manager-only.
+        if (role !== "advisor") setCanSeeAll(true);
+        setLoadingUsers(true);
+        try {
+          const res = await axios.get(role !== "advisor" ? "/schools/users/all" : "/schools/users/mentionable");
+          setUsers(Array.isArray(res.data) ? res.data : []);
+        } catch {
+          // non-fatal — the advisor pickers offer a retry
+        } finally {
+          setLoadingUsers(false);
         }
 
         // Load existing symbols for duplicate check — include_deleted so a symbol belonging
@@ -436,12 +441,10 @@ export default function AddSchoolPage() {
     setSchoolConflict(null);
     if (!schoolForm.name || validateSymbol(schoolForm.symbol)) return;
     if (existingSymbols.includes(schoolForm.symbol)) return;
-    if (canSeeAllUsers) {
-      const requiredTypes = activeServiceTypes(yearAdminForm.service_type);
-      if (yearAdminForm.client_status === "active" && requiredTypes.some(t => typedAdvisorIds[t].length === 0)) {
-        setSaveError("יש לבחור לפחות יועץ מלווה אחד עבור כל סוג שירות פעיל (גפן/שוטף/מחוז).");
-        return;
-      }
+    const requiredTypes = activeServiceTypes(yearAdminForm.service_type);
+    if (yearAdminForm.client_status === "active" && requiredTypes.some(t => typedAdvisorIds[t].length === 0)) {
+      setSaveError("יש לבחור לפחות יועץ מלווה אחד עבור כל סוג שירות פעיל (גפן/שוטף/מחוז).");
+      return;
     }
     if (validateCoversList(accountsDraft.map(d => d.covers))) return;
     if (schoolForm.principal_phone    && validateSecretaryPhone(schoolForm.principal_phone))    return;
@@ -496,7 +499,15 @@ export default function AddSchoolPage() {
         : parseInt(schoolForm.student_count, 10);
       let res;
       try {
-        res = await axios.post("/schools/", { ...schoolForm, ...chativaSync, ...legacyCoordinatorSync, stage: null, student_count: studentCountValue }, SURFACE_HEADERS);
+        // An advisor's "פרטי ליווי" go with the add itself — the only path where they may set them.
+        const onboarding = canSeeAllUsers ? {} : {
+          onboarding: {
+            client_status: yearAdminForm.client_status || null,
+            service_type: yearAdminForm.service_type || null,
+            typed_advisors: typedAdvisorIds,
+          },
+        };
+        res = await axios.post("/schools/", { ...schoolForm, ...chativaSync, ...legacyCoordinatorSync, stage: null, student_count: studentCountValue, ...onboarding }, SURFACE_HEADERS);
       } catch (err) {
         const detail = err?.response?.data?.detail;
         if (err?.response?.status === 409 && detail?.code === "duplicate_symbol") {
@@ -1034,30 +1045,26 @@ export default function AddSchoolPage() {
               <div className={SECTION_HEADER_CLS}>
                 {sectionTitle(Handshake, "פרטי ליווי", "bg-emerald-50 text-emerald-600")}
               </div>
-              <div className={`grid gap-3 ${canSeeAllUsers ? "grid-cols-3" : "grid-cols-1"}`}>
-                {canSeeAllUsers && (
-                  <div className={TILE_CLS}>
-                    <label htmlFor="ys-client-status" className={TILE_LABEL_CLS}>סטטוס לקוח</label>
-                    <select id="ys-client-status" className="input-field text-sm"
-                      value={yearAdminForm.client_status || ""}
-                      onChange={e => setYearAdminForm(p => ({ ...p, client_status: e.target.value || null }))}>
-                      <option value="">בחר</option>
-                      {CLIENT_STATUS_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                    </select>
-                  </div>
-                )}
+              <div className="grid gap-3 grid-cols-3">
+                <div className={TILE_CLS}>
+                  <label htmlFor="ys-client-status" className={TILE_LABEL_CLS}>סטטוס לקוח</label>
+                  <select id="ys-client-status" className="input-field text-sm"
+                    value={yearAdminForm.client_status || ""}
+                    onChange={e => setYearAdminForm(p => ({ ...p, client_status: e.target.value || null }))}>
+                    <option value="">בחר</option>
+                    {CLIENT_STATUS_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  </select>
+                </div>
 
-                {canSeeAllUsers && (
-                  <div className={TILE_CLS}>
-                    <label htmlFor="ys-service-type" className={TILE_LABEL_CLS}>סוג שירות</label>
-                    <select id="ys-service-type" className="input-field text-sm"
-                      value={yearAdminForm.service_type || ""}
-                      onChange={e => setYearAdminForm(p => ({ ...p, service_type: e.target.value || null }))}>
-                      <option value="">בחר</option>
-                      {SERVICE_TYPE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                    </select>
-                  </div>
-                )}
+                <div className={TILE_CLS}>
+                  <label htmlFor="ys-service-type" className={TILE_LABEL_CLS}>סוג שירות</label>
+                  <select id="ys-service-type" className="input-field text-sm"
+                    value={yearAdminForm.service_type || ""}
+                    onChange={e => setYearAdminForm(p => ({ ...p, service_type: e.target.value || null }))}>
+                    <option value="">בחר</option>
+                    {SERVICE_TYPE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  </select>
+                </div>
 
                 <div className={TILE_CLS}>
                   <label htmlFor="ys-order-amount" className={TILE_LABEL_CLS}>מחיר כולל מע"מ</label>
@@ -1112,12 +1119,12 @@ export default function AddSchoolPage() {
               </div>
 
               {!canSeeAllUsers && (
-                <p className="text-sm text-slate-500 py-1 mt-2">אתה תוקצה אוטומטית לבית הספר</p>
+                <p className="text-sm text-slate-500 py-1 mt-2">הגישה לבית הספר תינתן לך אוטומטית. את היועצים המלווים בוחרים למטה — הם יכולים להיות גם משתמשים אחרים.</p>
               )}
 
               {/* Per-service-type sub-sections: יועץ מלווה / הקצאת פגישות / זמן לפגישה, per
-                  גפן/שוטף/מחוז — replaces the old single flat "יועצים אחראיים" field. */}
-              {canSeeAllUsers && (
+                  גפן/שוטף/מחוז — replaces the old single flat "יועצים אחראיים" field. An advisor
+                  sees only the advisor pickers (the rest of these fields stay manager-only). */}
                 <div className="mt-6 pt-6 border-t border-slate-200/60">
                   <div className={SECTION_HEADER_CLS}>
                     {sectionTitle(UsersRound, "יועצים מלווים", "bg-violet-50 text-violet-600")}
@@ -1142,6 +1149,7 @@ export default function AddSchoolPage() {
                             )}
                           </div>
 
+                          {canSeeAllUsers && (<>
                           <label htmlFor={`ys-alloc-${key}`} className="text-sm text-slate-500 whitespace-nowrap flex-shrink-0 pt-[7px]">הקצאת פגישות:</label>
                           <div className="py-0.5">
                             <input id={`ys-alloc-${key}`} type="number" min="0" className="input-field text-sm"
@@ -1168,13 +1176,13 @@ export default function AddSchoolPage() {
                               minutes={yearAdminForm[`meeting_duration_${key}`] ?? null}
                               onChange={v => setYearAdminForm(p => ({ ...p, [`meeting_duration_${key}`]: v }))} />
                           </div>
+                          </>)}
                         </div>
                       </div>
                     );
                   })}
                   </div>
                 </div>
-              )}
             </div>
 
             {planType && (
