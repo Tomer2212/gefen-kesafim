@@ -251,7 +251,12 @@ export function MeetingActualDetail({ meeting, onMeetingPatched }) {
                   ariaLabel="הערה לשיחה"
                 />
               </td>
-              <td className="py-1.5 pl-2 text-slate-600 whitespace-nowrap" dir="ltr">{formatDuration(c.duration_seconds)}</td>
+              <td className="py-1.5 pl-2 text-slate-600 whitespace-nowrap" dir="ltr">
+                {formatDuration(c.duration_seconds)}
+                {c.counted_seconds != null && c.counted_seconds < (c.duration_seconds || 0) && (
+                  <span className="text-amber-600 text-xs" dir="rtl" title="שיחה זו חופפת לשיחה אחרת של אותו משתמש, ולכן הזמן החופף נספר פעם אחת"> (נספרו {formatDuration(c.counted_seconds)})</span>
+                )}
+              </td>
               <td className="py-1.5 pl-2 text-center">
                 {c.ai_summary ? (
                   <button type="button"

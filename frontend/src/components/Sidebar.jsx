@@ -292,6 +292,26 @@ function ProfileModal({ userName, userEmail, onClose, onNameSaved }) {
   );
 }
 
+const MOVED_TOAST_MS = 30000;
+
+// How long this version of the notification should still pop up in this browser: 30 s from the
+// first time, also across page changes (each page mounts its own Sidebar), 0 once dismissed.
+function movedToastMsLeft(n) {
+  const key = `moved-toast-${n.id}`;
+  try {
+    const saved = JSON.parse(localStorage.getItem(key) || "null");
+    if (saved?.v === n.created_at) return Math.max(0, saved.until - Date.now());
+    localStorage.setItem(key, JSON.stringify({ v: n.created_at, until: Date.now() + MOVED_TOAST_MS }));
+  } catch { /* storage blocked — show it */ }
+  return MOVED_TOAST_MS;
+}
+
+function endMovedToast(toastId) {
+  const [, id, v] = /^moved\|([^|]+)\|(.+)$/.exec(toastId) || [];
+  if (!id) return;
+  try { localStorage.setItem(`moved-toast-${id}`, JSON.stringify({ v, until: 0 })); } catch { /* ignore */ }
+}
+
 export default function Sidebar({ dark = false }) {
   const navigate = useNavigate();
   const location = useLocation();
@@ -314,6 +334,7 @@ export default function Sidebar({ dark = false }) {
   const wakeRefreshRef = useRef(null);
 
   const dismissToast = useCallback((id) => {
+    endMovedToast(id);
     setToasts(prev => prev.filter(t => t.id !== id));
   }, []);
 
@@ -404,7 +425,7 @@ export default function Sidebar({ dark = false }) {
         // Show toasts for new unread notifications (not on first load)
         if (newCount > prevCountRef.current && prevCountRef.current > 0) {
           const newItems = items.filter(n =>
-            !n.read_at && new Date(n.created_at).getTime() > lastPollTimeRef.current
+            n.type !== "meeting_moved" && !n.read_at && new Date(n.created_at).getTime() > lastPollTimeRef.current
           );
           if (newItems.length > 0) {
             setToasts(prev => [
@@ -412,6 +433,15 @@ export default function Sidebar({ dark = false }) {
               ...newItems.map(n => ({ id: `notif-${n.id}`, type: n.type, data: n.data })),
             ]);
           }
+        }
+        // A shared meeting a colleague moved: missing it means a missed meeting, so it pops up once
+        // per change on any load, also for someone who wasn't logged in when it happened.
+        const moved = items
+          .filter(n => n.type === "meeting_moved" && !n.read_at)
+          .map(n => ({ id: `moved|${n.id}|${n.created_at}`, type: n.type, data: n.data, duration: movedToastMsLeft(n) }))
+          .filter(t => t.duration > 0);
+        if (moved.length > 0) {
+          setToasts(prev => [...prev, ...moved.filter(t => !prev.some(x => x.id === t.id))]);
         }
         prevCountRef.current = newCount;
         lastPollTimeRef.current = pollTime;

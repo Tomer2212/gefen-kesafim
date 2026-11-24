@@ -11,8 +11,9 @@ from typing import Annotated
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+import call_conversations
 import school_activity
 from auth import get_current_user
 from integrations.calls import exm_adapter, voicenter_adapter
@@ -169,7 +170,7 @@ def _build_profile_phone_map(org_id: str) -> dict:
         for p in p_rows:
             suffix = _phone_suffix(p.get("work_phone"))
             if suffix and p.get("full_name"):
-                phone_map[suffix] = {"name": p["full_name"], "kind": "user"}
+                phone_map[suffix] = {"name": p["full_name"], "kind": "user", "user_id": p["id"]}
 
         m_rows = (
             db.table("calls_agent_mappings")
@@ -188,7 +189,7 @@ def _build_profile_phone_map(org_id: str) -> dict:
                 continue
             advisor = profiles_by_id.get(m.get("advisor_id"))
             if suffix and advisor and advisor.get("full_name"):
-                phone_map[suffix] = {"name": advisor["full_name"], "kind": "user"}
+                phone_map[suffix] = {"name": advisor["full_name"], "kind": "user", "user_id": advisor["id"]}
     except Exception as exc:
         logger.warning("calls: profile phone map enrichment failed (non-fatal): %s", exc)
 
@@ -854,8 +855,17 @@ def _enrich_raw_calls(org_id: str, provider: str, raw_calls: list[dict]) -> list
         counterpart = c.get("counterpart_phone")
         ai_row = ai_by_call_id.get(call_id)
         contact = _resolve_contact_for_call(contact_map, profile_phone_map, resolutions_by_call_id, call_id, counterpart)
+        # Who the counterpart is among our own users — even when their number is also saved as a
+        # school contact, which wins for the display above. See call_conversations.
+        counterpart_user_id = (profile_phone_map.get(_phone_suffix(counterpart)) or {}).get("user_id")
+        own_digits = "".join(ch for ch in (agent_key or "") if ch.isdigit())
         calls.append({
             "call_id": call_id,
+            "counterpart_user_id": counterpart_user_id,
+            "own_key": call_conversations.user_key(mapped_advisor_id)
+            or (call_conversations.phone_key(_phone_suffix(agent_key)) if len(own_digits) >= 9 else None),
+            "other_key": call_conversations.user_key(counterpart_user_id)
+            or call_conversations.phone_key(_phone_suffix(counterpart)),
             "direction": c.get("direction"),
             "counterpart_phone": counterpart,
             "contact_name": contact["contact_name"],
@@ -921,6 +931,18 @@ def _exm_pull_split(provider_config: dict, date_from: str, date_to: str, freetex
         _exm_pull_split(provider_config, date_from, mid.strftime(fmt), freetext)
         + _exm_pull_split(provider_config, (mid + timedelta(seconds=1)).strftime(fmt), date_to, freetext)
     )
+
+
+def collapse_school_calls(calls: list[dict]) -> list[dict]:
+    """One school's calls for display: the second record of an internal call is dropped
+    (mirror_call_ids on the kept one) and each carries counted_seconds — what it adds to the
+    school's total (a conference's overlapping legs are counted once)."""
+    kept, dropped = call_conversations.collapse_mirrors(calls)
+    seconds = call_conversations.counted_seconds(kept)
+    return [
+        {**c, "mirror_call_ids": dropped.get(c["call_id"], []), "counted_seconds": seconds[c["call_id"]]}
+        for c in kept
+    ]
 
 
 def _pull_school_calls(org_id: str, school_id: str, date_from: str, date_to: str) -> list[dict]:
@@ -1111,6 +1133,38 @@ def _close_prompt_answered_by_link(db, org_id: str, call_id: str, school_id: str
         logger.warning("link_call_school: closing the open prompt failed (non-fatal): %s", exc)
 
 
+def _already_counted_via(org_id: str, call_id: str, body: LinkCallSchoolIn, day_calls: list[dict] | None) -> str | None:
+    """Name of the colleague through whom this same conversation is already linked to the school
+    (so it isn't counted again), or None. A manager's day is pulled only when the school has
+    another call linked since this one took place. Informational only — never raises."""
+    try:
+        if day_calls is None:
+            if not body.call_time:
+                return None
+            rows = (
+                get_admin_client().table("calls_call_school_links").select("call_id")
+                .eq("org_id", org_id).eq("school_id", body.school_id).eq("state", "linked")
+                .neq("call_id", call_id).gte("linked_at", body.call_time).limit(1).execute()
+            ).data
+            if not rows:
+                return None
+            _, day_calls = _find_call_on_day(org_id, call_id, body.call_time)
+        call = next((c for c in day_calls if c.get("call_id") == call_id), None)
+        if not call:
+            return None
+        twin = call_conversations.find_mirror(call, [
+            c for c in day_calls
+            if body.school_id not in (c.get("excluded_school_ids") or [])
+            and (c.get("school_id") == body.school_id or body.school_id in (c.get("linked_school_ids") or []))
+        ])
+        if not twin:
+            return None
+        return (twin.get("advisor_profile") or {}).get("full_name") or "הצד השני בשיחה"
+    except Exception as exc:
+        logger.warning("link_call_school: counted-already lookup failed (non-fatal): %s", exc)
+        return None
+
+
 @router.post("/calls/{call_id}/link-school")
 def link_call_school(
     call_id: str,
@@ -1170,6 +1224,7 @@ def link_call_school(
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
     _close_prompt_answered_by_link(get_admin_client(), user["org_id"], call_id, body.school_id, user["id"])
+    counted_via = _already_counted_via(user["org_id"], call_id, body, day_calls)
 
     if body.call_time:
         if day_calls is not None:
@@ -1180,11 +1235,14 @@ def link_call_school(
         # After the response: a manager's link would otherwise wait on the provider pull.
         background_tasks.add_task(_after_manual_school_attribution, user["org_id"], body.school_id, body.call_time, day_calls)
 
-    return {"ok": True}
+    return {"ok": True, "already_counted_via": counted_via}
 
 
 class ExcludeCallSchoolIn(BaseModel):
     school_id: str
+    # The same conversation's other records (collapse_school_calls) — removed with it, or the
+    # twin would appear in its place.
+    mirror_call_ids: list[str] = Field(default_factory=list, max_length=10)
 
 
 @router.post("/calls/{call_id}/exclude-from-school")
@@ -1214,16 +1272,17 @@ def exclude_call_from_school(
         if not _advisor_has_access_to_school_row(db, user["id"], school_row.data[0]):
             raise HTTPException(status_code=403, detail="אין הרשאה לצפות בבית ספר זה")
 
+    call_ids = list(dict.fromkeys([call_id, *body.mirror_call_ids]))
     for attempt in range(2):
         try:
             db = get_admin_client()
-            db.table("calls_call_school_links").upsert({
+            db.table("calls_call_school_links").upsert([{
                 "org_id": user["org_id"],
-                "call_id": call_id,
+                "call_id": cid,
                 "school_id": body.school_id,
                 "linked_by": user["id"],
                 "state": "excluded",
-            }, on_conflict="org_id,call_id,school_id").execute()
+            } for cid in call_ids], on_conflict="org_id,call_id,school_id").execute()
             break
         except Exception as exc:
             if attempt == 0:
@@ -1232,6 +1291,19 @@ def exclude_call_from_school(
             else:
                 logger.error("exclude_call_from_school failed after 2 attempts: %s", exc, exc_info=True)
                 raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+    # The school's meeting must stop counting it too.
+    try:
+        from routers.schools_router import _recompute_meeting_aggregates
+        db = get_admin_client()
+        removed = (
+            db.table("meeting_call_links").delete()
+            .eq("org_id", user["org_id"]).eq("school_id", body.school_id).in_("call_id", call_ids).execute()
+        ).data or []
+        for mid in {r["meeting_id"] for r in removed}:
+            _recompute_meeting_aggregates(db, mid)
+    except Exception as exc:
+        logger.warning("exclude_call_from_school: meeting update failed (non-fatal): %s", exc)
 
     return {"ok": True}
 

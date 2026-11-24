@@ -61,5 +61,5 @@ def test_advisor_never_changes_other_advisors(org_b_client, make_client):
         assert last.json()["detail"]["code"] == "last_advisor"
     finally:
         if meeting_id:
-            cleanup = org_b_client.delete(f"{base}/{meeting_id}")
+            cleanup = org_b_client.delete(f"{base}/{meeting_id}", params={"confirm_all": True})
             assert cleanup.status_code == 200, f"Cleanup failed — test meeting {meeting_id} may still exist: {cleanup.text}"

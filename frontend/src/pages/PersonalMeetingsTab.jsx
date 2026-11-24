@@ -105,7 +105,7 @@ export default function PersonalMeetingsTab({ userId, role, canDeleteMeetings, u
     for (const id of ids) {
       const m = meetings.find(x => x.id === id);
       if (!m) continue;
-      try { await axios.delete(`/schools/${m.school_id}/meetings/${id}`); } catch { /* best-effort */ }
+      try { await axios.delete(`/schools/${m.school_id}/meetings/${id}`, { params: { discard_draft: true } }); } catch { /* best-effort */ }
     }
     setMeetings(prev => prev.filter(m => !ids.includes(m.id)));
     ids.forEach(id => sessionCreatedMeetingIdsRef.current.delete(id));
@@ -235,13 +235,12 @@ export default function PersonalMeetingsTab({ userId, role, canDeleteMeetings, u
     }
   }
 
-  async function deleteMeeting(id) {
+  // Rejects on failure — MeetingsTable shows why.
+  async function deleteMeeting(id, { confirmAll } = {}) {
     const m = meetings.find(x => x.id === id);
     if (!m) return;
-    try {
-      await axios.delete(`/schools/${m.school_id}/meetings/${id}`);
-      setMeetings(prev => prev.filter(x => x.id !== id));
-    } catch { /* silent */ }
+    await axios.delete(`/schools/${m.school_id}/meetings/${id}`, { params: confirmAll ? { confirm_all: true } : {} });
+    setMeetings(prev => prev.filter(x => x.id !== id));
   }
 
   async function createMeetingRow(school, stageScope) {
@@ -359,6 +358,10 @@ export default function PersonalMeetingsTab({ userId, role, canDeleteMeetings, u
     setMeetings(prev => prev.filter(m => !okIds.includes(m.id)));
     setSelectedIds({});
     setBulkDeleteConfirm(false);
+    const shared = results.filter(r => r.reason?.response?.data?.detail?.code === "multiple_advisors").length;
+    const failed = ids.length - okIds.length - shared;
+    if (shared) addReminderToast(`${shared} פגישות לא נמחקו כי יש בהן יועץ מבצע נוסף. ניתן להסיר את עצמך מהן בתפריט הפגישה.`);
+    if (failed) addReminderToast(`מחיקת ${failed} פגישות נכשלה`);
   }
 
   async function sendBulkStatusReminders() {
@@ -726,6 +729,8 @@ export default function PersonalMeetingsTab({ userId, role, canDeleteMeetings, u
             onSave={updateMeeting}
             onMeetingPatched={(id, patch) => setMeetings(prev => prev.map(m => m.id === id ? { ...m, ...patch } : m))}
             onDelete={deleteMeeting}
+            currentUserRole={role}
+            currentUserId={userId}
             onMeetingMovedYear={meetingId => setMeetings(prev => prev.filter(x => x.id !== meetingId))}
             onOpenNotes={openMeetingNotesFor}
             onRequestAccess={() => {}}

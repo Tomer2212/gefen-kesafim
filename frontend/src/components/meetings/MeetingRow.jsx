@@ -70,6 +70,15 @@ const BLUR_SAVED_FIELDS = [
   "meeting_service_type", "actual_duration", "notes", "primary_contact_key", "stage_scope",
 ];
 
+// The meeting's time as the server is known to hold it — see performSave.
+function timesOf(meeting) {
+  return {
+    meeting_date: meeting.meeting_date || "",
+    start_time: normalizeTimeValue(meeting.start_time),
+    end_time: normalizeTimeValue(meeting.end_time),
+  };
+}
+
 function blurSavedSnapshot(meeting) {
   const snapshot = Object.fromEntries(BLUR_SAVED_FIELDS.map(f => [f, meeting[f]]));
   snapshot.start_time = normalizeTimeValue(meeting.start_time);
@@ -334,7 +343,7 @@ function MeetingRowImpl({
   currentUserRole, currentUserId, onPermissionDenied,
   aiSummaryEnabled = true,
   hideReminderColumn = false, isEntityClient = false,
-  clientSurface, onRequestActivity,
+  clientSurface, onRequestActivity, saveQueuesRef, overlapOpen = false,
 }) {
   const navigate = useNavigate();
   const PERMISSION_DENIED_MSG = "אין לך הרשאה לערוך פגישה זו — הפגישה משויכת ליועץ אחר";
@@ -372,6 +381,7 @@ function MeetingRowImpl({
   const actionsMenuRef = useRef(null);
   // Track what was last sent so blur doesn't double-save after an immediate save
   const lastSentRef = useRef(blurSavedSnapshot(meeting));
+  const serverTimesRef = useRef(timesOf(meeting));
   const [saveFailed, setSaveFailed] = useState(false);
   // Mirrors saveFailed for the sync effects below: after a failed save the parent reloads the
   // list, and `meeting` jumps back from its optimistic copy (== draft) to the server values —
@@ -388,7 +398,7 @@ function MeetingRowImpl({
   // silently overwrites the newer, correct data with stale values.
   const saveQueueRef = useRef(Promise.resolve());
 
-  useEffect(() => { setDraft({ ...meeting }); lastSentRef.current = blurSavedSnapshot(meeting); }, [meeting.id]);
+  useEffect(() => { setDraft({ ...meeting }); lastSentRef.current = blurSavedSnapshot(meeting); serverTimesRef.current = timesOf(meeting); }, [meeting.id]);
 
   // The server may auto-enable the reminder toggle when a meeting first becomes eligible
   // (gains its first participant / a future date). `draft` only re-syncs on an id change,
@@ -416,6 +426,7 @@ function MeetingRowImpl({
       setDraft(d => ({ ...d, start_time: meeting.start_time, end_time: meeting.end_time, meeting_date: meeting.meeting_date }));
       const { start_time, end_time, meeting_date } = blurSavedSnapshot(meeting);
       lastSentRef.current = { ...lastSentRef.current, start_time, end_time, meeting_date };
+      serverTimesRef.current = timesOf(meeting);
     }
     prevMeetingRef.current = meeting;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -688,8 +699,14 @@ function MeetingRowImpl({
       delete toSend.advisor_ids;
       delete toSend.advisor_id;
     }
+    // Same for the date and hours: a row a colleague's move hasn't reached yet would move the
+    // meeting back — for everyone, calendars included — by saving an unrelated field. Compared
+    // with what the server holds (not with `meeting`, which the parent updates optimistically).
+    const times = timesOf(draftToSave);
+    for (const f of Object.keys(times)) if (times[f] === serverTimesRef.current[f]) delete toSend[f];
     try {
       await onSave(toSend);
+      serverTimesRef.current = { ...serverTimesRef.current, ...Object.fromEntries(Object.keys(times).filter(f => f in toSend).map(f => [f, times[f]])) };
       markSaveFailed(false);
     } catch (err) {
       // Not saved: forget that it was sent, so the row stays dirty and the next blur re-sends
@@ -743,6 +760,9 @@ function MeetingRowImpl({
     setBookingRequests(null);
   }
 
+  // Lets MeetingsTable wait for this row's pending saves before merging the meeting away.
+  useEffect(() => { saveQueuesRef?.current.set(meeting.id, saveQueueRef); }, [meeting.id, saveQueuesRef]);
+
   const status = getStatusDisplay(draft.status);
   const offlineSeconds = sumOfflineSeconds(meeting.offline_work_entries);
   const callsSeconds = meeting.calls_duration_seconds || 0;
@@ -754,7 +774,7 @@ function MeetingRowImpl({
         <LeaveMeetingModal blockedMessage={leavePrompt.blockedMessage} busy={leaveBusy}
           onConfirm={handleLeaveAsAdvisor} onClose={() => { if (!leaveBusy) setLeavePrompt(null); }} />
       )}
-      {bookingRequests && (
+      {bookingRequests && !overlapOpen && (
         <BookingRequestResolutionModal
           schoolId={meeting.school_id} meetingId={meeting.id} schoolName={meeting.school_name}
           requests={bookingRequests} clientSurface={clientSurface} onClose={closeBookingRequests}

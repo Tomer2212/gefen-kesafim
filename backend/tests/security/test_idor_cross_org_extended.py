@@ -1748,6 +1748,24 @@ def test_task_cannot_join_another_orgs_round(org_b_client, admin_db):
         admin_db.table("meeting_rounds").delete().eq("id", foreign["id"]).execute()
 
 
+# A task's name is unique within its round; renaming never reaches another org's task.
+# The tasks here are inserted directly, so nothing is ever sent.
+def test_task_rename_in_round(org_a_client, org_b_client, org_b_round, admin_db):
+    tasks = admin_db.table("org_tasks").insert([{
+        "org_id": ORG_B_ID, "created_by": ORG_B_MANAGER_ID, "name": name, "status": "archived", "criteria": {"groups": []},
+        "matched_school_ids": [], "message_config": {}, "round_id": org_b_round["id"],
+    } for name in ("בדיקת שם א", "בדיקת שם ב")]).execute().data
+    try:
+        url = f"/tasks/{tasks[0]['id']}"
+        assert org_a_client.patch(url, json={"name": "פריצה"}).status_code == 404
+        taken = org_b_client.patch(url, json={"name": "בדיקת שם ב "})
+        assert taken.status_code == 409 and taken.json()["detail"]["code"] == "task_name_taken"
+        assert admin_db.table("org_tasks").select("name").eq("id", tasks[0]["id"]).execute().data[0]["name"] == "בדיקת שם א"
+        assert org_b_client.patch(url, json={"name": "בדיקת שם ג"}).status_code == 200
+    finally:
+        admin_db.table("org_tasks").delete().in_("id", [t["id"] for t in tasks]).execute()
+
+
 # ===========================================================================
 # Task sends reach only the task's own schools. _queue_messages_for_schools reads any school id
 # it is given, so an unchecked id (another org's school included) used to get this task's message.

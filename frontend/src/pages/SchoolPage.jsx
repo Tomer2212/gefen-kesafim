@@ -3336,7 +3336,7 @@ export default function SchoolPage() {
   async function discardIncompleteMeetings(ids) {
     for (const id of ids) {
       try {
-        await axios.delete(`/schools/${schoolId}/meetings/${id}`);
+        await axios.delete(`/schools/${schoolId}/meetings/${id}`, { params: { discard_draft: true } });
       } catch { /* best-effort */ }
     }
     setMeetings(prev => prev.filter(m => !ids.includes(m.id)));
@@ -3734,8 +3734,8 @@ export default function SchoolPage() {
   }
 
 
-  async function deleteMeeting(meetingId) {
-    await axios.delete(`/schools/${schoolId}/meetings/${meetingId}`);
+  async function deleteMeeting(meetingId, { confirmAll } = {}) {
+    await axios.delete(`/schools/${schoolId}/meetings/${meetingId}`, { params: confirmAll ? { confirm_all: true } : {} });
     setMeetings(prev => prev.filter(m => m.id !== meetingId));
   }
 

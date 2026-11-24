@@ -872,7 +872,7 @@ export default function RoundDashboard({ roundId, onBack, onChanged }) {
           key={taskDraft.key}
           isMeetingTask
           initialAcademicYear={rnd.academic_year}
-          roundContext={{ round: rnd, ...taskDraft }}
+          roundContext={{ round: rnd, ...taskDraft, taskNames: data.tasks.map(t => (t.name || "").trim()) }}
           onClose={() => setTaskDraft(null)}
           onCreated={() => { setTaskDraft(null); load(); onChanged?.(); }}
         />

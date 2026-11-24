@@ -6378,6 +6378,7 @@ export default function AdminPage() {
               loadUsers={loadUsers}
               canDeleteMeetings={canDeleteMeetings}
               onIncompleteChange={setMeetingsGuardActive}
+              myUserId={myUserId}
               myRole={myRole}
               canEditAutomations={myRole === "owner" || (myRole === "manager" && permDefaults?.can_edit_meeting_automations?.manager === true)}
             />

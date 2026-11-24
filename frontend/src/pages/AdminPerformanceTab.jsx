@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import axios from "axios";
 import { fetchRangeBusyByDate } from "../components/meetings/dayScheduleUtils";
-import { computeEndTimeIso } from "../components/calls/CallRow";
+import { callSchoolCards, computeEndTimeIso } from "../components/calls/CallRow";
 import { PerformanceDayCard } from "../components/performance/PerformanceDayCard";
 import DateField from "../components/DateField";
 
@@ -186,11 +186,11 @@ export default function AdminPerformanceTab({ users, loadingUsers, loadUsers }) 
         byDate[dateKey].push({
           id: `call-${call.call_id}`,
           startHM, endHM, kind: "call",
-          subject: call.contact_name || call.school_name || "שיחה",
+          subject: call.contact_name || callSchoolCards(call)[0]?.name || "שיחה",
           call: {
             contactName: call.contact_name,
             contactRole: call.contact_role,
-            schoolName: call.school_name || (call.candidate_schools || []).map(s => s.name).filter(Boolean).join(" / "),
+            schoolName: callSchoolCards(call).map(c => c.name).join(" / ") || (call.candidate_schools || []).map(s => s.name).filter(Boolean).join(" / "),
             durationSeconds: call.duration_seconds || 0,
           },
         });

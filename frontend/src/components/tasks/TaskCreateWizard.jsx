@@ -5,6 +5,7 @@ import ConditionGroupsEditor, { newConditionGroup, isMeetingRequirementComplete,
 import StageScopeCustomizeModal from "./StageScopeCustomizeModal";
 import StageScopeSummaryModal from "./StageScopeSummaryModal";
 import ScheduleCriteriaModal from "./ScheduleCriteriaModal";
+import TaskNameTakenModal, { isTaskNameTaken, taskNameTakenMessage } from "./TaskNameTakenModal";
 import OutlookLimitModal from "./OutlookLimitModal";
 import TaskContactResolutionModal from "./TaskContactResolutionModal";
 import TaskMeetingResolutionModal from "./TaskMeetingResolutionModal";
@@ -257,8 +258,19 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
   const [step, setStep] = useState(1);
   const phase = PHASES[step - 1];
 
-  const [name, setName] = useState(roundContext ? `${roundContext.round.name}${roundContext.physical ? " — פיזי" : ""}` : "");
+  // A round's task can't have the name of another task of the round (the server refuses it too):
+  // the round's own name is suggested only while it's free.
+  const [serverTakenNames, setServerTakenNames] = useState([]);
+  const [name, setName] = useState(() => {
+    if (!roundContext) return "";
+    const suggested = `${roundContext.round.name}${roundContext.physical ? " — פיזי" : ""}`;
+    return roundContext.taskNames?.includes(suggested.trim()) ? "" : suggested;
+  });
   const nameSet = name.trim().length > 0;
+  const nameTaken = !!roundContext && (!!roundContext.taskNames?.includes(name.trim()) || serverTakenNames.includes(name.trim()));
+  const [nameTakenAttempted, setNameTakenAttempted] = useState(false); // the field's error shows after a blocked attempt
+  const [showNameTakenModal, setShowNameTakenModal] = useState(false);
+  const showNameTakenError = nameTaken && nameTakenAttempted;
   const [scheduledFor, setScheduledFor] = useState(""); // datetime-local string, empty = evaluate now
   const [showScheduleModal, setShowScheduleModal] = useState(false);
 
@@ -846,6 +858,12 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
       const detail = err?.response?.data?.detail;
       if (err?.response?.status === 409 && detail?.outlook_limit_exceeded) {
         setOutlookLimitWarning(detail);
+      } else if (isTaskNameTaken(err)) {
+        setServerTakenNames(prev => [...prev, name.trim()]);
+        setOutlookLimitWarning(null);
+        setNameTakenAttempted(true);
+        setShowNameTakenModal(true);
+        setStep(1);
       } else if (!err?.response) {
         setError("לא התקבלה תשובה מהשרת — ייתכן שהמשימה כבר נוצרה. לחיצה נוספת על \"יצירת המשימה\" לא תיצור משימה כפולה.");
       } else {
@@ -995,6 +1013,11 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
   const meetingStepPreviewFailed = phase === "meeting_audience" && isMeetingTask && !previewLoading && previewFailed;
 
   function handleNextClick() {
+    if (step === 1 && nameTaken) {
+      setNameTakenAttempted(true);
+      setShowNameTakenModal(true);
+      return;
+    }
     if (phase === "meeting_audience" && isMeetingTask) {
       if (!meetingRequirementsComplete) {
         setMeetingReqAttempted(true);
@@ -1053,8 +1076,13 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
                   value={name}
                   onChange={e => setName(e.target.value)}
                   placeholder='למשל: "קביעת פגישות גפן — רבעון 1"'
-                  className="w-full text-sm border border-black rounded-lg px-3 py-2 outline-none focus:border-blue-400"
+                  aria-invalid={showNameTakenError}
+                  aria-describedby={showNameTakenError ? "task-name-error" : undefined}
+                  className={`w-full text-sm border rounded-lg px-3 py-2 outline-none ${showNameTakenError ? "border-red-500 focus:border-red-600" : "border-black focus:border-blue-400"}`}
                 />
+                {showNameTakenError && (
+                  <p id="task-name-error" role="alert" className="text-xs text-red-600 mt-1">{taskNameTakenMessage(name)}</p>
+                )}
               </div>
 
               {roundContext && (
@@ -1648,6 +1676,17 @@ export default function TaskCreateWizard({ isMeetingTask, initialAcademicYear, o
           schools={selfScheduledNotice}
           onCancel={() => setSelfScheduledNotice(null)}
           onConfirm={() => { setSelfScheduledNotice(null); attemptCreate(); }}
+        />
+      )}
+
+      {showNameTakenModal && (
+        <TaskNameTakenModal
+          name={name}
+          onClose={() => {
+            setShowNameTakenModal(false);
+            // After the modal's focus trap has restored the previous focus.
+            setTimeout(() => document.getElementById("task-name")?.focus(), 0);
+          }}
         />
       )}
 

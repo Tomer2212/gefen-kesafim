@@ -13,6 +13,7 @@ import threading
 import time
 import urllib.parse
 import uuid
+from contextlib import nullcontext
 from datetime import date, datetime, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
@@ -32,6 +33,7 @@ import booking_token_logic
 import graph_client
 import school_activity
 import slot_policy
+import booking_lock
 import task_logic
 import whatsapp_twilio
 from routers import meeting_booking_router as _meeting_booking_router
@@ -2106,6 +2108,53 @@ def _task_by_client_request_id(org_id: str, client_request_id: str | None) -> di
         return None
 
 
+def _round_task_with_name(org_id: str, round_id: str | None, name: str, exclude_task_id: str | None = None) -> dict | None:
+    """Another task of the same round (whatever its status) holding exactly this name, ignoring
+    spaces at its ends. The caller raises the 409: a repeated create may be its own task."""
+    if not round_id:
+        return None
+    for attempt in range(2):
+        try:
+            rows = (
+                get_admin_client().table("org_tasks").select("id, name")
+                .eq("org_id", org_id).eq("round_id", round_id).execute().data or []
+            )
+            match = next((t for t in rows if t["id"] != exclude_task_id and (t.get("name") or "").strip() == name.strip()), None)
+            if not match:
+                return None
+            full = get_admin_client().table("org_tasks").select("*").eq("id", match["id"]).eq("org_id", org_id).execute().data
+            return full[0] if full else None
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("_round_task_with_name attempt 1 failed: %s — resetting and retrying", exc)
+                reset_admin_client()
+            else:
+                logger.error("_round_task_with_name failed after 2 attempts: %s", exc, exc_info=True)
+                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+
+
+def _round_name_lock(round_id: str | None):
+    """Held around the final name check + write, so two tasks of a round saved at the same moment
+    (on any worker) can't both pass the check — booking_lock.py."""
+    return booking_lock.booking_locks([f"round-task-name:{round_id}"]) if round_id else nullcontext()
+
+
+def _repeated_round_create(org_id: str, round_id: str | None, name: str, client_request_id: str | None) -> dict | None:
+    """409 when the name is taken in the round. The one exception is a task the same wizard already
+    created (an earlier click, saved since create_task's first check): it is returned."""
+    same_name = _round_task_with_name(org_id, round_id, name)
+    if same_name and not (client_request_id and same_name.get("client_request_id") == client_request_id):
+        raise _task_name_taken(name)
+    return same_name
+
+
+def _task_name_taken(name: str) -> HTTPException:
+    return HTTPException(status_code=409, detail={
+        "code": "task_name_taken",
+        "message": f'השם "{name.strip()}" כבר תפוס על ידי משימה אחרת בסבב הזה. יש להגדיר שם אחר למשימה.',
+    })
+
+
 @router.post("/")
 def create_task(body: TaskCreateIn, user: Annotated[dict, Depends(get_current_user)]):
     """Round-2 redesign: creation now immediately queues messages to whoever matches (see
@@ -2129,6 +2178,9 @@ def create_task(body: TaskCreateIn, user: Annotated[dict, Depends(get_current_us
     _prepare_meeting_conditions(success_criteria, user["org_id"], advisor_exclusions)
 
     round_members = _round_member_ids(get_admin_client(), user["org_id"], body.round_id, body.include_open_requests)
+    existing = _repeated_round_create(user["org_id"], body.round_id, body.name, client_request_id)
+    if existing:
+        return {**existing, "missing_contact_school_ids": []}
     _stamp_round_plan(get_admin_client(), user["org_id"], body.round_id, success_criteria)
     meeting_overrides = _clean_override_advisor_choices(get_admin_client(), user["org_id"], body.meeting_overrides)
 
@@ -2164,47 +2216,51 @@ def create_task(body: TaskCreateIn, user: Annotated[dict, Depends(get_current_us
         })
 
     task = None
-    for attempt in range(2):
-        try:
-            db = get_admin_client()
-            row = (
-                db.table("org_tasks")
-                .insert({
-                    "org_id": user["org_id"],
-                    "created_by": user["id"],
-                    "name": body.name,
-                    "status": status,
-                    "criteria": criteria,
-                    "matched_school_ids": matched_school_ids,
-                    "message_config": body.message_config.model_dump(),
-                    "scheduled_for": scheduled_for_dt.isoformat() if is_future_scheduled else None,
-                    "academic_year": body.academic_year,
-                    "manual_school_ids": manual_ids,
-                    "success_criteria": success_criteria,
-                    "track_success": body.track_success,
-                    "is_meeting_task": body.is_meeting_task,
-                    "meeting_overrides": meeting_overrides,
-                    "excluded_school_ids": list(dict.fromkeys(body.removed_school_ids or [])) or None,
-                    "round_id": body.round_id,
-                    "round_include_open_requests": bool(body.round_id and body.include_open_requests),
-                    "advisor_exclusions": advisor_exclusions or None,
-                    "client_request_id": client_request_id,
-                })
-                .execute()
-            )
-            task = row.data[0]
-            break
-        except Exception as exc:
-            # A concurrent identical request won the unique (org_id, client_request_id) index.
-            existing = _task_by_client_request_id(user["org_id"], client_request_id)
-            if existing:
-                return {**existing, "missing_contact_school_ids": []}
-            if attempt == 0:
-                logger.warning("create_task attempt 1 failed: %s — resetting and retrying", exc)
-                reset_admin_client()
-            else:
-                logger.error("create_task failed after 2 attempts: %s", exc, exc_info=True)
-                raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
+    with _round_name_lock(body.round_id):
+        existing = _repeated_round_create(user["org_id"], body.round_id, body.name, client_request_id)
+        if existing:
+            return {**existing, "missing_contact_school_ids": []}
+        for attempt in range(2):
+            try:
+                db = get_admin_client()
+                row = (
+                    db.table("org_tasks")
+                    .insert({
+                        "org_id": user["org_id"],
+                        "created_by": user["id"],
+                        "name": body.name.strip(),
+                        "status": status,
+                        "criteria": criteria,
+                        "matched_school_ids": matched_school_ids,
+                        "message_config": body.message_config.model_dump(),
+                        "scheduled_for": scheduled_for_dt.isoformat() if is_future_scheduled else None,
+                        "academic_year": body.academic_year,
+                        "manual_school_ids": manual_ids,
+                        "success_criteria": success_criteria,
+                        "track_success": body.track_success,
+                        "is_meeting_task": body.is_meeting_task,
+                        "meeting_overrides": meeting_overrides,
+                        "excluded_school_ids": list(dict.fromkeys(body.removed_school_ids or [])) or None,
+                        "round_id": body.round_id,
+                        "round_include_open_requests": bool(body.round_id and body.include_open_requests),
+                        "advisor_exclusions": advisor_exclusions or None,
+                        "client_request_id": client_request_id,
+                    })
+                    .execute()
+                )
+                task = row.data[0]
+                break
+            except Exception as exc:
+                # A concurrent identical request won the unique (org_id, client_request_id) index.
+                existing = _task_by_client_request_id(user["org_id"], client_request_id)
+                if existing:
+                    return {**existing, "missing_contact_school_ids": []}
+                if attempt == 0:
+                    logger.warning("create_task attempt 1 failed: %s — resetting and retrying", exc)
+                    reset_admin_client()
+                else:
+                    logger.error("create_task failed after 2 attempts: %s", exc, exc_info=True)
+                    raise HTTPException(status_code=503, detail="שגיאה זמנית בשרת — נסה שוב בעוד מספר שניות")
 
     _merge_round_advisor_choices(
         get_admin_client(), user["org_id"], body.round_id,
@@ -2494,17 +2550,21 @@ def get_task(task_id: str, user: Annotated[dict, Depends(get_current_user)]):
 def patch_task(task_id: str, body: TaskPatchIn, user: Annotated[dict, Depends(get_current_user)]):
     _require_manager(user)
     db = get_admin_client()
-    _get_task_or_404(db, task_id, user["org_id"])
+    task = _get_task_or_404(db, task_id, user["org_id"])
     patch = {}
     if body.name is not None:
-        patch["name"] = body.name
+        patch["name"] = body.name.strip()
     if body.status is not None:
         patch["status"] = body.status
     if body.message_config is not None:
         patch["message_config"] = body.message_config.model_dump()
     if not patch:
         return _get_task_or_404(db, task_id, user["org_id"])
-    row = db.table("org_tasks").update(patch).eq("id", task_id).eq("org_id", user["org_id"]).execute()
+    renamed = "name" in patch and patch["name"] != (task.get("name") or "").strip()
+    with _round_name_lock(task.get("round_id") if renamed else None):
+        if renamed and _round_task_with_name(user["org_id"], task.get("round_id"), patch["name"], exclude_task_id=task_id):
+            raise _task_name_taken(patch["name"])
+        row = db.table("org_tasks").update(patch).eq("id", task_id).eq("org_id", user["org_id"]).execute()
     return row.data[0]
 
 

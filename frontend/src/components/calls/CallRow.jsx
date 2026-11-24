@@ -2,6 +2,7 @@ import { memo, useState } from "react";
 import axios from "axios";
 import { Link } from "react-router-dom";
 import { useCallNoteWindows } from "../../context/CallNoteWindowsContext";
+import { useFocusTrap } from "../../hooks/useFocusTrap";
 import { SchoolPickerModal } from "../meetings/SchoolPickerCell";
 
 export const STATUS_LABELS = {
@@ -117,6 +118,22 @@ function buildWindowTitle(call, advisorLabel) {
   return parts.join(" - ");
 }
 
+function AlreadyCountedModal({ note, onClose }) {
+  const { ref, handleKeyDown } = useFocusTrap(onClose);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(15,23,42,0.55)" }} dir="rtl">
+      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="already-counted-title" onKeyDown={handleKeyDown}
+        className="glass-card rounded-2xl p-6 w-full max-w-md flex flex-col gap-4">
+        <h2 id="already-counted-title" className="font-bold text-slate-900">השיחה שויכה</h2>
+        <p className="text-sm text-slate-600 leading-relaxed">
+          השיחה שויכה גם אצלך ל{note.card}. היא כבר נספרה שם דרך {note.via}, ולכן לא תיספר פעם נוספת במשך השיחות ובפגישה.
+        </p>
+        <button type="button" onClick={onClose} className="btn-blue text-sm px-4 py-2 self-end">הבנתי</button>
+      </div>
+    </div>
+  );
+}
+
 // canLink: offer "שייך שיחה" (defaults to canManage). With canLink but not canManage the menu
 // has only that action — the personal area, where every call is the user's own.
 function CallRowBase({ call, onDelete, hideSchoolColumn, hideAdvisorColumn, canManage = true, canLink = canManage, schoolId, cardNoun = "בית הספר", onLinked }) {
@@ -127,6 +144,8 @@ function CallRowBase({ call, onDelete, hideSchoolColumn, hideAdvisorColumn, canM
   const [linkSchools, setLinkSchools] = useState(null);
   // Cards linked from this row since the list was loaded — shown at once, without a reload.
   const [addedCards, setAddedCards] = useState([]);
+  // {via, card}: the colleague on the other side already linked this conversation there.
+  const [countedNote, setCountedNote] = useState(null);
   const schoolCards = callSchoolCards(call, addedCards);
   const pending = call.pending_school_resolution && !addedCards.some(c => linkAnswersPending(call, c.id));
   const canLinkHere = canLink && !schoolId;
@@ -138,6 +157,7 @@ function CallRowBase({ call, onDelete, hideSchoolColumn, hideAdvisorColumn, canM
 
   return (
     <>
+      {countedNote && <AlreadyCountedModal note={countedNote} onClose={() => setCountedNote(null)} />}
       {confirmDelete && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(15,23,42,0.55)" }} dir="rtl">
           <div role="dialog" aria-modal="true" aria-labelledby="delete-call-title" className="glass-card rounded-2xl p-6 w-full max-w-md flex flex-col gap-4">
@@ -155,7 +175,7 @@ function CallRowBase({ call, onDelete, hideSchoolColumn, hideAdvisorColumn, canM
                 onClick={async () => {
                   try {
                     if (schoolId) {
-                      await axios.post(`/calls/calls/${call.call_id}/exclude-from-school`, { school_id: schoolId });
+                      await axios.post(`/calls/calls/${call.call_id}/exclude-from-school`, { school_id: schoolId, mirror_call_ids: call.mirror_call_ids || [] });
                     } else {
                       await axios.delete(`/calls/calls/${call.call_id}`);
                     }
@@ -179,13 +199,15 @@ function CallRowBase({ call, onDelete, hideSchoolColumn, hideAdvisorColumn, canM
             submittingLabel="משייך..."
             onCancel={() => setLinkModalOpen(false)}
             onConfirm={async s => {
+              let res;
               try {
-                await axios.post(`/calls/calls/${call.call_id}/link-school`, { school_id: s.id, call_time: call.start_time });
+                res = await axios.post(`/calls/calls/${call.call_id}/link-school`, { school_id: s.id, call_time: call.start_time });
               } catch (e) {
                 // Shown inside the picker (SchoolResultsList), which stays open.
                 const detail = e.response?.data?.detail;
                 throw new Error(typeof detail === "string" ? detail : "השיוך נכשל — נסו שוב");
               }
+              if (res.data?.already_counted_via) setCountedNote({ via: res.data.already_counted_via, card: s.name });
               const card = { id: s.id, name: s.name, client_type: s.client_type || "school" };
               setAddedCards(prev => [...prev, card]);
               onLinked?.(call.call_id, card);
@@ -217,7 +239,12 @@ function CallRowBase({ call, onDelete, hideSchoolColumn, hideAdvisorColumn, canM
           {status.label}
         </span>
       </td>
-      <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap" dir="ltr">{formatDuration(call.duration_seconds)}</td>
+      <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap" dir="ltr">
+        {formatDuration(call.duration_seconds)}
+        {call.counted_seconds != null && call.counted_seconds < (call.duration_seconds || 0) && (
+          <span className="text-amber-600 text-xs" dir="rtl" title="שיחה זו חופפת לשיחה אחרת של אותו משתמש, ולכן הזמן החופף נספר פעם אחת"> (נספרו {formatDuration(call.counted_seconds)})</span>
+        )}
+      </td>
       {!hideAdvisorColumn && (
         <td className="py-2.5 px-2 text-sm text-slate-700 whitespace-nowrap">{advisorLabel}</td>
       )}

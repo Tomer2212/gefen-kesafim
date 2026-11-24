@@ -30,7 +30,7 @@ export default function UserMeetingsConflictModal({ targetUser, meetings, otherU
     setError("");
     try {
       const res = await axios.post(`/schools/users/${targetUser.id}/meetings/cancel-future`);
-      setSummary({ type: "cancel", count: res.data?.cancelled || 0 });
+      setSummary({ type: "cancel", count: res.data?.cancelled || 0, kept: res.data?.kept_shared || 0 });
       setMode("done");
     } catch (err) {
       setError(err?.response?.data?.detail || "שגיאה בביטול הפגישות");
@@ -80,7 +80,7 @@ export default function UserMeetingsConflictModal({ targetUser, meetings, otherU
                 )}
               </div>
             ) : (
-              <p className="text-sm text-slate-700 mb-4">{summary?.count} פגישות בוטלו ונמחקו, כולל מהיומן החיצוני המחובר.</p>
+              <p className="text-sm text-slate-700 mb-4">{summary?.count} פגישות בוטלו ונמחקו, כולל מהיומן החיצוני המחובר.{summary?.kept > 0 && ` ${summary.kept} פגישות משותפות נשארו אצל היועצים האחרים, והמשתמש הוסר מהן.`}</p>
             )}
             <button onClick={onResolved} className="w-full py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-medium text-sm transition-colors">
               המשך למחיקת המשתמש

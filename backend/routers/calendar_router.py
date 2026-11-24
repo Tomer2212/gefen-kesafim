@@ -252,7 +252,7 @@ def _handle_notification(db, notif: dict) -> None:
         return  # not an event tied to any meeting we track
     meeting_row = (
         db.table("meetings")
-        .select("id, school_id, meeting_date, start_time, end_time, status, calendar_sync")
+        .select("id, school_id, meeting_date, start_time, end_time, status, calendar_sync, advisor_ids, advisor_id")
         .eq("id", idx.data[0]["meeting_id"])
         .execute()
     )

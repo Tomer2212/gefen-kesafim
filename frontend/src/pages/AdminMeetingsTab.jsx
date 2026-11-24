@@ -63,7 +63,7 @@ function saveState(state) {
   try { sessionStorage.setItem(SS_KEY, JSON.stringify(state)); } catch { /* ignore */ }
 }
 
-const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUsers, loadUsers, canDeleteMeetings, onIncompleteChange, myRole, canEditAutomations }, ref) {
+const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUsers, loadUsers, canDeleteMeetings, onIncompleteChange, myRole, myUserId, canEditAutomations }, ref) {
   const saved = readSavedState();
 
   const [meetings, setMeetings] = useState([]);
@@ -146,7 +146,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
       for (const id of ids) {
         const m = meetings.find(x => x.id === id);
         if (!m) continue;
-        try { await axios.delete(`/schools/${m.school_id}/meetings/${id}`); } catch { /* best-effort */ }
+        try { await axios.delete(`/schools/${m.school_id}/meetings/${id}`, { params: { discard_draft: true } }); } catch { /* best-effort */ }
       }
       setMeetings(prev => prev.filter(m => !ids.includes(m.id)));
       ids.forEach(id => sessionCreatedMeetingIdsRef.current.delete(id));
@@ -444,16 +444,13 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
     }
   }
 
-  async function deleteMeeting(meetingId) {
+  // Rejects on failure — MeetingsTable shows why.
+  async function deleteMeeting(meetingId, { confirmAll } = {}) {
     const m = meetings.find(x => x.id === meetingId);
     if (!m) return;
-    try {
-      await axios.delete(`/schools/${m.school_id}/meetings/${meetingId}`);
-      setMeetings(prev => prev.filter(x => x.id !== meetingId));
-      setSelectedIds(prev => { const n = { ...prev }; delete n[meetingId]; return n; });
-    } catch (err) {
-      console.error("Delete meeting failed:", err);
-    }
+    await axios.delete(`/schools/${m.school_id}/meetings/${meetingId}`, { params: confirmAll ? { confirm_all: true } : {} });
+    setMeetings(prev => prev.filter(x => x.id !== meetingId));
+    setSelectedIds(prev => { const n = { ...prev }; delete n[meetingId]; return n; });
   }
 
   async function createMeetingRow(school, stageScope) {
@@ -723,11 +720,13 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
     }
   }
 
+  const sharedSelectedCount = meetings.filter(m => selectedIds[m.id] && (m.advisor_ids || []).length > 1).length;
+
   async function bulkDelete() {
     const ids = Object.keys(selectedIds).filter(id => selectedIds[id]);
     const results = await Promise.allSettled(ids.map(id => {
       const m = meetings.find(x => x.id === id);
-      return m ? axios.delete(`/schools/${m.school_id}/meetings/${id}`) : Promise.reject();
+      return m ? axios.delete(`/schools/${m.school_id}/meetings/${id}`, { params: { confirm_all: true } }) : Promise.reject();
     }));
     const okIds = ids.filter((_, i) => results[i].status === "fulfilled");
     setMeetings(prev => prev.filter(m => !okIds.includes(m.id)));
@@ -957,7 +956,7 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
       {bulkDeleteConfirm && (
         <DeleteMeetingModal
           titleText="מחיקת פגישות"
-          confirmText={`האם למחוק ${selectedCount} פגישות לצמיתות? לא ניתן לשחזר פעולה זו.`}
+          confirmText={`האם למחוק ${selectedCount} פגישות לצמיתות? לא ניתן לשחזר פעולה זו.${sharedSelectedCount ? ` שימו לב: ב-${sharedSelectedCount} מהן יש יותר מיועץ מבצע אחד, והן יימחקו אצל כל היועצים.` : ""}`}
           onConfirm={bulkDelete}
           onCancel={() => setBulkDeleteConfirm(false)}
         />
@@ -1187,6 +1186,8 @@ const AdminMeetingsTab = forwardRef(function AdminMeetingsTab({ users, loadingUs
             onSave={updateMeeting}
             onMeetingPatched={(id, patch) => setMeetings(prev => prev.map(m => m.id === id ? { ...m, ...patch } : m))}
             onDelete={deleteMeeting}
+            currentUserRole={myRole}
+            currentUserId={myUserId}
             onMeetingMovedYear={meetingId => {
               setMeetings(prev => prev.filter(x => x.id !== meetingId));
               setSelectedIds(prev => { const n = { ...prev }; delete n[meetingId]; return n; });

@@ -405,8 +405,8 @@ export default function ClientPage() {
     }
   }
 
-  async function deleteMeeting(meetingId) {
-    await axios.delete(`/schools/${clientId}/meetings/${meetingId}`);
+  async function deleteMeeting(meetingId, { confirmAll } = {}) {
+    await axios.delete(`/schools/${clientId}/meetings/${meetingId}`, { params: confirmAll ? { confirm_all: true } : {} });
     setMeetings(prev => prev.filter(m => m.id !== meetingId));
   }
 

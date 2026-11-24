@@ -1,5 +1,6 @@
 import { memo, useState } from "react";
 import axios from "axios";
+import TaskNameTakenModal, { isTaskNameTaken } from "./TaskNameTakenModal";
 import TaskRowMenu from "./TaskRowMenu";
 import TaskRowExpandedDetail from "./TaskRowExpandedDetail";
 import { formatDateDMY } from "./taskShared";
@@ -44,6 +45,7 @@ function TaskRow({ task, visibleColumns, expanded, onToggleExpand, onChanged, on
   const [renaming, setRenaming] = useState(false);
   const [nameDraft, setNameDraft] = useState(task.name || "");
   const [saving, setSaving] = useState(false);
+  const [takenName, setTakenName] = useState(null);
 
   const hasProblems = !!task.has_meeting_send_problems;
   const statusLabel = task.status === "scheduled" ? "מתוזמנת" : task.status === "archived" ? "הושלמה" : "פעילה";
@@ -61,9 +63,13 @@ function TaskRow({ task, visibleColumns, expanded, onToggleExpand, onChanged, on
     try {
       await axios.patch(`/tasks/${task.id}`, { name: trimmed });
       onChanged();
+      setRenaming(false);
+    } catch (err) {
+      // The field stays open with the typed name.
+      if (isTaskNameTaken(err)) setTakenName(trimmed);
+      else window.alert("שינוי שם המשימה נכשל — נסה שוב.");
     } finally {
       setSaving(false);
-      setRenaming(false);
     }
   }
 
@@ -130,6 +136,15 @@ function TaskRow({ task, visibleColumns, expanded, onToggleExpand, onChanged, on
           />
         </td>
       </tr>
+      {takenName && (
+        <TaskNameTakenModal
+          name={takenName}
+          onClose={() => {
+            setTakenName(null);
+            setTimeout(() => document.getElementById(`task-rename-${task.id}`)?.focus(), 0);
+          }}
+        />
+      )}
       {expanded && (
         <tr className="border-b border-slate-300 bg-slate-50/40">
           <td colSpan={colSpan} className="px-3 py-3">

@@ -306,7 +306,7 @@ def get_event(db, org_id: str, advisor_id: str, event_id: str) -> dict | str | N
         resp = httpx.get(
             f"{GRAPH_BASE}/users/{email}/events/{event_id}",
             headers={**_headers(token), "Prefer": 'outlook.timezone="Israel Standard Time"'},
-            params={"$select": "id,subject,start,end,isCancelled"},
+            params={"$select": "id,subject,start,end,isCancelled,lastModifiedDateTime"},
             timeout=15,
         )
     except httpx.HTTPError as exc:
@@ -327,7 +327,7 @@ def get_event(db, org_id: str, advisor_id: str, event_id: str) -> dict | str | N
 
     if e.get("isCancelled"):
         return None
-    return {"start": e["start"]["dateTime"], "end": e["end"]["dateTime"], "subject": e.get("subject")}
+    return {"start": e["start"]["dateTime"], "end": e["end"]["dateTime"], "subject": e.get("subject"), "modified": e.get("lastModifiedDateTime")}
 
 
 def list_events_in_range(db, org_id: str, advisor_id: str, start_iso: str, end_iso: str) -> dict | None:
@@ -357,7 +357,7 @@ def list_events_in_range(db, org_id: str, advisor_id: str, start_iso: str, end_i
     params = {
         "startDateTime": start_iso,
         "endDateTime": end_iso,
-        "$select": "id,subject,start,end,isCancelled",
+        "$select": "id,subject,start,end,isCancelled,lastModifiedDateTime",
         "$top": 500,
     }
     headers = {**_headers(token), "Prefer": 'outlook.timezone="Israel Standard Time"'}
@@ -372,7 +372,7 @@ def list_events_in_range(db, org_id: str, advisor_id: str, start_iso: str, end_i
                 if e.get("isCancelled"):
                     results[e["id"]] = None
                 else:
-                    results[e["id"]] = {"start": e["start"]["dateTime"], "end": e["end"]["dateTime"], "subject": e.get("subject")}
+                    results[e["id"]] = {"start": e["start"]["dateTime"], "end": e["end"]["dateTime"], "subject": e.get("subject"), "modified": e.get("lastModifiedDateTime")}
             next_link = payload.get("@odata.nextLink")
             if not next_link:
                 return results
@@ -441,6 +441,22 @@ def _event_payload(meeting: dict, subject: str | None, show_as: str | None = Non
         if attendees:
             payload["attendees"] = attendees
     return payload
+
+
+def written_event_time(meeting: dict) -> list[str] | None:
+    """[date, start, end] an event of this meeting carries in a calendar (incl. the default hours
+    of a meeting without any)."""
+    if not meeting.get("meeting_date"):
+        return None
+    payload = _event_payload(meeting, None)
+    start, end = payload["start"]["dateTime"], payload["end"]["dateTime"]
+    return [start[:10], start[11:16], end[11:16]]
+
+
+def mailbox_changed(db, org_id: str, advisor_id: str, entry: dict) -> bool:
+    """The advisor's calendar address isn't the one the event was written to — its absence there
+    says nothing."""
+    return bool(entry.get("mailbox")) and _resolve_advisor_email(db, org_id, advisor_id) != entry["mailbox"]
 
 
 # ---------------------------------------------------------------------------
@@ -997,15 +1013,19 @@ def _create_event_for_advisor(db, org_id: str, token: str, advisor_id: str, meet
             "external_event_id": event_id,
             "status": "soft_cancelled" if show_as == "free" else "synced",
             "updated_at": datetime.now(timezone.utc).isoformat(),
+            # What this advisor's calendar now shows, and in which mailbox (see shared_meetings).
+            "event_time": written_event_time(meeting),
+            "mailbox": email,
         }
     except Exception as exc:
         logger.warning("calendar event create failed for advisor %s: %s", advisor_id, exc)
         return {"provider": "microsoft", "status": "error", "error": str(exc), "retryable": _is_retryable_graph_error(exc)}
 
 
-def sync_meeting_update(db, org_id: str, meeting: dict, previous_sync: dict, subject: str | None = None, show_as: str | None = None, clear_attendees: bool = False) -> dict:
+def sync_meeting_update(db, org_id: str, meeting: dict, previous_sync: dict, subject: str | None = None, show_as: str | None = None, clear_attendees: bool = False, only: set | None = None) -> dict:
     """Reconciles calendar events against the current advisor_ids: updates existing,
-    creates for newly-added advisors, deletes for removed ones."""
+    creates for newly-added advisors, deletes for removed ones. `only`: write to these advisors'
+    calendars and leave every other entry exactly as it is."""
     if not meeting.get("meeting_date"):
         # Meeting has no date yet (e.g. still being filled in) — nothing to send Graph,
         # and leave any previously-synced events untouched rather than guessing.
@@ -1024,6 +1044,10 @@ def sync_meeting_update(db, org_id: str, meeting: dict, previous_sync: dict, sub
     sync_map: dict = {}
     for advisor_id in current_ids:
         prior = previous_sync.get(advisor_id)
+        if only is not None and advisor_id not in only:
+            if prior:
+                sync_map[advisor_id] = prior
+            continue
         email = _resolve_advisor_email(db, org_id, advisor_id)
         if prior and prior.get("external_event_id") and email:
             entry = _update_event_for_advisor(db, org_id, token, advisor_id, email, prior["external_event_id"], meeting, subject, show_as, clear_attendees)
@@ -1031,9 +1055,12 @@ def sync_meeting_update(db, org_id: str, meeting: dict, previous_sync: dict, sub
             entry = _create_event_for_advisor(db, org_id, token, advisor_id, meeting, subject, show_as, clear_attendees)
         if entry.get("status") == "synced" and show_as != "free":
             entry["conflict"] = _check_meeting_conflict(db, org_id, advisor_id, meeting, entry.get("external_event_id"))
+        if entry.get("status") == "error" and entry.get("external_event_id"):
+            # The write failed: the calendar still shows what it showed before.
+            entry.update({k: prior[k] for k in ("event_time", "mailbox") if prior.get(k)})
         sync_map[advisor_id] = entry
 
-    for advisor_id in previous_ids - current_ids:
+    for advisor_id in (previous_ids - current_ids if only is None else ()):
         prior = previous_sync.get(advisor_id) or {}
         email = _resolve_advisor_email(db, org_id, advisor_id)
         if prior.get("external_event_id") and email:
@@ -1074,6 +1101,9 @@ def _update_event_for_advisor(db, org_id: str, token: str, advisor_id: str, emai
             "external_event_id": event_id,
             "status": "soft_cancelled" if show_as == "free" else "synced",
             "updated_at": datetime.now(timezone.utc).isoformat(),
+            # What this advisor's calendar now shows, and in which mailbox (see shared_meetings).
+            "event_time": written_event_time(meeting),
+            "mailbox": email,
         }
     except Exception as exc:
         logger.warning("calendar event update failed (event %s): %s", event_id, exc)

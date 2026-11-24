@@ -92,8 +92,15 @@ function actionLabel(ev, profiles, tasks) {
     case "moved_year":        return "העברה לשנת לימודים אחרת";
     case "reassigned_school": return "שיוך לבית ספר אחר";
     case "advisor_joined":    return "הצטרף כיועץ מבצע";
-    case "advisor_left":      return "הסיר את עצמו כיועץ מבצע";
-    case "deleted":           return "מחיקת הפגישה";
+    case "advisor_left":
+      if (ev.source === "outlook") {
+        const owners = (meta.calendar_owner_ids || []).map(id => personName(profiles, id)).join(", ");
+        return `${owners} הוסר/ה כיועץ מבצע — הפגישה נמחקה מיומן ה-Outlook`;
+      }
+      return "הסיר את עצמו כיועץ מבצע";
+    case "merged_into":       return "אוחדה לתוכה פגישה נוספת";
+    case "confirmed_separate": return "אושרה כפגישה נפרדת";
+    case "deleted":           return meta.merged_into ? "אוחדה לתוך פגישה קיימת" : "מחיקת הפגישה";
     case "note_added":        return "הוספת הערה";
     case "note_edited":       return "עריכת הערה";
     case "note_deleted":      return "מחיקת הערה";
@@ -120,6 +127,10 @@ function offlineText(entry) {
   return [range, entry.notes].filter(Boolean).join(" · ");
 }
 
+function hoursOf(m) {
+  return m?.start_time && m?.end_time ? ` (${m.start_time.slice(0, 5)}–${m.end_time.slice(0, 5)})` : "";
+}
+
 // Wide description for actions that aren't a change of the meeting's own columns.
 function describeOther(ev) {
   const meta = ev.meta || {};
@@ -136,6 +147,8 @@ function describeOther(ev) {
 ${meta.decision === "replaces"
         ? "הבקשה נסגרה — בית הספר לא יתבקש לקבוע דרך הלינק"
         : "הבקשה נשארה פתוחה — בית הספר עדיין יתבקש לקבוע דרך הלינק"}`;
+    case "merged_into":       return `פגישה שנרשמה באותו יום${hoursOf(meta.merged)} אוחדה לפגישה זו, כולל היועצים, ההערות, העבודה העצמאית והשיחות`;
+    case "confirmed_separate": return `קיימת פגישה חופפת של בית הספר${(meta.others || []).map(hoursOf).join(" ·")} — אושר שמדובר בפגישות נפרדות`;
     case "request_reopened":
       return `${requestText(meta)}
 הפגישה ${meta.status === "postponed" ? "נדחתה" : "בוטלה"}, ולכן בית הספר יכול לקבוע שוב דרך הלינק`;

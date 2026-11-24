@@ -5,7 +5,10 @@ import { DeleteMeetingModal } from "./DeleteMeetingModal";
 import { MoveMeetingYearModal } from "./MoveMeetingYearModal";
 import { MeetingActivityModal } from "./MeetingActivityModal";
 import { MeetingRow } from "./MeetingRow";
+import SharedMeetingDeleteModal from "./SharedMeetingDeleteModal";
+import OverlappingMeetingModal from "./OverlappingMeetingModal";
 import { MEETING_SERVICE_TYPE_BREAKDOWN, formatMeetingMinutes } from "./constants";
+import { useMeetingNotes } from "../../context/MeetingNotesContext";
 import { isEntityClientType } from "../../constants/clientEntities";
 import {
   MeetingColumnMenu,
@@ -13,6 +16,10 @@ import {
   passesMeetingColumnFilters,
   buildMeetingRowComparator,
 } from "./meetingColumnMenu";
+
+// overlapping_meetings lists already asked about (each server answer is its own array): an
+// optimistic save re-applies a row's older copy, and a remount reads the same one again.
+const askedOverlaps = new WeakSet();
 
 function meetingDurationMinutes(m) {
   if (!m.start_time || !m.end_time) return 0;
@@ -117,9 +124,26 @@ export function MeetingsTable({
   const [sortSpecs, setSortSpecs] = useState([]);          // [{ key, dir }], index 0 = primary
   const [openMenuKey, setOpenMenuKey] = useState(null);
   const [pendingDeleteId, setPendingDeleteId] = useState(null);
+  const [sharedDelete, setSharedDelete] = useState(null); // { id, schoolId, advisors } | null
   const [pendingMoveMeeting, setPendingMoveMeeting] = useState(null);
   // Held here (not in MeetingRow) so a virtualized row unmounting can't close an open log.
   const [activityTarget, setActivityTarget] = useState(null); // { meeting, waitForSaves } | null
+  // "זו אותה פגישה?" — a create/PUT response carries overlapping_meetings when the school already
+  // has a meeting at that time. Here for the same reason, and shown before the row's
+  // "מחליפה או נוספת?" (joining removes the meeting).
+  const [overlapTarget, setOverlapTarget] = useState(null); // { meeting, overlaps } | null
+  // Waits for this meeting's notes window: an unsaved note there would have no meeting to go to.
+  const { noteWindows } = useMeetingNotes();
+  const overlapNotesOpen = !!overlapTarget && noteWindows.some(w => w.meetingId === overlapTarget.meeting.id);
+  const saveQueuesRef = useRef(new Map());
+  const [mergeCounts, setMergeCounts] = useState({}); // meeting id -> merges into it here
+  useEffect(() => {
+    if (overlapTarget) return;
+    const m = meetings.find(x => x.overlapping_meetings?.length && !askedOverlaps.has(x.overlapping_meetings));
+    if (!m) return;
+    askedOverlaps.add(m.overlapping_meetings);
+    setOverlapTarget({ meeting: m, overlaps: m.overlapping_meetings });
+  }, [meetings, overlapTarget]);
   const [movedYearToast, setMovedYearToast] = useState(null);
   const [reminderToast, setReminderToast] = useState(false);
   const [permissionDeniedMsg, setPermissionDeniedMsg] = useState(null);
@@ -137,6 +161,57 @@ export function MeetingsTable({
   // so it can't depend on the delete permission alone.
   // Always shown: "תיעוד פעילות" (first item) is available to anyone who can see the row.
   const showActionsColumn = true;
+
+  // "הצטרף לפגישה הקיימת": the row leaves the list (like a move to another year) and the
+  // meeting it joined, if listed, shows its new advisors.
+  function handleMeetingMerged(mergedId, target) {
+    setOverlapTarget(null);
+    onMeetingMovedYear?.(mergedId);
+    if (target?.id) {
+      // Remounts its row: the row edits its own copy, and saving the older one would undo the merge.
+      setMergeCounts(prev => ({ ...prev, [target.id]: (prev[target.id] || 0) + 1 }));
+      const { id, advisor_ids, advisor_profiles, offline_work_entries, calls_start_time, calls_duration_seconds, status,
+        start_time, end_time, participants, primary_contact_key } = target;
+      onMeetingPatched?.(id, {
+        advisor_ids, offline_work_entries, calls_start_time, calls_duration_seconds, status,
+        start_time, end_time, participants, primary_contact_key,
+        ...(advisor_profiles ? { advisor_profiles } : {}),
+      });
+    }
+  }
+
+  // A meeting with other performing advisors isn't deleted from under them.
+  function requestDelete(id) {
+    const m = meetings.find(x => x.id === id);
+    // Someone who is no longer a user isn't "another advisor"; the server has the final say.
+    const known = [...(m?.advisor_profiles || []), ...(usersWithAccess || []), ...(usersWithoutAccess || [])];
+    const advisors = (m?.advisor_ids || []).map(uid => known.find(u => u?.id === uid)).filter(Boolean);
+    if (advisors.length < 2) { setPendingDeleteId(id); return; }
+    setSharedDelete({ id, schoolId: m.school_id, advisors });
+  }
+
+  async function deleteMeeting(id) {
+    const m = meetings.find(x => x.id === id);
+    try {
+      await onDelete(id);
+    } catch (err) {
+      const detail = err?.response?.data?.detail;
+      // Someone joined since this list was loaded.
+      if (detail?.code === "multiple_advisors") setSharedDelete({ id, schoolId: m?.school_id, advisors: detail.advisors });
+      else setPermissionDeniedMsg((typeof detail === "string" && detail) || "מחיקת הפגישה נכשלה, נסה שוב");
+    }
+  }
+
+  async function leaveSharedMeeting() {
+    const { id, schoolId, advisors } = sharedDelete;
+    const res = await axios.post(`/schools/${schoolId}/meetings/${id}/leave`);
+    setSharedDelete(null);
+    // The personal area lists only one's own meetings.
+    if (hideAdvisorColumn) { onMeetingMovedYear?.(id); return; }
+    const newIds = res.data?.advisor_ids || advisors.map(a => a.id).filter(uid => uid !== currentUserId);
+    const known = [...(meetings.find(x => x.id === id)?.advisor_profiles || []), ...advisors];
+    onMeetingPatched?.(id, { advisor_ids: newIds, advisor_profiles: newIds.map(uid => known.find(p => p?.id === uid)).filter(Boolean) });
+  }
 
   async function moveMeetingYear(meeting, academicYear) {
     const res = await axios.patch(`/schools/${meeting.school_id}/meetings/${meeting.id}/academic-year`, { academic_year: academicYear });
@@ -236,9 +311,23 @@ export function MeetingsTable({
       {permissionDeniedMsg && <PermissionDeniedToast message={permissionDeniedMsg} onClose={() => setPermissionDeniedMsg(null)} />}
       {pendingDeleteId && (
         <DeleteMeetingModal
-          onConfirm={() => { onDelete(pendingDeleteId); setPendingDeleteId(null); }}
+          onConfirm={() => { deleteMeeting(pendingDeleteId); setPendingDeleteId(null); }}
           onCancel={() => setPendingDeleteId(null)}
         />
+      )}
+      {sharedDelete && (
+        <SharedMeetingDeleteModal advisors={sharedDelete.advisors} currentUserId={currentUserId}
+          isManager={currentUserRole === "owner" || currentUserRole === "manager"}
+          onLeave={leaveSharedMeeting}
+          onDeleteAll={async () => { await onDelete(sharedDelete.id, { confirmAll: true }); setSharedDelete(null); }}
+          onClose={() => setSharedDelete(null)} />
+      )}
+      {overlapTarget && !overlapNotesOpen && (
+        <OverlappingMeetingModal key={overlapTarget.meeting.id} meeting={overlapTarget.meeting} overlaps={overlapTarget.overlaps}
+          schoolName={overlapTarget.meeting.school_name} clientSurface={clientSurface}
+          beforeMerge={() => saveQueuesRef.current.get(overlapTarget.meeting.id)?.current}
+          onMerged={target => handleMeetingMerged(overlapTarget.meeting.id, target)}
+          onClose={() => setOverlapTarget(null)} />
       )}
       {activityTarget && (
         <MeetingActivityModal
@@ -342,8 +431,8 @@ export function MeetingsTable({
                     if (!m) return null;
                     return (
                       <tbody key={m.id} data-index={vi.index} ref={rowVirtualizer.measureElement}>
-                        <MeetingRow meeting={m} onSave={onSave} onMeetingPatched={onMeetingPatched}
-                          onRequestDelete={canDeleteMeetings ? setPendingDeleteId : null}
+                        <MeetingRow key={mergeCounts[m.id] || 0} meeting={m} onSave={onSave} onMeetingPatched={onMeetingPatched}
+                          onRequestDelete={canDeleteMeetings ? requestDelete : null}
                           onRequestMoveYear={onMeetingMovedYear ? setPendingMoveMeeting : null}
                           onOpenNotes={onOpenNotes}
                           usersWithAccess={usersWithAccessFor ? usersWithAccessFor(m) : usersWithAccess}
@@ -365,6 +454,8 @@ export function MeetingsTable({
                           isEntityClient={entityMode || isEntityClientType(m.school_client_type)}
                           clientSurface={clientSurface}
                           onRequestActivity={setActivityTarget}
+                          saveQueuesRef={saveQueuesRef}
+                          overlapOpen={overlapTarget?.meeting.id === m.id}
                           typedAdvisors={typedAdvisorsFor ? typedAdvisorsFor(m) : null}
                           schoolStage={schoolStageFor ? schoolStageFor(m) : schoolStage}
                           expanded={expandedIds.has(m.id)}

@@ -61,10 +61,14 @@ from meeting_labels import (
     resolve_participant_role_token,
 )
 from meeting_upload_logic import build_upload_checklist, get_or_create_upload_token, recipient_division_scope
+import booking_lock
 import booking_requests
+import call_conversations
 import meeting_plan
 import client_entities
 import meeting_activity
+import meeting_overlaps
+import shared_meetings
 import overdue_status_alerts
 import school_activity
 import school_directory
@@ -6075,89 +6079,159 @@ def process_booking_email_queue(request: Request):
     return {"ok": True, "sent": sent, "failed": failed, "batch_size": len(rows)}
 
 
-def _reconcile_meeting_from_outlook(db, org_id: str, meeting: dict, prefetched: dict | None = None) -> dict:
-    """Shared by the periodic poll (backup safety net) and the real-time webhook
-    handler: checks every synced advisor's event for this meeting and applies any
-    confirmed change (reschedule or cancellation) back onto the meeting row.
-
-    Deliberately narrow in scope: we never pull the subject/title back from Outlook —
-    our own naming logic (school/city/contact) stays authoritative for that. A meeting
-    is only cancelled if its event is confirmed gone for *every* synced advisor (not
-    just one, for multi-advisor meetings) — and any check that fails/errors is skipped
-    rather than ever being treated as "deleted".
-
-    prefetched (poll only): {advisor_id: graph_client.list_events_in_range result}. An
-    event found in its advisor's listing is used as-is; an advisor whose listing failed
-    is inconclusive (skipped this round); an event absent from a complete listing is
-    confirmed individually via get_event — absence alone never cancels a meeting. The
-    webhook path passes nothing and queries each event directly, as before.
-
-    Returns {"action": "updated"|"cancelled"|"skipped"|"none", "checked": N} where N
-    is the number of advisor events checked.
-    """
+def _reconcile_decision(db, org_id: str, meeting: dict, prefetched: dict | None) -> tuple[dict, dict, int]:
+    """Reads each performing advisor's event (an event of someone no longer on the meeting is
+    ignored) and returns (shared_meetings.decide result, events, checked). A failed check is left
+    out of `events`, so it is never read as a deletion or a move."""
     sync_map = meeting.get("calendar_sync") or {}
-    advisor_results = {}
-    checked = 0
-    for advisor_id, entry in sync_map.items():
+    advisors = meeting_overlaps.advisor_ids(meeting) or list(sync_map)
+    events, checked = {}, 0
+    for advisor_id in advisors:
+        entry = sync_map.get(advisor_id) or {}
         event_id = entry.get("external_event_id")
         if not event_id:
             continue
         checked += 1
-        if prefetched is not None and advisor_id in prefetched:
-            listing = prefetched[advisor_id]
-            if listing is None:
-                advisor_results[advisor_id] = graph_client.EVENT_CHECK_SKIPPED
-                continue
-            if event_id in listing:
-                advisor_results[advisor_id] = listing[event_id]
-                continue
-        advisor_results[advisor_id] = graph_client.get_event(db, org_id, advisor_id, event_id)
-
-    if not advisor_results:
-        return {"action": "none", "checked": checked}
-    if any(v == graph_client.EVENT_CHECK_SKIPPED for v in advisor_results.values()):
-        return {"action": "skipped", "checked": checked}  # inconclusive — never guess, retry next round
-
-    if all(v is None for v in advisor_results.values()):
-        try:
-            activity_before = meeting_activity.fetch_tracked(db, meeting["id"])
-            db.table("meetings").update({"status": "cancelled"}).eq("id", meeting["id"]).execute()
-            meeting_activity.log_meeting_activity(
-                db, meeting_id=meeting["id"], school_id=meeting.get("school_id"), org_id=org_id,
-                actor_id=None, actor_type="outlook", source="outlook", action="updated",
-                before=activity_before, after={"status": "cancelled"},
-                meta={"calendar_owner_ids": list(advisor_results.keys()), "event_deleted": True},
-            )
-            graph_client.persist_calendar_sync(db, meeting["id"], {})
-            return {"action": "cancelled", "checked": checked}
-        except Exception as exc:
-            logger.warning("_reconcile_meeting_from_outlook: failed to cancel meeting %s: %s", meeting["id"], exc)
-            return {"action": "skipped", "checked": checked}
-
-    for advisor_id, result in advisor_results.items():
-        if result is None:
+        listing = prefetched[advisor_id] if prefetched is not None and advisor_id in prefetched else {}
+        if listing is None:
             continue
-        new_date, new_start, new_end = result["start"][:10], result["start"][11:16], result["end"][11:16]
-        if new_date != meeting.get("meeting_date") or new_start != meeting.get("start_time") or new_end != meeting.get("end_time"):
-            try:
-                activity_before = meeting_activity.fetch_tracked(db, meeting["id"])
-                update = {"meeting_date": new_date, "start_time": new_start, "end_time": new_end}
-                if new_date != meeting.get("meeting_date"):
-                    update["auto_complete_blocked"] = False  # a new occurrence — see _apply_auto_complete_block
-                db.table("meetings").update(update).eq("id", meeting["id"]).execute()
+        result = listing[event_id] if event_id in listing else graph_client.get_event(db, org_id, advisor_id, event_id)
+        if result == graph_client.EVENT_CHECK_SKIPPED:
+            continue
+        if result is None and graph_client.mailbox_changed(db, org_id, advisor_id, entry):
+            continue
+        events[advisor_id] = result
+    if any(v is None for v in events.values()) and len(advisors) > 1:
+        # Someone who is no longer a user of the org can't be the one the meeting stays with.
+        advisors = [a["id"] for a in shared_meetings.org_advisors(db, org_id, meeting)] or advisors
+    return shared_meetings.decide(meeting, advisors, graph_client.written_event_time(meeting), events), events, checked
+
+
+def _reconcile_meeting_from_outlook(db, org_id: str, meeting: dict, prefetched: dict | None = None) -> dict:
+    """Shared by the periodic poll (backup safety net) and the real-time webhook
+    handler: checks every performing advisor's event for this meeting and applies any
+    confirmed change back onto the meeting (rules: shared_meetings.decide):
+    - deleted by one advisor while others remain → only that advisor leaves the meeting, and no
+      other calendar is touched; deleted by all → the meeting is cancelled;
+    - moved by one advisor → the meeting, the other advisors' calendars, and a notification to them;
+    - a calendar our own push didn't reach → pushed again.
+
+    Deliberately narrow in scope: we never pull the subject/title back from Outlook —
+    our own naming logic (school/city/contact) stays authoritative for that. Any check that
+    fails/errors is never treated as "deleted".
+
+    prefetched (poll only): {advisor_id: graph_client.list_events_in_range result}. An
+    event found in its advisor's listing is used as-is; an advisor whose listing failed
+    is inconclusive; an event absent from a complete listing is confirmed individually via
+    get_event — absence alone never means deleted. The webhook path passes nothing and queries
+    each event directly.
+
+    A change is applied only after both the meeting and the events are read again under the
+    meeting's sync lock: a save that landed meanwhile must not be mistaken for an advisor's move.
+
+    Returns {"action": "updated"|"cancelled"|"advisor_removed"|"repushed"|"skipped"|"none", "checked": N}.
+    """
+    plan, events, checked = _reconcile_decision(db, org_id, meeting, prefetched)
+    if not (plan["gone"] or plan["moved_by"] or plan["repush"] or plan["end_time"]):
+        return {"action": "none" if len(events) == checked else "skipped", "checked": checked}
+
+    moved_before, sync_map = None, {}
+    try:
+        with graph_client.calendar_sync_lock(db, meeting["id"]) as acquired:
+            if not acquired:
+                return {"action": "skipped", "checked": checked}
+            rows = db.table("meetings").select("*").eq("id", meeting["id"]).execute().data
+            meeting = rows[0] if rows else None
+            if not meeting or meeting.get("status") != "scheduled":
+                return {"action": "none", "checked": checked}
+            plan, events, _ = _reconcile_decision(db, org_id, meeting, None)
+            sync_map = dict(meeting.get("calendar_sync") or {})
+            school_id, meeting_id = meeting.get("school_id"), meeting["id"]
+            action = "none"
+
+            if plan["cancel"]:
+                activity_before = meeting_activity.fetch_tracked(db, meeting_id)
+                db.table("meetings").update({"status": "cancelled"}).eq("id", meeting_id).execute()
                 meeting_activity.log_meeting_activity(
-                    db, meeting_id=meeting["id"], school_id=meeting.get("school_id"), org_id=org_id,
+                    db, meeting_id=meeting_id, school_id=school_id, org_id=org_id,
+                    actor_id=None, actor_type="outlook", source="outlook", action="updated",
+                    before=activity_before, after={"status": "cancelled"},
+                    meta={"calendar_owner_ids": plan["gone"], "event_deleted": True},
+                )
+                graph_client.persist_calendar_sync(db, meeting_id, {})
+                return {"action": "cancelled", "checked": checked}
+
+            if plan["gone"]:
+                activity_before = meeting_activity.fetch_tracked(db, meeting_id)
+                # As they are now — someone may have joined while the calendars were being read.
+                remaining = [a for a in meeting_overlaps.advisor_ids(activity_before or meeting) if a not in plan["gone"]]
+                db.table("meetings").update({"advisor_ids": remaining}).eq("id", meeting_id).execute()
+                meeting_activity.log_meeting_activity(
+                    db, meeting_id=meeting_id, school_id=school_id, org_id=org_id,
+                    actor_id=None, actor_type="outlook", source="outlook", action="advisor_left",
+                    before=activity_before, after={"advisor_ids": remaining},
+                    meta={"calendar_owner_ids": plan["gone"], "event_deleted": True},
+                )
+                meeting = {**meeting, "advisor_ids": remaining}
+                sync_map = {a: e for a, e in sync_map.items() if a not in plan["gone"]}
+                action = "advisor_removed"
+
+            # What each calendar shows right now — if a push below fails, that is still what it shows.
+            for a, ev in events.items():
+                if ev and a in sync_map:
+                    sync_map[a] = {**sync_map[a], "event_time": shared_meetings.event_time(ev)}
+
+            push_to: set = set(plan["repush"])
+            if plan["end_time"]:
+                activity_before = meeting_activity.fetch_tracked(db, meeting_id)
+                db.table("meetings").update({"end_time": plan["end_time"]}).eq("id", meeting_id).is_("end_time", "null").execute()
+                meeting_activity.log_meeting_activity(
+                    db, meeting_id=meeting_id, school_id=school_id, org_id=org_id,
+                    actor_id=None, actor_type="outlook", source="outlook", action="updated",
+                    before=activity_before, after={"end_time": plan["end_time"]},
+                )
+                meeting = {**meeting, "end_time": plan["end_time"]}
+                action = "updated"
+            if plan["moved_by"]:
+                new_date, new_start, new_end = shared_meetings.event_time(events[plan["moved_by"]])
+                update = {"meeting_date": new_date, "start_time": new_start, "end_time": new_end}
+                before_move = dict(meeting)
+                if new_date != str(meeting.get("meeting_date")):
+                    update["auto_complete_blocked"] = False  # a new occurrence — see _apply_auto_complete_block
+                # What each calendar shows is saved before the meeting changes: if anything below
+                # dies midway, a calendar still showing the old time is recognized as not updated
+                # rather than as a move back — while the mover keeps their old entry, so that if
+                # the meeting wasn't updated their move is still seen as one.
+                mover_entry = {plan["moved_by"]: (meeting.get("calendar_sync") or {}).get(plan["moved_by"]) or {}}
+                graph_client.persist_calendar_sync(db, meeting_id, {**sync_map, **mover_entry})
+                activity_before = meeting_activity.fetch_tracked(db, meeting_id)
+                db.table("meetings").update(update).eq("id", meeting_id).execute()
+                meeting = {**meeting, **update}
+                moved_before = before_move
+                meeting_activity.log_meeting_activity(
+                    db, meeting_id=meeting_id, school_id=school_id, org_id=org_id,
                     actor_id=None, actor_type="outlook", source="outlook", action="updated",
                     before=activity_before,
                     after={"meeting_date": new_date, "start_time": new_start, "end_time": new_end},
-                    meta={"calendar_owner_ids": [advisor_id]},
+                    meta={"calendar_owner_ids": [plan["moved_by"]]},
                 )
-                return {"action": "updated", "checked": checked}
-            except Exception as exc:
-                logger.warning("_reconcile_meeting_from_outlook: failed to update meeting %s: %s", meeting["id"], exc)
-                return {"action": "skipped", "checked": checked}
+                push_to = set(meeting_overlaps.advisor_ids(meeting)) - {plan["moved_by"]}
+                action = "updated"
 
-    return {"action": "none", "checked": checked}
+            if push_to:
+                subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"), meeting.get("meeting_service_type"))
+                sync_map = graph_client.sync_meeting_update(
+                    db, org_id, meeting, sync_map, subject, show_as="busy", only=push_to)
+                if action == "none":
+                    action = "repushed"
+            graph_client.persist_calendar_sync(db, meeting_id, sync_map)
+    except Exception as exc:
+        logger.warning("_reconcile_meeting_from_outlook: failed for meeting %s: %s", (meeting or {}).get("id"), exc)
+        action = "skipped"  # what wasn't pushed is retried next round
+
+    if moved_before:
+        shared_meetings.notify_moved(db, org_id, meeting, moved_before, plan["moved_by"], sync_map)
+    return {"action": action, "checked": checked}
 
 
 def _run_outlook_poll(meetings: list[dict], schools_map: dict) -> dict:
@@ -6191,7 +6265,7 @@ def _run_outlook_poll(meetings: list[dict], schools_map: dict) -> dict:
         end = (date.fromisoformat(hi) + timedelta(days=2)).isoformat() + "T00:00:00"
         listings.setdefault(org_id, {})[advisor_id] = graph_client.list_events_in_range(db, org_id, advisor_id, start, end)
 
-    checked = updated = cancelled = skipped = 0
+    checked = updated = cancelled = skipped = removed = 0
     for m in meetings:
         org_id = schools_map.get(m.get("school_id"))
         if not org_id:
@@ -6209,13 +6283,15 @@ def _run_outlook_poll(meetings: list[dict], schools_map: dict) -> dict:
             updated += 1
         elif result["action"] == "cancelled":
             cancelled += 1
+        elif result["action"] == "advisor_removed":
+            removed += 1
         elif result["action"] == "skipped":
             skipped += 1
 
     failed_listings = sum(1 for per_org in listings.values() for v in per_org.values() if v is None)
     summary = {
         "meetings": len(meetings), "advisors": len(windows), "failed_listings": failed_listings,
-        "checked": checked, "updated": updated, "cancelled": cancelled, "skipped": skipped,
+        "checked": checked, "updated": updated, "cancelled": cancelled, "skipped": skipped, "advisors_removed": removed,
     }
     logger.info("poll_outlook_changes finished: %s", summary)
     return summary
@@ -6242,7 +6318,7 @@ def poll_outlook_changes(request: Request, background_tasks: BackgroundTasks):
     try:
         meetings = (
             db.table("meetings")
-            .select("id, school_id, meeting_date, start_time, end_time, status, calendar_sync")
+            .select("id, school_id, meeting_date, start_time, end_time, status, calendar_sync, advisor_ids, advisor_id")
             .eq("status", "scheduled")
             .gte("meeting_date", today)
             .not_.is_("calendar_sync", "null")
@@ -7644,7 +7720,8 @@ def transfer_user_meetings(user_id: str, body: TransferMeetingsIn, user: Annotat
 
     results = []
     for m in meetings:
-        new_ids = [body.new_advisor_id if aid == user_id else aid for aid in (m.get("advisor_ids") or [])]
+        # The new advisor may already be on a shared meeting.
+        new_ids = list(dict.fromkeys(body.new_advisor_id if aid == user_id else aid for aid in (m.get("advisor_ids") or [])))
         conflict = False
         try:
             db.table("meetings").update({"advisor_ids": new_ids}).eq("id", m["id"]).execute()
@@ -7676,7 +7753,8 @@ def transfer_user_meetings(user_id: str, body: TransferMeetingsIn, user: Annotat
 
 @router.post("/users/{user_id}/meetings/cancel-future")
 def cancel_user_future_meetings(user_id: str, user: Annotated[dict, Depends(get_current_user)]):
-    """Deletes this advisor's future meetings entirely — from the system and from Outlook."""
+    """Deletes this advisor's future meetings entirely — from the system and from Outlook. A
+    meeting shared with another advisor stays with them; only this advisor is removed from it."""
     if user["role"] not in ("owner", "manager"):
         raise HTTPException(status_code=403, detail="אין הרשאה")
     from datetime import datetime, timezone
@@ -7697,6 +7775,21 @@ def cancel_user_future_meetings(user_id: str, user: Annotated[dict, Depends(get_
     meetings = rows.data or []
     for m in meetings:
         m.pop("schools", None)
+    kept = []
+    for m in meetings:
+        others = [a["id"] for a in shared_meetings.org_advisors(db, user["org_id"], m) if a["id"] != user_id]
+        if not others:
+            continue
+        kept.append(m["id"])
+        new_ids = [aid for aid in m.get("advisor_ids") or [] if aid != user_id]
+        db.table("meetings").update({"advisor_ids": new_ids}).eq("id", m["id"]).execute()
+        meeting_activity.log_meeting_activity(
+            db, meeting_id=m["id"], school_id=m.get("school_id"), org_id=user["org_id"],
+            actor_id=user["id"], actor_type="user", source="user_transfer", action="updated",
+            before=m, after={"advisor_ids": new_ids},
+        )
+        _resync_meeting_calendar(db, user["org_id"], m.get("school_id"), m["id"])
+    meetings = [m for m in meetings if m["id"] not in kept]
     for m in meetings:
         try:
             if m.get("calendar_sync"):
@@ -7728,7 +7821,7 @@ def cancel_user_future_meetings(user_id: str, user: Annotated[dict, Depends(get_
             actor_id=user["id"], actor_type="user", source="user_transfer", action="deleted", before=m,
             meta={"reason": "cancel_user_future_meetings", "advisor_id": user_id},
         )
-    return {"cancelled": len(meetings)}
+    return {"cancelled": len(meetings), "kept_shared": len(kept)}
 
 
 def _get_user_sole_schools(db, user_id: str) -> list[dict]:
@@ -8857,7 +8950,7 @@ def list_school_calls(
     """Calls (from Voicenter) matched to this school's contacts — same visibility as the
     rest of the school card (advisor assigned / restrict_access_to / manager+)."""
     from academic_years import get_academic_year_date_range
-    from routers.calls_router import _pull_school_calls
+    from routers.calls_router import _pull_school_calls, collapse_school_calls
 
     for attempt in range(2):
         try:
@@ -8884,7 +8977,7 @@ def list_school_calls(
     date_to = f"{end_date.isoformat()}T23:59:59"
 
     try:
-        calls = _pull_school_calls(user["org_id"], school_id, date_from, date_to)
+        calls = collapse_school_calls(_pull_school_calls(user["org_id"], school_id, date_from, date_to))
     except HTTPException as exc:
         if exc.status_code == 400:
             # Calls integration not configured/enabled for this org — friendly empty state, not an error
@@ -8918,40 +9011,74 @@ def _call_time_to_israel_hm(call_time_iso: str | None) -> str | None:
         return call_time_iso[11:16] if len(call_time_iso) >= 16 else None
 
 
-def _attribute_calls_to_meetings(calls: list[dict], meetings_for_day: list[dict]) -> dict:
-    """Two-tier attribution for a school with possibly more than one meeting the same day:
-    1) role/stage match (מנהל/ת -&gt; tichon, מנהל/ת חט"ב -&gt; chativa) IF it uniquely matches
-       exactly one of that day's meetings' stage_scope;
-    2) otherwise, time-bucket fallback — earliest meeting whose end_time &gt;= the call's time,
-       or the day's last meeting as a catch-all. Returns {call_id: meeting_id}."""
+def _attribute_calls_to_meetings(calls: list[dict], meetings_for_day: list[dict], current: dict | None = None) -> dict:
+    """Which of a school's same-day meetings each call belongs to. Among the meetings that aren't
+    cancelled/postponed (all of them, if every one is):
+    1) those where one of the call's sides is a performing advisor, if any (a cancelled one of
+       theirs comes before another advisor's live meeting);
+    2) role/stage match (מנהל/ת -> tichon, מנהל/ת חט"ב -> chativa) IF it uniquely matches one;
+    3) time — the earliest meeting whose end_time >= the call's time, else the last one. When the
+       hours can't decide (a meeting without hours, or both contain the call) a call already on
+       one of them (`current`: call_id -> meeting_id) stays there: it must not wander because a
+       colleague logged another meeting later (2026-11-23).
+    Returns {call_id: meeting_id}."""
     if not meetings_for_day:
         return {}
-    meetings_sorted = sorted(meetings_for_day, key=lambda m: m.get("end_time") or "23:59")
+    live = [m for m in meetings_for_day if m.get("status") != "postponed" and not is_cancelled_like(m.get("status"))]
+
+    def _by_end(meetings):
+        return sorted(meetings, key=lambda m: m.get("end_time") or "23:59")
+
+    current = current or {}
     assignments: dict = {}
     for call in calls:
+        people = {call.get("advisor_id"), call.get("counterpart_user_id"), *(call.get("handler_ids") or [])} - {None}
+
+        def _theirs(meetings):
+            return [m for m in meetings if people.intersection(meeting_overlaps.advisor_ids(m))]
+
+        candidates = _by_end(_theirs(live) or _theirs(meetings_for_day) or live or meetings_for_day)
         role = call.get("contact_role")
         stage_signal = "tichon" if role == "מנהל/ת" else ("chativa" if role == "מנהל/ת חט\"ב" else None)
         target = None
         if stage_signal:
-            matches = [m for m in meetings_sorted if m.get("stage_scope") in (stage_signal, "both")]
+            matches = [m for m in candidates if m.get("stage_scope") in (stage_signal, "both")]
             if len(matches) == 1:
                 target = matches[0]
         if target is None:
-            call_time_hm = _call_time_to_israel_hm(call.get("start_time")) or ""
-            candidates = [m for m in meetings_sorted if m.get("end_time") and m["end_time"] >= call_time_hm]
-            target = candidates[0] if candidates else meetings_sorted[-1]
+            hm = _call_time_to_israel_hm(call.get("start_time")) or ""
+            in_time = [m for m in candidates if m.get("end_time") and m["end_time"] >= hm]
+            target = in_time[0] if in_time else candidates[-1]
+            prev = next((m for m in candidates if m["id"] == current.get(call["call_id"])), None)
+            if prev and not (prev.get("end_time") and target.get("end_time")):
+                target = prev
+            elif prev and all((m.get("start_time") or "99") <= hm <= m["end_time"] for m in (prev, target)):
+                target = prev
         assignments[call["call_id"]] = target["id"]
     return assignments
 
 
+_CALL_LINK_COUNT_SELECT = (
+    "call_id, meeting_id, source, call_time, duration_seconds, counterpart_phone, "
+    "advisor_id, counterpart_user_id, own_key, direction"
+)
+_ATTRIBUTION_MEETING_SELECT = "id, stage_scope, start_time, end_time, status, advisor_ids, advisor_id"
+
+
+def _links_as_calls(rows: list[dict]) -> list[dict]:
+    from routers.calls_router import _phone_suffix
+    return [call_conversations.link_as_call(r, _phone_suffix) for r in rows]
+
+
 def _recompute_meeting_aggregates(db, meeting_id: str) -> None:
     """Recomputes calls_start_time/calls_duration_seconds from whatever meeting_call_links
-    rows currently point at this meeting (both auto and manual) — no Voicenter call, cheap."""
-    rows = db.table("meeting_call_links").select("call_time, duration_seconds").eq("meeting_id", meeting_id).execute().data or []
+    rows currently point at this meeting (both auto and manual) — no Voicenter call, cheap.
+    A conversation logged on several lines is counted once (call_conversations)."""
+    rows = db.table("meeting_call_links").select(_CALL_LINK_COUNT_SELECT).eq("meeting_id", meeting_id).execute().data or []
     if rows:
         earliest = min(rows, key=lambda r: r.get("call_time") or "")
         calls_start_time = _call_time_to_israel_hm(earliest.get("call_time"))
-        calls_duration_seconds = sum(r.get("duration_seconds") or 0 for r in rows)
+        calls_duration_seconds = sum(call_conversations.counted_seconds(_links_as_calls(rows)).values())
     else:
         calls_start_time = None
         calls_duration_seconds = 0
@@ -8977,13 +9104,17 @@ def _recompute_meeting_call_activity(db, org_id: str, school_id: str, meeting_da
     columns. Returns the affected meeting ids (all of that day's meetings for this school,
     even ones with zero calls — marks them as synced)."""
     meetings_for_day = (
-        db.table("meetings").select("id, stage_scope, end_time, status")
+        db.table("meetings").select(_ATTRIBUTION_MEETING_SELECT)
         .eq("school_id", school_id).eq("meeting_date", meeting_date).execute()
     ).data or []
     if not meetings_for_day:
         return []
 
     call_ids = [c["call_id"] for c in calls_for_school]
+    day_links = (
+        db.table("meeting_call_links").select(_CALL_LINK_COUNT_SELECT)
+        .in_("meeting_id", [m["id"] for m in meetings_for_day]).execute()
+    ).data or []
     existing = []
     if call_ids:
         existing = (
@@ -8991,12 +9122,18 @@ def _recompute_meeting_call_activity(db, org_id: str, school_id: str, meeting_da
             .eq("org_id", org_id).in_("call_id", call_ids).execute()
         ).data or []
     manual_call_ids = {r["call_id"] for r in existing if r.get("source") == "manual"}
+    current = {r["call_id"]: r["meeting_id"] for r in day_links}
 
     attributable = [
         c for c in calls_for_school
         if c["call_id"] not in manual_call_ids and not c.get("pending_school_resolution")
     ]
-    assignments = _attribute_calls_to_meetings(attributable, meetings_for_day)
+    # The other side's record of a conversation already on one of these meetings isn't added.
+    # (Known from this pull as well: a link saved before side keys were recorded has none.)
+    linked_calls = _links_as_calls(day_links) + [c for c in calls_for_school if c["call_id"] in current]
+    attributable = [c for c in attributable if c["call_id"] in current or not call_conversations.find_mirror(c, linked_calls)]
+    attributable, _ = call_conversations.collapse_mirrors(attributable, preferred_ids=set(current))
+    assignments = _attribute_calls_to_meetings(attributable, meetings_for_day, current)
 
     rows = []
     for c in attributable:
@@ -9014,6 +9151,9 @@ def _recompute_meeting_call_activity(db, org_id: str, school_id: str, meeting_da
             "contact_role": c.get("contact_role"),
             "counterpart_phone": c.get("counterpart_phone"),
             "advisor_id": c.get("advisor_id"),
+            "counterpart_user_id": c.get("counterpart_user_id"),
+            "own_key": c.get("own_key"),
+            "direction": c.get("direction"),
             "source": "auto",
         })
     if rows:
@@ -9023,6 +9163,34 @@ def _recompute_meeting_call_activity(db, org_id: str, school_id: str, meeting_da
     for mid in meeting_ids:
         _recompute_meeting_aggregates(db, mid)
     return meeting_ids
+
+
+def _rehome_call_links(db, meeting_id: str, school_id: str, meeting_date) -> list[str]:
+    """Before a meeting is deleted: its calls move to the school's other live meeting(s) of that
+    day — the delete cascades to its links, and for a past day nothing would re-attribute them.
+    Returns the meetings that received calls (their totals are refreshed by the caller)."""
+    if not meeting_date:
+        return []
+    day = str(meeting_date)[:10]
+    others = [
+        m for m in (
+            db.table("meetings").select(_ATTRIBUTION_MEETING_SELECT)
+            .eq("school_id", school_id).eq("meeting_date", day).neq("id", meeting_id).execute()
+        ).data or [] if m.get("status") in meeting_overlaps.LIVE_STATUSES
+    ]
+    if not others:
+        return []
+    from routers.calls_router import _call_date_il
+    links = [
+        {**r, "start_time": r.get("call_time")}
+        for r in db.table("meeting_call_links").select("*").eq("meeting_id", meeting_id).execute().data or []
+        if _call_date_il(r.get("call_time")) == day
+    ]
+    assignments = _attribute_calls_to_meetings(links, others)
+    for call_id, target_id in assignments.items():
+        db.table("meeting_call_links").update({"meeting_id": target_id, "source": "auto"}) \
+            .eq("meeting_id", meeting_id).eq("call_id", call_id).execute()
+    return list(set(assignments.values()))
 
 
 _AUTO_COMPLETE_MIN_SECONDS = 300
@@ -9318,6 +9486,8 @@ def get_meeting_actual_detail(school_id: str, meeting_id: str, user: Annotated[d
         logger.warning("actual-detail refresh failed (non-fatal) for meeting %s: %s", meeting_id, exc)
 
     link_rows = db.table("meeting_call_links").select("*").eq("meeting_id", meeting_id).order("call_time").execute().data or []
+    link_rows, _ = call_conversations.collapse_mirrors(_links_as_calls(link_rows))
+    counted = call_conversations.counted_seconds(link_rows)
 
     # AI summary/transcript-availability are always looked up fresh here (never cached on
     # meeting_call_links) so late-arriving transcripts show up the moment a user opens the row.
@@ -9356,6 +9526,7 @@ def get_meeting_actual_detail(school_id: str, meeting_id: str, user: Annotated[d
             "call_id": r["call_id"],
             "call_time": r["call_time"],
             "duration_seconds": r["duration_seconds"],
+            "counted_seconds": counted[r["call_id"]],
             "contact_name": r["contact_name"],
             "contact_role": r["contact_role"],
             "counterpart_phone": r.get("counterpart_phone"),
@@ -9812,6 +9983,8 @@ def create_meeting(school_id: str, body: MeetingIn, user: Annotated[dict, Depend
     # "מחליפה או נוספת?" — open booking requests of the school this meeting's date falls in
     # (MeetingRow asks about each one; see booking_requests.py).
     meeting["open_booking_requests"] = booking_requests.open_requests_for_meeting(db, user["org_id"], meeting)
+    # "זו אותה פגישה?" — another meeting of the school at that time (see meeting_overlaps.py).
+    meeting["overlapping_meetings"] = meeting_overlaps.overlapping_meetings(db, meeting, None)
     return meeting
 
 
@@ -11451,7 +11624,12 @@ def update_meeting(school_id: str, meeting_id: str, body: MeetingIn, user: Annot
     except Exception as exc:
         logger.warning("calendar sync failed for updated meeting %s (non-fatal): %s", meeting_id, exc)
 
+    if meeting.get("id") and activity_before:
+        shared_meetings.notify_moved(db, user["org_id"], meeting, activity_before, user["id"], meeting.get("calendar_sync"))
+
     meeting["open_booking_requests"] = booking_requests.open_requests_for_meeting(db, user["org_id"], meeting)
+    if meeting.get("id") and activity_before:
+        meeting["overlapping_meetings"] = meeting_overlaps.overlapping_meetings(db, meeting, activity_before)
     return meeting
 
 
@@ -11626,6 +11804,28 @@ def move_meeting_academic_year(school_id: str, meeting_id: str, body: MeetingMov
     }
 
 
+def _resync_meeting_calendar(db, org_id: str, school_id: str, meeting_id: str) -> None:
+    """Brings the Outlook events in line with the meeting's current advisors. Non-fatal."""
+    try:
+        with graph_client.calendar_sync_lock(db, meeting_id) as acquired:
+            if acquired:
+                row = db.table("meetings").select("*").eq("id", meeting_id).execute()
+                meeting = row.data[0] if row.data else None
+                if meeting:
+                    previous_sync = meeting.get("calendar_sync") or {}
+                    subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"), meeting.get("meeting_service_type"))
+                    cancelled_like = is_cancelled_like(meeting.get("status"))
+                    if cancelled_like:
+                        subject = f"[{calendar_status_label(meeting['status'])}] {subject}"
+                    sync_map = graph_client.sync_meeting_update(
+                        db, org_id, meeting, previous_sync, subject,
+                        show_as=("free" if cancelled_like else "busy"), clear_attendees=cancelled_like,
+                    )
+                    graph_client.persist_calendar_sync(db, meeting_id, sync_map)
+    except Exception as exc:
+        logger.warning("calendar sync failed after advisor change on meeting %s (non-fatal): %s", meeting_id, exc)
+
+
 @router.post("/{school_id}/meetings/{meeting_id}/join")
 def join_meeting_as_advisor(school_id: str, meeting_id: str, user: Annotated[dict, Depends(get_current_user)]):
     """Lets a user add themselves as an additional performing advisor on a meeting they are
@@ -11657,6 +11857,7 @@ def join_meeting_as_advisor(school_id: str, meeting_id: str, user: Annotated[dic
         actor_id=user["id"], actor_type="user", source=None, action="advisor_joined",
         before=activity_before, after={"advisor_ids": new_advisor_ids},
     )
+    _resync_meeting_calendar(db, user["org_id"], school_id, meeting_id)
     return res.data[0] if res.data else {"advisor_ids": new_advisor_ids}
 
 
@@ -11694,40 +11895,14 @@ def leave_meeting_as_advisor(school_id: str, meeting_id: str, user: Annotated[di
         actor_id=user["id"], actor_type="user", source=None, action="advisor_left",
         before=activity_before, after={"advisor_ids": new_advisor_ids},
     )
-    try:
-        with graph_client.calendar_sync_lock(db, meeting_id) as acquired:
-            if acquired:
-                row = db.table("meetings").select("*").eq("id", meeting_id).execute()
-                meeting = row.data[0] if row.data else None
-                if meeting:
-                    previous_sync = meeting.get("calendar_sync") or {}
-                    subject = _build_meeting_subject(db, school_id, meeting.get("participants"), meeting.get("primary_contact_key"), meeting.get("meeting_service_type"))
-                    cancelled_like = is_cancelled_like(meeting.get("status"))
-                    if cancelled_like:
-                        subject = f"[{calendar_status_label(meeting['status'])}] {subject}"
-                    sync_map = graph_client.sync_meeting_update(
-                        db, user["org_id"], meeting, previous_sync, subject,
-                        show_as=("free" if cancelled_like else "busy"), clear_attendees=cancelled_like,
-                    )
-                    graph_client.persist_calendar_sync(db, meeting_id, sync_map)
-    except Exception as exc:
-        logger.warning("calendar sync failed after advisor left meeting %s (non-fatal): %s", meeting_id, exc)
+    _resync_meeting_calendar(db, user["org_id"], school_id, meeting_id)
     return res.data[0] if res.data else {"advisor_ids": new_advisor_ids}
 
 
-@router.delete("/{school_id}/meetings/{meeting_id}")
-def delete_meeting(school_id: str, meeting_id: str, user: Annotated[dict, Depends(get_current_user)]):
-    db = get_admin_client()
-    if not _check_permission(db, user, "can_delete_own_meetings"):
-        raise HTTPException(status_code=403, detail="אין הרשאה למחוק פגישות")
-    # Org ownership must be checked before the Outlook soft-cancel below — otherwise a caller
-    # from another org could both delete the row and push a cancellation to its attendees.
-    school_check = db.table("schools").select("id").eq("id", school_id).eq("org_id", user["org_id"]).execute()
-    if not school_check.data:
-        raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
-    existing = db.table("meetings").select("id").eq("id", meeting_id).eq("school_id", school_id).execute().data
-    if not existing:
-        raise HTTPException(status_code=404, detail="פגישה לא נמצאה")
+def _remove_meeting(db, user: dict, school_id: str, meeting_id: str, meta: dict | None = None) -> None:
+    """Deletes a meeting the caller was already authorized to remove: soft-cancels its Outlook
+    events, moves its calls to another meeting of that day, reopens the booking requests it
+    filled, and logs it."""
     try:
         with graph_client.calendar_sync_lock(db, meeting_id) as acquired:
             if acquired:
@@ -11754,13 +11929,211 @@ def delete_meeting(school_id: str, meeting_id: str, user: Annotated[dict, Depend
     except Exception as exc:
         logger.warning("delete_meeting: filled-requests lookup failed for %s (non-fatal): %s", meeting_id, exc)
         filled_requests = []
+    try:
+        rehomed_to = _rehome_call_links(db, meeting_id, school_id, (activity_before or {}).get("meeting_date"))
+    except Exception as exc:
+        logger.warning("moving the calls of deleted meeting %s failed (non-fatal): %s", meeting_id, exc)
+        rehomed_to = []
     db.table("meetings").delete().eq("id", meeting_id).eq("school_id", school_id).execute()
     if filled_requests:
         booking_requests.reopen_for_deleted_meeting(db, user["org_id"], filled_requests)
     meeting_activity.log_meeting_activity(
         db, meeting_id=meeting_id, school_id=school_id, org_id=user["org_id"],
-        actor_id=user["id"], actor_type="user", source=None, action="deleted", before=activity_before,
+        actor_id=user["id"], actor_type="user", source=None, action="deleted", before=activity_before, meta=meta,
     )
+    for mid in rehomed_to:
+        try:
+            _recompute_meeting_aggregates(db, mid)
+        except Exception as exc:
+            logger.warning("call totals of meeting %s not refreshed after a delete (non-fatal): %s", mid, exc)
+
+
+class ConfirmSeparateIn(BaseModel):
+    other_ids: list[str]
+
+
+def _meeting_for_overlap_answer(db, user: dict, school_id: str, meeting_id: str) -> dict:
+    """The meeting an overlap question was asked about — answerable by its creator, one of its
+    advisors, or an owner/manager."""
+    _require_school_access_for_meeting_activity(db, user, school_id)
+    rows = db.table("meetings").select("*").eq("id", meeting_id).eq("school_id", school_id).execute().data
+    if not rows:
+        raise HTTPException(status_code=404, detail="פגישה לא נמצאה")
+    m = rows[0]
+    if (user["role"] not in ("owner", "manager") and m.get("created_by") != user["id"]
+            and user["id"] not in meeting_overlaps.advisor_ids(m)):
+        raise HTTPException(status_code=403, detail="אין לך הרשאה לערוך פגישה זו — הפגישה משויכת ליועץ אחר")
+    return m
+
+
+@router.post("/{school_id}/meetings/{meeting_id}/confirm-separate")
+def confirm_meeting_separate(school_id: str, meeting_id: str, body: ConfirmSeparateIn,
+                             user: Annotated[dict, Depends(get_current_user)],
+                             x_client_surface: Annotated[str | None, Header()] = None):
+    """"זו פגישה נפרדת" — these meetings really take place at the same time; never ask again."""
+    db = get_admin_client()
+    meeting = _meeting_for_overlap_answer(db, user, school_id, meeting_id)
+    others = []
+    if body.other_ids:
+        others = db.table("meetings").select("id, start_time, end_time").eq("school_id", school_id) \
+            .in_("id", body.other_ids).neq("id", meeting_id).execute().data or []
+    if not others:
+        raise HTTPException(status_code=404, detail="פגישה לא נמצאה")
+    known = meeting.get("separate_from_ids") or []
+    db.table("meetings").update({
+        "separate_from_ids": known + [o["id"] for o in others if o["id"] not in known],
+    }).eq("id", meeting_id).eq("school_id", school_id).execute()
+    meeting_activity.log_meeting_activity(
+        db, meeting_id=meeting_id, school_id=school_id, org_id=user["org_id"],
+        actor_id=user["id"], actor_type="user", source=meeting_activity.client_surface(x_client_surface),
+        action="confirmed_separate", before=meeting, meta={"others": others},
+    )
+    return {"ok": True}
+
+
+def _today_il_iso() -> str:
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo("Asia/Jerusalem")).date().isoformat()
+
+
+def _merge_blocker(db, meeting: dict) -> str | None:
+    """What the meeting holds that a merge would lose."""
+    if meeting.get("booking_token_id"):
+        return "קביעה של בית הספר דרך קישור"
+    if meeting.get("summary_status") not in (None, "", "none"):
+        return "סיכום פגישה"
+    if db.table("meeting_upload_files").select("id").eq("meeting_id", meeting["id"]).limit(1).execute().data:
+        return "קבצים שהועלו"
+    # The school already holds an emailed upload link to this meeting; removing it breaks the link.
+    if db.table("meeting_upload_tokens").select("id").eq("meeting_id", meeting["id"]).limit(1).execute().data:
+        return "בקשת קבצים שנשלחה לבית הספר"
+    return None
+
+
+@router.post("/{school_id}/meetings/{meeting_id}/merge-into/{target_id}")
+def merge_meeting_into(school_id: str, meeting_id: str, target_id: str, background_tasks: BackgroundTasks,
+                       user: Annotated[dict, Depends(get_current_user)],
+                       x_client_surface: Annotated[str | None, Header()] = None):
+    """"הצטרף לפגישה הקיימת": this meeting's advisors, notes, offline work and calls move to
+    target_id and this meeting is removed. What target_id already holds stays; only what it lacks
+    (hours, participants, "completed" of a day that came) is taken from this one. Not gated by
+    can_delete_own_meetings — its content isn't lost. Locked per school + day and re-read inside;
+    this meeting stops being live before the lock is released, so two colleagues merging into
+    each other at once can't remove both."""
+    db = get_admin_client()
+    if meeting_id == target_id:
+        raise HTTPException(status_code=400, detail="לא ניתן לאחד פגישה עם עצמה")
+    first = _meeting_for_overlap_answer(db, user, school_id, meeting_id)
+    source = meeting_activity.client_surface(x_client_surface)
+
+    with booking_lock.booking_locks([f"merge:{school_id}:{first.get('meeting_date')}"]):
+        db = get_admin_client()
+        meeting = _meeting_for_overlap_answer(db, user, school_id, meeting_id)
+        target_rows = db.table("meetings").select("*").eq("id", target_id).eq("school_id", school_id).execute().data
+        target = target_rows[0] if target_rows else None
+        if not target:
+            raise HTTPException(status_code=404, detail="הפגישה הקיימת לא נמצאה")
+        if target.get("status") not in meeting_overlaps.LIVE_STATUSES:
+            raise HTTPException(status_code=409, detail="הפגישה הקיימת כבר אינה פעילה")
+        if not meeting.get("meeting_date") or meeting["meeting_date"] != target.get("meeting_date"):
+            raise HTTPException(status_code=409, detail="ניתן לאחד רק פגישות של אותו בית ספר באותו יום")
+        blocker = _merge_blocker(db, meeting)
+        if blocker:
+            raise HTTPException(status_code=409, detail=(
+                f"לא ניתן לאחד את הפגישות אוטומטית כי בפגישה החדשה כבר יש {blocker}. "
+                "ניתן להצטרף לפגישה הקיימת מתפריט הפעולות שלה."
+            ))
+
+        target_ids = meeting_overlaps.advisor_ids(target)
+        new_ids = target_ids + [uid for uid in meeting_overlaps.advisor_ids(meeting) if uid not in target_ids]
+        known_entries = {e.get("id") for e in target.get("offline_work_entries") or []}
+        entries = (target.get("offline_work_entries") or []) + [
+            e for e in meeting.get("offline_work_entries") or [] if e.get("id") not in known_entries
+        ]
+        before = meeting_activity.snapshot_of(target)
+        filled = {"advisor_ids": new_ids, "offline_work_entries": entries}
+        mine, theirs = meeting_overlaps.without_placeholder_hours(db, [meeting, target])
+        if meeting_overlaps.has_hours(mine) and not meeting_overlaps.has_hours(theirs):
+            filled.update(start_time=meeting["start_time"], end_time=meeting["end_time"])
+        if meeting.get("participants") and not target.get("participants"):
+            filled.update(participants=meeting["participants"], primary_contact_key=meeting.get("primary_contact_key"))
+        if (meeting.get("status") == "completed" and target.get("status") == "scheduled"
+                and str(target["meeting_date"])[:10] <= _today_il_iso()):
+            filled["status"] = "completed"
+        db.table("meetings").update(filled).eq("id", target_id).eq("school_id", school_id).execute()
+        for table in ("meeting_notes", "mention_notifications", "meeting_call_links"):
+            db.table(table).update({"meeting_id": target_id}).eq("meeting_id", meeting_id).execute()
+        answers = db.table("meeting_request_resolutions").select("id, meeting_id, token_id, range_key") \
+            .in_("meeting_id", [meeting_id, target_id]).execute().data or []
+        taken = {(r["token_id"], r["range_key"]) for r in answers if r["meeting_id"] == target_id}
+        for r in answers:
+            if r["meeting_id"] == meeting_id and (r["token_id"], r["range_key"]) not in taken:
+                db.table("meeting_request_resolutions").update({"meeting_id": target_id}).eq("id", r["id"]).execute()
+
+        meeting_activity.log_meeting_activity(
+            db, meeting_id=target_id, school_id=school_id, org_id=user["org_id"],
+            actor_id=user["id"], actor_type="user", source=source,
+            action="advisor_joined" if new_ids != target_ids else "updated", before=before, after=filled,
+        )
+        meeting_activity.log_meeting_activity(
+            db, meeting_id=target_id, school_id=school_id, org_id=user["org_id"],
+            actor_id=user["id"], actor_type="user", source=source, action="merged_into",
+            before={**before, **filled},
+            meta={"merged": {k: meeting.get(k) for k in ("id", "meeting_date", "start_time", "end_time")}},
+        )
+        # Its Outlook removal may outlast the lock: from here on nobody can merge into it.
+        db.table("meetings").update({"status": "cancelled"}).eq("id", meeting_id).eq("school_id", school_id).execute()
+
+    _remove_meeting(db, user, school_id, meeting_id, meta={"merged_into": target_id})
+    try:
+        _recompute_meeting_aggregates(db, target_id)
+        _maybe_auto_complete_meeting(db, user["org_id"], target_id)
+    except Exception as exc:
+        logger.warning("merge: call totals of meeting %s not refreshed (non-fatal): %s", target_id, exc)
+    background_tasks.add_task(_resync_meeting_calendar, db, user["org_id"], school_id, target_id)
+
+    result = {**target, **filled}
+    try:
+        result = (db.table("meetings").select("*").eq("id", target_id).execute().data or [result])[0]
+        result["advisor_profiles"] = db.table("profiles").select("id, full_name, email").in_("id", new_ids).execute().data if new_ids else []
+    except Exception as exc:
+        logger.warning("merge: reading back meeting %s failed (non-fatal): %s", target_id, exc)
+    return result
+
+
+@router.delete("/{school_id}/meetings/{meeting_id}")
+def delete_meeting(school_id: str, meeting_id: str, user: Annotated[dict, Depends(get_current_user)],
+                   confirm_all: bool = False, discard_draft: bool = False):
+    """A meeting with other performing advisors isn't deleted from under them: an advisor may only
+    leave it (POST .../leave); an owner/manager deletes it for everyone with confirm_all.
+    discard_draft: cleaning up a meeting the caller just created and never completed."""
+    db = get_admin_client()
+    if not _check_permission(db, user, "can_delete_own_meetings"):
+        raise HTTPException(status_code=403, detail="אין הרשאה למחוק פגישות")
+    # Org ownership must be checked before the Outlook soft-cancel below — otherwise a caller
+    # from another org could both delete the row and push a cancellation to its attendees.
+    school_check = db.table("schools").select("id").eq("id", school_id).eq("org_id", user["org_id"]).execute()
+    if not school_check.data:
+        raise HTTPException(status_code=404, detail="בית הספר לא נמצא")
+    existing = db.table("meetings").select("id, advisor_ids, advisor_id, created_by, created_at") \
+        .eq("id", meeting_id).eq("school_id", school_id).execute().data
+    if not existing:
+        raise HTTPException(status_code=404, detail="פגישה לא נמצאה")
+    advisors = shared_meetings.org_advisors(db, user["org_id"], existing[0])
+    advisor_ids = [a["id"] for a in advisors]
+    is_manager = user["role"] in ("owner", "manager")
+    if not is_manager and advisor_ids and user["id"] not in advisor_ids:
+        raise HTTPException(status_code=403, detail="אין לך הרשאה למחוק פגישה זו — הפגישה משויכת ליועץ אחר")
+    is_draft = (
+        discard_draft and existing[0].get("created_by") == user["id"]
+        and datetime.fromisoformat(existing[0]["created_at"]) > datetime.now(timezone.utc) - timedelta(hours=24)
+    )
+    if len(advisors) > 1 and not is_draft and not (is_manager and confirm_all):
+        raise HTTPException(status_code=409, detail={
+            "code": "multiple_advisors", "advisors": advisors,
+            "message": "לא ניתן למחוק את הפגישה משום שקיים בה יועץ מבצע נוסף",
+        })
+    _remove_meeting(db, user, school_id, meeting_id)
     return {"ok": True}
 
 

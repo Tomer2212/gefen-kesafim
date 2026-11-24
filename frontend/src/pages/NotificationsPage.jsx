@@ -48,6 +48,7 @@ const TYPE_ICON = {
   meeting_files_arrived:    "📎",
   meeting_cancel_review:    "🚫",
   meeting_overdue_status:   "⏰",
+  meeting_moved:            "📅",
   meeting_overdue_summary:  "📋",
   task_send_problems:       "⚠️",
   person_task_assigned:     "📌",

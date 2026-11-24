@@ -129,7 +129,7 @@ export function CallsTable({ calls, hideSchoolColumn, hideAdvisorColumn, canMana
   }, [columnFilters, baseRows]);
 
   const hasColumnFilter = Object.keys(columnFilters).length > 0;
-  const totalDurationSeconds = rows.reduce((sum, r) => sum + (r.call.duration_seconds || 0), 0);
+  const totalDurationSeconds = rows.reduce((sum, r) => sum + (r.call.counted_seconds ?? r.call.duration_seconds ?? 0), 0);
   const totalHours = Math.floor(totalDurationSeconds / 3600);
   const totalMinutes = Math.floor((totalDurationSeconds % 3600) / 60);
 

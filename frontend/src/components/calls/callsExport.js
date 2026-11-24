@@ -36,7 +36,7 @@ export function exportCallsToExcel(calls, { fileName, sheetName = "שיחות", 
     { header: "סיכום AI", wch: 80, value: c => c.ai_summary || "" },
   ];
 
-  const totalSeconds = calls.reduce((sum, c) => sum + (c.duration_seconds || 0), 0);
+  const totalSeconds = calls.reduce((sum, c) => sum + (c.counted_seconds ?? c.duration_seconds ?? 0), 0);
   const totalHours = Math.floor(totalSeconds / 3600);
   const totalMinutes = Math.floor((totalSeconds % 3600) / 60);
 

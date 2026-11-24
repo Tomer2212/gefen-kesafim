@@ -13,6 +13,7 @@ const TYPE_ICONS = {
   school_deleted:           "🗑️",
   meeting_reminder:         "🗓️",
   meeting_status_updated:   "✅",
+  meeting_moved:            "📅",
 };
 
 function Toast({ notif, onDismiss }) {
@@ -43,7 +44,7 @@ function Toast({ notif, onDismiss }) {
     >
       <span className="text-xl mt-0.5 flex-shrink-0" aria-hidden="true">{icon}</span>
       <div className="flex-1 min-w-0">
-        <p className="text-sm font-semibold text-slate-800 leading-tight line-clamp-2">{title}</p>
+        <p className={`text-sm font-semibold text-slate-800 leading-tight ${notif.type === "meeting_moved" ? "" : "line-clamp-2"}`}>{title}</p>
         {school && <p className="text-xs text-slate-500 mt-0.5 truncate">{school}</p>}
         <NotePreview notif={notif} className="block text-xs text-slate-600 mt-1 line-clamp-2" />
       </div>
